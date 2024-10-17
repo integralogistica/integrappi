@@ -6,8 +6,6 @@ class Usuario(BaseModel):
     id: Optional[str] = None
     nombre: str = "Edwin Zarate"
     email: EmailStr = "edwin@example.com"
+    tenedor: Optional[str] = None
     telefono: Optional[str] = None
-    fecha_nacimiento: Optional[datetime]
-    foto_perfil: Optional[str] = "https://example.com/profile.jpg"
-    metodo_pago: Optional[str] = "Visa"
-    es_anfitrion: bool = False
+

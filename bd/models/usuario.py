@@ -3,11 +3,9 @@ def modelo_usuario(usuario)->dict:
         "id":str(usuario["_id"]),
         "nombre": usuario["nombre"],
         "email": usuario["email"],
-        "telefono":usuario["telefono"],
-        "fecha_nacimiento": usuario["fecha_nacimiento"],
-        "foto_perfil": usuario["foto_perfil"],
-        "metodo_pago":usuario["metodo_pago"],
-        "es_anfitrion": usuario["es_anfitrion"],
+        "tenedor":usuario["tenedor"],
+        "telefono":usuario["telefono"]
+
     }
 
 def modelo_usuarios(usuarios)->list:
