@@ -5,8 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from rutas.usuarios import ruta_usuario
 
 app = FastAPI()
-app.title = "Glamping"
-app.version = "0.0.1"
+app.title = "integra"
+app.version = "1"
 
 # Configuración de CORS
 app.add_middleware(
@@ -21,7 +21,7 @@ app.include_router(ruta_usuario)
 
 @app.get("/", tags=['Home'])
 async def root():
-    return {"message": "Hello glamping"}
+    return {"message": "Hello integra"}
 
 # Ejecuta el servidor
 if __name__ == "__main__":
