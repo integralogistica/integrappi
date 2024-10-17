@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de rutas
 from rutas.usuarios import ruta_usuario
+from rutas.aut import ruta_aut
+
 
 app = FastAPI()
 app.title = "integra"
@@ -18,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(ruta_usuario)
+app.include_router(ruta_aut)
 
 @app.get("/", tags=['Home'])
 async def root():
