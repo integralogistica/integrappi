@@ -2,9 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de rutas
-# from rutas.usuarios import ruta_usuario
+from rutas.aut2 import ruta_usuario
 # from rutas.aut import ruta_aut
-from rutas.aut2 import ruta_edwin
+# from rutas.aut2 import ruta_edwin
 
 
 app = FastAPI()
@@ -20,9 +20,9 @@ app.add_middleware(
     allow_headers=["*"],  # Permite todos los encabezados
 )
 
-# app.include_router(ruta_usuario)
-# app.include_router(ruta_aut)
-app.include_router(ruta_edwin)
+app.include_router(ruta_usuario)
+# # app.include_router(ruta_aut)
+# app.include_router(ruta_edwin)
 
 @app.get("/", tags=['Home'])
 async def root():

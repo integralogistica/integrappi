@@ -8,16 +8,22 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 from pydantic import BaseModel
 from bd.bd_cliente import bd_cliente
+from bd.models.usuario import modelo_usuario, modelo_usuarios
 
 # Configuración de la base de datos
 base_datos = bd_cliente.integra
 
 # Configuración de FastAPI y seguridad
-ruta_edwin = APIRouter()
-esquema_oauth2 = OAuth2PasswordBearer(tokenUrl="ruta_autenticacion")
+ruta_usuario = APIRouter( 
+    prefix="/usuarios",
+    tags=['Usuarios'],
+    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
+)
+
+esquema_oauth2 = OAuth2PasswordBearer(tokenUrl="usuarios/token")
 CLAVE_SECRETA = "tu_clave_secreta"  # Cambia esto por una clave secreta más segura
 ALGORITMO = "HS256"
-EXPIRE_MINUTOS_TOKEN = 2
+EXPIRE_MINUTOS_TOKEN = 20
 
 # Configuración de la contraseña
 contexto_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -29,16 +35,6 @@ class Usuario(BaseModel):
     tenedor: str
     telefono: str
     clave: str
-
-def modelo_usuario(usuario) -> dict:
-    return {
-        "id": str(usuario["_id"]),
-        "nombre": usuario["nombre"],
-        "email": usuario["email"],
-        "tenedor": usuario["tenedor"],
-        "telefono": usuario["telefono"],
-        "clave": usuario["clave"],
-    }
 
 def modelo_usuarios(usuarios) -> list:
     return [modelo_usuario(usuario) for usuario in usuarios]
@@ -79,7 +75,7 @@ async def obtener_usuario_actual(token: str = Depends(esquema_oauth2)):
     return modelo_usuario(usuario)
 
 # Rutas de la API
-@ruta_edwin.post("/ruta_autenticacion/token")
+@ruta_usuario.post("/token")
 async def iniciar_sesion(form_data: OAuth2PasswordRequestForm = Depends()):
     usuario = base_datos.usuarios.find_one({"email": form_data.username})
     if not usuario or not verificar_hash(form_data.password, usuario["clave"]):
@@ -89,7 +85,7 @@ async def iniciar_sesion(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = crear_token(data={"sub": usuario["email"]}, expires_delta=expires_access_token)
     return {"access_token": access_token, "token_type": "bearer"}
 
-@ruta_edwin.post("/ruta_autenticacion/usuarios/", response_model=dict)
+@ruta_usuario.post("/", response_model=dict)
 async def crear_usuario(usuario: Usuario):
     # Verificar si el email ya existe
     if base_datos.usuarios.find_one({"email": usuario.email}):
@@ -106,19 +102,14 @@ async def crear_usuario(usuario: Usuario):
     result = base_datos.usuarios.insert_one(nuevo_usuario)
     return modelo_usuario(base_datos.usuarios.find_one({"_id": result.inserted_id}))
 
-@ruta_edwin.get("/ruta_autenticacion/usuarios/", response_model=List[dict])
-async def obtener_usuarios(usuario_actual: dict = Depends(obtener_usuario_actual)):
-    usuarios = base_datos.usuarios.find()
-    return modelo_usuarios(usuarios)
-
-@ruta_edwin.get("/ruta_autenticacion/usuarios/{usuario_id}", response_model=dict)
+@ruta_usuario.get("/{usuario_id}", response_model=dict)
 async def obtener_usuario(usuario_id: str, usuario_actual: dict = Depends(obtener_usuario_actual)):
     usuario = base_datos.usuarios.find_one({"_id": ObjectId(usuario_id)})
     if usuario is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return modelo_usuario(usuario)
 
-@ruta_edwin.put("/ruta_autenticacion/usuarios/{usuario_id}", response_model=dict)
+@ruta_usuario.put("/{usuario_id}", response_model=dict)
 async def actualizar_usuario(usuario_id: str, usuario: Usuario, usuario_actual: dict = Depends(obtener_usuario_actual)):
     usuario_actualizado = {
         "nombre": usuario.nombre,
@@ -132,11 +123,11 @@ async def actualizar_usuario(usuario_id: str, usuario: Usuario, usuario_actual: 
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return modelo_usuario(base_datos.usuarios.find_one({"_id": ObjectId(usuario_id)}))
 
-@ruta_edwin.delete("/ruta_autenticacion/usuarios/{usuario_id}", response_model=dict)
+@ruta_usuario.delete("/{usuario_id}", response_model=dict)
 async def eliminar_usuario(usuario_id: str, usuario_actual: dict = Depends(obtener_usuario_actual)):
     result = base_datos.usuarios.delete_one({"_id": ObjectId(usuario_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return {"mensaje": "Usuario eliminado"}
 
-# Ejecutar el servidor: `uvicorn aut2:app --reload`
+# Ejecutar el servidor: `uvicorn main:app --reload`
