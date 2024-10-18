@@ -8,4 +8,5 @@ class Usuario(BaseModel):
     email: EmailStr = "edwin@example.com"
     tenedor: Optional[str] = None
     telefono: Optional[str] = None
+    clave: str = "clavesegura"
 

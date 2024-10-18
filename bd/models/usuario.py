@@ -4,7 +4,8 @@ def modelo_usuario(usuario)->dict:
         "nombre": usuario["nombre"],
         "email": usuario["email"],
         "tenedor":usuario["tenedor"],
-        "telefono":usuario["telefono"]
+        "telefono":usuario["telefono"],
+        "clave":usuario["clave"]
 
     }
 
