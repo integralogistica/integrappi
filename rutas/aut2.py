@@ -83,7 +83,14 @@ async def iniciar_sesion(form_data: OAuth2PasswordRequestForm = Depends()):
     
     expires_access_token = timedelta(minutes=EXPIRE_MINUTOS_TOKEN)
     access_token = crear_token(data={"sub": usuario["email"]}, expires_delta=expires_access_token)
-    return {"access_token": access_token, "token_type": "bearer"}
+    
+    # Retorna el token y también el nombre y el tenedor
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "nombre": usuario["nombre"],  # Agrega el nombre
+        "tenedor": usuario["tenedor"],  # Agrega el tenedor
+    }
 
 @ruta_usuario.post("/", response_model=dict)
 async def crear_usuario(usuario: Usuario):
