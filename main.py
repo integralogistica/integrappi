@@ -5,8 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from rutas.aut2 import ruta_usuario
 from rutas.pagoSaldos import ruta_manifiestos
 
-
-
 app = FastAPI()
 app.title = "integra"
 app.version = "1"
