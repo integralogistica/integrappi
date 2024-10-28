@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de rutas
 from rutas.aut2 import ruta_usuario
-# from rutas.aut import ruta_aut
-# from rutas.aut2 import ruta_edwin
+from rutas.pagoSaldos import ruta_manifiestos
+
 
 
 app = FastAPI()
@@ -21,8 +21,8 @@ app.add_middleware(
 )
 
 app.include_router(ruta_usuario)
-# # app.include_router(ruta_aut)
-# app.include_router(ruta_edwin)
+app.include_router(ruta_manifiestos)
+
 
 @app.get("/", tags=['Home'])
 async def root():
