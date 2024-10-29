@@ -98,6 +98,10 @@ async def crear_usuario(usuario: Usuario):
     if base_datos.usuarios.find_one({"email": usuario.email}):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El email ya está en uso")
     
+    # Verificar si el tenedor ya está en uso
+    if base_datos.usuarios.find_one({"tenedor": usuario.tenedor}):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta cedula o NIT ya están en uso")
+    
     usuario.clave = crear_hash(usuario.clave)  # Hash de la contraseña
     nuevo_usuario = {
         "nombre": usuario.nombre,
