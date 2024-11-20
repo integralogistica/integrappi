@@ -4,7 +4,7 @@ from bson import ObjectId
 from typing import List, Dict, Any
 
 # Conexión a la base de datos MongoDB
-client = MongoClient("mongodb+srv://integra:integra2024@integrappi.su5yi.mongodb.net/?retryWrites=true&w=majority&appName=integrappi")
+client = MongoClient("mongodb+srv://integra:integra2025@integrappi.agvcg.mongodb.net/?retryWrites=true&w=majority&appName=integrappi")
 db = client["integra"]
 collection = db["manifiestos_pagos"]
 
