@@ -24,4 +24,18 @@ async def read_manifiestos():
         return manifiestos
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@ruta_novedades.get("/tenedor/{tenedor}", response_model=List[Dict[str, Any]])
+async def read_manifiestos_by_tenedor(tenedor: str):
+    try:
+        # Buscar todos los manifiestos que tengan el campo "Tenedor" con el valor proporcionado
+        manifiestos = list(collection.find({"Tenedor": tenedor}))
+        # Convertir el ObjectId a string para que sea JSON serializable
+        for manifiesto in manifiestos:
+            manifiesto["_id"] = str(manifiesto["_id"])
+        return manifiestos
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
