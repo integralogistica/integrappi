@@ -8,17 +8,19 @@ from PIL import Image
 import os
 
 # Configuración de MongoDB
-bd_cliente = MongoClient(
-    "mongodb+srv://integra:integra2025@integrappi.agvcg.mongodb.net/?retryWrites=true&w=majority&appName=integrappi"
-)
+mongo_uri = os.getenv("MONGODB_URI")
+if not mongo_uri:
+    raise ValueError("La variable de entorno MONGODB_URI no está configurada.")
+bd_cliente = MongoClient(mongo_uri)
 bd = bd_cliente['integra']
 coleccion_vehiculos = bd['vehiculos']
 
 # Configuración de Google Cloud Storage
 BUCKET_NAME = "integrapp"
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
-    r"C:\Users\zarat\OneDrive\Documentos\Edwin\INTEGRA\integrappi\sunlit-analyst-448516-p8-25c05fe7366d.json"
-)
+google_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if not google_credentials_path:
+    raise ValueError("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS no está configurada.")
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_credentials_path
 
 # APIRouter para la ruta
 ruta_vehiculos = APIRouter(
@@ -63,7 +65,7 @@ def subir_a_google_storage(archivo: UploadFile, carpeta: str = "licencias") -> s
 async def subir_licencia(
     archivo: UploadFile,
     placa: str = Form(...),
-    id_usuario: str = Form(...)
+    id_usuario: str = Form(...),
 ):
     if archivo.content_type not in ["image/jpeg", "image/png", "image/webp", "application/pdf"]:
         raise HTTPException(
@@ -98,8 +100,6 @@ async def subir_licencia(
         raise http_exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
-
-
 
 # Ruta para consultar vehículos por id_usuario
 @ruta_vehiculos.get("/consultar-por-id-usuario/{id_usuario}")
