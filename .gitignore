@@ -1,2 +1,8 @@
 venv
 __pycache__
+novedades
+subirNovedades.spec
+subirNovedades.py
+novedades.xlsx
+dist
+build

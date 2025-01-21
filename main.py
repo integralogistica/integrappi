@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from rutas.aut2 import ruta_usuario
 from rutas.pagoSaldos import ruta_manifiestos
 from rutas.novedades import ruta_novedades
+from rutas.vehiculos import ruta_vehiculos
 
 app = FastAPI()
 app.title = "integra"
@@ -22,6 +23,7 @@ app.add_middleware(
 app.include_router(ruta_usuario)
 app.include_router(ruta_manifiestos)
 app.include_router(ruta_novedades)
+app.include_router(ruta_vehiculos)
 
 
 @app.get("/", tags=['Home'])
