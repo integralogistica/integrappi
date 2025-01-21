@@ -42,7 +42,7 @@ def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int 
         raise HTTPException(status_code=400, detail=f"Error al optimizar la imagen: {str(e)}")
 
 # Función para subir archivos a Google Cloud Storage
-def subir_a_google_storage(archivo: UploadFile, carpeta: str = "licencias") -> str:
+def subir_a_google_storage(archivo: UploadFile, carpeta: str = "TarjetasPropiedad") -> str:
     try:
         cliente = storage.Client()
         bucket = cliente.bucket(BUCKET_NAME)
@@ -60,9 +60,9 @@ def subir_a_google_storage(archivo: UploadFile, carpeta: str = "licencias") -> s
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al subir el archivo a Google Storage: {str(e)}")
 
-# Ruta para subir la licencia de conducir con placa e id_usuario
-@ruta_vehiculos.post("/subir-licencia")
-async def subir_licencia(
+# Ruta para subir la tarjeta de conducir con placa e id_usuario
+@ruta_vehiculos.post("/subir-tarjeta")
+async def subir_tarjeta(
     archivo: UploadFile,
     placa: str = Form(...),
     id_usuario: str = Form(...),
@@ -78,14 +78,14 @@ async def subir_licencia(
         url_archivo = subir_a_google_storage(archivo)
 
         # Guardar la información en MongoDB
-        nueva_licencia = {
+        nueva_tarjeta = {
             "placa": placa,
             "id_usuario": id_usuario,
             "nombre_archivo": archivo.filename,
             "tipo": archivo.content_type,
             "url": url_archivo
         }
-        coleccion_vehiculos.insert_one(nueva_licencia)
+        coleccion_vehiculos.insert_one(nueva_tarjeta)
 
         return JSONResponse(
             status_code=status.HTTP_201_CREATED,
