@@ -10,7 +10,7 @@ import os
 # Configuración de MongoDB
 mongo_uri = os.getenv("MONGO_URI")
 if not mongo_uri:
-    raise ValueError("La variable de entorno MONGODB_URI no está configurada.")
+    raise ValueError("La variable de entorno MONGO_URI no está configurada.")
 bd_cliente = MongoClient(mongo_uri)
 bd = bd_cliente['integra']
 coleccion_vehiculos = bd['vehiculos']
