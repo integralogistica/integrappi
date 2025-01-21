@@ -8,7 +8,7 @@ from PIL import Image
 import os
 
 # Configuración de MongoDB
-mongo_uri = os.getenv("MONGODB_URI")
+mongo_uri = os.getenv("MONGO_URI")
 if not mongo_uri:
     raise ValueError("La variable de entorno MONGODB_URI no está configurada.")
 bd_cliente = MongoClient(mongo_uri)
