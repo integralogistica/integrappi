@@ -163,3 +163,14 @@ async def eliminar_foto(placa: str, url: str):
     eliminar_de_google_storage(url)
     coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"fotos": url}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Foto eliminada correctamente"})
+
+
+# 6️⃣ Obtener la información de un vehículo por su placa
+@ruta_vehiculos.get("/obtener-vehiculo/{placa}")
+async def obtener_vehiculo(placa: str):
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa}, {"_id": 0})
+    
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
