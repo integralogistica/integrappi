@@ -89,7 +89,7 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
         "revision_tecnomecanica": None,
         "tarjeta_remolque": None,
         "poliza_responsabilidad": None,
-        "documento_identidad": None,
+        "documento_identidad_conductor": None,
         "licencia": None,
         "planilla_eps": None,
         "planilla_arl": None,
@@ -109,7 +109,7 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
     if tipo not in [
         "tarjeta_propiedad", "soat", "revision_tecnomecanica", "tarjeta_remolque",
-        "poliza_responsabilidad", "documento_identidad", "licencia",
+        "poliza_responsabilidad", "documento_identidad_conductor", "licencia",
         "planilla_eps", "planilla_arl", "documento_identidad_tenedor",
         "certificacion_bancaria", "documento_acreditacion_tenedor",
         "rut_tenedor", "documento_identidad_propietario", "rut_propietario"
