@@ -32,7 +32,6 @@ ruta_vehiculos = APIRouter(
     responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
 )
 
-# Función para optimizar imágenes y convertirlas a WebP
 def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int = 1200, max_height: int = 800) -> BytesIO:
     try:
         imagen = Image.open(archivo.file)
@@ -44,7 +43,6 @@ def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al optimizar la imagen: {str(e)}")
 
-# Función para subir archivos a Google Cloud Storage
 def subir_a_google_storage(archivo: UploadFile, nombre_archivo: str) -> str:
     try:
         cliente = storage.Client()
@@ -63,7 +61,6 @@ def subir_a_google_storage(archivo: UploadFile, nombre_archivo: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al subir el archivo a Google Storage: {str(e)}")
 
-# Función para eliminar un archivo de Google Cloud Storage
 def eliminar_de_google_storage(url: str):
     try:
         cliente = storage.Client()
@@ -74,48 +71,42 @@ def eliminar_de_google_storage(url: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar el archivo: {str(e)}")
 
-# 1️⃣ Crear vehículo en MongoDB
 @ruta_vehiculos.post("/crear")
 async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     if coleccion_vehiculos.find_one({"placa": placa}):
         raise HTTPException(status_code=400, detail="La placa ya está registrada.")
-
     nuevo_vehiculo = {
-    "idUsuario": id_usuario,
-    "placa": placa,
-    "fotos": [],
-    "tarjetaPropiedad": None,
-    "soat": None,
-    "revisionTecnomecanica": None,
-    "tarjetaRemolque": None,
-    "polizaResponsabilidad": None,
-    "documentoIdentidadConductor": None,
-    "licencia": None,
-    "planillaEps": None,
-    "planillaArl": None,
-    "documentoIdentidadTenedor": None,
-    "certificacionBancaria": None,
-    "documentoAcreditacionTenedor": None,
-    "rutTenedor": None,
-    "documentoIdentidadPropietario": None,
-    "rutPropietario": None
-}
-
-
+        "idUsuario": id_usuario,
+        "placa": placa,
+        "fotos": [],
+        "tarjetaPropiedad": None,
+        "soat": None,
+        "revisionTecnomecanica": None,
+        "tarjetaRemolque": None,
+        "polizaResponsabilidad": None,
+        "documentoIdentidadConductor": None,
+        "licencia": None,
+        "planillaEps": None,
+        "planillaArl": None,
+        "documentoIdentidadTenedor": None,
+        "certificacionBancaria": None,
+        "documentoAcreditacionTenedor": None,
+        "rutTenedor": None,
+        "documentoIdentidadPropietario": None,
+        "rutPropietario": None
+    }
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "Vehículo registrado exitosamente"})
 
-# 2️⃣ Subir documentos generales (Tarjeta de Propiedad, SOAT, etc.)
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
     if tipo not in [
-    "tarjetaPropiedad",  "soat",  "revisionTecnomecanica",  "tarjetaRemolque",
-    "polizaResponsabilidad", "documentoIdentidadConductor", "licencia",
-    "planillaEps", "planillaArl", "documentoIdentidadTenedor",
-    "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor", 
-    "documentoIdentidadPropietario", "rutPropietario"
-]:
-
+        "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
+        "polizaResponsabilidad", "documentoIdentidadConductor", "licencia",
+        "planillaEps", "planillaArl", "documentoIdentidadTenedor",
+        "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor", 
+        "documentoIdentidadPropietario", "rutPropietario"
+    ]:
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
 
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
@@ -124,11 +115,9 @@ async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str
 
     nombre_archivo = f"{tipo}_{placa}.webp"
     url_archivo = subir_a_google_storage(archivo, nombre_archivo)
-
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": {tipo: url_archivo}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": f"{tipo} subido correctamente", "url": url_archivo})
 
-# 3️⃣ Subir varias fotos
 @ruta_vehiculos.put("/subir-fotos")
 async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
@@ -144,35 +133,27 @@ async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
     coleccion_vehiculos.update_one({"placa": placa}, {"$push": {"fotos": {"$each": urls_fotos}}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Fotos subidas correctamente", "urls": urls_fotos})
 
-# 4️⃣ Eliminar documento
 @ruta_vehiculos.delete("/eliminar-documento")
 async def eliminar_documento(placa: str, tipo: str):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or not vehiculo.get(tipo):
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
-
     eliminar_de_google_storage(vehiculo[tipo])
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": {tipo: None}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": f"{tipo} eliminado correctamente"})
 
-# 5️⃣ Eliminar una foto específica
 @ruta_vehiculos.delete("/eliminar-foto")
 async def eliminar_foto(placa: str, url: str):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or url not in vehiculo["fotos"]:
         raise HTTPException(status_code=404, detail="Foto no encontrada.")
-
     eliminar_de_google_storage(url)
     coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"fotos": url}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Foto eliminada correctamente"})
 
-
-# 6️⃣ Obtener la información de un vehículo por su placa
 @ruta_vehiculos.get("/obtener-vehiculo/{placa}")
 async def obtener_vehiculo(placa: str):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa}, {"_id": 0})
-    
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
