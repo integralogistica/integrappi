@@ -81,25 +81,26 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
         raise HTTPException(status_code=400, detail="La placa ya está registrada.")
 
     nuevo_vehiculo = {
-        "id_usuario": id_usuario,
-        "placa": placa,
-        "fotos": [],
-        "tarjeta_propiedad": None,
-        "soat": None,
-        "revision_tecnomecanica": None,
-        "tarjeta_remolque": None,
-        "poliza_responsabilidad": None,
-        "documento_identidad_conductor": None,
-        "licencia": None,
-        "planilla_eps": None,
-        "planilla_arl": None,
-        "documento_identidad_tenedor": None,
-        "certificacion_bancaria": None,
-        "documento_acreditacion_tenedor": None,
-        "rut_tenedor": None,
-        "documento_identidad_propietario": None,
-        "rut_propietario": None
-    }
+    "idUsuario": id_usuario,
+    "placa": placa,
+    "fotos": [],
+    "tarjetaPropiedad": None,
+    "soat": None,
+    "revisionTecnomecanica": None,
+    "tarjetaRemolque": None,
+    "polizaResponsabilidad": None,
+    "documentoIdentidadConductor": None,
+    "licencia": None,
+    "planillaEps": None,
+    "planillaArl": None,
+    "documentoIdentidadTenedor": None,
+    "certificacionBancaria": None,
+    "documentoAcreditacionTenedor": None,
+    "rutTenedor": None,
+    "documentoIdentidadPropietario": None,
+    "rutPropietario": None
+}
+
 
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "Vehículo registrado exitosamente"})
@@ -108,12 +109,13 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
     if tipo not in [
-        "tarjeta_propiedad", "soat", "revision_tecnomecanica", "tarjeta_remolque",
-        "poliza_responsabilidad", "documento_identidad_conductor", "licencia",
-        "planilla_eps", "planilla_arl", "documento_identidad_tenedor",
-        "certificacion_bancaria", "documento_acreditacion_tenedor",
-        "rut_tenedor", "documento_identidad_propietario", "rut_propietario"
-    ]:
+    "tarjetaPropiedad",  "soat",  "revisionTecnomecanica",  "tarjetaRemolque",
+    "polizaResponsabilidad", "documentoIdentidadConductor", "licencia",
+    "planillaEps", "planillaArl", "documentoIdentidadTenedor",
+    "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor", 
+    "documentoIdentidadPropietario", "rutPropietario"
+]:
+
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
 
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
