@@ -157,3 +157,11 @@ async def obtener_vehiculo(placa: str):
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
+
+@ruta_vehiculos.get("/obtener-vehiculos")
+def obtener_vehiculos(id_usuario: str):
+
+    vehiculos = list(coleccion_vehiculos.find({"idUsuario": id_usuario}, {"_id": 0, "placa": 1}))
+    if not vehiculos:
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"message": "No se encontraron vehículos para este usuario."})
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículos encontrados", "vehicles": vehiculos})
