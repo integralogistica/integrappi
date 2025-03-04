@@ -100,23 +100,48 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
 
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
+    # Validamos si el tipo de documento es de los permitidos
     if tipo not in [
         "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
         "polizaResponsabilidad", "documentoIdentidadConductor", "licencia",
         "planillaEps", "planillaArl", "documentoIdentidadTenedor",
-        "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor", 
+        "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor",
         "documentoIdentidadPropietario", "rutPropietario"
     ]:
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
 
+    # Buscamos el vehículo
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    nombre_archivo = f"{tipo}_{placa}.webp"
+    # Definimos la extensión según el tipo de contenido
+    if archivo.content_type.startswith("image/"):
+        extension = "webp"
+    elif archivo.content_type == "application/pdf":
+        extension = "pdf"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se permiten archivos de imagen o PDF."
+        )
+
+    # Construimos el nombre de archivo apropiado
+    nombre_archivo = f"{tipo}_{placa}.{extension}"
+
+    # Subimos a Google Storage (la función ya maneja la compresión si es imagen)
     url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+
+    # Guardamos la URL en MongoDB
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": {tipo: url_archivo}})
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": f"{tipo} subido correctamente", "url": url_archivo})
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": f"{tipo} subido correctamente",
+            "url": url_archivo
+        }
+    )
 
 @ruta_vehiculos.put("/subir-fotos")
 async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
