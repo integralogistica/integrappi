@@ -71,10 +71,12 @@ def eliminar_de_google_storage(url: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar el archivo: {str(e)}")
 
+# Crear vehiculo
 @ruta_vehiculos.post("/crear")
 async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     if coleccion_vehiculos.find_one({"placa": placa}):
         raise HTTPException(status_code=400, detail="La placa ya está registrada.")
+    
     nuevo_vehiculo = {
         "idUsuario": id_usuario,
         "placa": placa,
@@ -97,6 +99,7 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     }
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "Vehículo registrado exitosamente"})
+
 
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
