@@ -87,15 +87,76 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
         "tarjetaRemolque": None,
         "polizaResponsabilidad": None,
         "documentoIdentidadConductor": None,
+        "condFoto": None,
         "licencia": None,
-        "planillaEps": None,
-        "planillaArl": None,
+        "planillaEpsArl": None,
         "documentoIdentidadTenedor": None,
-        "certificacionBancaria": None,
+        "condCertificacionBancaria": None,
+        "propCertificacionBancaria": None,
+        "tenedCertificacionBancaria": None,
         "documentoAcreditacionTenedor": None,
         "rutTenedor": None,
         "documentoIdentidadPropietario": None,
-        "rutPropietario": None
+        "rutPropietario": None,
+
+        "condPrimerApellido": None,
+        "condSegundoApellido": None,
+        "condNombres": None,
+        "condCedulaCiudadania": None,
+        "condExpedidaEn": None,
+        "condDireccion": None,
+        "condCiudad": None,
+        "condCelular": None,
+        "condCorreo": None,
+        "condEpsArl": None,
+        "condNoLicencia": None,
+        "condFechaVencimientoLic": None,
+        "condCategoriaLic": None,
+        "condGrupoSanguineo": None,
+        "condNombreEmergencia": None,
+        "condCelularEmergencia": None,
+        "condParentescoEmergencia": None,
+        "condEmpresaRef": None,
+        "condCelularRef": None,
+        "condCiudadRef": None,
+        "condNroViajesRef": None,
+        "condAntiguedadRef": None,
+        "condMercTransportada": None,
+
+        "propNombre": None,
+        "propDocumento": None,
+        "propCiudadExpDoc": None,
+        "propCorreo": None,
+        "propCelular": None,
+        "propDireccion": None,
+        "propCiudad": None,
+
+        "tenedNombre": None,
+        "tenedDocumento": None,
+        "tenedCiudadExpDoc": None,
+        "tenedCorreo": None,
+        "tenedDireccion": None,
+        "tenedCiudad": None,        
+        "tenedCelular": None,
+
+        "vehModelo": None,
+        "vehMarca": None,
+        "vehTipoCarroceria": None,
+        "vehLinea": None,
+        "vehColor": None,
+        "vehRepotenciado": None,
+        "vehAno": None,
+        "vehEmpresaSat": None,
+        "vehUsuarioSat": None,
+        "vehClaveSat": None,
+
+        "RemolPlaca": None,
+        "RemolModelo": None,
+        "RemolClase": None,
+        "RemolTipoCarroceria": None,
+        "RemolAlto": None,
+        "RemolLargo": None,
+        "RemolAncho": None,
     }
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "Vehículo registrado exitosamente"})
@@ -105,12 +166,12 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
     # Validamos si el tipo de documento es de los permitidos
     if tipo not in [
-        "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
-        "polizaResponsabilidad", "documentoIdentidadConductor", "licencia",
-        "planillaEps", "planillaArl", "documentoIdentidadTenedor",
-        "certificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor",
-        "documentoIdentidadPropietario", "rutPropietario"
-    ]:
+    "tarjetaPropiedad", "soat", "revisionTecnomecanica",  "tarjetaRemolque","polizaResponsabilidad", 
+    "documentoIdentidadConductor", "documentoIdentidadPropietario", "documentoIdentidadTenedor", 
+    "licencia", "planillaEpsArl", "condFoto", "condCertificacionBancaria", "propCertificacionBancaria", 
+    "tenedCertificacionBancaria", "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario"
+]:
+
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
 
     # Buscamos el vehículo
