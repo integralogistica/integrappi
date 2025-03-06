@@ -254,3 +254,20 @@ def obtener_vehiculos(id_usuario: str):
     if not vehiculos:
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"message": "No se encontraron vehículos para este usuario."})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículos encontrados", "vehicles": vehiculos})
+
+
+# Actualiza la informacion de datos
+@ruta_vehiculos.put("/actualizar-informacion/{placa}")
+async def actualizar_informacion_vehiculo(placa: str, datos: dict):
+    # Verificar si el vehículo existe
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    # Actualizar la información en la base de datos
+    resultado = coleccion_vehiculos.update_one({"placa": placa}, {"$set": datos})
+
+    if resultado.modified_count == 0:
+        return JSONResponse(status_code=200, content={"message": "No se realizaron cambios en el vehículo."})
+    
+    return JSONResponse(status_code=200, content={"message": "Información del vehículo actualizada exitosamente"})
