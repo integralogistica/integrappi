@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from bd.bd_cliente import bd_cliente
 
-# Accede SIN paréntesis a la colección
+# Ahora bd_cliente es ya la base de datos; accedes a la colección así:
 coleccion_empleados = bd_cliente["empleados"]
 
 class Empleado(BaseModel):
@@ -39,13 +39,15 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def getEmpleados():
-    cursor = coleccion_empleados.find()          # → método, no colección()
+    cursor = coleccion_empleados.find()      # → Método sobre colección
     return [transformar_empleado(doc) for doc in cursor]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def getEmpleadoPorIdentificacion(identificacion: str):
     doc = coleccion_empleados.find_one({"identificacion": identificacion})
     if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Empleado no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Empleado no encontrado"
+        )
     return transformar_empleado(doc)
