@@ -1,6 +1,7 @@
 # rutas/empleados.py
 
 import os
+import math
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional, List, Union
@@ -31,23 +32,27 @@ class Empleado(BaseModel):
 
 # ——— Función para mapear y castear todos los campos ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # Nombre completo
-    partes_nombre = [
+    # Construir nombre completo
+    partes = [
         doc.get("primer_nombre"),
         doc.get("segundo_nombre"),
         doc.get("primer_apellido"),
         doc.get("segundo_apellido"),
     ]
-    nombre_completo = " ".join(filter(None, partes_nombre)) or None
+    nombre_completo = " ".join(filter(None, partes)) or None
 
-    # Identificación como string
+    # Identificación como string, protegiendo NaN
     id_val: Union[int, float, str] = doc.get("identificacion", "")
     if isinstance(id_val, (int, float)):
-        identificacion_str = str(int(id_val))
+        if isinstance(id_val, float) and math.isnan(id_val):
+            identificacion_str = ""
+        else:
+            # Convertimos a int para quitar .0 si viene como float
+            identificacion_str = str(int(id_val))
     else:
         identificacion_str = str(id_val)
 
-    # Fecha de ingreso en ISO
+    # Fecha de ingreso en ISO si es datetime
     fecha_ing = doc.get("fecha_ingreso")
     if isinstance(fecha_ing, datetime):
         fecha_ing_str = fecha_ing.isoformat()
@@ -68,7 +73,7 @@ def transformar_empleado(doc: dict) -> Empleado:
 ruta_empleado = APIRouter(
     prefix="/empleados",
     tags=["Empleados"],
-    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
+    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}},
 )
 
 @ruta_empleado.get("/", response_model=List[Empleado])
@@ -78,11 +83,11 @@ async def getEmpleados():
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def getEmpleadoPorIdentificacion(identificacion: str):
-    # Pymongo convertirá la query si guardaste número o string
-    doc = coleccion_empleados.find_one({"identificacion": identificacion})
+    doc = coleccion_empleados.find_one({"identificacion": float(identificacion)}) \
+          or coleccion_empleados.find_one({"identificacion": identificacion})
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Empleado no encontrado"
+            detail="Empleado no encontrado",
         )
     return transformar_empleado(doc)
