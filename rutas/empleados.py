@@ -6,7 +6,7 @@ from typing import Optional
 from bd.bd_cliente import bd_cliente
 from bd.models.empleado import modelo_empleado, modelo_empleados
 
-# Modelo Pydantic directamente aquí
+# Modelo Pydantic directamente aquí a
 class Empleado(BaseModel):
     id: Optional[str]
     nombre: Optional[str]
