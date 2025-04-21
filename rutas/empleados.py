@@ -3,10 +3,10 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional, List
-from bd.bd_cliente import bd_cliente
+from bd.bd_cliente import bd_cliente  # tu MongoClient ya configurado
 
-# Ahora bd_cliente es ya la base de datos; accedes a la colección así:
-coleccion_empleados = bd_cliente["empleados"]
+# Aquí la colección, usando atributo igual que en usuarios
+coleccion_empleados = bd_cliente.empleados
 
 class Empleado(BaseModel):
     id: Optional[str]
@@ -39,8 +39,8 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def getEmpleados():
-    cursor = coleccion_empleados.find()      # → Método sobre colección
-    return [transformar_empleado(doc) for doc in cursor]
+    # bd_cliente.empleados.find() devuelve un cursor sobre la colección
+    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def getEmpleadoPorIdentificacion(identificacion: str):
