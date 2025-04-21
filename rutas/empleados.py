@@ -1,13 +1,21 @@
 # rutas/empleados.py
 
+import os
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional, List
-from bd.bd_cliente import bd_cliente  # tu MongoClient ya configurado
+from pymongo import MongoClient
 
-# Aquí la colección, usando atributo igual que en usuarios
-coleccion_empleados = bd_cliente.empleados
+# ——— Configuración de MongoDB ———
+mongo_uri = os.getenv("MONGO_URI")
+if not mongo_uri:
+    raise ValueError("La variable de entorno MONGO_URI no está configurada.")
 
+client = MongoClient(mongo_uri)
+db = client["integra"]               # Aquí el nombre de tu base de datos
+coleccion_empleados = db["empleados"]  # Y la colección
+
+# ——— Modelo Pydantic ———
 class Empleado(BaseModel):
     id: Optional[str]
     nombre: Optional[str]
@@ -20,6 +28,7 @@ class Empleado(BaseModel):
     class Config:
         orm_mode = True
 
+# ——— Función para mapear el documento de Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
     return Empleado(
         id=str(doc.get("_id")),
@@ -31,6 +40,7 @@ def transformar_empleado(doc: dict) -> Empleado:
         tipoContrato=doc.get("tipoContrato"),
     )
 
+# ——— APIRouter ———
 ruta_empleado = APIRouter(
     prefix="/empleados",
     tags=["Empleados"],
@@ -39,8 +49,8 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def getEmpleados():
-    # bd_cliente.empleados.find() devuelve un cursor sobre la colección
-    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
+    cursor = coleccion_empleados.find()  # método sobre la colección
+    return [transformar_empleado(doc) for doc in cursor]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def getEmpleadoPorIdentificacion(identificacion: str):
