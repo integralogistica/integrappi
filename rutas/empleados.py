@@ -1,11 +1,9 @@
 from fastapi import APIRouter, HTTPException, status
-from pymongo.collection import Collection
 from pydantic import BaseModel
 from typing import Optional
-
 from bd.bd_cliente import bd_cliente
 
-# Modelo Pydantic directamente aquí a
+# Modelo directo
 class Empleado(BaseModel):
     id: Optional[str]
     nombre: Optional[str]
@@ -15,7 +13,16 @@ class Empleado(BaseModel):
     fechaIngreso: Optional[str]
     tipoContrato: Optional[str]
 
-# API Router
+# Funciones de conversión
+def modelo_empleado(doc: dict) -> dict:
+    doc["id"] = str(doc["_id"])
+    doc.pop("_id", None)
+    return doc
+
+def modelo_empleados(cursor) -> list[dict]:
+    return [modelo_empleado(doc) for doc in cursor]
+
+# Rutas
 ruta_empleado = APIRouter(
     prefix="/empleados",
     tags=["Empleados"],
@@ -24,7 +31,8 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=list[Empleado])
 async def getEmpleados():
-    return modelo_empleados(bd_cliente.empleados.find())
+    empleados_cursor = bd_cliente.empleados.find()  # ✅ NO LO LLAMES COMO FUNCIÓN
+    return modelo_empleados(empleados_cursor)
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def getEmpleadoPorIdentificacion(identificacion: str):
