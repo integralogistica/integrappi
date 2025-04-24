@@ -14,8 +14,8 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Paragraph
 from datetime import datetime
-from rutas.fondo_base64 import fondo_base64
-from rutas.firma_base64 import firma_base64
+from rutas.fondoBase64 import fondo_base64
+from rutas.firmaBase64 import firma_base64
 
 
 # ——— Configuración de MongoDB ———
