@@ -102,9 +102,11 @@ async def get_empleado_por_identificacion(
 ):
     """Busca un empleado por su número de identificación (query param)."""
     filtros = {
-        "$or": [
-            {"identificacion": identificacion},
-            {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": "__nunca_coincide__"}
+    "$or": [
+        {"identificacion": identificacion},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": "__nunca_coincide__"},
+        {"IDENTIFICACIÓN": identificacion},
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": "__nunca_coincide__"}
         ]
     }
     doc = coleccion_empleados.find_one(filtros)
