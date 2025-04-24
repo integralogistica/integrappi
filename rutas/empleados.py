@@ -72,7 +72,7 @@ def transformar_empleado(doc: dict) -> Empleado:
         identificacion=str(get('identificacion', 'IDENTIFICACIÓN') or ""),
         nombre=get('nombre', 'NOMBRE'),
         cargo=get('cargo', 'CARGO'),
-        tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO de CONTRATO'),
+        tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO DE CONTRATO'),
         fechaIngreso=fecha_ing,
         basico=get_float('basico', 'BASICO'),
         auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO_VIVIENDA'),
@@ -138,8 +138,8 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo desde base64 (opcional)
-    if fondo_base64.startswith("data:image"):  
+    # Fondo desde base64
+    if fondo_base64.startswith("data:image"):
         fondo_clean = fondo_base64.split(",", 1)[1]
     else:
         fondo_clean = fondo_base64
@@ -156,7 +156,7 @@ async def enviar_certificado(
     c.setFont("Times-Roman", 12)
     c.drawCentredString(width/2, y_top - 30, "CERTIFICA QUE:")
 
-    # Cuerpo con wrapping usando Paragraph
+    # Cuerpo con wrapping
     y = y_top - 60
     fecha_ing = emp.fechaIngreso or ""
     text = (
@@ -167,19 +167,13 @@ async def enviar_certificado(
     if req and req.incluirSalario and emp.basico > 0:
         text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
 
-    style = ParagraphStyle(
-        name="Body",
-        fontName="Times-Roman",
-        fontSize=12,
-        leading=14
-    )
+    style = ParagraphStyle(name="Body", fontName="Times-Roman", fontSize=12, leading=14)
     paragraph = Paragraph(text, style)
-    max_width = width - 40
-    paragraph.wrapOn(c, max_width, height)
+    paragraph.wrapOn(c, width - 40, height)
     paragraph.drawOn(c, 20, y)
     y_aux_start = y - paragraph.height - 20
 
-    # Auxilios (si aplica)
+    # Auxilios
     if req and req.incluirSalario:
         for label, val in [
             ("Auxilio Vivienda", emp.auxilioVivienda),
@@ -198,7 +192,7 @@ async def enviar_certificado(
     c.setFont("Times-Roman", 10)
     c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
     try:
-        firma_clean = firma_base64.split(",",1)[1] if firma_base64.startswith("data:image") else firma_base64
+        firma_clean = firma_base64.split(",", 1)[1] if firma_base64.startswith("data:image") else firma_base64
         firma_bytes = base64.b64decode(firma_clean)
         c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
     except Exception as e:
@@ -233,6 +227,5 @@ async def enviar_certificado(
 
     return JSONResponse(status_code=200, content={"message": "Correo enviado correctamente"})
 
-# ——— FastAPI App ———
 app = FastAPI()
 app.include_router(ruta_empleado)
