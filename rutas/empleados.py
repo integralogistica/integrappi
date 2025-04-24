@@ -14,12 +14,9 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Paragraph
 from datetime import datetime
+from rutas.fondo_base64 import fondo_base64
+from rutas.firma_base64 import firma_base64
 
-# ——— Imágenes en Base64 ———
-# Pega aquí las cadenas base64 (sin prefijo data:image/...)
-# Ejemplo: fondo_base64 = "iVBORw0KGgoAAAANS..."
-fondo_base64 = ""
-firma_base64 = ""
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
