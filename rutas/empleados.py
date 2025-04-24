@@ -119,7 +119,16 @@ async def get_empleado_por_identificacion(
 async def enviar_certificado(identificacion: str = Query(..., description="ID del empleado"),
                              req: EnviarRequest = None):
     """Genera y envía el certificado laboral en PDF al correo del empleado."""
-    doc = coleccion_empleados.find_one({"identificacion": str(identificacion)})
+    filtros = {
+    "$or": [
+        {"identificacion": identificacion},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": "__nunca_coincide__"},
+        {"IDENTIFICACIÓN": identificacion},
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": "__nunca_coincide__"}
+    ]
+    }
+    doc = coleccion_empleados.find_one(filtros)
+
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
 
