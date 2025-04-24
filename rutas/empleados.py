@@ -11,8 +11,8 @@ import resend
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.platypus import Paragraph
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, Frame
 from datetime import datetime
 from rutas.fondoBase64 import fondo_base64
 from rutas.firmaBase64 import firma_base64
@@ -54,7 +54,7 @@ class Empleado(BaseModel):
 class EnviarRequest(BaseModel):
     incluirSalario: bool
 
-# ——— Función de transformación ———
+# ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
     get = lambda *keys: next((doc.get(k) for k in keys if k in doc), None)
     def get_float(*keys):
@@ -84,12 +84,9 @@ def transformar_empleado(doc: dict) -> Empleado:
         correo=get('correo', 'CORREO')
     )
 
-# ——— Router de empleados ———
-ruta_empleado = APIRouter(
-    prefix="/empleados",
-    tags=["Empleados"],
-    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
-)
+# ——— Router y rutas ———
+ruta_empleado = APIRouter(prefix="/empleados", tags=["Empleados"],
+                          responses={status.HTTP_404_NOT_FOUND:{"message":"No encontrado"}})
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
@@ -100,17 +97,15 @@ async def get_empleados():
 async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description="Número de identificación")
 ):
-    filtros = {
-        "$or": [
-            {"identificacion": identificacion},
-            {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": None},
-            {"IDENTIFICACIÓN": identificacion},
-            {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": None}
-        ]
-    }
+    filtros = {"$or":[
+        {"identificacion":identificacion},
+        {"identificacion":int(identificacion)} if identificacion.isdigit() else {},
+        {"IDENTIFICACIÓN":identificacion},
+        {"IDENTIFICACIÓN":int(identificacion)} if identificacion.isdigit() else {}
+    ]}
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
     return transformar_empleado(doc)
 
 @ruta_empleado.post("/enviar")
@@ -118,118 +113,123 @@ async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
     req: EnviarRequest = None
 ):
-    filtros = {
-        "$or": [
-            {"identificacion": identificacion},
-            {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": None},
-            {"IDENTIFICACIÓN": identificacion},
-            {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": None}
-        ]
-    }
+    filtros = {"$or":[
+        {"identificacion":identificacion},
+        {"identificacion":int(identificacion)} if identificacion.isdigit() else {},
+        {"IDENTIFICACIÓN":identificacion},
+        {"IDENTIFICACIÓN":int(identificacion)} if identificacion.isdigit() else {}
+    ]}
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
-
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
     emp = transformar_empleado(doc)
     if not emp.correo:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empleado no tiene correo registrado")
+        raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
+    # Generación de PDF
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo desde base64
+    # Fondo
     if fondo_base64.startswith("data:image"):
-        fondo_clean = fondo_base64.split(",", 1)[1]
+        fondo_clean = fondo_base64.split(',',1)[1]
     else:
         fondo_clean = fondo_base64
     try:
-        fondo_bytes = base64.b64decode(fondo_clean)
-        c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=width, height=height)
-    except Exception as e:
-        print(f"⚠ Error decodificando fondo_base64: {e}")
+        img = base64.b64decode(fondo_clean)
+        c.drawImage(ImageReader(BytesIO(img)), 0, 0, width=width, height=height)
+    except:
+        pass
+
+    # Definir estilos
+    styles = getSampleStyleSheet()
+    body_style = ParagraphStyle(
+        'Body', parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=15
+    )
+    bold_style = ParagraphStyle(
+        'Bold', parent=styles['Normal'], fontName='Times-Bold', fontSize=12, leading=15
+    )
 
     # Encabezado
-    y_top = height - 40
-    c.setFont("Times-Bold", 14)
-    c.drawCentredString(width/2, y_top, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
-    c.setFont("Times-Roman", 12)
-    c.drawCentredString(width/2, y_top - 20, "CERTIFICA QUE:")
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], alignment=1,
+                                 fontName='Times-Bold', fontSize=14)
+    header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
+    subtitle = Paragraph("CERTIFICA QUE:", styles['Heading3'])
 
-    # Cuerpo mezclando estilos
-    y_cuerpo = y_top - 60
-    # Formatear cédula con puntos
-    ced = emp.identificacion
-    if emp.identificacion.isdigit():
-        ced = "{:,}".format(int(emp.identificacion)).replace(",", ".")
-    text_html = (
+    # Contenido mixto
+    ced = emp.identificacion if not emp.identificacion.isdigit() else f"{int(emp.identificacion):,}".replace(',', '.')
+    text = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde {emp.fechaIngreso}, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
-    if req and req.incluirSalario and emp.basico > 0:
-        text_html += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
-    style = ParagraphStyle(name="Body", fontName="Times-Roman", fontSize=12, leading=14)
-    paragraph = Paragraph(text_html, style)
-    paragraph.wrapOn(c, width-40, height)
-    paragraph.drawOn(c, 20, y_cuerpo)
-    y_next = y_cuerpo - paragraph.height - 20
+    if req and req.incluirSalario and emp.basico>0:
+        sal = f"{int(emp.basico):,}".replace(',', '.')
+        text += f" Con un salario fijo mensual por valor de <b>{sal} pesos</b>."
+    body = Paragraph(text, body_style)
+
+    # Frame de cuerpo
+    frame = Frame(40, 100, width-80, height-200, showBoundary=0)
+    story = [header, subtitle, body]
+    frame.addFromList(story, c)
 
     # Auxilios
     if req and req.incluirSalario:
+        y_aux = height/2 - 40
+        c.setFont('Times-Bold', 12)
         for label, val in [
-            ("Auxilio Vivienda", emp.auxilioVivienda),
-            ("Auxilio Alimentación", emp.auxilioAlimentacion),
-            ("Auxilio Movilidad", emp.auxilioMovilidad),
-            ("Auxilio Rodamiento", emp.auxilioRodamiento),
-            ("Auxilio Productividad", emp.auxilioProductividad),
-            ("Auxilio Comunic", emp.auxilioComunic)
+            ('Auxilio Vivienda', emp.auxilioVivienda),
+            ('Auxilio Alimentación', emp.auxilioAlimentacion),
+            ('Auxilio Movilidad', emp.auxilioMovilidad),
+            ('Auxilio Rodamiento', emp.auxilioRodamiento),
+            ('Auxilio Productividad', emp.auxilioProductividad),
+            ('Auxilio Comunic', emp.auxilioComunic)
         ]:
-            if val and val > 0:
-                c.setFont("Times-Bold", 12)
-                c.drawString(20, y_next, f"{label}: {int(val):,}")
-                y_next -= 18
+            if val>0:
+                c.drawString(40, y_aux, f"{label}: {int(val):,}")
+                y_aux -= 20
 
     # Pie y firma
-    c.setFont("Times-Roman", 10)
-    c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
+    c.setFont('Times-Roman', 10)
+    c.drawString(40, 40, 'Para mayor información: PBX 7006232 o celular 3183385709.')
+    if firma_base64.startswith('data:image'):
+        firma_clean = firma_base64.split(',',1)[1]
+    else:
+        firma_clean = firma_base64
     try:
-        firma_clean = firma_base64.split(",", 1)[1] if firma_base64.startswith("data:image") else firma_base64
-        firma_bytes = base64.b64decode(firma_clean)
-        c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
-    except Exception as e:
-        print(f"⚠ Error decodificando firma_base64: {e}")
-    c.setFont("Times-Bold", 12)
-    c.drawCentredString(width/2, 50, "PATRICIA LEAL AROCA")
-    c.setFont("Times-Roman", 10)
-    c.drawCentredString(width/2, 35, "Gerente de gestión humana | Integra cadena de servicios")
+        fimg = base64.b64decode(firma_clean)
+        c.drawImage(ImageReader(BytesIO(fimg)), width/2-75, 60, width=150, height=50)
+    except:
+        pass
+    c.setFont('Times-Bold', 12)
+    c.drawCentredString(width/2, 50, 'PATRICIA LEAL AROCA')
+    c.setFont('Times-Roman', 10)
+    c.drawCentredString(width/2, 35, 'Gerente de gestión humana | Integra cadena de servicios')
 
-    # Finalizar PDF
     c.showPage()
     c.save()
     buffer.seek(0)
 
-    # Envío de correo
+    # Envío
     payload = {
-        "from": "no-reply@integralogistica.com",
-        "to": [emp.correo],
-        "subject": f"Certificado Laboral - {emp.nombre}",
-        "html": f"<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>",
-        "attachments": [
-            {
-                "filename": f"certificado_{emp.identificacion}.pdf",
-                "type": "application/pdf",
-                "content": base64.b64encode(buffer.read()).decode("utf-8"),
-            }
-        ],
+        'from':'no-reply@integralogistica.com',
+        'to':[emp.correo],
+        'subject':f'Certificado Laboral - {emp.nombre}',
+        'html':f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
+        'attachments':[{  
+            'filename':f'certificado_{emp.identificacion}.pdf',
+            'type':'application/pdf',
+            'content':base64.b64encode(buffer.read()).decode()
+        }]
     }
     try:
         resend.Emails.send(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error enviando correo: {e}")
+        raise HTTPException(status_code=500, detail=f'Error enviando correo: {e}')
 
-    return JSONResponse(status_code=200, content={"message": "Correo enviado correctamente"})
+    return JSONResponse(status_code=200, content={'message':'Correo enviado correctamente'})
 
-# ——— FastAPI App ———
+# ——— App ———
 app = FastAPI()
 app.include_router(ruta_empleado)
