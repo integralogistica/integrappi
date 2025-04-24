@@ -213,7 +213,7 @@ async def enviar_certificado(
             {
                 "filename": f"certificado_{emp.identificacion}.pdf",
                 "type": "application/pdf",
-                "content": buffer.read(),
+                "content": base64.b64encode(buffer.read()).decode("utf-8"),
             }
         ],
     }
