@@ -185,7 +185,7 @@ async def enviar_certificado(
             ("Auxilio Vivienda", emp.auxilioVivienda),
             ("Auxilio Alimentación", emp.auxilioAlimentacion),
             ("Auxilio Movilidad", emp.auxilioMovilidad),
-            ("Auxilio Rodamiento", emp.auxicioRodamiento),
+            ("Auxilio Rodamiento", emp.auxilioRodamiento),
             ("Auxilio Productividad", emp.auxilioProductividad),
             ("Auxilio Comunic", emp.auxilioComunic)
         ]:
