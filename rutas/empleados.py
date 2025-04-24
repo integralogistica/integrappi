@@ -1,3 +1,5 @@
+# Dependencias necesarias:
+# pip install fastapi uvicorn pymongo reportlab resend
 import os
 import io
 from fastapi import APIRouter, HTTPException, status
@@ -5,10 +7,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from pymongo import MongoClient
-from resend import Resend
+import resend
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import Paragraph
+from datetime import datetime
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -19,10 +24,10 @@ db = client["integra"]
 coleccion_empleados = db["empleados"]
 
 # ——— Configuración de Resend ———
-resend_key = os.getenv("RESEND_API_KEY")
-if not resend_key:
+resend_api_key = os.getenv("RESEND_API_KEY")
+if not resend_api_key:
     raise ValueError("La variable de entorno RESEND_API_KEY no está configurada.")
-resend = Resend(resend_key)
+resend.api_key = resend_api_key  # configure el SDK
 
 # ——— Modelos Pydantic ———
 class Empleado(BaseModel):
@@ -51,8 +56,10 @@ class EnviarRequest(BaseModel):
 def transformar_empleado(doc: dict) -> Empleado:
     get = lambda *keys: next((doc.get(k) for k in keys if k in doc), None)
     def get_float(*keys):
-        try: return float(get(*keys) or 0)
-        except: return 0
+        try:
+            return float(get(*keys) or 0)
+        except:
+            return 0
 
     fecha_raw = get('fechaIngreso','FECHA_INGRESO','FECHA INGRESO')
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or '')
@@ -108,7 +115,7 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
     
-    # Dibujar fondo (asesgúrate de tener 'fondo.png' en la carpeta 'assets')
+    # Dibujar fondo (asegúrate de tener 'assets/fondo.png')
     fondo_path = os.path.join(os.getcwd(), 'assets', 'fondo.png')
     c.drawImage(ImageReader(fondo_path), 0, 0, width=width, height=height)
 
@@ -121,20 +128,15 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
     c.drawCentredString(width/2, y, "CERTIFICA QUE:")
 
     y -= 30
-    opciones = dict(day='numeric', month='long', year='numeric')
-    from datetime import datetime
     fecha_emision = datetime.today().strftime("%d de %B de %Y")
     fecha_ing = emp.fechaIngreso or ""
 
-    # Texto con word wrap
     text = (f"El señor/a {emp.nombre}, identificado/a con cédula número {emp.identificacion}, "
             f"labora en nuestra empresa desde {fecha_ing}, desempeñando el cargo de {emp.cargo} "
             f"con contrato a término {emp.tipoContrato}.")
     if req.incluirSalario and emp.basico:
         text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
 
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.platypus import Paragraph
     style = ParagraphStyle('body', fontName='Times-Roman', fontSize=12, leading=14)
     p = Paragraph(text, style)
     p.wrapOn(c, width-40, height)
@@ -156,12 +158,9 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
                 c.drawString(20, y, f"{label}: {int(val):,}")
                 y -= 18
 
-    # Pie de página
-    contacto = "Para mayor información: PBX 7006232 o celular 3183385709."
+    # Pie de página y firma
     c.setFont("Times-Roman", 10)
-    c.drawString(20, 40, contacto)
-
-    # Firma
+    c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
     firma_path = os.path.join(os.getcwd(), 'assets', 'firma.png')
     c.drawImage(ImageReader(firma_path), width/2-75, 60, width=150, height=50)
     c.setFont("Times-Bold", 12)
@@ -173,19 +172,22 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
     c.save()
     buffer.seek(0)
 
-    # 3) Enviar correo
-    try:
-        await resend.emails.send(
-            from_="no-reply@send.integralogistica.com",
-            to=[emp.correo],
-            subject=f"Certificado Laboral - {emp.nombre}",
-            html=f"<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>",
-            attachments=[{
-                "content": buffer.read(),
+    # 3) Enviar correo vía Resend SDK en Python
+    params = {
+        "from": "no-reply@send.integralogistica.com",
+        "to": [emp.correo],
+        "subject": f"Certificado Laboral - {emp.nombre}",
+        "html": f"<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>",
+        "attachments": [
+            {
                 "filename": f"certificado_{emp.identificacion}.pdf",
-                "type": "application/pdf"
-            }]
-        )
+                "type": "application/pdf",
+                "content": buffer.read()
+            }
+        ]
+    }
+    try:
+        email = resend.Emails.send(params)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error enviando correo: {e}")
 
