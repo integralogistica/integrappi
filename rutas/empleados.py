@@ -11,12 +11,9 @@ import resend
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.platypus import Paragraph
 from datetime import datetime
 from rutas.fondoBase64 import fondo_base64
 from rutas.firmaBase64 import firma_base64
-
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -140,21 +137,23 @@ async def enviar_certificado(
     width, height = A4
 
     # Fondo desde base64 (opcional)
-    if fondo_base64:
-        try:
-            fondo_bytes = base64.b64decode(fondo_base64)
-            c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=width, height=height)
-        except Exception as e:
-            print(f"⚠ Error decodificando fondo_base64: {e}")
+    if fondo_base64.startswith("data:image"):
+        fondo_base64_clean = fondo_base64.split(",", 1)[1]
+    else:
+        fondo_base64_clean = fondo_base64
+    try:
+        fondo_bytes = base64.b64decode(fondo_base64_clean)
+        c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=210, height=297)
+    except Exception as e:
+        print(f"⚠ Error decodificando fondo_base64: {e}")
 
-    # Encabezado y cuerpo del PDF
-    y = height - 80
+    y = 40
     c.setFont("Times-Bold", 14)
-    c.drawCentredString(width/2, y, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
-    y -= 30
+    c.drawCentredString(105, y, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
+    y += 15
     c.setFont("Times-Roman", 12)
-    c.drawCentredString(width/2, y, "CERTIFICA QUE:")
-    y -= 30
+    c.drawCentredString(105, y, "CERTIFICA QUE:")
+    y += 12
 
     fecha_ing = emp.fechaIngreso or ""
     text = (
@@ -165,11 +164,17 @@ async def enviar_certificado(
     if req and req.incluirSalario and emp.basico > 0:
         text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
 
-    style = ParagraphStyle("body", fontName="Times-Roman", fontSize=12, leading=14)
-    p = Paragraph(text, style)
-    p.wrapOn(c, width - 40, height)
-    p.drawOn(c, 20, y)
-    y -= p.height + 20
+    lines = c.beginText(20, y + 20)
+    lines.setFont("Times-Roman", 12)
+    for line in text.split(" "):
+        if lines.getX() > 170:
+            c.drawText(lines)
+            y = lines.getY() - 14
+            lines = c.beginText(20, y)
+            lines.setFont("Times-Roman", 12)
+        lines.textLine(line)
+    c.drawText(lines)
+    y = lines.getY() - 20
 
     if req and req.incluirSalario:
         for label, val in [
@@ -188,22 +193,20 @@ async def enviar_certificado(
     # Pie y firma desde base64 (opcional)
     c.setFont("Times-Roman", 10)
     c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
-    if firma_base64:
-        try:
-            firma_bytes = base64.b64decode(firma_base64)
-            c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
-        except Exception as e:
-            print(f"⚠ Error decodificando firma_base64: {e}")
+    try:
+        firma_bytes = base64.b64decode(firma_base64.split(",", 1)[1])
+        c.drawImage(ImageReader(BytesIO(firma_bytes)), 105 - 25, 60, width=50, height=20)
+    except Exception as e:
+        print(f"⚠ Error decodificando firma_base64: {e}")
     c.setFont("Times-Bold", 12)
-    c.drawCentredString(width/2, 50, "PATRICIA LEAL AROCA")
+    c.drawCentredString(105, 50, "PATRICIA LEAL AROCA")
     c.setFont("Times-Roman", 10)
-    c.drawCentredString(width/2, 35, "Gerente de gestión humana | Integra cadena de servicios")
+    c.drawCentredString(105, 35, "Gerente de gestión humana | Integra cadena de servicios")
 
     c.showPage()
     c.save()
     buffer.seek(0)
 
-    # Envío de correo
     params = {
         "from": "no-reply@integralogistica.com",
         "to": [emp.correo],
