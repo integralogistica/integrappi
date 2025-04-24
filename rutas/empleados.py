@@ -1,6 +1,8 @@
+# main.py
+
 import os
 import io
-from fastapi import FastAPI, APIRouter, HTTPException, status
+from fastapi import FastAPI, APIRouter, HTTPException, status, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
@@ -52,31 +54,33 @@ class EnviarRequest(BaseModel):
 
 # ——— Función de transformación ———
 def transformar_empleado(doc: dict) -> Empleado:
+    # intenta varios nombres de campo (lower/upper/espacios)
     get = lambda *keys: next((doc.get(k) for k in keys if k in doc), None)
     def get_float(*keys):
         try:
-            return float(get(*keys) or 0)
+            v = get(*keys)
+            return float(v) if v is not None else 0
         except:
             return 0
 
-    fecha_raw = get('fechaIngreso')
-    fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or '')
+    fecha_raw = get('fechaIngreso', 'FECHA_INGRESO', 'FECHA INGRESO')
+    fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or "")
 
     return Empleado(
         id=str(doc.get('_id')),
-        identificacion=str(doc.get('identificacion') or ""),
-        nombre=get('nombre'),
-        cargo=get('cargo'),
-        tipoContrato=get('tipoContrato'),
+        identificacion=str(get('identificacion', 'IDENTIFICACIÓN') or ""),
+        nombre=get('nombre', 'NOMBRE'),
+        cargo=get('cargo', 'CARGO'),
+        tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO DE CONTRATO'),
         fechaIngreso=fecha_ing,
-        basico=get_float('basico'),
-        auxilioVivienda=get_float('auxilioVivienda'),
-        auxilioAlimentacion=get_float('auxilioAlimentacion'),
-        auxilioMovilidad=get_float('auxilioMovilidad'),
-        auxilioRodamiento=get_float('auxilioRodamiento'),
-        auxilioProductividad=get_float('auxilioProductividad'),
-        auxilioComunic=get_float('auxilioComunic'),
-        correo=get('correo')
+        basico=get_float('basico', 'BASICO'),
+        auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO_VIVIENDA'),
+        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO_ALIMENTA', 'AUXILIO ALIMENTACIÓN'),
+        auxilioMovilidad=get_float('auxilioMovilidad', 'AUXILIO_DE_MOVILIDAD'),
+        auxilioRodamiento=get_float('auxilioRodamiento', 'AUXILIO_RODAMIENTO'),
+        auxilioProductividad=get_float('auxilioProductividad', 'AUXILIO_DE_PRODUCTIVIDAD'),
+        auxilioComunic=get_float('auxilioComunic', 'AUXILIO_COMUNIC'),
+        correo=get('correo', 'CORREO')
     )
 
 # ——— Router de empleados ———
@@ -88,61 +92,68 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
+    """Lista todos los empleados."""
     docs = coleccion_empleados.find()
     return [transformar_empleado(doc) for doc in docs]
 
-@ruta_empleado.get("/buscar/{identificacion}", response_model=Empleado)
-async def get_empleado_por_identificacion(identificacion: str):
-    identificacion = identificacion.strip()
+@ruta_empleado.get("/buscar", response_model=Empleado)
+async def get_empleado_por_identificacion(
+    identificacion: str = Query(..., description="Número de identificación")
+):
+    """Busca un empleado por su número de identificación (query param)."""
     doc = coleccion_empleados.find_one({"identificacion": identificacion})
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
     return transformar_empleado(doc)
 
 @ruta_empleado.post("/enviar")
-async def enviar_certificado(identificacion: str, req: EnviarRequest):
-    identificacion = identificacion.strip()
+async def enviar_certificado(identificacion: str = Query(..., description="ID del empleado"),
+                             req: EnviarRequest = None):
+    """Genera y envía el certificado laboral en PDF al correo del empleado."""
     doc = coleccion_empleados.find_one({"identificacion": identificacion})
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
+
     emp = transformar_empleado(doc)
     if not emp.correo:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empleado no tiene correo registrado")
 
-    # Generar PDF en memoria
+    # 1) Generar PDF en memoria
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    # Fondo
-    fondo_path = os.path.join(os.getcwd(), 'assets', 'fondo.png')
+
+    # fondo
+    fondo_path = os.path.join(os.getcwd(), "assets", "fondo.png")
     c.drawImage(ImageReader(fondo_path), 0, 0, width=width, height=height)
 
+    # encabezado
     y = height - 80
     c.setFont("Times-Bold", 14)
     c.drawCentredString(width/2, y, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
-
     y -= 30
     c.setFont("Times-Roman", 12)
     c.drawCentredString(width/2, y, "CERTIFICA QUE:")
 
+    # cuerpo
     y -= 30
-    fecha_emision = datetime.today().strftime("%d de %B de %Y")
     fecha_ing = emp.fechaIngreso or ""
     text = (
         f"El señor/a {emp.nombre}, identificado/a con cédula número {emp.identificacion}, "
         f"labora en nuestra empresa desde {fecha_ing}, desempeñando el cargo de {emp.cargo} "
         f"con contrato a término {emp.tipoContrato}."
     )
-    if req.incluirSalario and emp.basico:
-        text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte." 
+    if req and req.incluirSalario and emp.basico and emp.basico > 0:
+        text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
 
-    style = ParagraphStyle('body', fontName='Times-Roman', fontSize=12, leading=14)
+    style = ParagraphStyle("body", fontName="Times-Roman", fontSize=12, leading=14)
     p = Paragraph(text, style)
-    p.wrapOn(c, width-40, height)
+    p.wrapOn(c, width - 40, height)
     p.drawOn(c, 20, y)
     y -= p.height + 20
 
-    if req.incluirSalario:
+    # auxilios
+    if req and req.incluirSalario:
         for label, val in [
             ("Auxilio Vivienda", emp.auxilioVivienda),
             ("Auxilio Alimentación", emp.auxilioAlimentacion),
@@ -156,11 +167,11 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
                 c.drawString(20, y, f"{label}: {int(val):,}")
                 y -= 18
 
-    # Pie
+    # pie y firma
     c.setFont("Times-Roman", 10)
     c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
-    firma_path = os.path.join(os.getcwd(), 'assets', 'firma.png')
-    c.drawImage(ImageReader(firma_path), width/2-75, 60, width=150, height=50)
+    firma_path = os.path.join(os.getcwd(), "assets", "firma.png")
+    c.drawImage(ImageReader(firma_path), width/2 - 75, 60, width=150, height=50)
     c.setFont("Times-Bold", 12)
     c.drawCentredString(width/2, 50, "PATRICIA LEAL AROCA")
     c.setFont("Times-Roman", 10)
@@ -170,7 +181,7 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
     c.save()
     buffer.seek(0)
 
-    # Enviar correo
+    # 2) Enviar correo
     params = {
         "from": "no-reply@send.integralogistica.com",
         "to": [emp.correo],
@@ -180,9 +191,9 @@ async def enviar_certificado(identificacion: str, req: EnviarRequest):
             {
                 "filename": f"certificado_{emp.identificacion}.pdf",
                 "type": "application/pdf",
-                "content": buffer.read()
+                "content": buffer.read(),
             }
-        ]
+        ],
     }
     try:
         resend.Emails.send(params)
