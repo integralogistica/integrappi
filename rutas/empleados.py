@@ -101,7 +101,7 @@ async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description="Número de identificación")
 ):
     """Busca un empleado por su número de identificación (query param)."""
-    doc = coleccion_empleados.find_one({"identificacion": identificacion})
+    doc = coleccion_empleados.find_one({"identificacion": str(identificacion)})
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
     return transformar_empleado(doc)
@@ -110,7 +110,7 @@ async def get_empleado_por_identificacion(
 async def enviar_certificado(identificacion: str = Query(..., description="ID del empleado"),
                              req: EnviarRequest = None):
     """Genera y envía el certificado laboral en PDF al correo del empleado."""
-    doc = coleccion_empleados.find_one({"identificacion": identificacion})
+    doc = coleccion_empleados.find_one({"identificacion": str(identificacion)})
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
 
