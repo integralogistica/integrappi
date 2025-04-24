@@ -205,7 +205,7 @@ async def enviar_certificado(
 
     # Envío de correo
     params = {
-        "from": "no-reply@send.integralogistica.com",
+        "from": "no-reply@integralogistica.com",
         "to": [emp.correo],
         "subject": f"Certificado Laboral - {emp.nombre}",
         "html": f"<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>",
