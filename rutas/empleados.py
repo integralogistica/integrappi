@@ -1,7 +1,7 @@
-# main.py
-
 import os
 import io
+import base64
+from io import BytesIO
 from fastapi import FastAPI, APIRouter, HTTPException, status, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,6 +14,12 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Paragraph
 from datetime import datetime
+
+# ——— Imágenes en Base64 ———
+# Coloca aquí tus cadenas base64 (sin prefijo data:image/...)
+# Ejemplo: fondo_base64 = "iVBORw0KGgoAAAANS..."
+fondo_base64 = "<TU_BASE64_FONDO>"
+firma_base64 = "<TU_BASE64_FIRMA>"
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -54,7 +60,6 @@ class EnviarRequest(BaseModel):
 
 # ——— Función de transformación ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # intenta varios nombres de campo (lower/upper/espacios)
     get = lambda *keys: next((doc.get(k) for k in keys if k in doc), None)
     def get_float(*keys):
         try:
@@ -92,7 +97,6 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
-    """Lista todos los empleados."""
     docs = coleccion_empleados.find()
     return [transformar_empleado(doc) for doc in docs]
 
@@ -100,13 +104,12 @@ async def get_empleados():
 async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description="Número de identificación")
 ):
-    """Busca un empleado por su número de identificación (query param)."""
     filtros = {
-    "$or": [
-        {"identificacion": identificacion},
-        {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": "__nunca_coincide__"},
-        {"IDENTIFICACIÓN": identificacion},
-        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": "__nunca_coincide__"}
+        "$or": [
+            {"identificacion": identificacion},
+            {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": None},
+            {"IDENTIFICACIÓN": identificacion},
+            {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": None}
         ]
     }
     doc = coleccion_empleados.find_one(filtros)
@@ -114,21 +117,20 @@ async def get_empleado_por_identificacion(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
     return transformar_empleado(doc)
 
-
 @ruta_empleado.post("/enviar")
-async def enviar_certificado(identificacion: str = Query(..., description="ID del empleado"),
-                             req: EnviarRequest = None):
-    """Genera y envía el certificado laboral en PDF al correo del empleado."""
+async def enviar_certificado(
+    identificacion: str = Query(..., description="ID del empleado"),
+    req: EnviarRequest = None
+):
     filtros = {
-    "$or": [
-        {"identificacion": identificacion},
-        {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": "__nunca_coincide__"},
-        {"IDENTIFICACIÓN": identificacion},
-        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": "__nunca_coincide__"}
-    ]
+        "$or": [
+            {"identificacion": identificacion},
+            {"identificacion": int(identificacion)} if identificacion.isdigit() else {"identificacion": None},
+            {"IDENTIFICACIÓN": identificacion},
+            {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {"IDENTIFICACIÓN": None}
+        ]
     }
     doc = coleccion_empleados.find_one(filtros)
-
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
 
@@ -136,32 +138,30 @@ async def enviar_certificado(identificacion: str = Query(..., description="ID de
     if not emp.correo:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empleado no tiene correo registrado")
 
-    # 1) Generar PDF en memoria
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # fondo
-    fondo_path = os.path.join(os.getcwd(), "assets", "fondo.png")
-    c.drawImage(ImageReader(fondo_path), 0, 0, width=width, height=height)
+    # Fondo en base64
+    fondo_bytes = base64.b64decode(fondo_base64)
+    c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=width, height=height)
 
-    # encabezado
+    # Encabezado y cuerpo del PDF
     y = height - 80
     c.setFont("Times-Bold", 14)
     c.drawCentredString(width/2, y, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
     y -= 30
     c.setFont("Times-Roman", 12)
     c.drawCentredString(width/2, y, "CERTIFICA QUE:")
-
-    # cuerpo
     y -= 30
+
     fecha_ing = emp.fechaIngreso or ""
     text = (
         f"El señor/a {emp.nombre}, identificado/a con cédula número {emp.identificacion}, "
         f"labora en nuestra empresa desde {fecha_ing}, desempeñando el cargo de {emp.cargo} "
         f"con contrato a término {emp.tipoContrato}."
     )
-    if req and req.incluirSalario and emp.basico and emp.basico > 0:
+    if req and req.incluirSalario and emp.basico > 0:
         text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
 
     style = ParagraphStyle("body", fontName="Times-Roman", fontSize=12, leading=14)
@@ -170,7 +170,6 @@ async def enviar_certificado(identificacion: str = Query(..., description="ID de
     p.drawOn(c, 20, y)
     y -= p.height + 20
 
-    # auxilios
     if req and req.incluirSalario:
         for label, val in [
             ("Auxilio Vivienda", emp.auxilioVivienda),
@@ -180,16 +179,16 @@ async def enviar_certificado(identificacion: str = Query(..., description="ID de
             ("Auxilio Productividad", emp.auxilioProductividad),
             ("Auxilio Comunic", emp.auxilioComunic)
         ]:
-            if val and val > 0:
+            if val > 0:
                 c.setFont("Times-Bold", 12)
                 c.drawString(20, y, f"{label}: {int(val):,}")
                 y -= 18
 
-    # pie y firma
+    # Pie y firma en base64
     c.setFont("Times-Roman", 10)
     c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
-    firma_path = os.path.join(os.getcwd(), "assets", "firma.png")
-    c.drawImage(ImageReader(firma_path), width/2 - 75, 60, width=150, height=50)
+    firma_bytes = base64.b64decode(firma_base64)
+    c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
     c.setFont("Times-Bold", 12)
     c.drawCentredString(width/2, 50, "PATRICIA LEAL AROCA")
     c.setFont("Times-Roman", 10)
@@ -199,7 +198,7 @@ async def enviar_certificado(identificacion: str = Query(..., description="ID de
     c.save()
     buffer.seek(0)
 
-    # 2) Enviar correo
+    # Envío de correo
     params = {
         "from": "no-reply@send.integralogistica.com",
         "to": [emp.correo],
