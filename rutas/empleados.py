@@ -16,10 +16,10 @@ from reportlab.platypus import Paragraph
 from datetime import datetime
 
 # ——— Imágenes en Base64 ———
-# Coloca aquí tus cadenas base64 (sin prefijo data:image/...)
+# Pega aquí las cadenas base64 (sin prefijo data:image/...)
 # Ejemplo: fondo_base64 = "iVBORw0KGgoAAAANS..."
-fondo_base64 = "<TU_BASE64_FONDO>"
-firma_base64 = "<TU_BASE64_FIRMA>"
+fondo_base64 = ""
+firma_base64 = ""
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -76,11 +76,11 @@ def transformar_empleado(doc: dict) -> Empleado:
         identificacion=str(get('identificacion', 'IDENTIFICACIÓN') or ""),
         nombre=get('nombre', 'NOMBRE'),
         cargo=get('cargo', 'CARGO'),
-        tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO DE CONTRATO'),
+        tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO de CONTRATO'),
         fechaIngreso=fecha_ing,
         basico=get_float('basico', 'BASICO'),
         auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO_VIVIENDA'),
-        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO_ALIMENTA', 'AUXILIO ALIMENTACIÓN'),
+        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO_ALIMENTACIÓN'),
         auxilioMovilidad=get_float('auxilioMovilidad', 'AUXILIO_DE_MOVILIDAD'),
         auxilioRodamiento=get_float('auxilioRodamiento', 'AUXILIO_RODAMIENTO'),
         auxilioProductividad=get_float('auxilioProductividad', 'AUXILIO_DE_PRODUCTIVIDAD'),
@@ -142,9 +142,13 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo en base64
-    fondo_bytes = base64.b64decode(fondo_base64)
-    c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=width, height=height)
+    # Fondo desde base64 (opcional)
+    if fondo_base64:
+        try:
+            fondo_bytes = base64.b64decode(fondo_base64)
+            c.drawImage(ImageReader(BytesIO(fondo_bytes)), 0, 0, width=width, height=height)
+        except Exception as e:
+            print(f"⚠ Error decodificando fondo_base64: {e}")
 
     # Encabezado y cuerpo del PDF
     y = height - 80
@@ -184,11 +188,15 @@ async def enviar_certificado(
                 c.drawString(20, y, f"{label}: {int(val):,}")
                 y -= 18
 
-    # Pie y firma en base64
+    # Pie y firma desde base64 (opcional)
     c.setFont("Times-Roman", 10)
     c.drawString(20, 40, "Para mayor información: PBX 7006232 o celular 3183385709.")
-    firma_bytes = base64.b64decode(firma_base64)
-    c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
+    if firma_base64:
+        try:
+            firma_bytes = base64.b64decode(firma_base64)
+            c.drawImage(ImageReader(BytesIO(firma_bytes)), width/2 - 75, 60, width=150, height=50)
+        except Exception as e:
+            print(f"⚠ Error decodificando firma_base64: {e}")
     c.setFont("Times-Bold", 12)
     c.drawCentredString(width/2, 50, "PATRICIA LEAL AROCA")
     c.setFont("Times-Roman", 10)
