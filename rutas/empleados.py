@@ -150,28 +150,30 @@ async def enviar_certificado(
         print(f"⚠ Error decodificando fondo_base64: {e}")
 
     # Encabezado
-    y_top = height - 80
+    y_top = height - 40
     c.setFont("Times-Bold", 14)
     c.drawCentredString(width/2, y_top, "EL DEPARTAMENTO DE GESTIÓN HUMANA")
     c.setFont("Times-Roman", 12)
-    c.drawCentredString(width/2, y_top - 30, "CERTIFICA QUE:")
+    c.drawCentredString(width/2, y_top - 20, "CERTIFICA QUE:")
 
-    # Cuerpo con wrapping
-    y = y_top - 60
-    fecha_ing = emp.fechaIngreso or ""
-    text = (
-        f"El señor/a {emp.nombre}, identificado/a con cédula número {emp.identificacion}, "
-        f"labora en nuestra empresa desde {fecha_ing}, desempeñando el cargo de {emp.cargo} "
-        f"con contrato a término {emp.tipoContrato}."
+    # Cuerpo mezclando estilos
+    y_cuerpo = y_top - 60
+    # Formatear cédula con puntos
+    ced = emp.identificacion
+    if emp.identificacion.isdigit():
+        ced = "{:,}".format(int(emp.identificacion)).replace(",", ".")
+    text_html = (
+        f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
+        f"labora en nuestra empresa desde {emp.fechaIngreso}, desempeñando el cargo de "
+        f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
     if req and req.incluirSalario and emp.basico > 0:
-        text += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
-
+        text_html += f" Con un salario fijo mensual por valor de {int(emp.basico):,} pesos m/cte."
     style = ParagraphStyle(name="Body", fontName="Times-Roman", fontSize=12, leading=14)
-    paragraph = Paragraph(text, style)
-    paragraph.wrapOn(c, width - 40, height)
-    paragraph.drawOn(c, 20, y)
-    y_aux_start = y - paragraph.height - 20
+    paragraph = Paragraph(text_html, style)
+    paragraph.wrapOn(c, width-40, height)
+    paragraph.drawOn(c, 20, y_cuerpo)
+    y_next = y_cuerpo - paragraph.height - 20
 
     # Auxilios
     if req and req.incluirSalario:
@@ -185,8 +187,8 @@ async def enviar_certificado(
         ]:
             if val and val > 0:
                 c.setFont("Times-Bold", 12)
-                c.drawString(20, y_aux_start, f"{label}: {int(val):,}")
-                y_aux_start -= 18
+                c.drawString(20, y_next, f"{label}: {int(val):,}")
+                y_next -= 18
 
     # Pie y firma
     c.setFont("Times-Roman", 10)
@@ -202,12 +204,13 @@ async def enviar_certificado(
     c.setFont("Times-Roman", 10)
     c.drawCentredString(width/2, 35, "Gerente de gestión humana | Integra cadena de servicios")
 
+    # Finalizar PDF
     c.showPage()
     c.save()
     buffer.seek(0)
 
     # Envío de correo
-    params = {
+    payload = {
         "from": "no-reply@integralogistica.com",
         "to": [emp.correo],
         "subject": f"Certificado Laboral - {emp.nombre}",
@@ -221,11 +224,12 @@ async def enviar_certificado(
         ],
     }
     try:
-        resend.Emails.send(params)
+        resend.Emails.send(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error enviando correo: {e}")
 
     return JSONResponse(status_code=200, content={"message": "Correo enviado correctamente"})
 
+# ——— FastAPI App ———
 app = FastAPI()
 app.include_router(ruta_empleado)
