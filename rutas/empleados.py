@@ -1,10 +1,8 @@
-# rutas/empleados.py
-
 import os
 import math
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-from typing import Optional, List, Union
+from typing import Optional, List
 from pymongo import MongoClient
 
 # ——— Configuración de MongoDB ———
@@ -16,60 +14,65 @@ client = MongoClient(mongo_uri)
 db = client["integra"]
 coleccion_empleados = db["empleados"]
 
-# ——— Modelo Pydantic ———
+# ——— Modelo Pydantic actualizado ———
 class Empleado(BaseModel):
     id: Optional[str]
-    nombre: Optional[str]
+    codigoVulcano: Optional[str]
     identificacion: str
+    nombre: Optional[str]
     cargo: Optional[str]
-    salario: Optional[int]
-    fechaIngreso: Optional[str]
     tipoContrato: Optional[str]
+    fechaIngreso: Optional[str]
+    basico: Optional[float]
+    auxilioVivienda: Optional[float]
+    auxilioAlimentacion: Optional[float]
+    auxilioMovilidad: Optional[float]
+    auxilioRodamiento: Optional[float]
+    auxilioProductividad: Optional[float]
+    auxilioComunic: Optional[float]
+    correo: Optional[str]
 
     class Config:
         orm_mode = True
 
-# ——— Función de transformación ———
+# ——— Función de transformación adaptada ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # Nombre completo
-    partes = [
-        doc.get("primer_nombre"),
-        doc.get("segundo_nombre"),
-        doc.get("primer_apellido"),
-        doc.get("segundo_apellido"),
-    ]
-    nombre_completo = " ".join(filter(None, partes)) or None
+    # Helper para obtener el primer valor no None de varias claves
+    get = lambda *keys: next((doc.get(k) for k in keys if k in doc and doc.get(k) is not None), None)
+    # Para convertir a float o devolver None
+    def get_float(*keys):
+        val = get(*keys)
+        try:
+            return float(val)
+        except:
+            return None
 
-    # Identificación → string y manejamos NaN
-    id_val: Union[int, float, str] = doc.get("identificacion", "")
-    if isinstance(id_val, (int, float)):
-        if isinstance(id_val, float) and math.isnan(id_val):
-            identificacion_str = ""
-        else:
-            identificacion_str = str(int(id_val))
+    # Manejo de fecha
+    fecha_raw = get('FECHA INGRESO', 'FECHA_INGRESO')
+    if fecha_raw:
+        fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw)
     else:
-        identificacion_str = str(id_val)
-
-    # Fecha de ingreso → mantiene cadena o convierte datetime
-    fecha_raw = doc.get("fecha_ingreso")
-    if fecha_raw is None:
-        fecha_ing_str = None
-    elif hasattr(fecha_raw, "isoformat"):
-        fecha_ing_str = fecha_raw.isoformat()
-    else:
-        fecha_ing_str = str(fecha_raw)
+        fecha_ing = None
 
     return Empleado(
-        id=str(doc.get("_id")),
-        nombre=nombre_completo,
-        identificacion=identificacion_str,
-        cargo=doc.get("cargo_laboral"),
-        salario=doc.get("salario_mes"),
-        fechaIngreso=fecha_ing_str,
-        tipoContrato=doc.get("tipo_contrato"),
+        id=str(doc.get('_id')),
+        codigoVulcano=str(get('CODIGO VULCANO', 'CODIGO_VULCANO')) if get('CODIGO VULCANO', 'CODIGO_VULCANO') else None,
+        identificacion=str(get('IDENTIFICACIÓN', 'IDENTIFICACION') or ""),
+        nombre=get('NOMBRE', 'nombre'),
+        cargo=get('CARGO', 'cargo'),
+        tipoContrato=get('TIPO DE CONTRATO', 'TIPO_DE_CONTRATO', 'tipo_contrato'),
+        fechaIngreso=fecha_ing,
+        basico=get_float('BASICO ', 'BASICO'),
+        auxilioVivienda=get_float('AUXILIO VIVIENDA ', 'AUXILIO_VIVIENDA'),
+        auxilioAlimentacion=get_float('AUXILIO ALIMENTA', 'AUXILIO_ALIMENTA'),
+        auxilioMovilidad=get_float('AUXILIO DE MOVILIDAD', 'AUXILIO_DE_MOVILIDAD'),
+        auxilioRodamiento=get_float('AUXILIO RODAMIENTO ', 'AUXILIO_RODAMIENTO'),
+        auxilioProductividad=get_float('AUXILIO DE PRODUCTIVIDAD', 'AUXILIO_DE_PRODUCTIVIDAD'),
+        auxilioComunic=get_float('AUXILIO COMUNIC', 'AUXILIO_COMUNIC'),
+        correo=get('CORREO', 'correo')
     )
 
-# ——— APIRouter ———
+# ——— Router de empleados ———
 ruta_empleado = APIRouter(
     prefix="/empleados",
     tags=["Empleados"],
@@ -77,20 +80,22 @@ ruta_empleado = APIRouter(
 )
 
 @ruta_empleado.get("/", response_model=List[Empleado])
-async def getEmpleados():
-    cursor = coleccion_empleados.find()
-    return [transformar_empleado(doc) for doc in cursor]
+async def get_empleados():
+    docs = coleccion_empleados.find()
+    return [transformar_empleado(doc) for doc in docs]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
-async def getEmpleadoPorIdentificacion(identificacion: str):
-    # Primero intentamos buscar como número, luego como cadena
-    doc = (
-        coleccion_empleados.find_one({"identificacion": float(identificacion)}) or
-        coleccion_empleados.find_one({"identificacion": identificacion})
-    )
+async def get_empleado_por_identificacion(identificacion: str):
+    # Intentar como número y como cadena
+    try:
+        num = float(identificacion)
+    except:
+        num = None
+    doc = None
+    if num is not None:
+        doc = coleccion_empleados.find_one({"IDENTIFICACIÓN": num})
     if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Empleado no encontrado"
-        )
+        doc = coleccion_empleados.find_one({"IDENTIFICACIÓN": identificacion})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empleado no encontrado")
     return transformar_empleado(doc)
