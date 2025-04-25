@@ -12,7 +12,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, Frame
+from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
 from rutas.fondoBase64 import fondo_base64
 from rutas.firmaBase64 import firma_base64
@@ -86,7 +86,7 @@ def transformar_empleado(doc: dict) -> Empleado:
 
 # ——— Router y rutas ———
 ruta_empleado = APIRouter(prefix="/empleados", tags=["Empleados"],
-                          responses={status.HTTP_404_NOT_FOUND:{"message":"No encontrado"}})
+                          responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}})
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
@@ -97,11 +97,11 @@ async def get_empleados():
 async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description="Número de identificación")
 ):
-    filtros = {"$or":[
-        {"identificacion":identificacion},
-        {"identificacion":int(identificacion)} if identificacion.isdigit() else {},
-        {"IDENTIFICACIÓN":identificacion},
-        {"IDENTIFICACIÓN":int(identificacion)} if identificacion.isdigit() else {}
+    filtros = {"$or": [
+        {"identificacion": identificacion},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
+        {"IDENTIFICACIÓN": identificacion},
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
     ]}
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
@@ -113,11 +113,11 @@ async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
     req: EnviarRequest = None
 ):
-    filtros = {"$or":[
-        {"identificacion":identificacion},
-        {"identificacion":int(identificacion)} if identificacion.isdigit() else {},
-        {"IDENTIFICACIÓN":identificacion},
-        {"IDENTIFICACIÓN":int(identificacion)} if identificacion.isdigit() else {}
+    filtros = {"$or": [
+        {"identificacion": identificacion},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
+        {"IDENTIFICACIÓN": identificacion},
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
     ]}
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
@@ -126,14 +126,14 @@ async def enviar_certificado(
     if not emp.correo:
         raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
-    # Generación de PDF
+    # — Generación de PDF —
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo
+    # Fondo de página
     if fondo_base64.startswith("data:image"):
-        fondo_clean = fondo_base64.split(',',1)[1]
+        fondo_clean = fondo_base64.split(',', 1)[1]
     else:
         fondo_clean = fondo_base64
     try:
@@ -142,64 +142,74 @@ async def enviar_certificado(
     except:
         pass
 
-    # Definir estilos
+    # Estilos
     styles = getSampleStyleSheet()
     body_style = ParagraphStyle(
         'Body', parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=15
     )
-    bold_style = ParagraphStyle(
-        'Bold', parent=styles['Normal'], fontName='Times-Bold', fontSize=12, leading=15
+    title_style = ParagraphStyle(
+        'Title', parent=styles['Heading1'], alignment=1,
+        fontName='Times-Bold', fontSize=14, leading=18
+    )
+    subtitle_style = ParagraphStyle(
+        'Subtitle', parent=styles['Heading3'], alignment=1,
+        fontName='Times-Bold', fontSize=12, leading=14
     )
 
-    # Encabezado
-    title_style = ParagraphStyle('Title', parent=styles['Heading1'], alignment=1,
-                                 fontName='Times-Bold', fontSize=14)
+    # Cabecera y subtítulo
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
-    subtitle = Paragraph("CERTIFICA QUE:", styles['Heading3'])
+    subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Contenido mixto
-    ced = emp.identificacion if not emp.identificacion.isdigit() else f"{int(emp.identificacion):,}".replace(',', '.')
-    text = (
+    # Formateo de la fecha a español
+    try:
+        dt = datetime.fromisoformat(emp.fechaIngreso)
+        meses = [
+            "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+        ]
+        fecha_humana = f"{dt.day} de {meses[dt.month-1]} de {dt.year}"
+    except:
+        fecha_humana = emp.fechaIngreso
+
+    # Cédula con puntos
+    if emp.identificacion.isdigit():
+        ced = f"{int(emp.identificacion):,}".replace(",", ".")
+    else:
+        ced = emp.identificacion
+
+    # Cuerpo de texto
+    texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
-        f"labora en nuestra empresa desde {emp.fechaIngreso}, desempeñando el cargo de "
+        f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
-    if req and req.incluirSalario and emp.basico>0:
-        sal = f"{int(emp.basico):,}".replace(',', '.')
-        text += f" Con un salario fijo mensual por valor de <b>{sal} pesos</b>."
-    body = Paragraph(text, body_style)
+    if req and req.incluirSalario and emp.basico and emp.basico > 0:
+        sal = f"{int(emp.basico):,}".replace(",", ".")
+        texto += f" Con un salario fijo mensual por valor de <b>{sal} pesos</b>."
+    body = Paragraph(texto, body_style)
 
-    # Frame de cuerpo
-    frame = Frame(40, 100, width-80, height-200, showBoundary=0)
-    story = [header, subtitle, body]
+    # Story dentro de un frame con espacios
+    frame = Frame(40, 140, width - 80, height - 280, showBoundary=0)
+    story = [
+        header,
+        Spacer(1, 12),
+        subtitle,
+        Spacer(1, 12),
+        body
+    ]
     frame.addFromList(story, c)
 
-    # Auxilios
-    if req and req.incluirSalario:
-        y_aux = height/2 - 40
-        c.setFont('Times-Bold', 12)
-        for label, val in [
-            ('Auxilio Vivienda', emp.auxilioVivienda),
-            ('Auxilio Alimentación', emp.auxilioAlimentacion),
-            ('Auxilio Movilidad', emp.auxilioMovilidad),
-            ('Auxilio Rodamiento', emp.auxilioRodamiento),
-            ('Auxilio Productividad', emp.auxilioProductividad),
-            ('Auxilio Comunic', emp.auxilioComunic)
-        ]:
-            if val>0:
-                c.drawString(40, y_aux, f"{label}: {int(val):,}")
-                y_aux -= 20
-
-    # Pie y firma
+    # Pie de página y firma
     c.setFont('Times-Roman', 10)
     c.drawString(40, 40, 'Para mayor información: PBX 7006232 o celular 3183385709.')
+    # Firma
     if firma_base64.startswith('data:image'):
-        firma_clean = firma_base64.split(',',1)[1]
+        firma_clean = firma_base64.split(',', 1)[1]
     else:
         firma_clean = firma_base64
     try:
         fimg = base64.b64decode(firma_clean)
-        c.drawImage(ImageReader(BytesIO(fimg)), width/2-75, 60, width=150, height=50)
+        c.drawImage(ImageReader(BytesIO(fimg)), width/2 - 75, 60, width=150, height=50)
     except:
         pass
     c.setFont('Times-Bold', 12)
@@ -211,16 +221,16 @@ async def enviar_certificado(
     c.save()
     buffer.seek(0)
 
-    # Envío
+    # — Envío por correo —
     payload = {
-        'from':'no-reply@integralogistica.com',
-        'to':[emp.correo],
-        'subject':f'Certificado Laboral - {emp.nombre}',
-        'html':f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
-        'attachments':[{  
-            'filename':f'certificado_{emp.identificacion}.pdf',
-            'type':'application/pdf',
-            'content':base64.b64encode(buffer.read()).decode()
+        'from': 'no-reply@integralogistica.com',
+        'to': [emp.correo],
+        'subject': f'Certificado Laboral - {emp.nombre}',
+        'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
+        'attachments': [{
+            'filename': f'certificado_{emp.identificacion}.pdf',
+            'type': 'application/pdf',
+            'content': base64.b64encode(buffer.read()).decode()
         }]
     }
     try:
@@ -228,8 +238,8 @@ async def enviar_certificado(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Error enviando correo: {e}')
 
-    return JSONResponse(status_code=200, content={'message':'Correo enviado correctamente'})
+    return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
 
-# ——— App ———
+# ——— FastAPI app ———
 app = FastAPI()
 app.include_router(ruta_empleado)
