@@ -204,7 +204,7 @@ async def enviar_certificado(
     c.drawString(40, 60, 'Para mayor información: PBX 7006232 o celular 3183385709.')
     firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
-        y_firma = 150  # antes era 80
+        y_firma = 350  # antes era 80
 
         c.drawImage(ImageReader(BytesIO(base64.b64decode(firma_clean))), width/2 - 75, y_firma, width=150, height=50)
         c.setFont('Times-Bold', 12)
