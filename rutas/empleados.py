@@ -110,7 +110,7 @@ async def get_empleado_por_identificacion(
 @ruta_empleado.post("/enviar")
 async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
-    req: EnviarRequest = Body(None)
+    req: EnviarRequest = Body(...)
 ):
     # Busca empleado
     filtros = {"$or": [
@@ -238,8 +238,9 @@ async def enviar_certificado(
         c.setFont('Times-Bold', 12)
         c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
         c.setFont('Times-Roman', 10)
-        c.drawCentredString(width/2, y_base - 10, 'Gerente de gestión humana')
-        c.drawCentredString(width/2, y_base - 22, 'Integra cadena de servicios')
+        c.drawCentredString(width/2, y_base - 10, 'Certificado laboral')
+        c.drawCentredString(width/2, y_base - 22, 'Gerente de gestión humana')
+        c.drawCentredString(width/2, y_base - 34, 'Integra cadena de servicios')
 
         # Luego superponemos la imagen para que “tape” parcialmente el texto
         c.drawImage(
