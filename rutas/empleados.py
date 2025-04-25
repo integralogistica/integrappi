@@ -201,7 +201,7 @@ async def enviar_certificado(
 
     # Firma y pie (más arriba)
     c.setFont('Times-Roman', 10)
-    c.drawString(40, 60, 'Para mayor información: PBX 7006232 o celular 3183385709.')
+    c.drawString(40, 100, 'Para mayor información: PBX 7006232 o celular 3183385709.')
     firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
         y_firma = 350  # antes era 80
@@ -216,7 +216,8 @@ async def enviar_certificado(
         c.setFont('Times-Bold', 12)
         c.drawCentredString(width/2, y_firma - 10, 'PATRICIA LEAL AROCA')
         c.setFont('Times-Roman', 10)
-        c.drawCentredString(width/2, y_firma - 25, 'Gerente de gestión humana | Integra cadena de servicios')
+        c.drawCentredString(width/2, y_firma - 25, 'Integra cadena de servicios')
+        c.drawCentredString(width/2, y_firma - 35, 'Integra cadena de servicios')
 
     except:
         pass
