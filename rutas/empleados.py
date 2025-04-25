@@ -2,7 +2,7 @@ import os
 import io
 import base64
 from io import BytesIO
-from fastapi import FastAPI, APIRouter, HTTPException, status, Query
+from fastapi import FastAPI, APIRouter, HTTPException, status, Query, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
@@ -47,7 +47,6 @@ class Empleado(BaseModel):
     auxilioProductividad: Optional[float]
     auxilioComunic: Optional[float]
     correo: Optional[str]
-
     class Config:
         orm_mode = True
 
@@ -66,7 +65,6 @@ def transformar_empleado(doc: dict) -> Empleado:
 
     fecha_raw = get('fechaIngreso', 'FECHA_INGRESO', 'FECHA INGRESO')
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or "")
-
     return Empleado(
         id=str(doc.get('_id')),
         identificacion=str(get('identificacion', 'IDENTIFICACIÓN') or ""),
@@ -85,13 +83,14 @@ def transformar_empleado(doc: dict) -> Empleado:
     )
 
 # ——— Router y rutas ———
-ruta_empleado = APIRouter(prefix="/empleados", tags=["Empleados"],
-                          responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}})
+ruta_empleado = APIRouter(
+    prefix="/empleados", tags=["Empleados"],
+    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
+)
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
-    docs = coleccion_empleados.find()
-    return [transformar_empleado(doc) for doc in docs]
+    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def get_empleado_por_identificacion(
@@ -111,8 +110,9 @@ async def get_empleado_por_identificacion(
 @ruta_empleado.post("/enviar")
 async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
-    req: EnviarRequest = None
+    req: EnviarRequest = Body(None)
 ):
+    # Busca empleado
     filtros = {"$or": [
         {"identificacion": identificacion},
         {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
@@ -126,96 +126,78 @@ async def enviar_certificado(
     if not emp.correo:
         raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
+    show_salary = req.incluirSalario if req is not None else True
+
     # — Generación de PDF —
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo de página
-    if fondo_base64.startswith("data:image"):
-        fondo_clean = fondo_base64.split(',', 1)[1]
-    else:
-        fondo_clean = fondo_base64
+    # Fondo
+    fondo_clean = fondo_base64.split(',',1)[1] if fondo_base64.startswith("data:image") else fondo_base64
     try:
-        img = base64.b64decode(fondo_clean)
-        c.drawImage(ImageReader(BytesIO(img)), 0, 0, width=width, height=height)
+        c.drawImage(ImageReader(BytesIO(base64.b64decode(fondo_clean))), 0, 0, width=width, height=height)
     except:
         pass
 
     # Estilos
     styles = getSampleStyleSheet()
-    body_style = ParagraphStyle(
-        'Body', parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=15
+    body_style = ParagraphStyle('Body',
+        parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=16
     )
-    title_style = ParagraphStyle(
-        'Title', parent=styles['Heading1'], alignment=1,
+    title_style = ParagraphStyle('Title',
+        parent=styles['Heading1'], alignment=1,
         fontName='Times-Bold', fontSize=14, leading=18
     )
-    subtitle_style = ParagraphStyle(
-        'Subtitle', parent=styles['Heading3'], alignment=1,
+    subtitle_style = ParagraphStyle('Subtitle',
+        parent=styles['Heading3'], alignment=1,
         fontName='Times-Bold', fontSize=12, leading=14
     )
 
-    # Cabecera y subtítulo
+    # Header + subtitle
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Formateo de la fecha a español
+    # Fecha en español
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
-        meses = [
-            "enero", "febrero", "marzo", "abril", "mayo", "junio",
-            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
-        ]
+        meses = ["enero","febrero","marzo","abril","mayo","junio",
+                 "julio","agosto","septiembre","octubre","noviembre","diciembre"]
         fecha_humana = f"{dt.day} de {meses[dt.month-1]} de {dt.year}"
     except:
         fecha_humana = emp.fechaIngreso
 
-    # Cédula con puntos
-    if emp.identificacion.isdigit():
-        ced = f"{int(emp.identificacion):,}".replace(",", ".")
-    else:
-        ced = emp.identificacion
+    # Cédula formateada
+    ced = f"{int(emp.identificacion):,}".replace(",",".") if emp.identificacion.isdigit() else emp.identificacion
 
-    # Cuerpo de texto
+    # Texto principal
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
-    if req and req.incluirSalario and emp.basico and emp.basico > 0:
-        sal = f"{int(emp.basico):,}".replace(",", ".")
+    if show_salary and emp.basico and emp.basico > 0:
+        sal = f"{int(emp.basico):,}".replace(",",".")
         texto += f" Con un salario fijo mensual por valor de <b>{sal} pesos</b>."
     body = Paragraph(texto, body_style)
 
-    # Story dentro de un frame con espacios
-    frame = Frame(40, 140, width - 80, height - 280, showBoundary=0)
-    story = [
-        header,
-        Spacer(1, 12),
-        subtitle,
-        Spacer(1, 12),
-        body
-    ]
+    # Story + frame amplio
+    story = [header, Spacer(1,12), subtitle, Spacer(1,12), body]
+    frame = Frame(40, 180, width-80, height-360, showBoundary=0)
     frame.addFromList(story, c)
 
-    # Pie de página y firma
+    # Firma y pie (más arriba)
     c.setFont('Times-Roman', 10)
-    c.drawString(40, 40, 'Para mayor información: PBX 7006232 o celular 3183385709.')
-    # Firma
-    if firma_base64.startswith('data:image'):
-        firma_clean = firma_base64.split(',', 1)[1]
-    else:
-        firma_clean = firma_base64
+    c.drawString(40, 60, 'Para mayor información: PBX 7006232 o celular 3183385709.')
+    firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
-        fimg = base64.b64decode(firma_clean)
-        c.drawImage(ImageReader(BytesIO(fimg)), width/2 - 75, 60, width=150, height=50)
+        c.drawImage(ImageReader(BytesIO(base64.b64decode(firma_clean))), width/2-75, 80, width=150, height=50)
     except:
         pass
     c.setFont('Times-Bold', 12)
-    c.drawCentredString(width/2, 50, 'PATRICIA LEAL AROCA')
+    c.drawCentredString(width/2, 70, 'PATRICIA LEAL AROCA')
     c.setFont('Times-Roman', 10)
-    c.drawCentredString(width/2, 35, 'Gerente de gestión humana | Integra cadena de servicios')
+    c.drawCentredString(width/2, 55, 'Gerente de gestión humana | Integra cadena de servicios')
 
     c.showPage()
     c.save()
