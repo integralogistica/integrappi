@@ -206,7 +206,13 @@ async def enviar_certificado(
     try:
         y_firma = 350  # antes era 80
 
-        c.drawImage(ImageReader(BytesIO(base64.b64decode(firma_clean))), width/2 - 75, y_firma, width=150, height=50)
+        c.drawImage(
+            ImageReader(BytesIO(base64.b64decode(firma_clean))),
+            width/2 - 75, y_firma,
+            width=150, height=50,
+            mask='auto'
+        )
+
         c.setFont('Times-Bold', 12)
         c.drawCentredString(width/2, y_firma - 10, 'PATRICIA LEAL AROCA')
         c.setFont('Times-Roman', 10)
