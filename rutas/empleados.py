@@ -55,7 +55,7 @@ class EnviarRequest(BaseModel):
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # helper: toma la primera clave existente
+    # helper: toma la primera clave existente y no nula
     get = lambda *keys: next(
         (doc.get(k) for k in keys if k in doc and doc.get(k) is not None),
         None
@@ -67,13 +67,11 @@ def transformar_empleado(doc: dict) -> Empleado:
                 val = doc[k]
                 if isinstance(val, (int, float)):
                     return float(val)
-                # si viene como string, limpiamos comas y puntos
                 s = str(val).replace(".", "").replace(",", "").strip()
                 if s.isdigit():
                     return float(s)
         return 0.0
 
-    # fechaIngreso
     fecha_raw = get('fechaIngreso', 'FECHA_INGRESO', 'FECHA INGRESO')
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or "")
 
@@ -84,7 +82,7 @@ def transformar_empleado(doc: dict) -> Empleado:
         cargo=get('cargo', 'CARGO'),
         tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO DE CONTRATO'),
         fechaIngreso=fecha_ing,
-        basico=get_float('basico', 'BASICO'),
+        basico=get_float('basico', 'BASICO', 'BÁSICO'),
         auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO VIVIENDA', 'AUXILIO_VIVIENDA'),
         auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO ALIMENTA', 'AUXILIO_ALIMENTACIÓN'),
         auxilioMovilidad=get_float('auxilioMovilidad', 'AUXILIO DE MOVILIDAD', 'AUXILIO_MOVILIDAD'),
@@ -155,7 +153,7 @@ async def enviar_certificado(
         pass
 
     # Estilos
-    styles        = getSampleStyleSheet()
+    styles         = getSampleStyleSheet()
     title_style    = ParagraphStyle('Title',    parent=styles['Heading1'], alignment=1,
                                     fontName='Times-Bold', fontSize=14, leading=18)
     subtitle_style = ParagraphStyle('Subtitle', parent=styles['Heading3'], alignment=1,
@@ -165,11 +163,11 @@ async def enviar_certificado(
     info_style     = ParagraphStyle('Info',     parent=styles['Normal'],
                                     fontName='Times-Roman', fontSize=10, leading=12)
 
-    # Encabezado (más arriba)
+    # Encabezado (story, más abajo)
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Fecha en español
+    # Formatea fecha
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
         meses = ["enero","febrero","marzo","abril","mayo","junio",
@@ -179,12 +177,9 @@ async def enviar_certificado(
         fecha_humana = emp.fechaIngreso
 
     # Cédula con puntos
-    if emp.identificacion.isdigit():
-        ced = f"{int(emp.identificacion):,}".replace(",",".")
-    else:
-        ced = emp.identificacion
+    ced = f"{int(emp.identificacion):,}".replace(",",".") if emp.identificacion.isdigit() else emp.identificacion
 
-    # Texto principal + salario
+    # Texto principal
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
@@ -194,8 +189,9 @@ async def enviar_certificado(
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Story
+    # Armar story con Spacer inicial para bajar todo
     story = [
+        Spacer(1, 50),
         header,
         Spacer(1, 8),
         subtitle,
@@ -216,7 +212,7 @@ async def enviar_certificado(
             if val > 0:
                 story.append(Spacer(1,6))
                 story.append(
-                    Paragraph(f"<b>{label}:</b> {int(val):,}", body_style)
+                    Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style)
                 )
 
     # Pie de contacto
@@ -225,13 +221,13 @@ async def enviar_certificado(
         Paragraph("Para mayor información: PBX 7006232 o celular 3183385709.", info_style)
     )
 
-    # Dibuja el frame (más arriba)
+    # Dibuja el frame
     frame = Frame(40, 340, width - 80, height - 380, showBoundary=0)
     frame.addFromList(story, c)
 
     # Firma y nombre superpuestos
     firma_clean = firma_base64.split(',',1)[1]
-    y_base = 300  # ajústalo un poco si quieres subir/bajar
+    y_base = 300  # ajusta si quieres subir/bajar
     c.setFont('Times-Bold', 12)
     c.drawCentredString(width/2, y_base + 5, 'PATRICIA LEAL AROCA')
     c.setFont('Times-Roman', 10)
@@ -253,7 +249,7 @@ async def enviar_certificado(
         'to':      [emp.correo],
         'subject': f'Certificado Laboral - {emp.nombre}',
         'html':    f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
-        'attachments':[{
+        'attachments': [{
             'filename': f'certificado_{emp.identificacion}.pdf',
             'type':     'application/pdf',
             'content':  base64.b64encode(buffer.read()).decode()
