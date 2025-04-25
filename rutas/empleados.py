@@ -161,7 +161,7 @@ async def enviar_certificado(
     body_style     = ParagraphStyle('Body',     parent=styles['Normal'],
                                     fontName='Times-Roman', fontSize=12, leading=16)
     info_style     = ParagraphStyle('Info',     parent=styles['Normal'],
-                                    fontName='Times-Roman', fontSize=10, leading=12)
+                                    fontName='Times-Roman', fontSize=12, leading=1)
 
     # Encabezado (story, más abajo)
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
@@ -193,9 +193,9 @@ async def enviar_certificado(
     story = [
         Spacer(1, 50),
         header,
-        Spacer(1, 8),
+        Spacer(1, 16),
         subtitle,
-        Spacer(1, 8),
+        Spacer(1, 16),
         body
     ]
 
