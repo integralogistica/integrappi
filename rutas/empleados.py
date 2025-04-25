@@ -152,7 +152,7 @@ async def enviar_certificado(
         parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=16
     )
     info_style = ParagraphStyle('Info',
-        parent=styles['Normal'], fontName='Times-Roman', fontSize=10, leading=12
+        parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=12
     )
     title_style = ParagraphStyle('Title',
         parent=styles['Heading1'], alignment=1,
@@ -233,7 +233,7 @@ async def enviar_certificado(
     firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
         # Coordenada base para la firma
-        y_base = 140
+        y_base = 200
         # Primero escribimos el nombre y cargo
         c.setFont('Times-Bold', 12)
         c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
