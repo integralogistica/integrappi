@@ -110,31 +110,27 @@ async def get_empleado_por_identificacion(
 @ruta_empleado.post("/enviar")
 async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
-    req: EnviarRequest = Body(...)
+    req: EnviarRequest = Body(...)    # <-- obligatorio
 ):
-    # Busca empleado
-    filtros = {"$or": [
-        {"identificacion": identificacion},
-        {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
-        {"IDENTIFICACIÓN": identificacion},
-        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
-    ]}
-    doc = coleccion_empleados.find_one(filtros)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    emp = transformar_empleado(doc)
+    emp = transformar_empleado(
+        coleccion_empleados.find_one({
+            "$or": [
+                {"identificacion": identificacion},
+                {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
+                {"IDENTIFICACIÓN": identificacion},
+                {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
+            ]
+        }) or {}
+    )
     if not emp.correo:
         raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
-    show_salary = req.incluirSalario if req is not None else True
+    show_salary = req.incluirSalario   # <--- directo
 
     # — Generación de PDF —
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-
-    # (opcional) cuadrícula de ayuda...
-    # ...
 
     # Fondo
     fondo_clean = fondo_base64.split(',',1)[1] if fondo_base64.startswith("data:image") else fondo_base64
@@ -152,7 +148,7 @@ async def enviar_certificado(
         parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=16
     )
     info_style = ParagraphStyle('Info',
-        parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=12
+        parent=styles['Normal'], fontName='Times-Roman', fontSize=10, leading=12
     )
     title_style = ParagraphStyle('Title',
         parent=styles['Heading1'], alignment=1,
@@ -167,7 +163,7 @@ async def enviar_certificado(
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Fecha en español
+    # Formato fecha
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
         meses = ["enero","febrero","marzo","abril","mayo","junio",
@@ -177,23 +173,19 @@ async def enviar_certificado(
         fecha_humana = emp.fechaIngreso
 
     # Cédula con puntos
-    if emp.identificacion.isdigit():
-        ced = f"{int(emp.identificacion):,}".replace(",",".")
-    else:
-        ced = emp.identificacion
+    ced = f"{int(emp.identificacion):,}".replace(",",".") if emp.identificacion.isdigit() else emp.identificacion
 
-    # Texto principal + salario
+    # Texto principal
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
     if show_salary and emp.basico and emp.basico > 0:
-        sal = f"{int(emp.basico):,}".replace(",",".")
-        texto += f" Con un salario fijo mensual por valor de <b>{sal} pesos</b>."
+        texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Construir el story (incluye párrafos y luego el “Para mayor información”)
+    # Story
     story = [
         header,
         Spacer(1, 12),
@@ -202,55 +194,45 @@ async def enviar_certificado(
         body
     ]
 
-    # Auxilios (si aplica), agregados como párrafos independientes
+    # Auxilios
     if show_salary:
-        aux_labels = [
+        for label, val in [
             ('Auxilio Vivienda', emp.auxilioVivienda),
             ('Auxilio Alimentación', emp.auxilioAlimentacion),
             ('Auxilio Movilidad', emp.auxilioMovilidad),
             ('Auxilio Rodamiento', emp.auxilioRodamiento),
             ('Auxilio Productividad', emp.auxilioProductividad),
-            ('Auxilio Comunic', emp.auxilioComunic),
-        ]
-        for label, val in aux_labels:
+            ('Auxilio Comunic', emp.auxilioComunic)
+        ]:
             if val and val > 0:
                 story.append(Spacer(1,8))
-                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."),
-                                       body_style))
+                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style))
 
-    # “Para mayor información...” al final del frame
+    # “Para mayor información…”
     story.append(Spacer(1,12))
     story.append(Paragraph(
         "Para mayor información: PBX 7006232 o celular 3183385709.",
         info_style
     ))
 
-    # Dibujo en frame
-    frame = Frame(40, 250, width-80, height-430, showBoundary=0)
+    # — Frame movido hacia arriba —
+    frame = Frame(40, 300, width-80, height-480, showBoundary=0)
     frame.addFromList(story, c)
 
-    # — Firma sobre el nombre —
-    firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
-    try:
-        # Coordenada base para la firma
-        y_base = 200
-        # Primero escribimos el nombre y cargo
-        c.setFont('Times-Bold', 12)
-        c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
-        c.setFont('Times-Roman', 10)
-        c.drawCentredString(width/2, y_base - 10, 'Certificado laboral')
-        c.drawCentredString(width/2, y_base - 22, 'Gerente de gestión humana')
-        c.drawCentredString(width/2, y_base - 34, 'Integra cadena de servicios')
-
-        # Luego superponemos la imagen para que “tape” parcialmente el texto
-        c.drawImage(
-            ImageReader(BytesIO(base64.b64decode(firma_clean))),
-            width/2 - 75, y_base - 10,
-            width=150, height=50,
-            mask='auto'
-        )
-    except:
-        pass
+    # — Firma sobre nombre —
+    firma_clean = firma_base64.split(',',1)[1]
+    y_base = 240  # ajusta si quieres subir/bajar
+    c.setFont('Times-Bold', 12)
+    c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
+    c.setFont('Times-Roman', 10)
+    c.drawCentredString(width/2, y_base - 10, 'Gerente de gestión humana')
+    c.drawCentredString(width/2, y_base - 22, 'Integra cadena de servicios')
+    c.drawImage(
+        ImageReader(BytesIO(base64.b64decode(firma_clean))),
+        width/2 - 75, y_base - 10,
+        width=150, height=50,
+        mask='auto'
+    )
 
     c.showPage()
     c.save()
@@ -275,6 +257,5 @@ async def enviar_certificado(
 
     return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
 
-# ——— FastAPI app ———
 app = FastAPI()
 app.include_router(ruta_empleado)
