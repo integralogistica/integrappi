@@ -55,18 +55,22 @@ class EnviarRequest(BaseModel):
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
+    # helper: busca la primera clave existente y no nula
     get = lambda *keys: next(
         (doc.get(k) for k in keys if k in doc and doc.get(k) is not None),
         None
     )
+    # helper: devuelve float o 0.0
     def get_float(*keys):
-        v = get(*keys)
-        try:
-            return float(v)
-        except:
-            return 0.0
+        for k in keys:
+            if k in doc and doc[k] not in (None, ""):
+                try:
+                    return float(doc[k])
+                except:
+                    pass
+        return 0.0
 
-    # Fecha
+    # fechaIngreso
     fecha_raw = get('fechaIngreso', 'FECHA_INGRESO', 'FECHA INGRESO')
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw or "")
 
@@ -78,12 +82,12 @@ def transformar_empleado(doc: dict) -> Empleado:
         tipoContrato=get('tipoContrato', 'TIPO_DE_CONTRATO', 'TIPO DE CONTRATO'),
         fechaIngreso=fecha_ing,
         basico=get_float('basico', 'BASICO'),
-        auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO_VIVIENDA'),
-        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO_ALIMENTACIÓN'),
-        auxilioMovilidad=get_float('auxilioMovilidad', 'AUXILIO_DE_MOVILIDAD'),
-        auxilioRodamiento=get_float('auxilioRodamiento', 'AUXILIO_RODAMIENTO'),
-        auxilioProductividad=get_float('auxilioProductividad', 'AUXILIO_DE_PRODUCTIVIDAD'),
-        auxilioComunic=get_float('auxilioComunic', 'AUXILIO_COMUNIC'),
+        auxilioVivienda=get_float('auxilioVivienda', 'AUXILIO VIVIENDA', 'AUXILIO_VIVIENDA'),
+        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUXILIO ALIMENTA', 'AUXILIO_ALIMENTACIÓN'),
+        auxilioMovilidad=get_float('auxilioMovilidad', 'AUXILIO DE MOVILIDAD', 'AUXILIO_MOVILIDAD'),
+        auxilioRodamiento=get_float('auxilioRodamiento', 'AUXILIO RODAMIENTO', 'AUXILIO_RODAMIENTO'),
+        auxilioProductividad=get_float('auxilioProductividad', 'AUXILIO DE PRODUCTIVIDAD', 'AUXILIO_PRODUCTIVIDAD'),
+        auxilioComunic=get_float('auxilioComunic', 'AUXILIO COMUNIC', 'AUXILIO_COMUNIC'),
         correo=get('correo', 'CORREO')
     )
 
@@ -115,7 +119,7 @@ async def get_empleado_por_identificacion(
 @ruta_empleado.post("/enviar")
 async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
-    req: EnviarRequest = Body(...)    # obligatorio
+    req: EnviarRequest = Body(...)    # <== Body obligatorio
 ):
     filtros = {"$or": [
         {"identificacion": identificacion},
@@ -137,7 +141,7 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo
+    # Dibuja fondo
     fondo_clean = fondo_base64.split(',',1)[1] if fondo_base64.startswith("data:image") else fondo_base64
     try:
         c.drawImage(
@@ -147,8 +151,8 @@ async def enviar_certificado(
     except:
         pass
 
-    # Estilos
-    styles = getSampleStyleSheet()
+    # Definir estilos
+    styles        = getSampleStyleSheet()
     title_style    = ParagraphStyle('Title',    parent=styles['Heading1'], alignment=1,
                                     fontName='Times-Bold', fontSize=14, leading=18)
     subtitle_style = ParagraphStyle('Subtitle', parent=styles['Heading3'], alignment=1,
@@ -158,11 +162,11 @@ async def enviar_certificado(
     info_style     = ParagraphStyle('Info',     parent=styles['Normal'],
                                     fontName='Times-Roman', fontSize=10, leading=12)
 
-    # Header y subtítulo (más arriba)
+    # Encabezado (más arriba)
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Formateo de fecha
+    # Formatea fecha
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
         meses = ["enero","febrero","marzo","abril","mayo","junio",
@@ -187,7 +191,7 @@ async def enviar_certificado(
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Armar story
+    # Armar ‘story’
     story = [
         header,
         Spacer(1, 8),
@@ -196,7 +200,7 @@ async def enviar_certificado(
         body
     ]
 
-    # Auxilios si corresponde
+    # Auxilios (si corresponde)
     if show_salary:
         for label, val in [
             ('Auxilio Vivienda',      emp.auxilioVivienda),
@@ -206,21 +210,25 @@ async def enviar_certificado(
             ('Auxilio Productividad', emp.auxilioProductividad),
             ('Auxilio Comunic',       emp.auxilioComunic)
         ]:
-            if val and val > 0:
+            if val > 0:
                 story.append(Spacer(1,6))
-                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style))
+                story.append(
+                    Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style)
+                )
 
     # Pie de contacto
     story.append(Spacer(1, 10))
-    story.append(Paragraph("Para mayor información: PBX 7006232 o celular 3183385709.", info_style))
+    story.append(
+        Paragraph("Para mayor información: PBX 7006232 o celular 3183385709.", info_style)
+    )
 
-    # — Frame elevado —
+    # Dibuja el frame (más arriba)
     frame = Frame(40, 340, width - 80, height - 380, showBoundary=0)
     frame.addFromList(story, c)
 
-    # — Firma sobre el nombre —
+    # Firma y nombre superpuestos
     firma_clean = firma_base64.split(',',1)[1]
-    y_base = 300  # ajusta para subir o bajar la firma
+    y_base = 300  # ajusta si necesitas subir/bajar
     c.setFont('Times-Bold', 12)
     c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
     c.setFont('Times-Roman', 10)
@@ -229,8 +237,7 @@ async def enviar_certificado(
     c.drawImage(
         ImageReader(BytesIO(base64.b64decode(firma_clean))),
         width/2 - 75, y_base - 10,
-        width=150, height=50,
-        mask='auto'
+        width=150, height=50, mask='auto'
     )
 
     c.showPage()
@@ -239,14 +246,14 @@ async def enviar_certificado(
 
     # — Envío por correo —
     payload = {
-        'from': 'no-reply@integralogistica.com',
-        'to': [emp.correo],
+        'from':    'no-reply@integralogistica.com',
+        'to':      [emp.correo],
         'subject': f'Certificado Laboral - {emp.nombre}',
-        'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
-        'attachments': [{
+        'html':    f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
+        'attachments':[{
             'filename': f'certificado_{emp.identificacion}.pdf',
-            'type': 'application/pdf',
-            'content': base64.b64encode(buffer.read()).decode()
+            'type':     'application/pdf',
+            'content':  base64.b64encode(buffer.read()).decode()
         }]
     }
     try:
@@ -254,8 +261,8 @@ async def enviar_certificado(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Error enviando correo: {e}')
 
-    return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
+    return JSONResponse(status_code=200, content={'message':'Correo enviado correctamente'})
 
-# ——— Crear app y montar router ———
+# ——— Montar FastAPI ———
 app = FastAPI()
 app.include_router(ruta_empleado)
