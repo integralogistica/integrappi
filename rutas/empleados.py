@@ -55,19 +55,22 @@ class EnviarRequest(BaseModel):
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # helper: busca la primera clave existente y no nula
+    # helper: toma la primera clave existente
     get = lambda *keys: next(
         (doc.get(k) for k in keys if k in doc and doc.get(k) is not None),
         None
     )
-    # helper: devuelve float o 0.0
+    # helper: parsea int/float o limpia string con puntos/comas
     def get_float(*keys):
         for k in keys:
             if k in doc and doc[k] not in (None, ""):
-                try:
-                    return float(doc[k])
-                except:
-                    pass
+                val = doc[k]
+                if isinstance(val, (int, float)):
+                    return float(val)
+                # si viene como string, limpiamos comas y puntos
+                s = str(val).replace(".", "").replace(",", "").strip()
+                if s.isdigit():
+                    return float(s)
         return 0.0
 
     # fechaIngreso
@@ -119,7 +122,7 @@ async def get_empleado_por_identificacion(
 @ruta_empleado.post("/enviar")
 async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
-    req: EnviarRequest = Body(...)    # <== Body obligatorio
+    req: EnviarRequest = Body(...)
 ):
     filtros = {"$or": [
         {"identificacion": identificacion},
@@ -141,7 +144,7 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Dibuja fondo
+    # Fondo
     fondo_clean = fondo_base64.split(',',1)[1] if fondo_base64.startswith("data:image") else fondo_base64
     try:
         c.drawImage(
@@ -151,7 +154,7 @@ async def enviar_certificado(
     except:
         pass
 
-    # Definir estilos
+    # Estilos
     styles        = getSampleStyleSheet()
     title_style    = ParagraphStyle('Title',    parent=styles['Heading1'], alignment=1,
                                     fontName='Times-Bold', fontSize=14, leading=18)
@@ -166,7 +169,7 @@ async def enviar_certificado(
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Formatea fecha
+    # Fecha en español
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
         meses = ["enero","febrero","marzo","abril","mayo","junio",
@@ -181,7 +184,7 @@ async def enviar_certificado(
     else:
         ced = emp.identificacion
 
-    # Texto principal
+    # Texto principal + salario
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
@@ -191,7 +194,7 @@ async def enviar_certificado(
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Armar ‘story’
+    # Story
     story = [
         header,
         Spacer(1, 8),
@@ -200,7 +203,7 @@ async def enviar_certificado(
         body
     ]
 
-    # Auxilios (si corresponde)
+    # Auxilios
     if show_salary:
         for label, val in [
             ('Auxilio Vivienda',      emp.auxilioVivienda),
@@ -213,7 +216,7 @@ async def enviar_certificado(
             if val > 0:
                 story.append(Spacer(1,6))
                 story.append(
-                    Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style)
+                    Paragraph(f"<b>{label}:</b> {int(val):,}", body_style)
                 )
 
     # Pie de contacto
@@ -228,9 +231,9 @@ async def enviar_certificado(
 
     # Firma y nombre superpuestos
     firma_clean = firma_base64.split(',',1)[1]
-    y_base = 300  # ajusta si necesitas subir/bajar
+    y_base = 300  # ajústalo un poco si quieres subir/bajar
     c.setFont('Times-Bold', 12)
-    c.drawCentredString(width/2, y_base +  5, 'PATRICIA LEAL AROCA')
+    c.drawCentredString(width/2, y_base + 5, 'PATRICIA LEAL AROCA')
     c.setFont('Times-Roman', 10)
     c.drawCentredString(width/2, y_base - 10, 'Gerente de gestión humana')
     c.drawCentredString(width/2, y_base - 22, 'Integra cadena de servicios')
@@ -261,7 +264,7 @@ async def enviar_certificado(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Error enviando correo: {e}')
 
-    return JSONResponse(status_code=200, content={'message':'Correo enviado correctamente'})
+    return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
 
 # ——— Montar FastAPI ———
 app = FastAPI()
