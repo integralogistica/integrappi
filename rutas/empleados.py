@@ -188,6 +188,8 @@ async def enviar_certificado(
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
+        f"<b>{emp.cargo}</b> Para mayor información: PBX 7006232 o celular 3183385709. <b>{emp.tipoContrato}</b>."
+        
     )
     if show_salary and emp.basico and emp.basico > 0:
         sal = f"{int(emp.basico):,}".replace(",",".")
@@ -200,8 +202,8 @@ async def enviar_certificado(
     frame.addFromList(story, c)
 
     # Firma y pie (más arriba)
-    c.setFont('Times-Roman', 10)
-    c.drawString(40, 100, 'Para mayor información: PBX 7006232 o celular 3183385709.')
+    # c.setFont('Times-Roman', 10)
+    # c.drawString(40, 100, 'Para mayor información: PBX 7006232 o celular 3183385709.')
     firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
         y_firma = 350  # antes era 80
@@ -216,8 +218,9 @@ async def enviar_certificado(
         c.setFont('Times-Bold', 12)
         c.drawCentredString(width/2, y_firma - 10, 'PATRICIA LEAL AROCA')
         c.setFont('Times-Roman', 10)
-        c.drawCentredString(width/2, y_firma - 25, 'Integra cadena de servicios')
-        c.drawCentredString(width/2, y_firma - 35, 'Integra cadena de servicios')
+        c.drawCentredString(width/2, y_firma - 25, 'Certificado laboral')
+        c.drawCentredString(width/2, y_firma - 35, 'Gerente de gestión humana')
+        c.drawCentredString(width/2, y_firma - 45, 'Integra cadena de servicios')
 
     except:
         pass
