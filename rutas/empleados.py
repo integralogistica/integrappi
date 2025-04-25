@@ -226,7 +226,7 @@ async def enviar_certificado(
     ))
 
     # Dibujo en frame
-    frame = Frame(40, 180, width-80, height-360, showBoundary=0)
+    frame = Frame(40, 250, width-80, height-430, showBoundary=0)
     frame.addFromList(story, c)
 
     # — Firma sobre el nombre —
