@@ -133,6 +133,19 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
+    # Cuadrícula temporal para visualizar posiciones
+    c.setStrokeColorRGB(0.9, 0.9, 0.9)
+    c.setFont("Helvetica", 6)
+
+    for y in range(0, int(height), 50):
+        c.drawString(2, y + 2, f"y={y}")
+        c.line(0, y, width, y)
+
+    for x in range(0, int(width), 50):
+        c.drawString(x + 2, 2, f"x={x}")
+        c.line(x, 0, x, height)
+
+
     # Fondo
     fondo_clean = fondo_base64.split(',',1)[1] if fondo_base64.startswith("data:image") else fondo_base64
     try:
@@ -191,13 +204,16 @@ async def enviar_certificado(
     c.drawString(40, 60, 'Para mayor información: PBX 7006232 o celular 3183385709.')
     firma_clean = firma_base64.split(',',1)[1] if firma_base64.startswith("data:image") else firma_base64
     try:
-        c.drawImage(ImageReader(BytesIO(base64.b64decode(firma_clean))), width/2-75, 80, width=150, height=50)
+        y_firma = 150  # antes era 80
+
+        c.drawImage(ImageReader(BytesIO(base64.b64decode(firma_clean))), width/2 - 75, y_firma, width=150, height=50)
+        c.setFont('Times-Bold', 12)
+        c.drawCentredString(width/2, y_firma - 10, 'PATRICIA LEAL AROCA')
+        c.setFont('Times-Roman', 10)
+        c.drawCentredString(width/2, y_firma - 25, 'Gerente de gestión humana | Integra cadena de servicios')
+
     except:
         pass
-    c.setFont('Times-Bold', 12)
-    c.drawCentredString(width/2, 70, 'PATRICIA LEAL AROCA')
-    c.setFont('Times-Roman', 10)
-    c.drawCentredString(width/2, 55, 'Gerente de gestión humana | Integra cadena de servicios')
 
     c.showPage()
     c.save()
