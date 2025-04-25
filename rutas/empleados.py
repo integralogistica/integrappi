@@ -188,7 +188,7 @@ async def enviar_certificado(
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
         f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
-        f"<b>{emp.cargo}</b> Para mayor información: PBX 7006232 o celular 3183385709. <b>{emp.tipoContrato}</b>."
+        f"Para mayor información: PBX 7006232 o celular 3183385709."
         
     )
     if show_salary and emp.basico and emp.basico > 0:
