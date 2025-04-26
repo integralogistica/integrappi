@@ -204,12 +204,14 @@ async def enviar_certificado(
 
     # Auxilios
     if show_salary:
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
         for label, val in [
             ('Auxilio Vivienda', emp.auxilioVivienda),
             ('Auxilio Alimentación', emp.auxilioAlimentacion),
             ('Auxilio Movilidad', emp.auxilioMovilidad),
             ('Auxilio Rodamiento', emp.auxilioRodamiento),
-            ('Auxilio Produktividad', emp.auxilioProductividad),
+            ('Auxilio Productividad', emp.auxilioProductividad),
             ('Auxilio Comunic', emp.auxilioComunic)
         ]:
             if val > 0:
