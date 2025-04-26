@@ -47,6 +47,7 @@ class Empleado(BaseModel):
     auxilioProductividad: Optional[float]
     auxilioComunic: Optional[float]
     correo: Optional[str]
+
     class Config:
         orm_mode = True
 
@@ -55,12 +56,10 @@ class EnviarRequest(BaseModel):
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
-    # helper: toma la primera clave existente y no nula
     get = lambda *keys: next(
         (doc.get(k) for k in keys if k in doc and doc.get(k) is not None),
         None
     )
-    # helper: parsea int/float o limpia string con puntos/comas
     def get_float(*keys):
         for k in keys:
             if k in doc and doc[k] not in (None, ""):
@@ -161,13 +160,13 @@ async def enviar_certificado(
     body_style     = ParagraphStyle('Body',     parent=styles['Normal'],
                                     fontName='Times-Roman', fontSize=12, leading=16)
     info_style     = ParagraphStyle('Info',     parent=styles['Normal'],
-                                    fontName='Times-Roman', fontSize=12, leading=1)
+                                    fontName='Times-Roman', fontSize=12, leading=14)
 
-    # Encabezado (story, más abajo)
+    # Encabezado
     header   = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    # Formatea fecha
+    # Formatea fecha de ingreso
     try:
         dt = datetime.fromisoformat(emp.fechaIngreso)
         meses = ["enero","febrero","marzo","abril","mayo","junio",
@@ -176,10 +175,8 @@ async def enviar_certificado(
     except:
         fecha_humana = emp.fechaIngreso
 
-    # Cédula con puntos
-    ced = f"{int(emp.identificacion):,}".replace(",",".") if emp.identificacion.isdigit() else emp.identificacion
-
     # Texto principal
+    ced = f"{int(emp.identificacion):,}".replace(",", ".") if emp.identificacion.isdigit() else emp.identificacion
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
@@ -189,7 +186,13 @@ async def enviar_certificado(
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Armar story con Spacer inicial para bajar todo
+    # Fecha de certificación automática
+    now = datetime.now()
+    meses = ["enero","febrero","marzo","abril","mayo","junio",
+             "julio","agosto","septiembre","octubre","noviembre","diciembre"]
+    fecha_cert = f"{now.day} de {meses[now.month-1]} de {now.year}"
+
+    # Armar story
     story = [
         Spacer(1, 50),
         header,
@@ -202,32 +205,36 @@ async def enviar_certificado(
     # Auxilios
     if show_salary:
         for label, val in [
-            ('Auxilio Vivienda',      emp.auxilioVivienda),
-            ('Auxilio Alimentación',  emp.auxilioAlimentacion),
-            ('Auxilio Movilidad',     emp.auxilioMovilidad),
-            ('Auxilio Rodamiento',    emp.auxilioRodamiento),
-            ('Auxilio Productividad', emp.auxilioProductividad),
-            ('Auxilio Comunic',       emp.auxilioComunic)
+            ('Auxilio Vivienda', emp.auxilioVivienda),
+            ('Auxilio Alimentación', emp.auxilioAlimentacion),
+            ('Auxilio Movilidad', emp.auxilioMovilidad),
+            ('Auxilio Rodamiento', emp.auxilioRodamiento),
+            ('Auxilio Produktividad', emp.auxilioProductividad),
+            ('Auxilio Comunic', emp.auxilioComunic)
         ]:
             if val > 0:
-                story.append(Spacer(1,6))
-                story.append(
-                    Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style)
-                )
+                story.append(Spacer(1, 6))
+                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",","."), body_style))
 
-    # Pie de contacto
+    # Pie de contacto y certificación
     story.append(Spacer(1, 10))
-    story.append(
-        Paragraph("Para mayor información: PBX 7006232 o celular 3183385709.", info_style)
-    )
+    story.append(Paragraph("Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.", info_style))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        f"La presente certificación se expide a solicitud del interesado, dado a los {fecha_cert} "
+        "en la ciudad de Bogotá.",
+        info_style
+    ))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("Cordialmente,", info_style))
 
     # Dibuja el frame
     frame = Frame(40, 340, width - 80, height - 380, showBoundary=0)
     frame.addFromList(story, c)
 
-    # Firma y nombre superpuestos
+    # Firma
     firma_clean = firma_base64.split(',',1)[1]
-    y_base = 300  # ajusta si quieres subir/bajar
+    y_base = 300
     c.setFont('Times-Bold', 12)
     c.drawCentredString(width/2, y_base + 5, 'PATRICIA LEAL AROCA')
     c.setFont('Times-Roman', 10)
@@ -236,24 +243,23 @@ async def enviar_certificado(
     c.drawCentredString(width/2, y_base - 34, 'Integra cadena de servicios')
     c.drawImage(
         ImageReader(BytesIO(base64.b64decode(firma_clean))),
-        width/2 - 75, y_base - 10,
-        width=150, height=50, mask='auto'
+        width/2 - 75, y_base - 10, width=150, height=50, mask='auto'
     )
 
     c.showPage()
     c.save()
     buffer.seek(0)
 
-    # — Envío por correo —
+    # Envío por correo
     payload = {
-        'from':    'no-reply@integralogistica.com',
-        'to':      [emp.correo],
+        'from': 'no-reply@integralogistica.com',
+        'to': [emp.correo],
         'subject': f'Certificado Laboral - {emp.nombre}',
-        'html':    f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
+        'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
         'attachments': [{
             'filename': f'certificado_{emp.identificacion}.pdf',
-            'type':     'application/pdf',
-            'content':  base64.b64encode(buffer.read()).decode()
+            'type': 'application/pdf',
+            'content': base64.b64encode(buffer.read()).decode()
         }]
     }
     try:
