@@ -24,6 +24,7 @@ if not mongo_uri:
 client = MongoClient(mongo_uri)
 db = client["integra"]
 coleccion_empleados = db["empleados"]
+coleccion_historial = db["historial_certificados"]  # Nueva colección para historial
 
 # ——— Configuración de Resend ———
 resend_api_key = os.getenv("RESEND_API_KEY")
@@ -67,6 +68,7 @@ def transformar_empleado(doc: dict) -> Empleado:
                 if s.isdigit():
                     return float(s)
         return 0.0
+
     fecha_raw = get("fechaIngreso", "FECHA_INGRESO", "FECHA INGRESO")
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, "isoformat") else str(fecha_raw or "")
     return Empleado(
@@ -129,6 +131,13 @@ async def enviar_certificado(
     if not emp.correo:
         raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
+    # Registrar en historial la solicitud de certificado
+    coleccion_historial.insert_one({
+        "identificacion": emp.identificacion,
+        "nombre": emp.nombre,
+        "fecha_solicitud": datetime.now()
+    })
+
     show_salary = req.incluirSalario
 
     # ——— Generación de PDF ———
@@ -170,10 +179,10 @@ async def enviar_certificado(
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
-        f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>,"
+        f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
     if show_salary and emp.basico > 0:
-        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos."
+        texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
     # Fecha de certificación automática
@@ -202,18 +211,18 @@ async def enviar_certificado(
     ]
     if show_salary and any(val > 0 for _, val in aux_items):
         story.append(Spacer(1, 6))
-        story.append(Paragraph("Más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
+        story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
         for label, val in aux_items:
             if val > 0:
                 story.append(Spacer(1, 6))
-                story.append(Paragraph(f"<b>{label}:</b> ${int(val):,}".replace(",", "."), body_style))
+                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style))
 
     # Pie de contacto y certificación
     story.append(Spacer(1, 10))
     story.append(Paragraph("Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.", info_style))
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        f"La presente certificación se expide a solicitud del interesado el {fecha_cert} en la ciudad de Bogotá.",
+        f"La presente certificación se expide a solicitud del interesado, dado a los {fecha_cert} en la ciudad de Bogotá.",
         info_style
     ))
     story.append(Spacer(1, 6))
@@ -245,7 +254,7 @@ async def enviar_certificado(
 
     # Envío por correo electrónico
     payload = {
-        'from': 'certificados@integralogistica.com',
+        'from': 'no-reply@integralogistica.com',
         'to': [emp.correo],
         'subject': f'Certificado Laboral - {emp.nombre}',
         'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
