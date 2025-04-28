@@ -57,36 +57,59 @@ class EnviarRequest(BaseModel):
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
-    get = lambda *keys: next((doc.get(k) for k in keys if k in doc and doc.get(k) is not None), None)
+    """
+    Normaliza las claves del documento eliminando espacios en los nombres de campo,
+    y extrae valores de texto y numéricos correctamente.
+    """
+    # Limpiar claves: quitar espacios al inicio y final
+    clean_doc = {k.strip(): v for k, v in doc.items()}
+
+    # Función para obtener valor de múltiples posibles claves
+    def get_val(*keys):
+        for k in keys:
+            if k in clean_doc and clean_doc[k] is not None:
+                return clean_doc[k]
+        return None
+
+    # Función para obtener floater
     def get_float(*keys):
         for k in keys:
-            if k in doc and doc[k] not in (None, ""):
-                val = doc[k]
-                if isinstance(val, (int, float)):
-                    return float(val)
-                s = str(val).replace(".", "").replace(",", "").strip()
-                if s.isdigit():
-                    return float(s)
+            val = clean_doc.get(k)
+            if val in (None, ""):
+                continue
+            if isinstance(val, (int, float)):
+                return float(val)
+            # Convertir cadenas numéricas
+            s = str(val).replace(".", "").replace(",", "").strip()
+            if s.isdigit():
+                return float(s)
         return 0.0
 
-    fecha_raw = get("fechaIngreso", "FECHA_INGRESO", "FECHA INGRESO")
-    fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, "isoformat") else str(fecha_raw or "")
-    return Empleado(
-        id=str(doc.get("_id")),
-        identificacion=str(get("identificacion", "IDENTIFICACIÓN") or ""),
-        nombre=get("nombre", "NOMBRE"),
-        cargo=get("cargo", "CARGO"),
-        tipoContrato=get("tipoContrato", "TIPO_DE_CONTRATO", "TIPO DE CONTRATO"),
+    # Manejo de fecha de ingreso
+    fecha_raw = get_val("fechaIngreso", "FECHA_INGRESO", "FECHA INGRESO")
+    if hasattr(fecha_raw, "isoformat"):
+        fecha_ing = fecha_raw.isoformat()
+    else:
+        fecha_ing = str(fecha_raw or "")
+
+    # Construcción del modelo Empleado
+    empleado = Empleado(
+        id=str(clean_doc.get("_id")),
+        identificacion=str(get_val("identificacion", "IDENTIFICACIÓN") or ""),
+        nombre=get_val("nombre", "NOMBRE"),
+        cargo=get_val("cargo", "CARGO"),
+        tipoContrato=get_val("tipoContrato", "TIPO_DE_CONTRATO", "TIPO DE CONTRATO"),
         fechaIngreso=fecha_ing,
-        basico=get_float("basico", "BASICO", "BÁSICO"),
-        auxilioVivienda=get_float("auxilioVivienda", "AUXILIO VIVIENDA", "AUXILIO_VIVIENDA"),
-        auxilioAlimentacion=get_float("auxilioAlimentacion", "AUXILIO ALIMENTA", "AUXILIO_ALIMENTACIÓN"),
-        auxilioMovilidad=get_float("auxilioMovilidad", "AUXILIO DE MOVILIDAD", "AUXILIO_MOVILIDAD"),
-        auxilioRodamiento=get_float("auxilioRodamiento", "AUXILIO RODAMIENTO", "AUXILIO_RODAMIENTO"),
-        auxilioProductividad=get_float("auxilioProductividad", "AUXILIO DE PRODUCTIVIDAD", "AUXILIO_PRODUCTIVIDAD"),
-        auxilioComunic=get_float("auxilioComunic", "AUXILIO COMUNIC", "AUXILIO_COMUNIC"),
-        correo=get("correo", "CORREO")
+        basico=get_float("basico", "BASICO"),
+        auxilioVivienda=get_float("auxilioVivienda", "AUXILIO VIVIENDA"),
+        auxilioAlimentacion=get_float("auxilioAlimentacion", "AUXILIO ALIMENTA"),
+        auxilioMovilidad=get_float("auxilioMovilidad", "AUXILIO DE MOVILIDAD"),
+        auxilioRodamiento=get_float("auxilioRodamiento", "AUXILIO RODAMIENTO"),
+        auxilioProductividad=get_float("auxilioProductividad", "AUXILIO DE PRODUCTIVIDAD"),
+        auxilioComunic=get_float("auxilioComunic", "AUXILIO COMUNIC"),
+        correo=get_val("correo", "CORREO")
     )
+    return empleado
 
 # ——— Router y rutas ———
 ruta_empleado = APIRouter(
@@ -96,18 +119,23 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
-    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
+    """Devuelve la lista de todos los empleados."""
+    docs = coleccion_empleados.find()
+    return [transformar_empleado(doc) for doc in docs]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description="Número de identificación")
 ):
+    """Busca un empleado por su identificación."""
     filtros = {"$or": [
         {"identificacion": identificacion},
-        {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else None,
         {"IDENTIFICACIÓN": identificacion},
-        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else None
     ]}
+    # Filtrar None
+    filtros["$or"] = [f for f in filtros["$or"] if f]
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
@@ -118,20 +146,23 @@ async def enviar_certificado(
     identificacion: str = Query(..., description="ID del empleado"),
     req: EnviarRequest = Body(...)
 ):
+    """Genera y envía por correo el certificado laboral. Registra la solicitud en historial."""
     filtros = {"$or": [
         {"identificacion": identificacion},
-        {"identificacion": int(identificacion)} if identificacion.isdigit() else {},
+        {"identificacion": int(identificacion)} if identificacion.isdigit() else None,
         {"IDENTIFICACIÓN": identificacion},
-        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else {}
+        {"IDENTIFICACIÓN": int(identificacion)} if identificacion.isdigit() else None
     ]}
+    filtros["$or"] = [f for f in filtros["$or"] if f]
     doc = coleccion_empleados.find_one(filtros)
     if not doc:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
+
     emp = transformar_empleado(doc)
     if not emp.correo:
         raise HTTPException(status_code=400, detail="Empleado sin correo registrado")
 
-    # Registrar en historial la solicitud de certificado
+    # Registrar en historial
     coleccion_historial.insert_one({
         "identificacion": emp.identificacion,
         "nombre": emp.nombre,
@@ -140,42 +171,60 @@ async def enviar_certificado(
 
     show_salary = req.incluirSalario
 
-    # ——— Generación de PDF ———
+    # — Generación de PDF —
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo
+    # Dibujar fondo si existe
     fondo_clean = fondo_base64.split(",", 1)[1] if fondo_base64.startswith("data:image") else fondo_base64
     try:
         c.drawImage(
             ImageReader(BytesIO(base64.b64decode(fondo_clean))),
             0, 0, width=width, height=height
         )
-    except:
+    except Exception:
         pass
 
-    # Estilos
+    # Estilos de texto
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("Title", parent=styles["Heading1"], alignment=1, fontName="Times-Bold", fontSize=14, leading=18)
-    subtitle_style = ParagraphStyle("Subtitle", parent=styles["Heading3"], alignment=1, fontName="Times-Bold", fontSize=12, leading=14)
-    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontName="Times-Roman", fontSize=12, leading=16)
-    info_style = ParagraphStyle("Info", parent=styles["Normal"], fontName="Times-Roman", fontSize=12, leading=14)
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Heading1"], alignment=1,
+        fontName="Times-Bold", fontSize=14, leading=18
+    )
+    subtitle_style = ParagraphStyle(
+        "Subtitle", parent=styles["Heading3"], alignment=1,
+        fontName="Times-Bold", fontSize=12, leading=14
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["Normal"],
+        fontName="Times-Roman", fontSize=12, leading=16
+    )
+    info_style = ParagraphStyle(
+        "Info", parent=styles["Normal"],
+        fontName="Times-Roman", fontSize=12, leading=14
+    )
 
-    # Encabezado
+    # Construcción del certificado
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
     # Fecha de ingreso legible
     try:
-        dt = datetime.fromisoformat(emp.fechaIngreso)
-        meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
-        fecha_humana = f"{dt.day} de {meses_esp[dt.month-1]} de {dt.year}"
-    except:
-        fecha_humana = emp.fechaIngreso
+        dt_ing = datetime.fromisoformat(emp.fechaIngreso)
+        meses_esp = [
+            "enero","febrero","marzo","abril","mayo","junio",
+            "julio","agosto","septiembre","octubre","noviembre","diciembre"
+        ]
+        fecha_humana = f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
+    except Exception:
+        fecha_humana = emp.fechaIngreso or ""
 
     # Texto principal
-    ced = f"{int(emp.identificacion):,}".replace(",", ".") if emp.identificacion.isdigit() else emp.identificacion
+    ced = (
+        f"{int(emp.identificacion):,}".replace(",", ".")
+        if emp.identificacion.isdigit() else emp.identificacion
+    )
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
@@ -185,22 +234,15 @@ async def enviar_certificado(
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
-    # Fecha de certificación automática
+    # Fecha de certificación
     now = datetime.now()
-    meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
     fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
 
-    # Construir el contenido (story)
     story = [
-        Spacer(1, 50),
-        header,
-        Spacer(1, 16),
-        subtitle,
-        Spacer(1, 16),
-        body
+        Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body
     ]
 
-    # Auxilios condicionales
+    # Auxilios
     aux_items = [
         ("Auxilio Vivienda", emp.auxilioVivienda),
         ("Auxilio Alimentación", emp.auxilioAlimentacion),
@@ -211,24 +253,33 @@ async def enviar_certificado(
     ]
     if show_salary and any(val > 0 for _, val in aux_items):
         story.append(Spacer(1, 6))
-        story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
+        story.append(Paragraph(
+            "más un auxilio no salarial de mera liberalidad por concepto de:",
+            body_style
+        ))
         for label, val in aux_items:
             if val > 0:
                 story.append(Spacer(1, 6))
-                story.append(Paragraph(f"<b>{label}:</b> {int(val):,}".replace(",", "."), body_style))
+                story.append(Paragraph(
+                    f"<b>{label}:</b> {int(val):,}".replace(",", "."),
+                    body_style
+                ))
 
-    # Pie de contacto y certificación
+    # Pie y contacto
     story.append(Spacer(1, 10))
-    story.append(Paragraph("Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.", info_style))
+    story.append(Paragraph(
+        "Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.",
+        info_style
+    ))
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        f"La presente certificación se expide a solicitud del interesado, dado a los {fecha_cert} en la ciudad de Bogotá.",
+        f"La presente certificación se expide a solicitud del interesado, dado a {fecha_cert} en la ciudad de Bogotá.",
         info_style
     ))
     story.append(Spacer(1, 6))
     story.append(Paragraph("Cordialmente,", info_style))
 
-    # Dibujar el frame con el contenido
+    # Renderizar contenido
     frame = Frame(40, 340, width - 80, height - 380, showBoundary=0)
     frame.addFromList(story, c)
 
@@ -247,12 +298,11 @@ async def enviar_certificado(
         width=150, height=50, mask='auto'
     )
 
-    # Finalizar página y obtener buffer
     c.showPage()
     c.save()
     buffer.seek(0)
 
-    # Envío por correo electrónico
+    # Enviar correo
     payload = {
         'from': 'no-reply@integralogistica.com',
         'to': [emp.correo],
