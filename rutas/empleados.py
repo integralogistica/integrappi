@@ -306,7 +306,8 @@ async def enviar_certificado(
         'attachments': [{
             'filename': f'certificado_{emp.identificacion}.pdf',
             'content': attachment_b64,             # ← string JSON-serializable
-            'content_type': 'application/pdf'
+            'content_type': 'application/pdf',
+            'encoding': 'base64'  
         }]
     }
 
