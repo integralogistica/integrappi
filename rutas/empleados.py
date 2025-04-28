@@ -303,17 +303,17 @@ async def enviar_certificado(
     buffer.seek(0)
 
     # Enviar correo
+    buffer.seek(0)
     payload = {
-        'from': 'no-reply@integralogistica.com',
-        'to': [emp.correo],
-        'subject': f'Certificado Laboral - {emp.nombre}',
-        'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
-        'attachments': [{
-            'filename': f'certificado_{emp.identificacion}.pdf',
-            'type': 'application/pdf',
-            'content': base64.b64encode(buffer.read()).decode()
-        }]
-    }
+            'from': 'no-reply@integralogistica.com',
+            'to': [emp.correo],
+            'subject': f'Certificado Laboral - {emp.nombre}',
+            'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral.</p>',
+            'attachments': [{
+                'filename': f'certificado_{emp.identificacion}.pdf',
+                'content': base64.b64encode(buffer.read()).decode()  # Solo 'content' y 'filename'
+            }]
+        }
     try:
         resend.Emails.send(payload)
     except Exception as e:
