@@ -1,5 +1,6 @@
 import os
 import io
+import logging
 from io import BytesIO
 from fastapi import FastAPI, APIRouter, HTTPException, status, Query, Body
 from fastapi.responses import JSONResponse
@@ -14,12 +15,17 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
+from PIL import Image  # Nueva dependencia para validar imágenes
 from rutas.fondoBase64 import fondo_base64
 from rutas.firmaBase64 import firma_base64
 
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Para linearizar PDF y compatibilidad móvil
 try:
-    from pikepdf import Pdf
+    from pikepdf import Pdf, PdfError
     _HAVE_PIKEPDF = True
 except ImportError:
     _HAVE_PIKEPDF = False
@@ -60,6 +66,35 @@ class Empleado(BaseModel):
 
 class EnviarRequest(BaseModel):
     incluirSalario: bool
+
+# ——— Funciones de validación ———
+def validar_imagen_base64(b64_data: str) -> bool:
+    try:
+        if ',' in b64_data:
+            header, data = b64_data.split(',', 1)
+            if 'image/' not in header:
+                return False
+        else:
+            data = b64_data
+            
+        img_data = base64.b64decode(data)
+        img = Image.open(BytesIO(img_data))
+        img.verify()
+        return True
+    except Exception as e:
+        logger.error(f"Error validando imagen base64: {str(e)}")
+        return False
+
+def validar_pdf(pdf_bytes: bytes) -> bool:
+    try:
+        Pdf.open(BytesIO(pdf_bytes))
+        return True
+    except PdfError as e:
+        logger.error(f"PDF inválido: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Error validando PDF: {str(e)}")
+        return False
 
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
@@ -140,183 +175,213 @@ async def enviar_certificado(
     req: EnviarRequest = Body(...)
 ):
     # Buscar empleado
-    condiciones = (
-        [{'identificacion': identificacion}, {'IDENTIFICACIÓN': identificacion}]
-        if not identificacion.isdigit()
-        else [
-            {'identificacion': identificacion},
-            {'identificacion': int(identificacion)},
-            {'IDENTIFICACIÓN': identificacion},
-            {'IDENTIFICACIÓN': int(identificacion)}
-        ]
-    )
-    doc = coleccion_empleados.find_one({'$or': condiciones})
-    if not doc:
-        raise HTTPException(status_code=404, detail='Empleado no encontrado')
-
-    emp = transformar_empleado(doc)
-    if not emp.correo:
-        raise HTTPException(status_code=400, detail='Empleado sin correo registrado')
-
-    # Guardar en historial
-    coleccion_historial.insert_one({
-        'identificacion': emp.identificacion,
-        'nombre': emp.nombre,
-        'fecha_solicitud': datetime.now()
-    })
-
-    incluir_salario = req.incluirSalario
-
-    # ——— Generar PDF ———
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    c.setTitle('Certificado Laboral')
-    c.setAuthor('Integra Logística')
-    width, height = A4
-
-    # Fondo
     try:
-        img_data = fondo_base64.split(',', 1)[1] if fondo_base64.startswith('data:image') else fondo_base64
-        c.drawImage(
-            ImageReader(BytesIO(base64.b64decode(img_data))),
-            0, 0, width=width, height=height
+        condiciones = (
+            [{'identificacion': identificacion}, {'IDENTIFICACIÓN': identificacion}]
+            if not identificacion.isdigit()
+            else [
+                {'identificacion': identificacion},
+                {'identificacion': int(identificacion)},
+                {'IDENTIFICACIÓN': identificacion},
+                {'IDENTIFICACIÓN': int(identificacion)}
+            ]
         )
-    except:
-        pass
+        doc = coleccion_empleados.find_one({'$or': condiciones})
+        if not doc:
+            raise HTTPException(status_code=404, detail='Empleado no encontrado')
 
-    # Estilos y contenido
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('Title', parent=styles['Heading1'], alignment=1,
-                                 fontName='Times-Bold', fontSize=14, leading=18)
-    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Heading3'], alignment=1,
-                                    fontName='Times-Bold', fontSize=12, leading=14)
-    body_style = ParagraphStyle('Body', parent=styles['Normal'],
-                                fontName='Times-Roman', fontSize=12, leading=16)
-    info_style = ParagraphStyle('Info', parent=styles['Normal'],
-                                fontName='Times-Roman', fontSize=12, leading=14)
+        emp = transformar_empleado(doc)
+        if not emp.correo:
+            raise HTTPException(status_code=400, detail='Empleado sin correo registrado')
 
-    header = Paragraph('EL DEPARTAMENTO DE GESTIÓN HUMANA', title_style)
-    subtitle = Paragraph('CERTIFICA QUE:', subtitle_style)
+        # Guardar en historial
+        coleccion_historial.insert_one({
+            'identificacion': emp.identificacion,
+            'nombre': emp.nombre,
+            'fecha_solicitud': datetime.now()
+        })
 
-    # Fecha legible de ingreso
-    try:
-        dt = datetime.fromisoformat(emp.fechaIngreso)
-        meses = [
-            'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-            'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
+        incluir_salario = req.incluirSalario
+
+        # Validar imágenes base64
+        if not validar_imagen_base64(fondo_base64):
+            logger.error("Imagen de fondo inválida")
+        if not validar_imagen_base64(firma_base64):
+            logger.error("Imagen de firma inválida")
+
+        # ——— Generar PDF ———
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        c.setTitle('Certificado Laboral')
+        c.setAuthor('Integra Logística')
+        width, height = A4
+
+        # Fondo
+        try:
+            if validar_imagen_base64(fondo_base64):
+                img_data = fondo_base64.split(',', 1)[1] if fondo_base64.startswith('data:image') else fondo_base64
+                c.drawImage(
+                    ImageReader(BytesIO(base64.b64decode(img_data))),
+                    0, 0, width=width, height=height
+                )
+        except Exception as e:
+            logger.error(f"Error dibujando fondo: {str(e)}")
+
+        # Estilos y contenido
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('Title', parent=styles['Heading1'], alignment=1,
+                                    fontName='Times-Bold', fontSize=14, leading=18)
+        subtitle_style = ParagraphStyle('Subtitle', parent=styles['Heading3'], alignment=1,
+                                        fontName='Times-Bold', fontSize=12, leading=14)
+        body_style = ParagraphStyle('Body', parent=styles['Normal'],
+                                    fontName='Times-Roman', fontSize=12, leading=16)
+        info_style = ParagraphStyle('Info', parent=styles['Normal'],
+                                    fontName='Times-Roman', fontSize=12, leading=14)
+
+        header = Paragraph('EL DEPARTAMENTO DE GESTIÓN HUMANA', title_style)
+        subtitle = Paragraph('CERTIFICA QUE:', subtitle_style)
+
+        # Fecha legible de ingreso
+        try:
+            dt = datetime.fromisoformat(emp.fechaIngreso)
+            meses = [
+                'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
+            ]
+            fecha_leg = f"{dt.day} de {meses[dt.month-1]} de {dt.year}"
+        except Exception as e:
+            logger.error(f"Error formateando fecha: {str(e)}")
+            fecha_leg = emp.fechaIngreso or ''
+
+        ced = (f"{int(emp.identificacion):,}".replace(',', '.')
+            if emp.identificacion.isdigit() else emp.identificacion)
+
+        texto = (
+            f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula "
+            f"número <b>{ced}</b>, labora en nuestra empresa desde "
+            f"<b>{fecha_leg}</b>, desempeñando el cargo de <b>{emp.cargo}</b> "
+            f"con contrato a término <b>{emp.tipoContrato}</b>."
+        )
+        if incluir_salario and emp.basico > 0:
+            texto += f" Con un salario fijo mensual por valor de <b>${int(emp.basico):,}</b> pesos."
+
+        body = Paragraph(texto, body_style)
+
+        story = [Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
+
+        auxs = [
+            ('Auxilio Vivienda', emp.auxilioVivienda),
+            ('Auxilio Alimentación', emp.auxilioAlimentacion),
+            ('Auxilio Movilidad', emp.auxilioMovilidad),
+            ('Auxilio Rodamiento', emp.auxilioRodamiento),
+            ('Auxilio Productividad', emp.auxilioProductividad),
+            ('Auxilio Comunic', emp.auxilioComunic),
         ]
-        fecha_leg = f"{dt.day} de {meses[dt.month-1]} de {dt.year}"
-    except:
-        fecha_leg = emp.fechaIngreso or ''
 
-    ced = (f"{int(emp.identificacion):,}".replace(',', '.')
-           if emp.identificacion.isdigit() else emp.identificacion)
+        if incluir_salario and any(v > 0 for _, v in auxs):
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(
+                'Más un auxilio no salarial de mera liberalidad por concepto de:',
+                body_style
+            ))
+            for lab, val in auxs:
+                if val > 0:
+                    story.append(Spacer(1, 6))
+                    story.append(Paragraph(f"<b>{lab}:</b> ${int(val):,}".replace(',', '.'), body_style))
 
-    texto = (
-        f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula "
-        f"número <b>{ced}</b>, labora en nuestra empresa desde "
-        f"<b>{fecha_leg}</b>, desempeñando el cargo de <b>{emp.cargo}</b> "
-        f"con contrato a término <b>{emp.tipoContrato}</b>."
-    )
-    if incluir_salario and emp.basico > 0:
-        texto += f" Con un salario fijo mensual por valor de <b>${int(emp.basico):,}</b> pesos."
+        story.append(Spacer(1, 20))
+        story.append(Paragraph(
+            'Para mayor información: PBX 7006232 o celular 3183385709.',
+            info_style
+        ))
 
-    body = Paragraph(texto, body_style)
-
-    story = [Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
-
-    auxs = [
-        ('Auxilio Vivienda', emp.auxilioVivienda),
-        ('Auxilio Alimentación', emp.auxilioAlimentacion),
-        ('Auxilio Movilidad', emp.auxilioMovilidad),
-        ('Auxilio Rodamiento', emp.auxilioRodamiento),
-        ('Auxilio Productividad', emp.auxilioProductividad),
-        ('Auxilio Comunic', emp.auxilioComunic),
-    ]
-
-    if incluir_salario and any(v > 0 for _, v in auxs):
+        # Fecha de expedición
+        now = datetime.now()
+        cert_date = f"{now.day} de {meses[now.month-1]} de {now.year}"
         story.append(Spacer(1, 6))
         story.append(Paragraph(
-            'Más un auxilio no salarial de mera liberalidad por concepto de:',
-            body_style
+            f"La presente certificación se expide a solicitud del interesado, "
+            f"dado a {cert_date} en Bogotá.",
+            info_style
         ))
-        for lab, val in auxs:
-            if val > 0:
-                story.append(Spacer(1, 6))
-                story.append(Paragraph(f"<b>{lab}:</b> ${int(val):,}".replace(',', '.'), body_style))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph('Cordialmente,', info_style))
 
-    story.append(Spacer(1, 20))
-    story.append(Paragraph(
-        'Para mayor información: PBX 7006232 o celular 3183385709.',
-        info_style
-    ))
+        Frame(40, 340, width-80, height-380, showBoundary=0).addFromList(story, c)
 
-    # Fecha de expedición
-    now = datetime.now()
-    cert_date = f"{now.day} de {meses[now.month-1]} de {now.year}"
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        f"La presente certificación se expide a solicitud del interesado, "
-        f"dado a {cert_date} en Bogotá.",
-        info_style
-    ))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph('Cordialmente,', info_style))
+        # Firma
+        try:
+            if validar_imagen_base64(firma_base64):
+                sig = firma_base64.split(',', 1)[1]
+                c.drawImage(
+                    ImageReader(BytesIO(base64.b64decode(sig))),
+                    width/2 - 75, 300 - 10, width=150, height=50, mask='auto'
+                )
+        except Exception as e:
+            logger.error(f"Error dibujando firma: {str(e)}")
 
-    Frame(40, 340, width-80, height-380, showBoundary=0).addFromList(story, c)
+        c.setFont('Times-Bold', 12)
+        c.drawCentredString(width/2, 305, 'PATRICIA LEAL AROCA')
+        c.setFont('Times-Roman', 10)
+        c.drawCentredString(width/2, 290, 'Certificado laboral')
+        c.drawCentredString(width/2, 278, 'Gerente de gestión humana')
+        c.drawCentredString(width/2, 266, 'Integra cadena de servicios')
 
-    # Firma
-    try:
-        sig = firma_base64.split(',', 1)[1]
-        c.drawImage(
-            ImageReader(BytesIO(base64.b64decode(sig))),
-            width/2 - 75, 300 - 10, width=150, height=50, mask='auto'
-        )
-    except:
-        pass
+        c.showPage()
+        c.save()
 
-    c.setFont('Times-Bold', 12)
-    c.drawCentredString(width/2, 305, 'PATRICIA LEAL AROCA')
-    c.setFont('Times-Roman', 10)
-    c.drawCentredString(width/2, 290, 'Certificado laboral')
-    c.drawCentredString(width/2, 278, 'Gerente de gestión humana')
-    c.drawCentredString(width/2, 266, 'Integra cadena de servicios')
+        # ——— Validar y preparar PDF ———
+        buffer.seek(0)
+        pdf_bytes = buffer.getvalue()
+        
+        # Validar integridad del PDF generado
+        if not validar_pdf(pdf_bytes):
+            raise HTTPException(status_code=500, detail="Error generando PDF inválido")
 
-    c.showPage()
-    c.save()
+        final_bytes = pdf_bytes
+        if _HAVE_PIKEPDF:
+            try:
+                with Pdf.open(BytesIO(pdf_bytes)) as pdf:
+                    linear_io = BytesIO()
+                    pdf.save(linear_io, linearize=True)
+                    final_bytes = linear_io.getvalue()
+                    logger.info("PDF linearizado correctamente")
+            except Exception as e:
+                logger.error(f"Error linearizando PDF: {str(e)}")
+                final_bytes = pdf_bytes  # Usar versión original
 
-    # ——— Preparar bytes ———
-    buffer.seek(0)
-    pdf_bytes = buffer.getvalue()
-    final_bytes = pdf_bytes
-    if _HAVE_PIKEPDF:
-        linear_io = io.BytesIO()
-        Pdf.open(io.BytesIO(pdf_bytes)).save(linear_io, linearize=True)
-        final_bytes = linear_io.getvalue()
+        # Validar PDF final
+        if not validar_pdf(final_bytes):
+            raise HTTPException(status_code=500, detail="Error procesando PDF")
 
-    # ——— Construir y enviar payload ———
+        # ——— Construir y enviar payload ———
+        attachment_b64 = base64.b64encode(final_bytes).decode('ascii')
 
-    attachment_b64 = base64.b64encode(final_bytes).decode('ascii')
+        payload = {
+            'from': 'no-reply@integralogistica.com',
+            'to': [emp.correo],
+            'subject': f'Certificado Laboral - {emp.nombre}',
+            'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral generado automáticamente.</p>',
+            'attachments': [{
+                'filename': f'certificado_{emp.identificacion}.pdf',
+                'content': attachment_b64,
+                'content_type': 'application/pdf',
+                'encoding': 'base64'
+            }]
+        }
 
-    payload = {
-        'from': 'no-reply@integralogistica.com',
-        'to': [emp.correo],
-        'subject': f'Certificado Laboral - {emp.nombre}',
-        'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral generado automáticamente.</p>',
-        'attachments': [{
-            'filename': f'certificado_{emp.identificacion}.pdf',
-            'content': attachment_b64,             # ← string JSON-serializable
-            'content_type': 'application/pdf',
-            'encoding': 'base64'  
-        }]
-    }
+        try:
+            resend.Emails.send(payload)
+            logger.info(f"Correo enviado a {emp.correo}")
+        except Exception as e:
+            logger.error(f"Error enviando correo: {str(e)}")
+            raise HTTPException(status_code=500, detail=f'Error enviando correo: {str(e)}')
 
-    try:
-        resend.Emails.send(payload)
+        return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f'Error enviando correo: {e}')
-
-    return JSONResponse(status_code=200, content={'message': 'Correo enviado correctamente'})
+        logger.error(f"Error general en el proceso: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 app = FastAPI()
 app.include_router(ruta_empleado)
