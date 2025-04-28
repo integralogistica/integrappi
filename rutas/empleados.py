@@ -102,49 +102,61 @@ def validar_pdf(pdf_bytes: bytes) -> bool:
 
 # Transformación de documento Mongo a Pydantic
 def transformar_empleado(doc: dict) -> Empleado:
-    clean_doc = {k.strip(): v for k, v in doc.items()}
-    
-    def get_val(*keys):
-        for key in keys:
-            val = clean_doc.get(key)
-            if val is not None:
-                return val
+    field_mapping = {
+        'identificacion': ['IDENTIFICACIÓN', 'identificacion'],
+        'nombre': ['NOMBRE'],
+        'cargo': ['CARGO'],
+        'tipoContrato': ['TIPO DE CONTRATO', 'TIPO_CONTRATO'],
+        'fechaIngreso': ['FECHA INGRESO', 'FECHA_INGRESO'],
+        'basico': ['BASICO ', 'BASICO'],
+        'auxilioVivienda': ['AUXILIO VIVIENDA ', 'AUX_VIVIENDA'],
+        'auxilioAlimentacion': ['AUXILIO ALIMENTA'],
+        'auxilioMovilidad': ['AUXILIO DE MOVILIDAD'],
+        'auxilioRodamiento': ['AUXILIO RODAMIENTO '],
+        'auxilioProductividad': ['AUXILIO DE PRODUCTIVIDAD'],
+        'auxilioComunic': ['AUXILIO COMUNIC'],
+        'correo': ['CORREO']
+    }
+
+    def get_value(field_names):
+        for field in field_names:
+            value = doc.get(field)
+            if value is not None:
+                if isinstance(value, dict):
+                    if '$numberInt' in value:
+                        return float(value['$numberInt'])
+                    if '$numberDouble' in value:
+                        return float(value['$numberDouble'])
+                return value
         return None
 
-    def get_float(*keys):
-        for key in keys:
-            val = clean_doc.get(key)
-            if val is None:
-                continue
-            try:
-                return float(str(val).replace('.', '').replace(',', '').strip())
-            except ValueError:
-                continue
-        return 0.0
-
-    fecha_raw = get_val('fechaIngreso', 'FECHA_INGRESO')
-    fecha_ing = ""
+    # Manejo especial para fecha
+    fecha_ingreso = None
     try:
-        fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, 'isoformat') else str(fecha_raw)
-    except AttributeError:
-        fecha_ing = ""
+        raw_date = get_value(field_mapping['fechaIngreso'])
+        if isinstance(raw_date, datetime):
+            fecha_ingreso = raw_date.isoformat()
+        elif raw_date:
+            fecha_ingreso = datetime.fromisoformat(str(raw_date)).isoformat()
+    except Exception as e:
+        logger.error(f"Error procesando fecha: {str(e)}")
 
     return Empleado(
-        id=str(clean_doc.get('_id', '')),
-        identificacion=str(get_val('identificacion', 'IDENTIFICACIÓN') or ''),
-        nombre=get_val('nombre', 'NOMBRE'),
-        cargo=get_val('cargo', 'CARGO'),
-        tipoContrato=get_val('tipoContrato', 'TIPO_CONTRATO'),
-        fechaIngreso=fecha_ing,
-        basico=get_float('basico', 'BASICO'),
-        auxilioVivienda=get_float('auxilioVivienda', 'AUX_VIVIENDA'),
-        auxilioAlimentacion=get_float('auxilioAlimentacion', 'AUX_ALIMENTACION'),
-        auxilioMovilidad=get_float('auxilioMovilidad', 'AUX_MOVILIDAD'),
-        auxilioRodamiento=get_float('auxilioRodamiento', 'AUX_RODAMIENTO'),
-        auxilioProductividad=get_float('auxilioProductividad', 'AUX_PRODUCTIVIDAD'),
-        auxilioComunic=get_float('auxilioComunic', 'AUX_COMUNICACION'),
-        correo=get_val('correo', 'EMAIL')
-    )
+        id=str(doc.get('_id', '')),
+        identificacion=str(get_value(field_mapping['identificacion']) or ''),
+        nombre=get_value(field_mapping['nombre']),
+        cargo=get_value(field_mapping['cargo']),
+        tipoContrato=get_value(field_mapping['tipoContrato']),
+        fechaIngreso=fecha_ingreso,
+        basico=float(get_value(field_mapping['basico']) or 0.0,
+        auxilioVivienda=float(get_value(field_mapping['auxilioVivienda']) or 0.0,
+        auxilioAlimentacion=float(get_value(field_mapping['auxilioAlimentacion']) or 0.0,
+        auxilioMovilidad=float(get_value(field_mapping['auxilioMovilidad']) or 0.0,
+        auxilioRodamiento=float(get_value(field_mapping['auxilioRodamiento']) or 0.0,
+        auxilioProductividad=float(get_value(field_mapping['auxilioProductividad']) or 0.0,
+        auxilioComunic=float(get_value(field_mapping['auxilioComunic']) or 0.0,
+        correo=get_value(field_mapping['correo'])
+    ))))))))
 
 # Rutas y aplicación
 ruta_empleado = APIRouter(
@@ -155,24 +167,26 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get('/', response_model=List[Empleado])
 async def get_empleados():
-    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
+    try:
+        return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
+    except Exception as e:
+        logger.error(f"Error obteniendo empleados: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al obtener empleados")
 
 @ruta_empleado.get('/buscar', response_model=Empleado)
 async def get_empleado_por_identificacion(
     identificacion: str = Query(..., description='Número de identificación')
 ):
     try:
-        query = {'$or': [
-            {'identificacion': identificacion},
-            {'IDENTIFICACIÓN': identificacion}
-        ]}
+        query = {'$or': []}
+        posibles_campos = ['IDENTIFICACIÓN', 'identificacion']
         
-        if identificacion.isdigit():
-            query['$or'].extend([
-                {'identificacion': int(identificacion)},
-                {'IDENTIFICACIÓN': int(identificacion)}
-            ])
-        
+        # Manejar diferentes formatos de identificación
+        for campo in posibles_campos:
+            query['$or'].append({campo: identificacion})
+            if identificacion.isdigit():
+                query['$or'].append({campo: int(identificacion)})
+
         doc = coleccion_empleados.find_one(query)
         if not doc:
             raise HTTPException(status_code=404, detail='Empleado no encontrado')
@@ -222,10 +236,20 @@ async def enviar_certificado(
             Paragraph('CERTIFICA QUE:', styles['Heading2']),
             Spacer(1, 24),
             Paragraph(
-                f"El señor/a <b>{empleado.nombre}</b>, identificado con cédula No. <b>{empleado.identificacion}</b>...", 
+                f"El señor/a <b>{empleado.nombre}</b>, identificado con cédula No. <b>{empleado.identificacion}</b>, "
+                f"labora en nuestra empresa desde <b>{empleado.fechaIngreso}</b>, "
+                f"desempeñando el cargo de <b>{empleado.cargo}</b> con contrato "
+                f"<b>{empleado.tipoContrato}</b>.", 
                 styles['BodyText']
             )
         ]
+
+        # Agregar componentes salariales si es necesario
+        if req.incluirSalario:
+            content.append(Spacer(1, 24))
+            content.append(Paragraph("Detalle salarial:", styles['Heading3']))
+            content.append(Paragraph(f"Salario base: ${empleado.basico:,.2f}", styles['BodyText']))
+            # Agregar otros componentes salariales...
 
         # Agregar firma
         try:
@@ -262,7 +286,11 @@ async def enviar_certificado(
                 'from': 'no-reply@integralogistica.com',
                 'to': [empleado.correo],
                 'subject': f'Certificado Laboral - {empleado.nombre}',
-                'html': '<p>Adjunto su certificado laboral</p>',
+                'html': f'''
+                    <p>Estimado/a {empleado.nombre},</p>
+                    <p>Adjunto encontrará su certificado laboral actualizado.</p>
+                    <p>Atentamente,<br>Recursos Humanos</p>
+                ''',
                 'attachments': [{
                     'filename': f'certificado_{empleado.identificacion}.pdf',
                     'content': base64.b64encode(pdf_bytes).decode('utf-8'),
@@ -272,6 +300,14 @@ async def enviar_certificado(
         except Exception as e:
             logger.error(f"Error enviando correo: {str(e)}")
             raise HTTPException(status_code=500, detail="Error al enviar el correo")
+
+        # Registrar en historial
+        coleccion_historial.insert_one({
+            'identificacion': empleado.identificacion,
+            'nombre': empleado.nombre,
+            'fecha_envio': datetime.now(),
+            'incluyo_salario': req.incluirSalario
+        })
 
         return JSONResponse(status_code=200, content={'message': 'Certificado enviado correctamente'})
 
