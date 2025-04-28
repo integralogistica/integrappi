@@ -228,10 +228,10 @@ async def enviar_certificado(
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de "
-        f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
+        f"<b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>,"
     )
     if show_salary and emp.basico > 0:
-        texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
+        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos."
     body = Paragraph(texto, body_style)
 
     # Fecha de certificación
@@ -254,14 +254,14 @@ async def enviar_certificado(
     if show_salary and any(val > 0 for _, val in aux_items):
         story.append(Spacer(1, 6))
         story.append(Paragraph(
-            "más un auxilio no salarial de mera liberalidad por concepto de:",
+            "Más un auxilio no salarial de mera liberalidad por concepto de:",
             body_style
         ))
         for label, val in aux_items:
             if val > 0:
                 story.append(Spacer(1, 6))
                 story.append(Paragraph(
-                    f"<b>{label}:</b> {int(val):,}".replace(",", "."),
+                    f"<b>{label}:</b> ${int(val):,}".replace(",", "."),
                     body_style
                 ))
 
