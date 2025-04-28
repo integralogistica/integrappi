@@ -300,7 +300,6 @@ async def enviar_certificado(
 
     c.showPage()
     c.save()
-    buffer.seek(0)
 
     # Enviar correo
     buffer.seek(0)
