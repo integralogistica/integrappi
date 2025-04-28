@@ -12,7 +12,7 @@ import resend
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
 from PIL import Image, ImageFile
@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# Para linearizar PDF y compatibilidad móvil
+# Intentar importar pikepdf para validación y linearización de PDF
 try:
     from pikepdf import Pdf, PdfError
     _HAVE_PIKEPDF = True
@@ -35,7 +35,6 @@ except ImportError:
 mongo_uri = os.getenv("MONGO_URI")
 if not mongo_uri:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
-
 client = MongoClient(mongo_uri)
 db = client["integra"]
 coleccion_empleados = db["empleados"]
@@ -70,7 +69,7 @@ class Empleado(BaseModel):
 class EnviarRequest(BaseModel):
     incluirSalario: bool
 
-# Funciones de validación
+# Validar que un string Base64 sea una imagen
 def validar_imagen_base64(b64_data: str) -> bool:
     try:
         if ',' in b64_data:
@@ -88,9 +87,13 @@ def validar_imagen_base64(b64_data: str) -> bool:
         logger.error(f"Error validando imagen base64: {e}")
         return False
 
+# Validar PDF solo si pikepdf está disponible
 def validar_pdf(pdf_bytes: bytes) -> bool:
     if not pdf_bytes:
         return False
+    if not _HAVE_PIKEPDF:
+        # No podemos validar sin pikepdf: asumimos válido
+        return True
     try:
         Pdf.open(BytesIO(pdf_bytes))
         return True
@@ -98,7 +101,7 @@ def validar_pdf(pdf_bytes: bytes) -> bool:
         logger.error(f"Error validando PDF: {e}")
         return False
 
-# Transformación de documento Mongo a Pydantic
+# Transformar doc de Mongo a Pydantic
 def transformar_empleado(doc: dict) -> Empleado:
     field_mapping = {
         'identificacion': ['IDENTIFICACIÓN', 'identificacion'],
@@ -116,25 +119,25 @@ def transformar_empleado(doc: dict) -> Empleado:
         'correo': ['CORREO']
     }
 
-    def get_value(field_names):
-        for field in field_names:
-            value = doc.get(field)
-            if value is not None:
-                if isinstance(value, dict):
-                    if '$numberInt' in value:
-                        return float(value['$numberInt'])
-                    if '$numberDouble' in value:
-                        return float(value['$numberDouble'])
-                return value
+    def get_value(keys):
+        for k in keys:
+            v = doc.get(k)
+            if v is not None:
+                if isinstance(v, dict):
+                    if '$numberInt' in v:
+                        return float(v['$numberInt'])
+                    if '$numberDouble' in v:
+                        return float(v['$numberDouble'])
+                return v
         return None
 
-    fecha_ingreso = None
+    fecha_iso = None
     try:
-        raw_date = get_value(field_mapping['fechaIngreso'])
-        if isinstance(raw_date, datetime):
-            fecha_ingreso = raw_date.isoformat()
-        elif raw_date:
-            fecha_ingreso = datetime.fromisoformat(str(raw_date)).isoformat()
+        raw = get_value(field_mapping['fechaIngreso'])
+        if isinstance(raw, datetime):
+            fecha_iso = raw.isoformat()
+        elif raw:
+            fecha_iso = datetime.fromisoformat(str(raw)).isoformat()
     except Exception as e:
         logger.error(f"Error procesando fecha: {e}")
 
@@ -144,7 +147,7 @@ def transformar_empleado(doc: dict) -> Empleado:
         nombre=get_value(field_mapping['nombre']),
         cargo=get_value(field_mapping['cargo']),
         tipoContrato=get_value(field_mapping['tipoContrato']),
-        fechaIngreso=fecha_ingreso,
+        fechaIngreso=fecha_iso,
         basico=float(get_value(field_mapping['basico']) or 0.0),
         auxilioVivienda=float(get_value(field_mapping['auxilioVivienda']) or 0.0),
         auxilioAlimentacion=float(get_value(field_mapping['auxilioAlimentacion']) or 0.0),
@@ -152,10 +155,10 @@ def transformar_empleado(doc: dict) -> Empleado:
         auxilioRodamiento=float(get_value(field_mapping['auxilioRodamiento']) or 0.0),
         auxilioProductividad=float(get_value(field_mapping['auxilioProductividad']) or 0.0),
         auxilioComunic=float(get_value(field_mapping['auxilioComunic']) or 0.0),
-        correo=get_value(field_mapping['correo']),
+        correo=get_value(field_mapping['correo'])
     )
 
-# Rutas y aplicación
+# Definición de rutas
 ruta_empleado = APIRouter(
     prefix='/empleados',
     tags=['Empleados'],
@@ -166,7 +169,7 @@ ruta_empleado = APIRouter(
 async def get_empleados():
     try:
         docs = list(coleccion_empleados.find())
-        return [transformar_empleado(doc) for doc in docs]
+        return [transformar_empleado(d) for d in docs]
     except Exception as e:
         logger.error(f"Error obteniendo empleados: {e}")
         raise HTTPException(status_code=500, detail="Error al obtener empleados")
@@ -177,11 +180,11 @@ async def get_empleado_por_identificacion(
 ):
     try:
         query = {'$or': []}
-        posibles_campos = ['IDENTIFICACIÓN', 'identificacion']
-        for campo in posibles_campos:
-            query['$or'].append({campo: identificacion})
+        campos = ['IDENTIFICACIÓN', 'identificacion']
+        for c in campos:
+            query['$or'].append({c: identificacion})
             if identificacion.isdigit():
-                query['$or'].append({campo: int(identificacion)})
+                query['$or'].append({c: int(identificacion)})
         doc = coleccion_empleados.find_one(query)
         if not doc:
             raise HTTPException(status_code=404, detail='Empleado no encontrado')
@@ -202,72 +205,67 @@ async def enviar_certificado(
         if not empleado.correo:
             raise HTTPException(status_code=400, detail='El empleado no tiene correo registrado')
 
-        # Validaciones de imágenes
-        if not validar_imagen_base64(fondo_base64):
-            logger.warning("Imagen de fondo inválida, se generará sin fondo")
-        if not validar_imagen_base64(firma_base64):
-            logger.warning("Imagen de firma inválida, se generará sin firma")
-
         # Generar PDF
         buffer = BytesIO()
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
 
-        # Fondo
-        try:
-            if validar_imagen_base64(fondo_base64):
-                header, img_data_b64 = fondo_base64.split(',', 1)
-                img_data = base64.b64decode(img_data_b64)
-                c.drawImage(ImageReader(BytesIO(img_data)), 0, 0, width=width, height=height)
-        except Exception as e:
-            logger.error(f"Error al agregar fondo: {e}")
+        # Agregar fondo si es válido
+        if validar_imagen_base64(fondo_base64):
+            data_b64 = fondo_base64.split(',',1)[1] if ',' in fondo_base64 else fondo_base64
+            try:
+                img_bytes = base64.b64decode(data_b64)
+                c.drawImage(ImageReader(BytesIO(img_bytes)), 0, 0, width=width, height=height)
+            except Exception as e:
+                logger.error(f"Error al agregar fondo: {e}")
 
         styles = getSampleStyleSheet()
-        content = [
+        contenido = [
             Paragraph('EL DEPARTAMENTO DE GESTIÓN HUMANA', styles['Heading1']),
             Spacer(1, 24),
             Paragraph('CERTIFICA QUE:', styles['Heading2']),
             Spacer(1, 24),
             Paragraph(
-                f"El señor/a <b>{empleado.nombre}</b>, identificado con cédula No. <b>{empleado.identificacion}</b>, "
-                f"labora en nuestra empresa desde <b>{empleado.fechaIngreso}</b>, "
-                f"desempeñando el cargo de <b>{empleado.cargo}</b> con contrato "
-                f"<b>{empleado.tipoContrato}</b>.",
+                f"El señor/a <b>{empleado.nombre}</b>, identificado con cédula No. "
+                f"<b>{empleado.identificacion}</b>, labora en nuestra empresa desde "
+                f"<b>{empleado.fechaIngreso}</b>, desempeñando el cargo de <b>{empleado.cargo}</b> "
+                f"con contrato <b>{empleado.tipoContrato}</b>.",
                 styles['BodyText']
             )
         ]
 
         if req.incluirSalario:
-            content.extend([
+            contenido.extend([
                 Spacer(1, 24),
                 Paragraph("Detalle salarial:", styles['Heading3']),
                 Paragraph(f"Salario base: ${empleado.basico:,.2f}", styles['BodyText']),
-                # Puedes añadir más componentes salariales aquí
             ])
 
-        try:
-            if validar_imagen_base64(firma_base64):
-                _, firma_b64 = firma_base64.split(',', 1)
-                firma_data = base64.b64decode(firma_b64)
-                c.drawImage(ImageReader(BytesIO(firma_data)), width/2-75, 100, width=150, height=50)
-        except Exception as e:
-            logger.error(f"Error al agregar firma: {e}")
+        # Agregar firma si es válida
+        if validar_imagen_base64(firma_base64):
+            data_b64 = firma_base64.split(',',1)[1] if ',' in firma_base64 else firma_base64
+            try:
+                img_bytes = base64.b64decode(data_b64)
+                c.drawImage(ImageReader(BytesIO(img_bytes)), width/2-75, 100, width=150, height=50)
+            except Exception as e:
+                logger.error(f"Error al agregar firma: {e}")
 
-        Frame(40, 40, width-80, height-80).addFromList(content, c)
+        Frame(40, 40, width-80, height-80).addFromList(contenido, c)
         c.save()
 
-        # Validar y optimizar PDF
+        # Validar PDF antes de enviar
         buffer.seek(0)
         pdf_bytes = buffer.getvalue()
         if not validar_pdf(pdf_bytes):
             raise HTTPException(status_code=500, detail="El PDF generado es inválido")
 
+        # Linearizar si es posible
         if _HAVE_PIKEPDF:
             try:
                 with Pdf.open(BytesIO(pdf_bytes)) as pdf:
-                    optimized = BytesIO()
-                    pdf.save(optimized, linearize=True)
-                    pdf_bytes = optimized.getvalue()
+                    opt = BytesIO()
+                    pdf.save(opt, linearize=True)
+                    pdf_bytes = opt.getvalue()
             except PdfError as e:
                 logger.warning(f"No se pudo linearizar el PDF: {e}")
 
@@ -292,7 +290,7 @@ async def enviar_certificado(
             logger.error(f"Error enviando correo: {e}")
             raise HTTPException(status_code=500, detail="Error al enviar el correo")
 
-        # Registrar en historial
+        # Guardar en historial
         coleccion_historial.insert_one({
             'identificacion': empleado.identificacion,
             'nombre': empleado.nombre,
