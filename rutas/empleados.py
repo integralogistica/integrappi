@@ -14,8 +14,8 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
-from rutas.fondoBase64 import fondo_base64
-from rutas.firmaBase64 import firma_base64
+# from rutas.fondoBase64 import fondo_base64
+# from rutas.firmaBase64 import firma_base64
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -177,14 +177,14 @@ async def enviar_certificado(
     width, height = A4
 
     # Dibujar fondo si existe
-    fondo_clean = fondo_base64.split(",", 1)[1] if fondo_base64.startswith("data:image") else fondo_base64
-    try:
-        c.drawImage(
-            ImageReader(BytesIO(base64.b64decode(fondo_clean))),
-            0, 0, width=width, height=height
-        )
-    except Exception:
-        pass
+    # fondo_clean = fondo_base64.split(",", 1)[1] if fondo_base64.startswith("data:image") else fondo_base64
+    # try:
+    #     c.drawImage(
+    #         ImageReader(BytesIO(base64.b64decode(fondo_clean))),
+    #         0, 0, width=width, height=height
+    #     )
+    # except Exception:
+    #     pass
 
     # Estilos de texto
     styles = getSampleStyleSheet()
@@ -284,7 +284,7 @@ async def enviar_certificado(
     frame.addFromList(story, c)
 
     # Firma digital
-    firma_clean = firma_base64.split(",", 1)[1]
+    # firma_clean = firma_base64.split(",", 1)[1]
     y_base = 300
     c.setFont("Times-Bold", 12)
     c.drawCentredString(width/2, y_base + 5, "PATRICIA LEAL AROCA")
@@ -292,11 +292,11 @@ async def enviar_certificado(
     c.drawCentredString(width/2, y_base - 10, "Certificado laboral")
     c.drawCentredString(width/2, y_base - 22, "Gerente de gestión humana")
     c.drawCentredString(width/2, y_base - 34, "Integra cadena de servicios")
-    c.drawImage(
-        ImageReader(BytesIO(base64.b64decode(firma_clean))),
-        width/2 - 75, y_base - 10,
-        width=150, height=50, mask='auto'
-    )
+    # c.drawImage(
+    #     ImageReader(BytesIO(base64.b64decode(firma_clean))),
+    #     width/2 - 75, y_base - 10,
+    #     width=150, height=50, mask='auto'
+    # )
 
     c.showPage()
     c.save()
