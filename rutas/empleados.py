@@ -45,7 +45,6 @@ coleccion_historial = db["historial_certificados"]
 resend_api_key = os.getenv("RESEND_API_KEY")
 if not resend_api_key:
     raise ValueError("La variable de entorno RESEND_API_KEY no está configurada.")
-
 resend.api_key = resend_api_key
 
 # Modelos Pydantic
@@ -80,14 +79,13 @@ def validar_imagen_base64(b64_data: str) -> bool:
                 return False
         else:
             data = b64_data
-            
         img_data = base64.b64decode(data)
         img = Image.open(BytesIO(img_data))
         img.verify()
         img.close()
         return True
     except Exception as e:
-        logger.error(f"Error validando imagen base64: {str(e)}")
+        logger.error(f"Error validando imagen base64: {e}")
         return False
 
 def validar_pdf(pdf_bytes: bytes) -> bool:
@@ -97,7 +95,7 @@ def validar_pdf(pdf_bytes: bytes) -> bool:
         Pdf.open(BytesIO(pdf_bytes))
         return True
     except Exception as e:
-        logger.error(f"Error validando PDF: {str(e)}")
+        logger.error(f"Error validando PDF: {e}")
         return False
 
 # Transformación de documento Mongo a Pydantic
@@ -130,7 +128,6 @@ def transformar_empleado(doc: dict) -> Empleado:
                 return value
         return None
 
-    # Manejo especial para fecha
     fecha_ingreso = None
     try:
         raw_date = get_value(field_mapping['fechaIngreso'])
@@ -139,7 +136,7 @@ def transformar_empleado(doc: dict) -> Empleado:
         elif raw_date:
             fecha_ingreso = datetime.fromisoformat(str(raw_date)).isoformat()
     except Exception as e:
-        logger.error(f"Error procesando fecha: {str(e)}")
+        logger.error(f"Error procesando fecha: {e}")
 
     return Empleado(
         id=str(doc.get('_id', '')),
@@ -148,15 +145,15 @@ def transformar_empleado(doc: dict) -> Empleado:
         cargo=get_value(field_mapping['cargo']),
         tipoContrato=get_value(field_mapping['tipoContrato']),
         fechaIngreso=fecha_ingreso,
-        basico=float(get_value(field_mapping['basico']) or 0.0,
-        auxilioVivienda=float(get_value(field_mapping['auxilioVivienda']) or 0.0,
-        auxilioAlimentacion=float(get_value(field_mapping['auxilioAlimentacion']) or 0.0,
-        auxilioMovilidad=float(get_value(field_mapping['auxilioMovilidad']) or 0.0,
-        auxilioRodamiento=float(get_value(field_mapping['auxilioRodamiento']) or 0.0,
-        auxilioProductividad=float(get_value(field_mapping['auxilioProductividad']) or 0.0,
-        auxilioComunic=float(get_value(field_mapping['auxilioComunic']) or 0.0,
-        correo=get_value(field_mapping['correo'])
-    ))))))))
+        basico=float(get_value(field_mapping['basico']) or 0.0),
+        auxilioVivienda=float(get_value(field_mapping['auxilioVivienda']) or 0.0),
+        auxilioAlimentacion=float(get_value(field_mapping['auxilioAlimentacion']) or 0.0),
+        auxilioMovilidad=float(get_value(field_mapping['auxilioMovilidad']) or 0.0),
+        auxilioRodamiento=float(get_value(field_mapping['auxilioRodamiento']) or 0.0),
+        auxilioProductividad=float(get_value(field_mapping['auxilioProductividad']) or 0.0),
+        auxilioComunic=float(get_value(field_mapping['auxilioComunic']) or 0.0),
+        correo=get_value(field_mapping['correo']),
+    )
 
 # Rutas y aplicación
 ruta_empleado = APIRouter(
@@ -168,9 +165,10 @@ ruta_empleado = APIRouter(
 @ruta_empleado.get('/', response_model=List[Empleado])
 async def get_empleados():
     try:
-        return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
+        docs = list(coleccion_empleados.find())
+        return [transformar_empleado(doc) for doc in docs]
     except Exception as e:
-        logger.error(f"Error obteniendo empleados: {str(e)}")
+        logger.error(f"Error obteniendo empleados: {e}")
         raise HTTPException(status_code=500, detail="Error al obtener empleados")
 
 @ruta_empleado.get('/buscar', response_model=Empleado)
@@ -180,19 +178,18 @@ async def get_empleado_por_identificacion(
     try:
         query = {'$or': []}
         posibles_campos = ['IDENTIFICACIÓN', 'identificacion']
-        
-        # Manejar diferentes formatos de identificación
         for campo in posibles_campos:
             query['$or'].append({campo: identificacion})
             if identificacion.isdigit():
                 query['$or'].append({campo: int(identificacion)})
-
         doc = coleccion_empleados.find_one(query)
         if not doc:
             raise HTTPException(status_code=404, detail='Empleado no encontrado')
         return transformar_empleado(doc)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error buscando empleado: {str(e)}")
+        logger.error(f"Error buscando empleado: {e}")
         raise HTTPException(status_code=500, detail="Error interno en la búsqueda")
 
 @ruta_empleado.post('/enviar')
@@ -201,16 +198,13 @@ async def enviar_certificado(
     req: EnviarRequest = Body(...)
 ):
     try:
-        # Buscar empleado
         empleado = await get_empleado_por_identificacion(identificacion)
-        
         if not empleado.correo:
             raise HTTPException(status_code=400, detail='El empleado no tiene correo registrado')
 
-        # Validar imágenes
+        # Validaciones de imágenes
         if not validar_imagen_base64(fondo_base64):
             logger.warning("Imagen de fondo inválida, se generará sin fondo")
-        
         if not validar_imagen_base64(firma_base64):
             logger.warning("Imagen de firma inválida, se generará sin firma")
 
@@ -219,16 +213,15 @@ async def enviar_certificado(
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
 
-        # Agregar fondo
+        # Fondo
         try:
             if validar_imagen_base64(fondo_base64):
-                img_part = fondo_base64.split(',')
-                img_data = base64.b64decode(img_part[1] if len(img_part) > 1 else img_part[0])
+                header, img_data_b64 = fondo_base64.split(',', 1)
+                img_data = base64.b64decode(img_data_b64)
                 c.drawImage(ImageReader(BytesIO(img_data)), 0, 0, width=width, height=height)
         except Exception as e:
-            logger.error(f"Error al agregar fondo: {str(e)}")
+            logger.error(f"Error al agregar fondo: {e}")
 
-        # Contenido del PDF
         styles = getSampleStyleSheet()
         content = [
             Paragraph('EL DEPARTAMENTO DE GESTIÓN HUMANA', styles['Heading1']),
@@ -239,26 +232,26 @@ async def enviar_certificado(
                 f"El señor/a <b>{empleado.nombre}</b>, identificado con cédula No. <b>{empleado.identificacion}</b>, "
                 f"labora en nuestra empresa desde <b>{empleado.fechaIngreso}</b>, "
                 f"desempeñando el cargo de <b>{empleado.cargo}</b> con contrato "
-                f"<b>{empleado.tipoContrato}</b>.", 
+                f"<b>{empleado.tipoContrato}</b>.",
                 styles['BodyText']
             )
         ]
 
-        # Agregar componentes salariales si es necesario
         if req.incluirSalario:
-            content.append(Spacer(1, 24))
-            content.append(Paragraph("Detalle salarial:", styles['Heading3']))
-            content.append(Paragraph(f"Salario base: ${empleado.basico:,.2f}", styles['BodyText']))
-            # Agregar otros componentes salariales...
+            content.extend([
+                Spacer(1, 24),
+                Paragraph("Detalle salarial:", styles['Heading3']),
+                Paragraph(f"Salario base: ${empleado.basico:,.2f}", styles['BodyText']),
+                # Puedes añadir más componentes salariales aquí
+            ])
 
-        # Agregar firma
         try:
             if validar_imagen_base64(firma_base64):
-                firma_part = firma_base64.split(',')
-                firma_data = base64.b64decode(firma_part[1] if len(firma_part) > 1 else firma_part[0])
+                _, firma_b64 = firma_base64.split(',', 1)
+                firma_data = base64.b64decode(firma_b64)
                 c.drawImage(ImageReader(BytesIO(firma_data)), width/2-75, 100, width=150, height=50)
         except Exception as e:
-            logger.error(f"Error al agregar firma: {str(e)}")
+            logger.error(f"Error al agregar firma: {e}")
 
         Frame(40, 40, width-80, height-80).addFromList(content, c)
         c.save()
@@ -266,11 +259,9 @@ async def enviar_certificado(
         # Validar y optimizar PDF
         buffer.seek(0)
         pdf_bytes = buffer.getvalue()
-        
         if not validar_pdf(pdf_bytes):
             raise HTTPException(status_code=500, detail="El PDF generado es inválido")
 
-        # Linearizar PDF
         if _HAVE_PIKEPDF:
             try:
                 with Pdf.open(BytesIO(pdf_bytes)) as pdf:
@@ -278,7 +269,7 @@ async def enviar_certificado(
                     pdf.save(optimized, linearize=True)
                     pdf_bytes = optimized.getvalue()
             except PdfError as e:
-                logger.warning(f"No se pudo linearizar el PDF: {str(e)}")
+                logger.warning(f"No se pudo linearizar el PDF: {e}")
 
         # Enviar correo
         try:
@@ -286,11 +277,11 @@ async def enviar_certificado(
                 'from': 'no-reply@integralogistica.com',
                 'to': [empleado.correo],
                 'subject': f'Certificado Laboral - {empleado.nombre}',
-                'html': f'''
-                    <p>Estimado/a {empleado.nombre},</p>
-                    <p>Adjunto encontrará su certificado laboral actualizado.</p>
-                    <p>Atentamente,<br>Recursos Humanos</p>
-                ''',
+                'html': (
+                    f"<p>Estimado/a {empleado.nombre},</p>"
+                    "<p>Adjunto encontrará su certificado laboral actualizado.</p>"
+                    "<p>Atentamente,<br>Recursos Humanos</p>"
+                ),
                 'attachments': [{
                     'filename': f'certificado_{empleado.identificacion}.pdf',
                     'content': base64.b64encode(pdf_bytes).decode('utf-8'),
@@ -298,7 +289,7 @@ async def enviar_certificado(
                 }]
             })
         except Exception as e:
-            logger.error(f"Error enviando correo: {str(e)}")
+            logger.error(f"Error enviando correo: {e}")
             raise HTTPException(status_code=500, detail="Error al enviar el correo")
 
         # Registrar en historial
@@ -311,10 +302,10 @@ async def enviar_certificado(
 
         return JSONResponse(status_code=200, content={'message': 'Certificado enviado correctamente'})
 
-    except HTTPException as he:
-        raise he
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error general: {str(e)}", exc_info=True)
+        logger.error(f"Error general: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno al procesar la solicitud")
 
 app = FastAPI()
