@@ -295,6 +295,9 @@ async def enviar_certificado(
         final_bytes = linear_io.getvalue()
 
     # ——— Construir y enviar payload ———
+
+    attachment_b64 = base64.b64encode(final_bytes).decode('ascii')
+
     payload = {
         'from': 'no-reply@integralogistica.com',
         'to': [emp.correo],
@@ -302,7 +305,7 @@ async def enviar_certificado(
         'html': f'<p>Hola {emp.nombre},</p><p>Adjunto tu certificado laboral generado automáticamente.</p>',
         'attachments': [{
             'filename': f'certificado_{emp.identificacion}.pdf',
-            'content': final_bytes,
+            'content': attachment_b64,             # ← string JSON-serializable
             'content_type': 'application/pdf'
         }]
     }
