@@ -4,6 +4,7 @@ from io import BytesIO
 from fastapi import FastAPI, APIRouter, HTTPException, status, Query, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import base64
 from typing import Optional, List
 from pymongo import MongoClient
 import resend
