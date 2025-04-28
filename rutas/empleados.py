@@ -296,4 +296,3 @@ async def enviar_certificado(
 # ——— FastAPI app ———
 app = FastAPI()
 app.include_router(ruta_empleado)
-s
