@@ -188,7 +188,7 @@ async def enviar_certificado(
 
     now = datetime.now()
     fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
-    story = [Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
+    story = [Spacer(1, 100), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
     aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion), ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento), ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
     if show_salary and any(v>0 for _, v in aux_items):
         story.append(Spacer(1,6))
@@ -204,7 +204,7 @@ async def enviar_certificado(
     story.append(Spacer(1,6))
     story.append(Paragraph("Cordialmente,", info_style))
 
-    frame = Frame(40, 340, width-80, height-380, showBoundary=0)
+    frame = Frame(85, 340, width-85*2, height-380, showBoundary=0)
     frame.addFromList(story, c)
 
     # Firma y textos adicionales debajo
