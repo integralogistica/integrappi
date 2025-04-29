@@ -15,6 +15,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
+from reportlab.lib.enums import TA_JUSTIFY 
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")
@@ -164,8 +165,8 @@ async def enviar_certificado(
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("Title", parent=styles["Heading1"], alignment=1, fontName="Times-Bold", fontSize=16, leading=18)
     subtitle_style = ParagraphStyle("Subtitle", parent=styles["Heading3"], alignment=1, fontName="Times-Bold", fontSize=14, leading=14)
-    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=16)
-    info_style = ParagraphStyle("Info", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=14)
+    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=16, alignment=TA_JUSTIFY)
+    info_style = ParagraphStyle("Info", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=14, alignment=TA_JUSTIFY)
 
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
@@ -188,7 +189,7 @@ async def enviar_certificado(
 
     now = datetime.now()
     fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
-    story = [Spacer(1, 100), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
+    story = [Spacer(1, 75), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
     aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion), ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento), ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
     if show_salary and any(v>0 for _, v in aux_items):
         story.append(Spacer(1,6))
