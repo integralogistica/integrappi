@@ -149,15 +149,17 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Dibujar fondo desde URL
+    # Fondo semi-transparente y más pequeño
     try:
         bg_url = "https://storage.googleapis.com/integrapp/Imagenes/albatroz.png"
         bg_data = urlopen(bg_url).read()
-        c.drawImage(
-            ImageReader(BytesIO(bg_data)), 0, 0,
-            width=width, height=height,
-            preserveAspectRatio=True, mask='auto'
-        )
+        img = ImageReader(BytesIO(bg_data))
+        cw, ch = width * 0.8, height * 0.8
+        x0, y0 = (width - cw) / 2, (height - ch) / 2
+        c.saveState()
+        c.setFillAlpha(0.2)
+        c.drawImage(img, x0, y0, width=cw, height=ch, preserveAspectRatio=True, mask='auto')
+        c.restoreState()
     except Exception:
         pass
 
@@ -173,14 +175,16 @@ async def enviar_certificado(
 
     try:
         dt_ing = datetime.fromisoformat(emp.fechaIngreso)
-        meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+        meses_esp = ["enero","febrero","marzo","abril","mayo","junio",
+                     "julio","agosto","septiembre","octubre","noviembre","diciembre"]
         fecha_humana = f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
     except Exception:
         fecha_humana = emp.fechaIngreso or ""
 
     ced = (f"{int(emp.identificacion):,}".replace(",", ".") if emp.identificacion.isdigit() else emp.identificacion)
     texto = (
-        f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, labora en nuestra empresa desde <b>{fecha_humana}</b>, desempenando el cargo de <b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
+        f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
+        f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de <b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
     )
     if show_salary and emp.basico > 0:
         texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
@@ -189,7 +193,9 @@ async def enviar_certificado(
     now = datetime.now()
     fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
     story = [Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
-    aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion),("Auxilio Movilidad", emp.auxilioMovilidad),("Auxilio Rodamiento", emp.auxilioRodamiento),("Auxilio Productividad", emp.auxilioProductividad),("Auxilio Comunic", emp.auxilioComunic)]
+    aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion),
+                 ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento),
+                 ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
     if show_salary and any(v>0 for _,v in aux_items):
         story.append(Spacer(1,6))
         story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
@@ -204,14 +210,25 @@ async def enviar_certificado(
     story.append(Spacer(1,6))
     story.append(Paragraph("Cordialmente,", info_style))
 
-    frame = Frame(40,340,width-80,height-380,showBoundary=0)
-    frame.addFromList(story,c)
+    frame = Frame(40, 340, width-80, height-380, showBoundary=0)
+    frame.addFromList(story, c)
 
-    # Firma desde URL
+    # Firma y textos adicionales debajo
+    y_base = 300
+    c.setFont("Times-Bold", 12)
+    c.drawCentredString(width/2, y_base + 5, "PATRICIA LEAL AROCA")
+    c.drawCentredString(width/2, y_base - 10, "Certificado laboral")
+    c.drawCentredString(width/2, y_base - 22, "Gerente de gestión humana")
+    c.drawCentredString(width/2, y_base - 34, "Integra cadena de servicios")
     try:
         sig_url = "https://storage.googleapis.com/integrapp/Imagenes/firma%20patricia.png"
         sig_data = urlopen(sig_url).read()
-        c.drawImage(ImageReader(BytesIO(sig_data)), x=width/2-75, y=300-10, width=150, height=50, mask='auto')
+        c.drawImage(
+            ImageReader(BytesIO(sig_data)),
+            x=width/2-75, y=y_base-10,
+            width=150, height=50,
+            mask='auto'
+        )
     except Exception:
         pass
 
