@@ -69,9 +69,9 @@ def transformar_empleado(doc: dict) -> Empleado:
                 continue
             if isinstance(val, (int, float)):
                 return float(val)
-            s = str(val).replace(".", "").replace(",", "").strip()
-            if s.isdigit():
-                return float(s)
+            num = str(val).replace(".", "").replace(",", "").strip()
+            if num.isdigit():
+                return float(num)
         return 0.0
     fecha_raw = get_val("fechaIngreso", "FECHA_INGRESO", "FECHA INGRESO")
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, "isoformat") else str(fecha_raw or "")
@@ -100,8 +100,7 @@ ruta_empleado = APIRouter(
 
 @ruta_empleado.get("/", response_model=List[Empleado])
 async def get_empleados():
-    docs = coleccion_empleados.find()
-    return [transformar_empleado(doc) for doc in docs]
+    return [transformar_empleado(doc) for doc in coleccion_empleados.find()]
 
 @ruta_empleado.get("/buscar", response_model=Empleado)
 async def get_empleado_por_identificacion(
@@ -149,16 +148,14 @@ async def enviar_certificado(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Fondo semi-transparente y más pequeño
+    # Fondo de página completa desde nueva URL
     try:
-        bg_url = "https://storage.googleapis.com/integrapp/Imagenes/albatroz.png"
+        bg_url = "https://storage.googleapis.com/integrapp/Imagenes/FONDO%20INTEGRA%20CORPORATIVO.png"
         bg_data = urlopen(bg_url).read()
         img = ImageReader(BytesIO(bg_data))
-        cw, ch = width * 0.8, height * 0.8
-        x0, y0 = (width - cw) / 2, (height - ch) / 2
         c.saveState()
-        c.setFillAlpha(0.2)
-        c.drawImage(img, x0, y0, width=cw, height=ch, preserveAspectRatio=True, mask='auto')
+        c.setFillAlpha(0.3)
+        c.drawImage(img, 0, 0, width=width, height=height, mask='auto')
         c.restoreState()
     except Exception:
         pass
@@ -175,8 +172,7 @@ async def enviar_certificado(
 
     try:
         dt_ing = datetime.fromisoformat(emp.fechaIngreso)
-        meses_esp = ["enero","febrero","marzo","abril","mayo","junio",
-                     "julio","agosto","septiembre","octubre","noviembre","diciembre"]
+        meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
         fecha_humana = f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
     except Exception:
         fecha_humana = emp.fechaIngreso or ""
@@ -193,10 +189,8 @@ async def enviar_certificado(
     now = datetime.now()
     fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
     story = [Spacer(1, 50), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
-    aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion),
-                 ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento),
-                 ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
-    if show_salary and any(v>0 for _,v in aux_items):
+    aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion), ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento), ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
+    if show_salary and any(v>0 for _, v in aux_items):
         story.append(Spacer(1,6))
         story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
         for label, v in aux_items:
@@ -223,12 +217,7 @@ async def enviar_certificado(
     try:
         sig_url = "https://storage.googleapis.com/integrapp/Imagenes/firma%20patricia.png"
         sig_data = urlopen(sig_url).read()
-        c.drawImage(
-            ImageReader(BytesIO(sig_data)),
-            x=width/2-75, y=y_base-10,
-            width=150, height=50,
-            mask='auto'
-        )
+        c.drawImage(ImageReader(BytesIO(sig_data)), x=width/2-75, y=y_base-10, width=150, height=50, mask='auto')
     except Exception:
         pass
 
