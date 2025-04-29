@@ -162,10 +162,10 @@ async def enviar_certificado(
 
     # Estilos y contenido
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("Title", parent=styles["Heading1"], alignment=1, fontName="Times-Bold", fontSize=14, leading=18)
-    subtitle_style = ParagraphStyle("Subtitle", parent=styles["Heading3"], alignment=1, fontName="Times-Bold", fontSize=12, leading=14)
-    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontName="Times-Roman", fontSize=12, leading=16)
-    info_style = ParagraphStyle("Info", parent=styles["Normal"], fontName="Times-Roman", fontSize=12, leading=14)
+    title_style = ParagraphStyle("Title", parent=styles["Heading1"], alignment=1, fontName="Times-Bold", fontSize=16, leading=18)
+    subtitle_style = ParagraphStyle("Subtitle", parent=styles["Heading3"], alignment=1, fontName="Times-Bold", fontSize=14, leading=14)
+    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=16)
+    info_style = ParagraphStyle("Info", parent=styles["Normal"], fontName="Times-Roman", fontSize=14, leading=14)
 
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
