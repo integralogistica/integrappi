@@ -180,10 +180,10 @@ async def enviar_certificado(
     ced = (f"{int(emp.identificacion):,}".replace(",", ".") if emp.identificacion.isdigit() else emp.identificacion)
     texto = (
         f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
-        f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de <b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>."
+        f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de <b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>,"
     )
     if show_salary and emp.basico > 0:
-        texto += f" Con un salario fijo mensual por valor de <b>{int(emp.basico):,}</b> pesos."
+        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos,"
     body = Paragraph(texto, body_style)
 
     now = datetime.now()
@@ -192,11 +192,11 @@ async def enviar_certificado(
     aux_items = [("Auxilio Vivienda", emp.auxilioVivienda), ("Auxilio Alimentación", emp.auxilioAlimentacion), ("Auxilio Movilidad", emp.auxilioMovilidad), ("Auxilio Rodamiento", emp.auxilioRodamiento), ("Auxilio Productividad", emp.auxilioProductividad), ("Auxilio Comunic", emp.auxilioComunic)]
     if show_salary and any(v>0 for _, v in aux_items):
         story.append(Spacer(1,6))
-        story.append(Paragraph("más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
+        story.append(Paragraph("Más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
         for label, v in aux_items:
             if v>0:
                 story.append(Spacer(1,6))
-                story.append(Paragraph(f"<b>{label}:</b> {int(v):,}".replace(",","."), body_style))
+                story.append(Paragraph(f"<b>{label}:</b> ${int(v):,}".replace(",","."), body_style))
     story.append(Spacer(1,10))
     story.append(Paragraph("Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.", info_style))
     story.append(Spacer(1,6))
