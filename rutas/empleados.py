@@ -183,7 +183,7 @@ async def enviar_certificado(
         f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de <b>{emp.cargo}</b> con contrato a término <b>{emp.tipoContrato}</b>,"
     )
     if show_salary and emp.basico > 0:
-        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos,"
+        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos"
     body = Paragraph(texto, body_style)
 
     now = datetime.now()
