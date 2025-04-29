@@ -200,7 +200,7 @@ async def enviar_certificado(
     story.append(Spacer(1,10))
     story.append(Paragraph("Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.", info_style))
     story.append(Spacer(1,6))
-    story.append(Paragraph(f"La presente certificación se expide a solicitud del interesado, dado a {fecha_cert} en la ciudad de Bogotá.", info_style))
+    story.append(Paragraph(f"La presente certificación se expide a solicitud del interesado el {fecha_cert} en la ciudad de Bogotá.", info_style))
     story.append(Spacer(1,6))
     story.append(Paragraph("Cordialmente,", info_style))
 
