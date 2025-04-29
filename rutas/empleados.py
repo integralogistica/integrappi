@@ -154,7 +154,7 @@ async def enviar_certificado(
         bg_data = urlopen(bg_url).read()
         img = ImageReader(BytesIO(bg_data))
         c.saveState()
-        c.setFillAlpha(0.3)
+        c.setFillAlpha(0.6)
         c.drawImage(img, 0, 0, width=width, height=height, mask='auto')
         c.restoreState()
     except Exception:
