@@ -16,6 +16,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, Frame, Spacer
 from datetime import datetime
 from reportlab.lib.enums import TA_JUSTIFY 
+from dotenv import load_dotenv
+load_dotenv()
 
 # ——— Configuración de MongoDB ———
 mongo_uri = os.getenv("MONGO_URI")

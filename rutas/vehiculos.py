@@ -7,6 +7,8 @@ from io import BytesIO
 from PIL import Image
 import os
 from typing import List
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configuración de MongoDB
 mongo_uri = os.getenv("MONGO_URI")

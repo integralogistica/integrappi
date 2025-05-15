@@ -7,6 +7,7 @@ from rutas.pagoSaldos import ruta_manifiestos
 from rutas.novedades import ruta_novedades
 from rutas.vehiculos import ruta_vehiculos
 from rutas.empleados import ruta_empleado
+from rutas.puente_biometrico import ruta_biometria
 
 app = FastAPI()
 app.title = "integra"
@@ -26,6 +27,7 @@ app.include_router(ruta_manifiestos)
 app.include_router(ruta_novedades)
 app.include_router(ruta_vehiculos)
 app.include_router(ruta_empleado)
+app.include_router(ruta_biometria)
 
 
 @app.get("/", tags=['Home'])
