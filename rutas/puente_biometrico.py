@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional
+import base64
 
 # ─── CARGAR CONFIG ─────────────────────────────────────────────────────────────
 load_dotenv()
@@ -26,11 +27,11 @@ class HuellaResponse(BaseModel):
     huella: str
 
 class GuardarHuellasRequest(BaseModel):
-    usuario_id: str
+    tenedor: str
     huellas: List[Optional[str]]   # Debe tener longitud=10
 
 class GuardarHuellaRequest(BaseModel):
-    usuario_id: str
+    tenedor: str
     indice: int                     # 0–9
     huella: str
 
@@ -52,14 +53,14 @@ async def guardar_todas_huellas(data: GuardarHuellasRequest):
     """
     Guarda o actualiza un documento con las 10 huellas de una vez.
     """
-    if len(data.huellas) != 10:
+    if len(data.huellas)  !=10:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Se requieren exactamente 10 huellas."
         )
     try:
         result = collection.update_one(
-            {"usuario_id": data.usuario_id},
+            {"tenedor": data.tenedor},
             {"$set": {"huellas": data.huellas}},
             upsert=True
         )
@@ -84,7 +85,7 @@ async def guardar_huella(req: GuardarHuellaRequest):
         )
     try:
         result = collection.update_one(
-            {"usuario_id": req.usuario_id},
+            {"tenedor": req.tenedor},
             {"$set": {f"huellas.{req.indice}": req.huella}},
             upsert=True
         )
@@ -94,3 +95,31 @@ async def guardar_huella(req: GuardarHuellaRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+#     Devuelve las huellas registradas para una cédula dada. La comparación se hace del lado del cliente (C#).
+
+class VerificarHuellaRequest(BaseModel):
+    tenedor: str
+    huella: str  # base64 enviada por el frontend
+
+@ruta_biometria.post("/verificar")
+async def verificar_huella(req: VerificarHuellaRequest):
+    try:
+        doc = collection.find_one({"tenedor": req.tenedor})
+        if not doc:
+            raise HTTPException(status_code=404, detail="No se encontró ningún usuario con esa cédula.")
+        if "huellas" not in doc or not doc["huellas"]:
+            raise HTTPException(status_code=404, detail="No hay huellas registradas para esta cédula.")
+
+        huellas = [h for h in doc["huellas"] if h]
+        return {"match": True, "huellas": huellas}
+
+    except HTTPException as http_err:
+        raise http_err  # deja que FastAPI lo maneje bien
+
+    except Exception as e:
+        print("Error en /verificar:", e)
+        raise HTTPException(status_code=500, detail=str(e) or "Error interno del servidor")
