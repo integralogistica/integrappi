@@ -1,21 +1,32 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, UploadFile, Form
 from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import List, Optional
-import base64
+from pydantic import BaseModel, Field
+from typing import Dict, Optional
+from google.cloud import storage
+from io import BytesIO
+from PIL import Image
+import certifi
 
-# ─── CARGAR CONFIG ─────────────────────────────────────────────────────────────
+
+# ─── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
-mongo_uri = os.getenv("MONGO_URI")
-if not mongo_uri:
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
-client = MongoClient(mongo_uri)
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if not GOOGLE_APPLICATION_CREDENTIALS:
+    raise ValueError("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS no está configurada.")
+BUCKET_NAME = os.getenv("BUCKET_NAME", "integrapp")  # Ajusta si tu bucket se llama distinto
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
+
+# ─── MONGO ─────────────────────────────────────────────────────────────────────
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client["integra"]
 collection = db["biometria"]
 
-# ─── ROUTER ─────────────────────────────────────────────────────────────────────
+# ─── ROUTER ────────────────────────────────────────────────────────────────────
 ruta_biometria = APIRouter(
     prefix="/biometria",
     tags=["Biometría"],
@@ -26,14 +37,34 @@ ruta_biometria = APIRouter(
 class HuellaResponse(BaseModel):
     huella: str
 
-class GuardarHuellasRequest(BaseModel):
-    tenedor: str
-    huellas: List[Optional[str]]   # Debe tener longitud=10
+class DedoHuella(BaseModel):
+    plantilla: Optional[str] = None
+    imagen_url: Optional[str] = None
 
-class GuardarHuellaRequest(BaseModel):
+class GuardarHuellasFullRequest(BaseModel):
     tenedor: str
-    indice: int                     # 0–9
-    huella: str
+    huellas: Dict[int, DedoHuella] = Field(..., description="Keys 0–9, cada uno con plantilla y/o imagen_url")
+
+class VerificarHuellaRequest(BaseModel):
+    tenedor: str
+    huella: str  # base64 enviada por el frontend
+
+# ─── UTIL ───────────────────────────────────────────────────────────────────────
+def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int = 400, max_height: int = 400) -> BytesIO:
+    try:
+        # Convertimos archivo.file en bytes, ya que no se puede leer dos veces directamente
+        contenido = archivo.file.read()
+        stream = BytesIO(contenido)
+
+        imagen = Image.open(stream)
+        imagen.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+
+        buffer = BytesIO()
+        imagen.save(buffer, format=formato, optimize=True, quality=80)
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error al optimizar imagen: {str(e)}")
 
 # ─── ENDPOINTS ─────────────────────────────────────────────────────────────────
 @ruta_biometria.get("/capturar", response_model=HuellaResponse)
@@ -47,79 +78,105 @@ async def capturar_huella():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@ruta_biometria.post("/guardar_todas", status_code=status.HTTP_201_CREATED)
-async def guardar_todas_huellas(data: GuardarHuellasRequest):
+@ruta_biometria.post("/guardar_completo", status_code=status.HTTP_201_CREATED)
+async def guardar_huellas_completas(data: GuardarHuellasFullRequest):
     """
-    Guarda o actualiza un documento con las 10 huellas de una vez.
+    Guarda o actualiza un documento con el diccionario de dedos,
+    cada uno con plantilla y/o URL de imagen.
     """
-    if len(data.huellas)  !=10:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Se requieren exactamente 10 huellas."
-        )
     try:
+        # Convertir índices a cadenas para la clave en Mongo
+        doc_huellas = { str(idx): dedo.dict() for idx, dedo in data.huellas.items() }
         result = collection.update_one(
             {"tenedor": data.tenedor},
-            {"$set": {"huellas": data.huellas}},
+            {"$set": {"huellas": doc_huellas}},
             upsert=True
         )
         return {
-            "mensaje": "Huellas guardadas correctamente",
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None,
+            "mensaje": "Huellas completas guardadas correctamente",
             "modified_count": result.modified_count
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@ruta_biometria.post("/guardar", status_code=status.HTTP_201_CREATED)
-async def guardar_huella(req: GuardarHuellaRequest):
-    """
-    Guarda o actualiza una sola huella en el array por índice (0–9).
-    """
-    if req.indice < 0 or req.indice > 9:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Índice de dedo inválido. Debe estar entre 0 y 9."
-        )
-    try:
-        result = collection.update_one(
-            {"tenedor": req.tenedor},
-            {"$set": {f"huellas.{req.indice}": req.huella}},
-            upsert=True
-        )
-        return {
-            "mensaje": f"Huella índice {req.indice} guardada correctamente",
-            "modified_count": result.modified_count
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-#     Devuelve las huellas registradas para una cédula dada. La comparación se hace del lado del cliente (C#).
-
-class VerificarHuellaRequest(BaseModel):
-    tenedor: str
-    huella: str  # base64 enviada por el frontend
 
 @ruta_biometria.post("/verificar")
 async def verificar_huella(req: VerificarHuellaRequest):
+    """
+    Devuelve todas las plantillas registradas para comparación en el cliente.
+    """
     try:
-        doc = collection.find_one({"tenedor": req.tenedor})
-        if not doc:
-            raise HTTPException(status_code=404, detail="No se encontró ningún usuario con esa cédula.")
-        if "huellas" not in doc or not doc["huellas"]:
+        doc = collection.find_one(
+            {"tenedor": req.tenedor},
+            {"_id": 0, "huellas": 1}  # 👈 CORREGIDO
+        )
+        if not doc or "huellas" not in doc:
             raise HTTPException(status_code=404, detail="No hay huellas registradas para esta cédula.")
 
-        huellas = [h for h in doc["huellas"] if h]
-        return {"match": True, "huellas": huellas}
+        # Extraer solo las plantillas base64
+        plantillas = {
+            idx: info
+            for idx, info in doc["huellas"].items()
+            if info.get("plantilla")
+        }
+
+        if not plantillas:
+            raise HTTPException(status_code=404, detail="No se encontraron huellas para esta cédula.")
+        return {"match": True, "plantillas": plantillas}
 
     except HTTPException as http_err:
-        raise http_err  # deja que FastAPI lo maneje bien
+        raise http_err
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@ruta_biometria.post("/subir-imagen", status_code=status.HTTP_201_CREATED)
+async def subir_imagen_huella(
+    archivo: UploadFile,
+    tenedor: str = Form(...),
+    indice: int = Form(...)
+):
+    """
+    Optimiza y sube la imagen de la huella al bucket de GCS,
+    luego guarda la URL dentro del campo huellas[indice].imagen_url.
+    """
+    if indice < 0 or indice > 9:
+        raise HTTPException(status_code=400, detail="Índice de dedo inválido (debe ser 0–9).")
+    
+    try:
+        print(f"📥 Recibido archivo: {archivo.filename}, tenedor: {tenedor}, índice: {indice}")
+
+        cliente = storage.Client()
+        print("✅ Cliente GCS creado")
+
+        bucket = cliente.bucket(BUCKET_NAME)
+        print(f"✅ Acceso al bucket: {BUCKET_NAME}")
+
+        nombre_archivo = f"Huellas/huella_{tenedor}_{indice}.webp"
+        blob = bucket.blob(nombre_archivo)
+        print(f"📂 Archivo a subir: {nombre_archivo}")
+
+        imagen_buf = optimizar_imagen(archivo)
+        print("🖼 Imagen optimizada correctamente")
+
+        blob.upload_from_file(imagen_buf, content_type="image/webp")
+        print("📤 Imagen subida exitosamente a GCS")
+
+        url = f"https://storage.googleapis.com/{BUCKET_NAME}/{nombre_archivo}"
+        print(f"🔗 URL generada: {url}")
+
+        result = collection.update_one(
+            {"tenedor": tenedor},
+            {"$set": {f"huellas.{indice}.imagen_url": url}},
+            upsert=True
+        )
+        print(f"📦 Mongo actualizado: modified_count = {result.modified_count}")
+
+        return {
+            "mensaje": "Imagen subida correctamente",
+            "url": url,
+            "modified_count": result.modified_count
+        }
 
     except Exception as e:
-        print("Error en /verificar:", e)
-        raise HTTPException(status_code=500, detail=str(e) or "Error interno del servidor")
+        print("❌ ERROR en /subir-imagen:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
