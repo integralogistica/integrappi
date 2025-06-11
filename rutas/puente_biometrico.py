@@ -47,7 +47,10 @@ class GuardarHuellasFullRequest(BaseModel):
 
 class VerificarHuellaRequest(BaseModel):
     tenedor: str
-    huella: str  # base64 enviada por el frontend
+
+class VerificarHuellaResponse(BaseModel):
+    match: bool
+    plantillas: Dict[int, str]
 
 # ─── UTIL ───────────────────────────────────────────────────────────────────────
 def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int = 400, max_height: int = 400) -> BytesIO:
@@ -99,35 +102,31 @@ async def guardar_huellas_completas(data: GuardarHuellasFullRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @ruta_biometria.post("/verificar")
 async def verificar_huella(req: VerificarHuellaRequest):
-    """
-    Devuelve todas las plantillas registradas para comparación en el cliente.
-    """
-    try:
-        doc = collection.find_one(
-            {"tenedor": req.tenedor},
-            {"_id": 0, "huellas": 1}  # 👈 CORREGIDO
-        )
-        if not doc or "huellas" not in doc:
-            raise HTTPException(status_code=404, detail="No hay huellas registradas para esta cédula.")
+    # 1. Find document for this ID
+    doc = collection.find_one(
+        {"tenedor": req.tenedor},
+        {"_id": 0, "huellas": 1}
+    )
+    if not doc or "huellas" not in doc:
+        raise HTTPException(404, "No hay huellas registradas para esta cédula.")
 
-        # Extraer solo las plantillas base64
-        plantillas = {
-            idx: info
-            for idx, info in doc["huellas"].items()
-            if info.get("plantilla")
-        }
+    # 2. Extract all available templates
+    plantillas = {
+        idx: info.get("plantilla")
+        for idx, info in doc["huellas"].items()
+        if info.get("plantilla")
+    }
+    
+    if not plantillas:
+        raise HTTPException(404, "No se encontraron plantillas válidas para esta cédula.")
 
-        if not plantillas:
-            raise HTTPException(status_code=404, detail="No se encontraron huellas para esta cédula.")
-        return {"match": True, "plantillas": plantillas}
+    # 3. Return templates
+    return {"plantillas": plantillas}
 
-    except HTTPException as http_err:
-        raise http_err
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    
 
 @ruta_biometria.post("/subir-imagen", status_code=status.HTTP_201_CREATED)
 async def subir_imagen_huella(
