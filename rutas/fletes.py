@@ -1,0 +1,166 @@
+# archivo: rutas/ruta_fletes.py
+
+from fastapi import APIRouter, HTTPException, status, UploadFile, File
+from pymongo import MongoClient
+from pydantic import BaseModel
+from typing import List, Dict
+import os
+import pandas as pd
+
+# ------------------------------
+# 🔗 Conexión MongoDB
+# ------------------------------
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+client = MongoClient(MONGO_URI)
+db = client["integra"]
+coleccion_fletes = db["tarifas"]
+
+# ------------------------------
+# 🚦 Configuración Router
+# ------------------------------
+ruta_fletes = APIRouter(
+    prefix="/fletes",
+    tags=["Fletes"],
+    responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}},
+)
+
+# ------------------------------
+# 📌 Esquema Pydantic
+# ------------------------------
+class Flete(BaseModel):
+    origen: str
+    destino: str
+    ruta: str
+    tipo: str
+    tarifas: Dict[str, float]
+
+# ------------------------------
+# 📌 Modelo de salida
+# ------------------------------
+def modelo_flete(f: dict) -> dict:
+    return {
+        "origen": f["origen"],
+        "destino": f["destino"],
+        "ruta": f["ruta"],
+        "tipo": f["tipo"],
+        "tarifas": f["tarifas"],
+    }
+
+# ------------------------------
+# ✅ Crear flete/tarifa individual
+# ------------------------------
+@ruta_fletes.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+async def crear_flete(data: Flete):
+    origen = data.origen.upper().strip()
+    destino = data.destino.upper().strip()
+    # Verificar duplicado
+    if coleccion_fletes.find_one({"origen": origen, "destino": destino}):
+        raise HTTPException(status_code=409, detail="Flete ya existe para ese origen y destino")
+    nuevo = {
+        "origen": origen,
+        "destino": destino,
+        "ruta": data.ruta.upper().strip(),
+        "tipo": data.tipo.upper().strip(),
+        "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
+    }
+    coleccion_fletes.insert_one(nuevo)
+    return {"mensaje": "Flete creado exitosamente", "flete": modelo_flete(nuevo)}
+
+# ------------------------------
+# ✅ Carga masiva desde Excel (reemplaza todo)
+# ------------------------------
+# Carga masiva corregida con campo TIPO
+@ruta_fletes.post("/cargar-masivo", response_model=dict)
+async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
+    try:
+        df = pd.read_excel(archivo.file)
+        df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
+        if not {"ORIGEN", "DESTINO", "RUTA", "TIPO"}.issubset(df.columns):
+            raise HTTPException(status_code=400, detail="El archivo debe tener ORIGEN, DESTINO, RUTA y TIPO")
+        registros = []
+        for _, row in df.iterrows():
+            origen = str(row["ORIGEN"]).strip().upper()
+            destino = str(row["DESTINO"]).strip().upper()
+            ruta = str(row["RUTA"]).strip().upper()
+            tipo = str(row["TIPO"]).strip().upper()
+            tarifas = {}
+            for col in df.columns:
+                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO"}:
+                    tarifas[col] = float(row[col])
+            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "tarifas": tarifas})
+        coleccion_fletes.delete_many({})
+        if registros:
+            coleccion_fletes.insert_many(registros)
+        return {"mensaje": f"{len(registros)} tarifas cargadas con TIPO, anteriores eliminadas"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------
+# ✅ Obtener valor de tarifa específica
+# ------------------------------
+@ruta_fletes.get("/buscar-tarifa", response_model=dict)
+async def obtener_tarifa_especifica(origen: str, destino: str, tipo_vehiculo: str):
+    o = origen.upper().strip()
+    d = destino.upper().strip()
+    t = tipo_vehiculo.upper().strip()
+    flete = coleccion_fletes.find_one({"origen": o, "destino": d})
+    if not flete:
+        raise HTTPException(status_code=404, detail="No se encontró flete para ese origen y destino")
+    valor = flete["tarifas"].get(t)
+    if valor is None:
+        raise HTTPException(status_code=404, detail=f"Tarifa '{t}' no encontrada")
+    return {"origen": o, "destino": d, "tipo_vehiculo": t, "valor": valor}
+
+# ------------------------------
+# ✅ Listar todos los fletes
+# ------------------------------
+@ruta_fletes.get("/", response_model=List[dict])
+async def obtener_fletes():
+    docs = coleccion_fletes.find()
+    return [modelo_flete(f) for f in docs]
+
+# ------------------------------
+# ✅ Obtener flete por origen y destino
+# ------------------------------
+@ruta_fletes.get("/{origen}/{destino}", response_model=dict)
+async def get_flete(origen: str, destino: str):
+    o = origen.upper().strip()
+    d = destino.upper().strip()
+    flete = coleccion_fletes.find_one({"origen": o, "destino": d})
+    if not flete:
+        raise HTTPException(status_code=404, detail="Flete no encontrado")
+    return modelo_flete(flete)
+
+# ------------------------------
+# ✅ Actualizar flete por origen y destino
+# ------------------------------
+@ruta_fletes.put("/{origen}/{destino}", response_model=dict)
+async def actualizar_flete(origen: str, destino: str, data: Flete):
+    o = origen.upper().strip()
+    d = destino.upper().strip()
+    actualiza = {
+        "origen": o,
+        "destino": d,
+        "ruta": data.ruta.upper().strip(),
+        "tipo": data.tipo.upper().strip(),
+        "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
+    }
+    result = coleccion_fletes.update_one({"origen": o, "destino": d}, {"$set": actualiza})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Flete no encontrado para actualizar")
+    return {"mensaje": "Flete actualizado", "flete": actualiza}
+
+# ------------------------------
+# ✅ Eliminar flete por origen y destino
+# ------------------------------
+@ruta_fletes.delete("/{origen}/{destino}", response_model=dict)
+async def eliminar_flete(origen: str, destino: str):
+    o = origen.upper().strip()
+    d = destino.upper().strip()
+    result = coleccion_fletes.delete_one({"origen": o, "destino": d})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Flete no encontrado para eliminar")
+    return {"mensaje": "Flete eliminado exitosamente"}

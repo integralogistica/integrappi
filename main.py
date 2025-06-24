@@ -8,6 +8,11 @@ from rutas.novedades import ruta_novedades
 from rutas.vehiculos import ruta_vehiculos
 from rutas.empleados import ruta_empleado
 from rutas.puente_biometrico import ruta_biometria
+from rutas.baseusuarios import ruta_baseusuarios
+from rutas.clientes import ruta_clientes
+from rutas.fletes import ruta_fletes
+from rutas.pedidos import ruta_pedidos
+
 
 app = FastAPI()
 app.title = "integra"
@@ -28,6 +33,10 @@ app.include_router(ruta_novedades)
 app.include_router(ruta_vehiculos)
 app.include_router(ruta_empleado)
 app.include_router(ruta_biometria)
+app.include_router(ruta_baseusuarios)
+app.include_router(ruta_clientes)
+app.include_router(ruta_fletes)
+app.include_router(ruta_pedidos)
 
 
 @app.get("/", tags=['Home'])
