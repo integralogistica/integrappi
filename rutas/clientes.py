@@ -40,6 +40,8 @@ class Cliente(BaseModel):
     email: Optional[EmailStr] = None
     direccion: Optional[str] = None
     forma_pago: Optional[str] = None
+    equivalencia_centro_costo: Optional[str] = None
+    
 
 # ------------------------------
 # 📌 Modelo de salida
@@ -56,7 +58,8 @@ def modelo_cliente(c: dict) -> dict:
         "fax": c["fax"],
         "email": c["email"],
         "direccion": c["direccion"],
-        "forma_pago": c["forma_pago"],        
+        "forma_pago": c["forma_pago"],
+        "equivalencia_centro_costo": c["equivalencia_centro_costo"],        
     }
 
 # ------------------------------
@@ -77,7 +80,8 @@ async def crear_cliente(data: Cliente):
         "fax": data.fax.strip(),
         "email": data.email.strip(),
         "direccion": data.direccion.strip(),
-        "forma_pago": data.forma_pago.strip(),        
+        "forma_pago": data.forma_pago.strip(),
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.strip(),
     }
     inserted_id = coleccion_clientes.insert_one(nuevo).inserted_id
     cliente = coleccion_clientes.find_one({"_id": inserted_id})
@@ -124,7 +128,8 @@ async def actualizar_cliente(cliente_id: str, data: Cliente):
         "fax": data.fax.strip(),
         "email": data.email.strip(),
         "direccion": data.direccion.strip(),
-        "forma_pago": data.forma_pago.strip(),        
+        "forma_pago": data.forma_pago.strip(),
+        "equivalencia_centro_costo     ": data.equivalencia_centro_costo     .strip(),        
     }
     result = coleccion_clientes.update_one({"_id": oid}, {"$set": actualiza})
     if result.matched_count == 0:
@@ -156,7 +161,7 @@ async def cargar_clientes_masivo(archivo: UploadFile = File(...)):
         df = df.fillna("").astype(str)   
         # Normalizar nombres de columna
         df.columns = [col.strip().lower().replace(" ", "_") for col in df.columns]
-        required = {"nit", "nombre", "ubicacion", "contacto", "cargo", "telefono", "fax", "email", "direccion", "forma_pago"}
+        required = {"nit", "nombre", "ubicacion", "contacto", "cargo", "telefono", "fax", "email", "direccion", "forma_pago","equivalencia_centro_costo"}
         if not required.issubset(df.columns):
             faltantes = required - set(df.columns)
             raise HTTPException(status_code=400, detail=f"Columnas faltantes: {faltantes}")
@@ -177,6 +182,7 @@ async def cargar_clientes_masivo(archivo: UploadFile = File(...)):
                 "email":        row["email"].strip()        or None,
                 "direccion":    row["direccion"].strip()    or None,
                 "forma_pago":    row["forma_pago"].strip()    or None,                
+                "equivalencia_centro_costo":    row["equivalencia_centro_costo"].strip()    or None, 
             })
 
         if registros:

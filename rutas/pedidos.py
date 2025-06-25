@@ -9,6 +9,7 @@ from typing import List, Optional, Dict
 from io import BytesIO
 import os
 import pandas as pd
+from typing import Literal
 from datetime import datetime
 
 # ------------------------------
@@ -48,6 +49,7 @@ class Pedido(BaseModel):
     observaciones: Optional[str] = None
     placa: str
     creado_por: str
+    tipo_viaje: Literal["CARGA MASIVA", "PAQUETEO"]
 
 # ------------------------------
 # 📌 Modelo de salida
@@ -75,7 +77,7 @@ async def cargar_pedidos_masivo(
     req = [
         "FECHA","CLIENTE_NOMBRE","ORIGEN","DESTINO",
         "NUM_CAJAS","NUM_KILOS","TIPO_VEHICULO","VALOR_DECLARADO",
-        "PLANILLA_SISCORE","VALOR_FLETE","OBSERVACIONES","PLACA"
+        "PLANILLA_SISCORE","VALOR_FLETE","OBSERVACIONES","PLACA","TIPO_VIAJE"
     ]
     missing = [c for c in req if c not in [col.upper() for col in df.columns]]
     if missing:
@@ -97,6 +99,11 @@ async def cargar_pedidos_masivo(
 
         acumulados_por_placa.setdefault(placa, 0.0)
         acumulados_por_placa[placa] += val_flete
+        
+        tipo_viaje = row["TIPO_VIAJE"].strip().upper()
+        if tipo_viaje not in {"CARGA MASIVA", "PAQUETEO"}:
+            errores.append(f"Fila {fila}: TIPO_VIAJE debe ser 'CARGA MASIVA' o 'PAQUETEO'")
+            continue
 
         nombre_cli = row["CLIENTE_NOMBRE"].upper()
         if not coleccion_clientes.find_one({"nombre": nombre_cli}):
@@ -127,13 +134,14 @@ async def cargar_pedidos_masivo(
             "num_cajas": num_cajas,
             "num_kilos": num_kilos,
             "tipo_vehiculo": veh,
+            "tipo_viaje": tipo_viaje,
             "valor_declarado": float(row["VALOR_DECLARADO"]),
             "planilla_siscore": row["PLANILLA_SISCORE"],
             "valor_flete": val_flete,
             "observaciones": row["OBSERVACIONES"],
             "placa": placa,
             "creado_por": user["usuario"],
-            "regional": regional,
+            "regional": regional,            
         })
 
     if errores:
@@ -358,7 +366,7 @@ async def exportar_autorizados():
             "Agencia de fact":             "BOGOTA",
             "Forma de pago":               getc("forma_pago"),
             "Guía":                        d.get("planilla_siscore",""),
-            "CENTRO COSTO":                "ABC",
+            "centro costo":                flete.get("equivalencia_centro_costo", "") + " " + d["tipo_viaje"] + " OPERACIONES CARGA " +  getc("equivalencia_centro_costo"),
             "Ubicación Cargue":            "CALLE 1",
             "Direccion cargue":            "CALLE 1",
             "Ubicación Descargue":         "CALLE 1",

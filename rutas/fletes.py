@@ -32,6 +32,7 @@ class Flete(BaseModel):
     destino: str
     ruta: str
     tipo: str
+    equivalencia_centro_costo: str
     tarifas: Dict[str, float]
 
 # ------------------------------
@@ -43,6 +44,7 @@ def modelo_flete(f: dict) -> dict:
         "destino": f["destino"],
         "ruta": f["ruta"],
         "tipo": f["tipo"],
+        "equivalencia_centro_costo": f["equivalencia_centro_costo"],        
         "tarifas": f["tarifas"],
     }
 
@@ -61,6 +63,7 @@ async def crear_flete(data: Flete):
         "destino": destino,
         "ruta": data.ruta.upper().strip(),
         "tipo": data.tipo.upper().strip(),
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),        
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
     }
     coleccion_fletes.insert_one(nuevo)
@@ -75,19 +78,20 @@ async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
     try:
         df = pd.read_excel(archivo.file)
         df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
-        if not {"ORIGEN", "DESTINO", "RUTA", "TIPO"}.issubset(df.columns):
-            raise HTTPException(status_code=400, detail="El archivo debe tener ORIGEN, DESTINO, RUTA y TIPO")
+        if not {"ORIGEN", "DESTINO", "RUTA", "TIPO","EQUIVALENCIA_CENTRO_COSTO"}.issubset(df.columns):
+            raise HTTPException(status_code=400, detail="El archivo debe tener ORIGEN, DESTINO, RUTA,  TIPO y EQUIVALENCIA_CENTRO_COSTO")
         registros = []
         for _, row in df.iterrows():
             origen = str(row["ORIGEN"]).strip().upper()
             destino = str(row["DESTINO"]).strip().upper()
             ruta = str(row["RUTA"]).strip().upper()
             tipo = str(row["TIPO"]).strip().upper()
+            equivalencia_centro_costo  = str(row["EQUIVALENCIA_CENTRO_COSTO"]).strip().upper()
             tarifas = {}
             for col in df.columns:
-                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO"}:
+                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO","EQUIVALENCIA_CENTRO_COSTO"}:
                     tarifas[col] = float(row[col])
-            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "tarifas": tarifas})
+            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo,"equivalencia_centro_costo": equivalencia_centro_costo, "tarifas": tarifas})
         coleccion_fletes.delete_many({})
         if registros:
             coleccion_fletes.insert_many(registros)
@@ -146,6 +150,7 @@ async def actualizar_flete(origen: str, destino: str, data: Flete):
         "destino": d,
         "ruta": data.ruta.upper().strip(),
         "tipo": data.tipo.upper().strip(),
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),        
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
     }
     result = coleccion_fletes.update_one({"origen": o, "destino": d}, {"$set": actualiza})
