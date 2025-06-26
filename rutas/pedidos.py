@@ -1,6 +1,6 @@
 # archivo: rutas/ruta_pedidos.py
 
-from fastapi import APIRouter, HTTPException, status, UploadFile, File, Body
+from fastapi import APIRouter, HTTPException, status, UploadFile, File, Body, Form, Query
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
 from bson import ObjectId
@@ -35,6 +35,15 @@ ruta_pedidos = APIRouter(
 # ------------------------------
 # 📌 Esquema Pydantic
 # ------------------------------
+class FiltrosPedidos(BaseModel):
+    estados: Optional[List[str]] = None
+    regionales: Optional[List[str]] = None
+
+class FiltrosConUsuario(BaseModel):
+    usuario: str
+    filtros: Optional[FiltrosPedidos] = None
+
+
 class Pedido(BaseModel):
     fecha: str
     cliente_nombre: str
@@ -46,10 +55,15 @@ class Pedido(BaseModel):
     valor_declarado: float
     planilla_siscore: Optional[str] = None
     valor_flete: float
+    ubicacion_cargue: Optional[str] = None
+    direccion_cargue: Optional[str] = None
+    ubicacion_descargue: Optional[str] = None
+    direccion_descargue: Optional[str] = None
     observaciones: Optional[str] = None
     placa: str
     creado_por: str
     tipo_viaje: Literal["CARGA MASIVA", "PAQUETEO"]
+    observaciones_aprobador: Optional[str] = None
 
 # ------------------------------
 # 📌 Modelo de salida
@@ -63,7 +77,7 @@ def modelo_pedido(p: dict) -> dict:
 # ------------------------------
 @ruta_pedidos.post("/cargar-masivo", response_model=dict)
 async def cargar_pedidos_masivo(
-    creado_por: str = Body(..., embed=True),
+    creado_por: str = Form(...),
     archivo: UploadFile = File(...)
 ):
     user = coleccion_usuarios.find_one({"usuario": creado_por.upper().strip()})
@@ -77,7 +91,8 @@ async def cargar_pedidos_masivo(
     req = [
         "FECHA","CLIENTE_NOMBRE","ORIGEN","DESTINO",
         "NUM_CAJAS","NUM_KILOS","TIPO_VEHICULO","VALOR_DECLARADO",
-        "PLANILLA_SISCORE","VALOR_FLETE","OBSERVACIONES","PLACA","TIPO_VIAJE"
+        "PLANILLA_SISCORE","VALOR_FLETE","UBICACION_CARGUE","DIRECCION_CARGUE",
+        "UBICACION_DESCARGUE","DIRECCION_DESCARGUE","OBSERVACIONES","PLACA","TIPO_VIAJE"
     ]
     missing = [c for c in req if c not in [col.upper() for col in df.columns]]
     if missing:
@@ -88,9 +103,18 @@ async def cargar_pedidos_masivo(
     acumulados_por_placa: Dict[str, float] = {}
 
     # 1er pase: validar y acumular fletes por placa
+    tipos_por_placa: Dict[str, str] = {}
     for idx, row in df.iterrows():
         fila = idx + 2
         placa = row["PLACA"].upper()
+
+        vehiculo = row["TIPO_VEHICULO"].strip().upper()
+        if placa in tipos_por_placa:
+            if tipos_por_placa[placa] != vehiculo:
+                errores.append(f"Fila {fila}: tipo de vehículo '{vehiculo}' no coincide con tipo '{tipos_por_placa[placa]}' ya usado para placa '{placa}'")
+        else:
+            tipos_por_placa[placa] = vehiculo
+
         try:
             val_flete = float(row["VALOR_FLETE"])
         except:
@@ -122,6 +146,11 @@ async def cargar_pedidos_masivo(
         except:
             errores.append(f"Fila {fila}: NUM_CAJAS o NUM_KILOS no numérico")
             continue
+        
+        ubicacion_cargue     = row.get("UBICACION_CARGUE", "")
+        direccion_cargue     = row.get("DIRECCION_CARGUE", "")
+        ubicacion_descargue  = row.get("UBICACION_DESCARGUE", "")
+        direccion_descargue  = row.get("DIRECCION_DESCARGUE", "")
 
         if any(e.startswith(f"Fila {fila}:") for e in errores):
             continue
@@ -138,6 +167,10 @@ async def cargar_pedidos_masivo(
             "valor_declarado": float(row["VALOR_DECLARADO"]),
             "planilla_siscore": row["PLANILLA_SISCORE"],
             "valor_flete": val_flete,
+            "ubicacion_cargue": ubicacion_cargue,
+            "direccion_cargue": direccion_cargue,
+            "ubicacion_descargue": ubicacion_descargue,
+            "direccion_descargue": direccion_descargue,            
             "observaciones": row["OBSERVACIONES"],
             "placa": placa,
             "creado_por": user["usuario"],
@@ -180,18 +213,32 @@ async def cargar_pedidos_masivo(
 # ------------------------------
 # 🗂 Listar pedidos filtrables
 # ------------------------------
-@ruta_pedidos.get("/", response_model=List[dict])
-async def listar_pedidos(
-    estado: Optional[str] = None,
-    regional: Optional[str] = None
-):
+@ruta_pedidos.post("/", response_model=List[dict])
+async def listar_pedidos(datos: FiltrosConUsuario):
+    usuario = datos.usuario
+    filtros = datos.filtros or FiltrosPedidos()
+
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+
+    perfil = user["perfil"].upper()
+    regional_usuario = user["regional"].upper()
+
     filtro = {}
-    if estado:
-        filtro["estado"] = estado.upper().strip()
-    if regional:
-        filtro["regional"] = regional.upper().strip()
+
+    if filtros.estados:
+        filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
+
+    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
+        if filtros.regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
+    else:
+        filtro["regional"] = regional_usuario
+
     docs = coleccion_pedidos.find(filtro)
     return [modelo_pedido(d) for d in docs]
+
 
 # ------------------------------
 # 🔄 Actualizar estado de TODOS los pedidos de una placa
@@ -200,7 +247,8 @@ async def listar_pedidos(
 async def actualizar_estado(
     pedido_id: str,
     estado: str = Body(..., embed=True),
-    usuario: str = Body(..., embed=True)
+    usuario: str = Body(..., embed=True),
+    observaciones_aprobador: Optional[str] = Body(None, embed=True) 
 ):
     nuevo = estado.upper().strip()
     if nuevo not in {"AUTORIZADO", "REQUIERE AUTORIZACION", "PROCESADO"}:
@@ -240,6 +288,8 @@ async def actualizar_estado(
             "autorizado_por": user["usuario"],
             "fecha_autorizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
+    if observaciones_aprobador:
+        update_data["observaciones_aprobador"] = observaciones_aprobador
 
     res = coleccion_pedidos.update_many(
         {"placa": placa, "estado": anterior},
@@ -295,12 +345,24 @@ async def procesar_masivo(
 # ------------------------------
 # ❌ Eliminar pedido por ID (y todos de la misma placa)
 # ------------------------------
+
 @ruta_pedidos.delete("/{pedido_id}", response_model=dict)
-async def eliminar_pedido(pedido_id: str):
+async def eliminar_pedido(
+    pedido_id: str,
+    usuario: str = Query(..., description="Usuario que solicita la eliminación")
+):
     try:
         oid = ObjectId(pedido_id)
     except:
         raise HTTPException(400, "ID de pedido inválido")
+
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+
+    perfil = user["perfil"].upper()
+    if perfil == "GERENTE":
+        raise HTTPException(403, "Los usuarios con perfil GERENTE no pueden eliminar pedidos.")
 
     pedido = coleccion_pedidos.find_one({"_id": oid})
     if not pedido:
@@ -328,6 +390,21 @@ async def exportar_autorizados():
         raise HTTPException(404, "No hay pedidos AUTORIZADOS para exportar")
 
     rows = []
+
+    def mapear_tipo_vehiculo(vehiculo: str) -> str:
+       
+        if vehiculo == "CARRY":
+            return "CARRY"
+        elif vehiculo in {"NHR_VARIOS_DESTINOS", "NHR_1_DESTINO"}:
+            return "CAMIONETA"
+        elif vehiculo in {"TURBO_VARIOS_DESTINOS", "TURBO_1_DESTINO"}:
+            return "TURBO"
+        elif vehiculo in {"NIES_VARIOS_DESTINOS", "NIES_1_DESTINO", "SENCILLO_VARIOS_DESTINOS", "SENCILLO_1_DESTINO"}:
+            return "SENCILLO"
+        elif vehiculo in {"PATINETA_VARIOS_DESTINOS", "PATINETA_1_DESTINO"}:
+            return "TRACTOCAMION"
+        return vehiculo  # Por si llega otro valor inesperado
+
     for d in docs:
         # cargar datos de cliente
         cliente = coleccion_clientes.find_one({"nombre": d["cliente_nombre"]})
@@ -339,6 +416,10 @@ async def exportar_autorizados():
             raise HTTPException(500, f"No se encontró tarifa para {d['origen']}→{d['destino']}")
         # helper para extraer campo o string vacío
         getc = lambda k: cliente.get(k, "") if cliente else ""
+        # Esto es  para elegir el tipo de producto para estos dos clientes
+        producto = "VARIOS"
+        if d["cliente_nombre"] in {"FRESENIUS MEDICAL CARE SAS", "FRESENIUS KABI COLOMBIA SAS"}:
+            producto = "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002; 30"
 
         # construir cada fila con los mapeos fijos, de campo y cálculos
         rows.append({
@@ -367,13 +448,13 @@ async def exportar_autorizados():
             "Forma de pago":               getc("forma_pago"),
             "Guía":                        d.get("planilla_siscore",""),
             "centro costo":                flete.get("equivalencia_centro_costo", "") + " " + d["tipo_viaje"] + " OPERACIONES CARGA " +  getc("equivalencia_centro_costo"),
-            "Ubicación Cargue":            "CALLE 1",
-            "Direccion cargue":            "CALLE 1",
-            "Ubicación Descargue":         "CALLE 1",
-            "Direccion Descargue":         "CALLE 1",
-            "Producto":                    "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002; 30",
+            "Ubicación Cargue":            d["ubicacion_cargue"],
+            "Direccion cargue":            d["direccion_cargue"],
+            "Ubicación Descargue":         d["ubicacion_descargue"],
+            "Direccion Descargue":         d["direccion_descargue"],
+            "Producto":                    producto,
             "Naturaleza":                  "NORMAL",
-            "Tipo de vehiculo":            "CAMIONETA",
+            "Tipo de vehiculo":            mapear_tipo_vehiculo(d["tipo_vehiculo"]),
             "unidad":                      "vehiculos",
             "Cantidad":                    1,
             "Tipo embalaje":               "paquetes",
@@ -385,7 +466,7 @@ async def exportar_autorizados():
             "Vlr. Declar. Mercancia":      d["valor_declarado"],
             "Aprobar Poliza":              1,
             "Flete por":                   "cupo",
-            "Valor unitario":              d["valor_flete"] / 0.7,
+            "Valor unitario":              int(((d["valor_flete"] / 0.7 + 49) // 50) * 50),
             "Aprobar cupo credito":        1,
             "Aprobar rentabilidad":        1,
             "Otras caracteristicas":       "furgon",
