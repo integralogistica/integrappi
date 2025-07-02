@@ -104,6 +104,7 @@ async def cargar_pedidos_masivo(
 
     # 1er pase: validar y acumular fletes por placa
     tipos_por_placa: Dict[str, str] = {}
+    destinos_por_placa: Dict[str, str] = {}
     for idx, row in df.iterrows():
         fila = idx + 2
         placa = row["PLACA"].upper()
@@ -114,6 +115,14 @@ async def cargar_pedidos_masivo(
                 errores.append(f"Fila {fila}: tipo de vehículo '{vehiculo}' no coincide con tipo '{tipos_por_placa[placa]}' ya usado para placa '{placa}'")
         else:
             tipos_por_placa[placa] = vehiculo
+
+        destino = row["DESTINO"].upper()
+        if placa in destinos_por_placa:
+            if destinos_por_placa[placa] != destino:
+                errores.append(f"Fila {fila}: destino '{destino}' no coincide con destino '{destinos_por_placa[placa]}' ya usado para placa '{placa}'")
+        else:
+            destinos_por_placa[placa] = destino
+
 
         try:
             val_flete = float(row["VALOR_FLETE"])
@@ -208,7 +217,7 @@ async def cargar_pedidos_masivo(
     else:
         detalles = []
 
-    return {"mensaje": f"{len(registros)} pedidos cargados", "detalles": detalles}
+    return {"mensaje": f"{len(registros)} lineas cargadas", "detalles": detalles}
 
 # ------------------------------
 # 🗂 Listar pedidos filtrables
