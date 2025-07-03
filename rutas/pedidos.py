@@ -183,7 +183,7 @@ async def cargar_pedidos_masivo(
             "observaciones": row["OBSERVACIONES"],
             "placa": placa,
             "creado_por": user["usuario"],
-            "regional": regional,            
+            "regional": regional,       
         })
 
     if errores:
@@ -482,7 +482,9 @@ async def exportar_autorizados():
             "REMESAS":                     1,
             "REMISION DEL CLIENTE":        1,
             "GUIA DE TRANSPORTE":          1,
-            "MANIFIESTO":                  1
+            "MANIFIESTO":                  1,
+            "id_linea":                   str(d["_id"]),
+            "numero_pedido":               d.get("numero_pedido", "")
         })
 
     # 2. Crear DataFrame y escribir a Excel en memoria
@@ -499,3 +501,215 @@ async def exportar_autorizados():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+# ------------------------------
+# 📥 Cargar masivo numero_pedido desde Excel (modificado)
+# ------------------------------
+@ruta_pedidos.post("/cargar-numeros-pedido", response_model=dict)
+async def cargar_numeros_pedido(
+    usuario: str = Form(...),
+    archivo: UploadFile = File(...)
+):
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+
+    perfil = user["perfil"].upper()
+    if perfil not in {"ADMIN", "ANALISTA"}:
+        raise HTTPException(403, "No tienes permiso para actualizar numero_pedido masivamente")
+
+    # Leer el archivo Excel
+    df = pd.read_excel(archivo.file)
+    df = df.apply(lambda col: col.map(lambda x: str(x).strip() if pd.notnull(x) else ""))
+
+    # Validar columnas requeridas
+    required_cols = {"id_linea", "numero_pedido"}
+    if not required_cols.issubset(set(df.columns)):
+        raise HTTPException(400, f"El archivo debe contener las columnas: {required_cols}")
+
+    errores = []
+    updates = []  # Almacenar updates válidos
+
+    # 1. Validar todas las filas antes de actualizar
+    for idx, row in df.iterrows():
+        fila = idx + 2  # Excel es 1-indexed y +1 por encabezado
+        id_linea = row["id_linea"]
+        numero_pedido = row["numero_pedido"]
+
+        # Validar numero_pedido no vacío
+        if not numero_pedido:
+            errores.append(f"Fila {fila}: numero_pedido no puede estar vacío")
+            continue
+
+        try:
+            oid = ObjectId(id_linea)
+        except:
+            errores.append(f"Fila {fila}: id_linea inválido '{id_linea}'")
+            continue
+
+        pedido = coleccion_pedidos.find_one({"_id": oid})
+        if not pedido:
+            errores.append(f"Fila {fila}: No se encontró pedido con id_linea '{id_linea}'")
+            continue
+
+        # Validar estado AUTORIZADO
+        if pedido.get("estado") != "AUTORIZADO":
+            errores.append(f"Fila {fila}: El pedido no está en estado AUTORIZADO (estado actual: {pedido.get('estado')})")
+            continue
+
+        # Si todo ok, agrega a lista de updates
+        updates.append({
+            "_id": oid,
+            "numero_pedido": numero_pedido
+        })
+
+    # 2. Si hay errores, abortar sin actualizar nada
+    if errores:
+        raise HTTPException(400, detail={"mensaje": "Errores en el archivo. No se actualizó ningún registro.", "errores": errores})
+
+    # 3. Realizar los updates ahora que no hay errores
+    actualizados = 0
+    for u in updates:
+        res = coleccion_pedidos.update_one(
+            {"_id": u["_id"]},
+            {"$set": {
+                "numero_pedido": u["numero_pedido"],
+                "pedido_actualizado_por": user["usuario"],
+                "fecha_actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "estado": "COMPLETADO"
+            }}
+        )
+        if res.modified_count > 0:
+            actualizados += 1
+
+    return {"mensaje": f"{actualizados} registros actualizados correctamente"}
+
+
+
+# ------------------------------
+# 📤 Exportar pedidos COMPLETADOS filtrados por fechas y regional con permisos de perfil
+# ------------------------------
+@ruta_pedidos.get("/exportar-completados")
+async def exportar_completados(
+    usuario: str = Query(..., description="Usuario que exporta"),
+    fecha_inicial: str = Query(..., description="Fecha inicial en formato YYYY-MM-DD"),
+    fecha_final: str = Query(..., description="Fecha final en formato YYYY-MM-DD"),
+    regionales: List[str] = Query(None, description="Lista de regionales (opcional para OPERADOR)")
+):
+    # Validar usuario
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    perfil = user["perfil"].upper()
+    regional_usuario = user["regional"].upper()
+
+    # Validar formato de fechas
+    try:
+        fecha_ini_dt = datetime.strptime(fecha_inicial, "%Y-%m-%d")
+        fecha_fin_dt = datetime.strptime(fecha_final, "%Y-%m-%d")
+    except:
+        raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
+
+    # Construir filtro
+    filtro = {
+        "estado": "COMPLETADO",
+        "fecha_actualizacion": {
+            "$gte": f"{fecha_inicial} 00:00:00",
+            "$lte": f"{fecha_final} 23:59:59"
+        }
+    }
+
+    # Lógica de regional según perfil
+    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
+        if regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
+    else:  # OPERADOR u otro perfil limitado
+        filtro["regional"] = regional_usuario
+
+    # Consultar en base de datos
+    docs = list(coleccion_pedidos.find(filtro))
+    if not docs:
+        raise HTTPException(404, "No se encontraron pedidos COMPLETADOS para los filtros dados.")
+
+    # Campos a exportar
+    campos = [
+        "fecha", "cliente_nombre", "origen", "destino", "num_cajas", "num_kilos",
+        "tipo_vehiculo", "tipo_viaje", "valor_declarado", "planilla_siscore",
+        "valor_flete", "valor_flete_sistema", "ubicacion_cargue", "ubicacion_descargue",
+        "observaciones", "placa", "creado_por", "regional", "autorizado_por",
+        "fecha_autorizacion", "observaciones_aprobador", "fecha_actualizacion",
+        "numero_pedido", "pedido_actualizado_por"
+    ]
+
+    # Preparar filas
+    rows = []
+    for d in docs:
+        fila = {}
+        for campo in campos:
+            fila[campo] = d.get(campo, "")
+        rows.append(fila)
+
+    # Crear DataFrame y exportar
+    df = pd.DataFrame(rows)
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Completados')
+    output.seek(0)
+
+    # Devolver como descarga
+    filename = f"pedidos_completados_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@ruta_pedidos.get("/listar-completados")
+async def listar_completados(
+    usuario: str = Query(...),
+    fecha_inicial: str = Query(...),
+    fecha_final: str = Query(...),
+    regionales: List[str] = Query(None)
+):
+    # Validar usuario
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    perfil = user["perfil"].upper()
+    regional_usuario = user["regional"].upper()
+
+    # Validar formato de fechas
+    try:
+        fecha_ini_dt = datetime.strptime(fecha_inicial, "%Y-%m-%d")
+        fecha_fin_dt = datetime.strptime(fecha_final, "%Y-%m-%d")
+    except:
+        raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
+
+    # Construir filtro
+    filtro = {
+        "estado": "COMPLETADO",
+        "fecha_actualizacion": {
+            "$gte": f"{fecha_inicial} 00:00:00",
+            "$lte": f"{fecha_final} 23:59:59"
+        }
+    }
+
+    # Lógica de regional según perfil
+    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
+        if regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
+    else:  # OPERADOR u otro perfil limitado
+        filtro["regional"] = regional_usuario
+
+    # Consultar en base de datos
+    docs = list(coleccion_pedidos.find(filtro))
+    if not docs:
+        raise HTTPException(404, "No se encontraron pedidos COMPLETADOS.")
+
+    # Formatear resultados
+    resultados = []
+    for d in docs:
+        resultados.append(modelo_pedido(d))
+
+    return resultados
