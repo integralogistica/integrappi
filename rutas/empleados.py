@@ -60,11 +60,14 @@ class EnviarRequest(BaseModel):
 # ——— Transformación de documento Mongo a Pydantic ———
 def transformar_empleado(doc: dict) -> Empleado:
     clean_doc = {k.strip(): v for k, v in doc.items()}
+
     def get_val(*keys):
         for k in keys:
-            if k in clean_doc and clean_doc[k] is not None:
-                return clean_doc[k]
+            val = clean_doc.get(k)
+            if val is not None:
+                return val
         return None
+
     def get_float(*keys):
         for k in keys:
             val = clean_doc.get(k)
@@ -76,23 +79,34 @@ def transformar_empleado(doc: dict) -> Empleado:
             if num.isdigit():
                 return float(num)
         return 0.0
-    fecha_raw = get_val("fechaIngreso", "FECHA_INGRESO", "FECHA INGRESO")
+
+    # Fecha de ingreso
+    fecha_raw = get_val("fechaIngreso", "fecha_ingreso", "FECHA_INGRESO", "FECHA INGRESO")
     fecha_ing = fecha_raw.isoformat() if hasattr(fecha_raw, "isoformat") else str(fecha_raw or "")
+
+    # Nombre completo
+    nombre = " ".join(filter(None, [
+        get_val("primer_nombre"),
+        get_val("segundo_nombre"),
+        get_val("primer_apellido"),
+        get_val("segundo_apellido")
+    ])).strip()
+
     return Empleado(
         id=str(clean_doc.get("_id")),
         identificacion=str(get_val("identificacion", "IDENTIFICACIÓN") or ""),
-        nombre=get_val("nombre", "NOMBRE"),
-        cargo=get_val("cargo", "CARGO"),
-        tipoContrato=get_val("tipoContrato", "TIPO_DE_CONTRATO", "TIPO DE CONTRATO"),
+        nombre=nombre or get_val("nombre", "NOMBRE"),
+        cargo=get_val("cargo", "cargo_laboral", "CARGO"),
+        tipoContrato=get_val("tipoContrato", "tipo_contrato", "TIPO_DE_CONTRATO", "TIPO DE CONTRATO"),
         fechaIngreso=fecha_ing,
-        basico=get_float("basico", "BASICO"),
-        auxilioVivienda=get_float("auxilioVivienda", "AUXILIO VIVIENDA"),
-        auxilioAlimentacion=get_float("auxilioAlimentacion", "AUXILIO ALIMENTA"),
-        auxilioMovilidad=get_float("auxilioMovilidad", "AUXILIO DE MOVILIDAD"),
-        auxilioRodamiento=get_float("auxilioRodamiento", "AUXILIO RODAMIENTO"),
-        auxilioProductividad=get_float("auxilioProductividad", "AUXILIO DE PRODUCTIVIDAD"),
-        auxilioComunic=get_float("auxilioComunic", "AUXILIO COMUNIC"),
-        correo=get_val("correo", "CORREO")
+        basico=get_float("basico", "salario_mes", "BASICO"),
+        auxilioVivienda=get_float("auxilioVivienda", "auxilio_transporte", "AUXILIO VIVIENDA"),
+        auxilioAlimentacion=get_float("auxilioAlimentacion", "auxilio_alimentacion", "AUXILIO ALIMENTA"),
+        auxilioMovilidad=get_float("auxilioMovilidad", "auxilio_transporte", "AUXILIO DE MOVILIDAD"),
+        auxilioRodamiento=get_float("auxilioRodamiento", "auxilio_rodamiento", "AUXILIO RODAMIENTO"),
+        auxilioProductividad=get_float("auxilioProductividad", "auxilio_productividad", "AUXILIO DE PRODUCTIVIDAD"),
+        auxilioComunic=get_float("auxilioComunic", "auxilio_comunic", "AUXILIO COMUNIC"),
+        correo=get_val("correo", "email", "CORREO")
     )
 
 # ——— Router y rutas ———
@@ -172,10 +186,10 @@ async def enviar_certificado(
 
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
-
+    meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
     try:
         dt_ing = datetime.fromisoformat(emp.fechaIngreso)
-        meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+        
         fecha_humana = f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
     except Exception:
         fecha_humana = emp.fechaIngreso or ""
