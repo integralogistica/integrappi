@@ -19,6 +19,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
 db = client["integra"]
 coleccion_pedidos  = db["pedidos"]
+coleccion_pedidos_completados = db["pedidos_completados"]
 coleccion_clientes = db["clientes"]
 coleccion_fletes   = db["tarifas"]
 coleccion_usuarios = db["baseusuarios"]
@@ -45,7 +46,7 @@ class FiltrosConUsuario(BaseModel):
 
 
 class Pedido(BaseModel):
-    fecha: str
+    fecha_creacion: str
     cliente_nombre: str
     origen: str
     destino: str
@@ -60,7 +61,12 @@ class Pedido(BaseModel):
     ubicacion_descargue: Optional[str] = None
     direccion_descargue: Optional[str] = None
     observaciones: Optional[str] = None
-    placa: str
+    vehiculo: str
+    consecutivo_pedido: int
+    consecutivo_integrapp: str
+    desvio: float
+    cargue_descargue: float
+    punto_adicional: float
     creado_por: str
     tipo_viaje: Literal["CARGA MASIVA", "PAQUETEO"]
     observaciones_aprobador: Optional[str] = None
@@ -74,7 +80,6 @@ def modelo_pedido(p: dict) -> dict:
 
 # ------------------------------
 # 📦 Cargar pedidos masivamente desde Excel
-# ------------------------------
 @ruta_pedidos.post("/cargar-masivo", response_model=dict)
 async def cargar_pedidos_masivo(
     creado_por: str = Form(...),
@@ -83,133 +88,260 @@ async def cargar_pedidos_masivo(
     user = coleccion_usuarios.find_one({"usuario": creado_por.upper().strip()})
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
-    regional = user["regional"]
+    regional = user["regional"].upper()
+
+    # ── Prefijos por regional para los mensajes de error ──
+    prefix_map = {
+        "GIRARDOTA": "Ave Maria!, ",
+        "CALI": "¡mirá ve!, ",
+        "BUCARAMANGA": "¡Oiga mano!, ",
+        "FUNZA": "¡Oiga chino!, ",
+        "BARRANQUILLA": "¡No joda!, "
+    }
+    prefix = prefix_map.get(regional, "")
 
     df = pd.read_excel(archivo.file)
+    # ── Limpiar encabezados y convertir a mayúsculas sin espacios ──
+    df.columns = [col.strip().upper() for col in df.columns]
     df = df.apply(lambda col: col.map(lambda x: str(x).strip() if pd.notnull(x) else ""))
 
     req = [
-        "FECHA","CLIENTE_NOMBRE","ORIGEN","DESTINO",
-        "NUM_CAJAS","NUM_KILOS","TIPO_VEHICULO","VALOR_DECLARADO",
+        "CLIENTE_NOMBRE","ORIGEN","DESTINO",
+        "NUM_CAJAS","NUM_KILOS","TIPO_VEHICULO","VEHICULO","VALOR_DECLARADO",
         "PLANILLA_SISCORE","VALOR_FLETE","UBICACION_CARGUE","DIRECCION_CARGUE",
-        "UBICACION_DESCARGUE","DIRECCION_DESCARGUE","OBSERVACIONES","PLACA","TIPO_VIAJE"
+        "UBICACION_DESCARGUE","DIRECCION_DESCARGUE","OBSERVACIONES",
+        "TIPO_VIAJE","CONSECUTIVO_PEDIDO",
+        "DESVIO","CARGUE_DESCARGUE","PUNTO_ADICIONAL"
     ]
-    missing = [c for c in req if c not in [col.upper() for col in df.columns]]
+    missing = [c for c in req if c not in df.columns]
     if missing:
-        raise HTTPException(400, f"Columnas faltantes: {missing}")
+        raise HTTPException(400, f"{prefix}Columnas faltantes: {missing}")
 
     errores: List[str] = []
     registros: List[Dict] = []
-    acumulados_por_placa: Dict[str, float] = {}
 
-    # 1er pase: validar y acumular fletes por placa
-    tipos_por_placa: Dict[str, str] = {}
-    destinos_por_placa: Dict[str, str] = {}
+    # ── Fechas para consecutivos ──
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+    fecha_sin_guiones = datetime.now().strftime("%Y%m%d")
+
+    # Para cálculo de fletes máximos por vehiculo+original
+    maximo_flete_por_vehiculo_consecutivo: Dict[str, Dict[int, float]] = {}
+
+    # Validación de duplicados de consecutivo en el mismo archivo
+    seen_consecutivos: Dict[int, str] = {}
+
+    # Consistencia tipo_vehiculo y destino por vehiculo
+    tipos_por_vehiculo: Dict[str, str] = {}
+    destinos_por_vehiculo: Dict[str, str] = {}
+
     for idx, row in df.iterrows():
         fila = idx + 2
-        placa = row["PLACA"].upper()
+        vehiculo = row["VEHICULO"].upper()
+        tipo_vehiculo = row["TIPO_VEHICULO"].upper()
 
-        vehiculo = row["TIPO_VEHICULO"].strip().upper()
-        if placa in tipos_por_placa:
-            if tipos_por_placa[placa] != vehiculo:
-                errores.append(f"Fila {fila}: tipo de vehículo '{vehiculo}' no coincide con tipo '{tipos_por_placa[placa]}' ya usado para placa '{placa}'")
+        # 1) Parsear y validar consecutivo original
+        try:
+            original_int = int(row["CONSECUTIVO_PEDIDO"])
+        except:
+            errores.append(f"{prefix}Fila {fila}: CONSECUTIVO_PEDIDO '{row['CONSECUTIVO_PEDIDO']}' no es numérico")
+            continue
+
+        # 2) No permitir mismo consecutivo en dos vehículos distintos
+        if original_int in seen_consecutivos and seen_consecutivos[original_int] != vehiculo:
+            errores.append(
+                f"{prefix}Fila {fila}: El CONSECUTIVO_PEDIDO {original_int} está duplicado en '{vehiculo}' "
+                f"y en '{seen_consecutivos[original_int]}'. No permitido."
+            )
+            continue
+        seen_consecutivos[original_int] = vehiculo
+
+        # 3) Consistencia tipo_vehiculo por vehículo
+        if vehiculo in tipos_por_vehiculo:
+            if tipos_por_vehiculo[vehiculo] != tipo_vehiculo:
+                errores.append(
+                    f"{prefix}Fila {fila}: TIPO_VEHICULO '{tipo_vehiculo}' no coincide con "
+                    f"'{tipos_por_vehiculo[vehiculo]}' registrado para '{vehiculo}'"
+                )
+                continue
         else:
-            tipos_por_placa[placa] = vehiculo
+            tipos_por_vehiculo[vehiculo] = tipo_vehiculo
 
+        # 4) Consistencia destino por vehículo
         destino = row["DESTINO"].upper()
-        if placa in destinos_por_placa:
-            if destinos_por_placa[placa] != destino:
-                errores.append(f"Fila {fila}: destino '{destino}' no coincide con destino '{destinos_por_placa[placa]}' ya usado para placa '{placa}'")
+        if vehiculo in destinos_por_vehiculo:
+            if destinos_por_vehiculo[vehiculo] != destino:
+                errores.append(
+                    f"{prefix}Fila {fila}: DESTINO '{destino}' no coincide con "
+                    f"'{destinos_por_vehiculo[vehiculo]}' registrado para '{vehiculo}'"
+                )
+                continue
         else:
-            destinos_por_placa[placa] = destino
+            destinos_por_vehiculo[vehiculo] = destino
 
-
+        # 5) Validar valor_flete
         try:
             val_flete = float(row["VALOR_FLETE"])
         except:
-            errores.append(f"Fila {fila}: VALOR_FLETE no numérico")
+            errores.append(f"{prefix}Fila {fila}: VALOR_FLETE '{row['VALOR_FLETE']}' no es numérico")
             continue
 
-        acumulados_por_placa.setdefault(placa, 0.0)
-        acumulados_por_placa[placa] += val_flete
-        
-        tipo_viaje = row["TIPO_VIAJE"].strip().upper()
+        # 6) Validar tipo de viaje
+        tipo_viaje = row["TIPO_VIAJE"].upper()
         if tipo_viaje not in {"CARGA MASIVA", "PAQUETEO"}:
-            errores.append(f"Fila {fila}: TIPO_VIAJE debe ser 'CARGA MASIVA' o 'PAQUETEO'")
+            errores.append(f"{prefix}Fila {fila}: TIPO_VIAJE debe ser 'CARGA MASIVA' o 'PAQUETEO'")
             continue
 
+        # 7) Validar cliente
         nombre_cli = row["CLIENTE_NOMBRE"].upper()
         if not coleccion_clientes.find_one({"nombre": nombre_cli}):
-            errores.append(f"Fila {fila}: Cliente '{row['CLIENTE_NOMBRE']}' no existe")
-
-        o, d = row["ORIGEN"].upper(), row["DESTINO"].upper()
-        veh = row["TIPO_VEHICULO"].upper()
-        f = coleccion_fletes.find_one({"origen": o, "destino": d})
-        if not f or veh not in f["tarifas"]:
-            errores.append(f"Fila {fila}: Tarifa para {o}→{d} y vehículo {veh} no definida")
+            errores.append(f"{prefix}Fila {fila}: Cliente '{nombre_cli}' no existe")
             continue
 
+        # 8) Validar tarifa
+        o, d = row["ORIGEN"].upper(), row["DESTINO"].upper()
+        f = coleccion_fletes.find_one({"origen": o, "destino": d})
+        if not f or tipo_vehiculo not in f["tarifas"]:
+            errores.append(f"{prefix}Fila {fila}: Tarifa para {o}→{d} y tipo '{tipo_vehiculo}' no definida")
+            continue
+
+        # 9) Validar cajas y kilos
         try:
             num_cajas = int(row["NUM_CAJAS"])
-            num_kilos  = float(row["NUM_KILOS"])
+            num_kilos = float(row["NUM_KILOS"])
         except:
-            errores.append(f"Fila {fila}: NUM_CAJAS o NUM_KILOS no numérico")
-            continue
-        
-        ubicacion_cargue     = row.get("UBICACION_CARGUE", "")
-        direccion_cargue     = row.get("DIRECCION_CARGUE", "")
-        ubicacion_descargue  = row.get("UBICACION_DESCARGUE", "")
-        direccion_descargue  = row.get("DIRECCION_DESCARGUE", "")
-
-        if any(e.startswith(f"Fila {fila}:") for e in errores):
+            errores.append(f"{prefix}Fila {fila}: NUM_CAJAS o NUM_KILOS no son numéricos")
             continue
 
+        # 10) Leer observaciones
+        observaciones = row.get("OBSERVACIONES", "")
+
+        # 11) Parsear y validar nuevos campos numéricos
+        # DESVIO
+        desv_raw = row["DESVIO"]
+        if desv_raw == "":
+            desvio = 0
+        else:
+            try:
+                desvio = float(desv_raw)
+            except:
+                errores.append(f"{prefix}Fila {fila}: DESVIO '{desv_raw}' no es numérico")
+                continue
+            if desvio > 15:
+                errores.append(f"{prefix}Fila {fila}: DESVIO '{desvio}' no puede ser mayor a 15")
+                continue
+
+        # CARGUE_DESCARGUE
+        cd_raw = row["CARGUE_DESCARGUE"]
+        if cd_raw == "":
+            cargue_descargue = 0
+        else:
+            try:
+                cargue_descargue = float(cd_raw)
+            except:
+                errores.append(f"{prefix}Fila {fila}: CARGUE_DESCARGUE '{cd_raw}' no es numérico")
+                continue
+            if cargue_descargue > 15:
+                errores.append(f"{prefix}Fila {fila}: CARGUE_DESCARGUE '{cargue_descargue}' no puede ser mayor a 15")
+                continue
+
+        # PUNTO_ADICIONAL
+        pa_raw = row["PUNTO_ADICIONAL"]
+        if pa_raw == "":
+            punto_adicional = 0
+        else:
+            try:
+                punto_adicional = float(pa_raw)
+            except:
+                errores.append(f"{prefix}Fila {fila}: PUNTO_ADICIONAL '{pa_raw}' no es numérico")
+                continue
+            if punto_adicional > 15:
+                errores.append(f"{prefix}Fila {fila}: PUNTO_ADICIONAL '{punto_adicional}' no puede ser mayor a 15")
+                continue
+
+        # 12) Construir consecutivos usando el original
+        consecutivo_pedido = original_int
+        consecutivo_integrapp = f"{regional}-{fecha_sin_guiones}-{original_int}"
+        consecutivo_vehiculo  = f"{regional}-{fecha_sin_guiones}-{vehiculo}"
+
+        # 13) Validar duplicado en BD
+        existe = coleccion_pedidos.find_one({
+            "consecutivo_integrapp": consecutivo_integrapp,
+            "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION"]}
+        })
+        if existe:
+            docs = coleccion_pedidos.find({
+                "consecutivo_integrapp": {"$regex": f"^{regional}-{fecha_sin_guiones}-"},
+                "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION"]}
+            })
+            usados = [doc["consecutivo_pedido"] for doc in docs]
+            siguiente = max(usados) + 1 if usados else 1
+            errores.append(
+                f"{prefix}Fila {fila}: El CONSECUTIVO_PEDIDO {original_int} de la regional '{regional}' "
+                f"con fecha {fecha_sin_guiones} ya fue utilizado. Debes usar del {siguiente} en adelante."
+            )
+            continue
+
+        # 14) Acumular máximo valor_flete por (vehiculo, original)
+        maximos = maximo_flete_por_vehiculo_consecutivo.setdefault(vehiculo, {})
+        maximos[original_int] = max(val_flete, maximos.get(original_int, 0.0))
+
+        # 15) Agregar registro al batch
         registros.append({
-            "fecha": row["FECHA"],
+            "fecha_creacion": fecha_actual,
             "cliente_nombre": nombre_cli,
             "origen": o,
             "destino": d,
             "num_cajas": num_cajas,
             "num_kilos": num_kilos,
-            "tipo_vehiculo": veh,
+            "tipo_vehiculo": tipo_vehiculo,
+            "vehiculo": vehiculo,
             "tipo_viaje": tipo_viaje,
             "valor_declarado": float(row["VALOR_DECLARADO"]),
             "planilla_siscore": row["PLANILLA_SISCORE"],
             "valor_flete": val_flete,
-            "ubicacion_cargue": ubicacion_cargue,
-            "direccion_cargue": direccion_cargue,
-            "ubicacion_descargue": ubicacion_descargue,
-            "direccion_descargue": direccion_descargue,            
-            "observaciones": row["OBSERVACIONES"],
-            "placa": placa,
+            "ubicacion_cargue": row["UBICACION_CARGUE"],
+            "direccion_cargue": row["DIRECCION_CARGUE"],
+            "ubicacion_descargue": row["UBICACION_DESCARGUE"],
+            "direccion_descargue": row["DIRECCION_DESCARGUE"],
+            "observaciones": observaciones,
+            "desvio": desvio,
+            "cargue_descargue": cargue_descargue,
+            "punto_adicional": punto_adicional,
             "creado_por": user["usuario"],
-            "regional": regional,       
+            "regional": regional,
+            "consecutivo_pedido": consecutivo_pedido,
+            "consecutivo_integrapp": consecutivo_integrapp,
+            "consecutivo_vehiculo":  consecutivo_vehiculo,
         })
 
     if errores:
         raise HTTPException(400, detail={"mensaje": "Errores en archivo masivo", "errores": errores})
 
-    # 2º pase: asignar estado según acumulado
+    # 16) Calcular total_flete_vehiculo y asignar estado
+    total_flete_por_vehiculo = {
+        veh: sum(vals.values())
+        for veh, vals in maximo_flete_por_vehiculo_consecutivo.items()
+    }
+
     for r in registros:
-        placa = r["placa"]
-        o, d, veh = r["origen"], r["destino"], r["tipo_vehiculo"]
-        valor_bd = coleccion_fletes.find_one({"origen": o, "destino": d})["tarifas"][veh]
-        total = acumulados_por_placa[placa]
+        veh = r["vehiculo"]
+        o, d, tv = r["origen"], r["destino"], r["tipo_vehiculo"]
+        valor_bd = coleccion_fletes.find_one({"origen": o, "destino": d})["tarifas"][tv]
+        total = total_flete_por_vehiculo.get(veh, 0.0)
 
         if total <= valor_bd + 50000:
-            estado = "AUTORIZADO"
-            fecha_aut = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            r["autorizado_por"]    = "NA"
-            r["fecha_autorizacion"] = fecha_aut
+            r["estado"] = "AUTORIZADO"
+            r["autorizado_por"] = "NA"
+            r["fecha_autorizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         else:
-            estado = "REQUIERE AUTORIZACION"
-            r["autorizado_por"]    = "NA"
+            r["estado"] = "REQUIERE AUTORIZACION"
+            r["autorizado_por"] = "NA"
             r["fecha_autorizacion"] = "NA"
 
-        r["estado"]             = estado
         r["valor_flete_sistema"] = valor_bd
+        r["total_flete_vehiculo"] = total
 
-    # Insertar en bloque
+    # 17) Insertar en bloque y devolver detalles
     if registros:
         result = coleccion_pedidos.insert_many(registros)
         insertados = list(coleccion_pedidos.find({"_id": {"$in": result.inserted_ids}}))
@@ -217,13 +349,21 @@ async def cargar_pedidos_masivo(
     else:
         detalles = []
 
-    return {"mensaje": f"{len(registros)} lineas cargadas", "detalles": detalles}
+    consecutivos_unicos = len(set(r["consecutivo_vehiculo"] for r in registros))
+    mensaje = (
+        f"{consecutivos_unicos} vehículo cargado"
+        if consecutivos_unicos == 1
+        else f"{consecutivos_unicos} vehículos cargados"
+    )
+    return {"mensaje": mensaje, "detalles": detalles}
+
+
 
 # ------------------------------
-# 🗂 Listar pedidos filtrables
+# 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
 # ------------------------------
 @ruta_pedidos.post("/", response_model=List[dict])
-async def listar_pedidos(datos: FiltrosConUsuario):
+async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
     usuario = datos.usuario
     filtros = datos.filtros or FiltrosPedidos()
 
@@ -245,126 +385,96 @@ async def listar_pedidos(datos: FiltrosConUsuario):
     else:
         filtro["regional"] = regional_usuario
 
-    docs = coleccion_pedidos.find(filtro)
-    return [modelo_pedido(d) for d in docs]
+    pipeline = [
+        {"$match": filtro},
+        {"$group": {
+            "_id": "$consecutivo_vehiculo",
+            "pedidos": {"$push": "$$ROOT"},
+            "estados_unicos": {"$addToSet": "$estado"}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+
+    docs = list(coleccion_pedidos.aggregate(pipeline))
+
+    # Formatear la respuesta
+    respuesta = []
+    for grupo in docs:
+        pedidos = [modelo_pedido(p) for p in grupo["pedidos"]]
+        estados = grupo.get("estados_unicos", [])
+        multiestado = len(estados) > 1
+        respuesta.append({
+            "consecutivo_vehiculo": grupo["_id"],
+            "multiestado": multiestado,
+            "estados": estados,
+            "pedidos": pedidos
+        })
+
+    return respuesta
 
 
-# ------------------------------
-# 🔄 Actualizar estado de TODOS los pedidos de una placa
-# ------------------------------
-@ruta_pedidos.put("/{pedido_id}/estado", response_model=dict)
-async def actualizar_estado(
-    pedido_id: str,
-    estado: str = Body(..., embed=True),
-    usuario: str = Body(..., embed=True),
-    observaciones_aprobador: Optional[str] = Body(None, embed=True) 
+# ---------------------------------------------------
+# 🔄 Autorizar pedidos por consecutivo_vehiculo
+# ---------------------------------------------------
+@ruta_pedidos.put("/autorizar-por-consecutivo-vehiculo", response_model=dict,  summary="Autorizar pedidos por vehiculo")
+async def autorizar_por_consecutivo_vehiculo(
+    consecutivos: List[str] = Body(..., embed=True, description="Lista de consecutivo_vehiculo a autorizar"),
+    usuario: str = Body(..., embed=True, description="Usuario que realiza la autorización"),
+    observaciones_aprobador: Optional[str] = Body(
+        None,
+        embed=True,
+        description="Observaciones del aprobador (opcional)"
+    )
 ):
-    nuevo = estado.upper().strip()
-    if nuevo not in {"AUTORIZADO", "REQUIERE AUTORIZACION", "PROCESADO"}:
-        raise HTTPException(400, "Estado inválido")
-
-    try:
-        oid = ObjectId(pedido_id)
-    except:
-        raise HTTPException(400, "ID de pedido inválido")
-
-    pedido = coleccion_pedidos.find_one({"_id": oid})
-    if not pedido:
-        raise HTTPException(404, "Pedido no encontrado")
-
-    anterior, placa = pedido["estado"], pedido["placa"]
+    # 1) Validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
-        raise HTTPException(404, "Usuario que actualiza no encontrado")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+
     perfil = user["perfil"].upper()
+    if perfil not in {"ADMIN", "GERENTE"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Solo ADMIN o GERENTE pueden autorizar pedidos")
 
-    # REQUIERE_AUTORIZACION → AUTORIZADO
-    if anterior == "REQUIERE AUTORIZACION" and nuevo == "AUTORIZADO":
-        if perfil not in {"ADMIN", "GERENTE"}:
-            raise HTTPException(403, "Solo ADMIN/Gerente pueden autorizar.")
+    # 2) Validar input
+    if not consecutivos:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Debes indicar al menos un consecutivo_vehiculo")
 
-    # AUTORIZADO → PROCESADO
-    if nuevo == "PROCESADO":
-        if perfil not in {"ADMIN", "GERENTE", "ANALISTA"}:
-            raise HTTPException(403, "Solo ANALISTA/Admin/Gerente pueden procesar.")
-        if anterior != "AUTORIZADO":
-            raise HTTPException(400, f"Sólo pedidos en 'AUTORIZADO' pueden procesarse, estado actual: {anterior}")
+    # 3) Construir filtro y datos a actualizar
+    filtro = {
+        "consecutivo_vehiculo": {"$in": consecutivos},
+        "estado": "REQUIERE AUTORIZACION"
+    }
+    datos_a_setear = {
+        "estado": "AUTORIZADO",
+        "autorizado_por": user["usuario"],
+        "fecha_autorizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    # Solo añadir observaciones_aprobador si viene en la petición
+    if observaciones_aprobador is not None:
+        datos_a_setear["observaciones_aprobador"] = observaciones_aprobador
 
-    # Preparar datos de actualización
-    update_data = {"estado": nuevo}
-    if anterior == "REQUIERE AUTORIZACION" and nuevo == "AUTORIZADO":
-        update_data.update({
-            "autorizado_por": user["usuario"],
-            "fecha_autorizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-    if observaciones_aprobador:
-        update_data["observaciones_aprobador"] = observaciones_aprobador
+    # 4) Ejecutar la actualización
+    res = coleccion_pedidos.update_many(filtro, {"$set": datos_a_setear})
 
-    res = coleccion_pedidos.update_many(
-        {"placa": placa, "estado": anterior},
-        {"$set": update_data}
-    )
     if res.matched_count == 0:
-        raise HTTPException(404, f"No se encontraron pedidos de placa {placa} en estado {anterior}")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail="No se encontraron pedidos en estado REQUIERE AUTORIZACION para los consecutivo_vehiculo dados"
+        )
 
     return {
-        "mensaje": f"{res.modified_count} pedidos de placa '{placa}' actualizados de {anterior} a {nuevo} por {user['usuario']}"
+        "mensaje": f"{len(set(consecutivos))} vehiculo autorizado correctamente por {user['usuario']}"
     }
 
-# ------------------------------
-# 🔄 Procesar pedidos masivamente por IDs
-# ------------------------------
-@ruta_pedidos.put("/procesar-masivo", response_model=dict)
-async def procesar_masivo(
-    pedido_ids: List[str] = Body(..., embed=True),
-    usuario: str     = Body(..., embed=True)
-):
-    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
-    if not user:
-        raise HTTPException(404, "Usuario no encontrado")
-    perfil = user["perfil"].upper()
-    if perfil not in {"ADMIN", "GERENTE", "ANALISTA"}:
-        raise HTTPException(403, "No tienes permiso para procesar pedidos masivamente")
-
-    # Convertir a ObjectId y filtrar solo AUTORIZADO
-        # 1) Convertir a ObjectId y validar
-    oids = []
-    for pid in pedido_ids:
-        try:
-            oids.append(ObjectId(pid))
-        except:
-            raise HTTPException(400, f"ID inválido: {pid}")
-
-    # 2) Leer todas las placas de esos pedidos
-    docs = list(coleccion_pedidos.find({"_id": {"$in": oids}, "estado": "AUTORIZADO"}, {"placa": 1}))
-    if not docs:
-        raise HTTPException(404, "No se encontraron pedidos AUTORIZADO con esos IDs")
-    placas = {d["placa"] for d in docs}
-
-    # 3) Procesar **todos** los pedidos que compartan esas placas
-    res = coleccion_pedidos.update_many(
-        {"placa": {"$in": list(placas)}, "estado": "AUTORIZADO"},
-        {"$set": {"estado": "PROCESADO"}}
-    )
-
-    if res.matched_count == 0:
-        raise HTTPException(404, "No se encontraron pedidos AUTORIZADO para procesar")
-    return {"mensaje": f"{res.modified_count} pedidos procesados por {user['usuario']}"}
 
 # ------------------------------
-# ❌ Eliminar pedido por ID (y todos de la misma placa)
+# ❌ Eliminar pedidos por consecutivo_vehiculo
 # ------------------------------
-
-@ruta_pedidos.delete("/{pedido_id}", response_model=dict)
-async def eliminar_pedido(
-    pedido_id: str,
+@ruta_pedidos.delete("/eliminar-por-consecutivo-vehiculo", response_model=dict,  summary="Eliminar pedidos por vehiculo")
+async def eliminar_pedidos_por_consecutivo_vehiculo(
+    consecutivo_vehiculo: str = Query(..., description="Consecutivo vehicular (ej. FUNZA-20250711-FUN123)"),
     usuario: str = Query(..., description="Usuario que solicita la eliminación")
 ):
-    try:
-        oid = ObjectId(pedido_id)
-    except:
-        raise HTTPException(400, "ID de pedido inválido")
-
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
@@ -373,25 +483,31 @@ async def eliminar_pedido(
     if perfil == "GERENTE":
         raise HTTPException(403, "Los usuarios con perfil GERENTE no pueden eliminar pedidos.")
 
-    pedido = coleccion_pedidos.find_one({"_id": oid})
-    if not pedido:
-        raise HTTPException(404, "Pedido no encontrado")
-
-    placa = pedido["placa"]
-    if pedido["estado"] not in {"AUTORIZADO", "REQUIERE AUTORIZACION"}:
-        raise HTTPException(400, "Solo se pueden eliminar pedidos con esos estados")
-
-    res = coleccion_pedidos.delete_many({
-        "placa": placa,
-        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION"]}
+    # Buscar al menos un pedido que coincida
+    pedido = coleccion_pedidos.find_one({
+        "consecutivo_vehiculo": consecutivo_vehiculo
     })
-    return {"mensaje": f"Se eliminaron {res.deleted_count} pedidos de placa '{placa}'"}
+
+    if not pedido:
+        raise HTTPException(404, f"No se encontró ningún pedido con consecutivo_vehiculo '{consecutivo_vehiculo}'")
+
+    if pedido["estado"] not in {"AUTORIZADO", "REQUIERE AUTORIZACION", "COMPLETADO"}:
+        raise HTTPException(400, "Solo se pueden eliminar pedidos en estado AUTORIZADO o REQUIERE AUTORIZACION")
+
+    # Eliminar todos los pedidos con ese consecutivo y estado válido
+    res = coleccion_pedidos.delete_many({
+        "consecutivo_vehiculo": consecutivo_vehiculo,
+        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION", "COMPLETADO"]}
+    })
+
+    return {"mensaje": f"Se elimino el vehiculo '{consecutivo_vehiculo}'"}
+
 
 
 # ------------------------------
 # ✅ Exportar pedidos AUTORIZADOS a Excel (con datos de facturación)
 # ------------------------------
-@ruta_pedidos.get("/exportar-autorizados")
+@ruta_pedidos.get("/exportar-autorizados", summary="Exportar pedidos AUTORIZADOS a Excel")
 async def exportar_autorizados():
     # 1. Obtener sólo los pedidos AUTORIZADOS
     docs = list(coleccion_pedidos.find({"estado": "AUTORIZADO"}))
@@ -435,8 +551,6 @@ async def exportar_autorizados():
             "Tipo de viaje":               flete["tipo"],                       # tipo
             "Linea de negocio":            "MASIVO",
             "Estado":                      "PENDIENTE",
-            "Fecha pedido":                d["fecha"],
-            "Fecha vigencia":              d["fecha"],
             "Observación":                 d.get("planilla_siscore",""),
             "Cliente":                     d["cliente_nombre"],
             "Facturar a":                  d["cliente_nombre"],
@@ -482,9 +596,8 @@ async def exportar_autorizados():
             "REMESAS":                     1,
             "REMISION DEL CLIENTE":        1,
             "GUIA DE TRANSPORTE":          1,
-            "MANIFIESTO":                  1,
-            "id_linea":                   str(d["_id"]),
-            "numero_pedido":               d.get("numero_pedido", "")
+            "MANIFIESTO":                  1,            
+            "consecutivo integrapp":       d["consecutivo_integrapp"]
         })
 
     # 2. Crear DataFrame y escribir a Excel en memoria
@@ -503,9 +616,10 @@ async def exportar_autorizados():
     )
 
 # ------------------------------
-# 📥 Cargar masivo numero_pedido desde Excel (modificado)
+# 📥 Cargar masivo numero_pedido desde Excel (por consecutivo_integrapp)
+#   y mover vehículos completamente terminados
 # ------------------------------
-@ruta_pedidos.post("/cargar-numeros-pedido", response_model=dict)
+@ruta_pedidos.post("/cargar-numeros-pedido", response_model=dict, summary="Cargar los pedidos desde vulcano masivo")
 async def cargar_numeros_pedido(
     usuario: str = Form(...),
     archivo: UploadFile = File(...)
@@ -518,198 +632,226 @@ async def cargar_numeros_pedido(
     if perfil not in {"ADMIN", "ANALISTA"}:
         raise HTTPException(403, "No tienes permiso para actualizar numero_pedido masivamente")
 
-    # Leer el archivo Excel
+    # Leer y limpiar Excel
     df = pd.read_excel(archivo.file)
     df = df.apply(lambda col: col.map(lambda x: str(x).strip() if pd.notnull(x) else ""))
 
-    # Validar columnas requeridas
-    required_cols = {"id_linea", "numero_pedido"}
-    if not required_cols.issubset(set(df.columns)):
+    # Validar columnas
+    required_cols = {"consecutivo_integrapp", "numero_pedido"}
+    if not required_cols.issubset(df.columns):
         raise HTTPException(400, f"El archivo debe contener las columnas: {required_cols}")
 
+    # Eliminar duplicados de input
+    df = df.drop_duplicates(subset=["consecutivo_integrapp"])
+
     errores = []
-    updates = []  # Almacenar updates válidos
+    actualizados = 0
+    vehiculos_a_verificar = set()
 
-    # 1. Validar todas las filas antes de actualizar
     for idx, row in df.iterrows():
-        fila = idx + 2  # Excel es 1-indexed y +1 por encabezado
-        id_linea = row["id_linea"]
-        numero_pedido = row["numero_pedido"]
+        fila = idx + 2
+        ci = row["consecutivo_integrapp"]
+        nped = row["numero_pedido"]
 
-        # Validar numero_pedido no vacío
-        if not numero_pedido:
+        if not ci:
+            errores.append(f"Fila {fila}: consecutivo_integrapp no puede estar vacío")
+            continue
+        if not nped:
             errores.append(f"Fila {fila}: numero_pedido no puede estar vacío")
             continue
 
-        try:
-            oid = ObjectId(id_linea)
-        except:
-            errores.append(f"Fila {fila}: id_linea inválido '{id_linea}'")
+        # Buscar documentos pendientes
+        docs = list(coleccion_pedidos.find({
+            "consecutivo_integrapp": ci,
+            "estado": "AUTORIZADO"
+        }))
+        if not docs:
+            errores.append(
+                f"Fila {fila}: '{ci}' no existe o no está en estado AUTORIZADO"
+            )
             continue
 
-        pedido = coleccion_pedidos.find_one({"_id": oid})
-        if not pedido:
-            errores.append(f"Fila {fila}: No se encontró pedido con id_linea '{id_linea}'")
-            continue
+        # Extraer vehículo para más tarde
+        veh = docs[0]["consecutivo_vehiculo"]
+        vehiculos_a_verificar.add(veh)
 
-        # Validar estado AUTORIZADO
-        if pedido.get("estado") != "AUTORIZADO":
-            errores.append(f"Fila {fila}: El pedido no está en estado AUTORIZADO (estado actual: {pedido.get('estado')})")
-            continue
-
-        # Si todo ok, agrega a lista de updates
-        updates.append({
-            "_id": oid,
-            "numero_pedido": numero_pedido
-        })
-
-    # 2. Si hay errores, abortar sin actualizar nada
-    if errores:
-        raise HTTPException(400, detail={"mensaje": "Errores en el archivo. No se actualizó ningún registro.", "errores": errores})
-
-    # 3. Realizar los updates ahora que no hay errores
-    actualizados = 0
-    for u in updates:
-        res = coleccion_pedidos.update_one(
-            {"_id": u["_id"]},
+        # Actualizar todos los que coincidan
+        res = coleccion_pedidos.update_many(
+            {"consecutivo_integrapp": ci, "estado": "AUTORIZADO"},
             {"$set": {
-                "numero_pedido": u["numero_pedido"],
-                "pedido_actualizado_por": user["usuario"],
-                "fecha_actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "numero_pedido": nped,
+                "pedido_actualizado_vulcano_por": user["usuario"],
+                "fecha_pedido_actualizado_vulcano": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "estado": "COMPLETADO"
             }}
         )
-        if res.modified_count > 0:
-            actualizados += 1
+        if res.modified_count:
+            actualizados += res.modified_count
 
-    return {"mensaje": f"{actualizados} registros actualizados correctamente"}
+    if errores:
+        raise HTTPException(400, detail={
+            "mensaje": "Se actualizaron parcialmente; errores en algunas filas",
+            "errores": errores
+        })
+
+    # Ahora: para cada vehículo actualizado, comprobar si TODOS sus docs ya están COMPLETADOS
+    movidos = []
+    for veh in vehiculos_a_verificar:
+        total_docs = coleccion_pedidos.count_documents({"consecutivo_vehiculo": veh})
+        completados = coleccion_pedidos.count_documents({
+            "consecutivo_vehiculo": veh,
+            "estado": "COMPLETADO"
+        })
+        if total_docs > 0 and total_docs == completados:
+            # moverlos a la colección de completados
+            docs_para_mover = list(coleccion_pedidos.find({"consecutivo_vehiculo": veh}))
+            # eliminar _id para reinsertar sin conflictos
+            for d in docs_para_mover:
+                d.pop("_id")
+            coleccion_pedidos_completados.insert_many(docs_para_mover)
+            coleccion_pedidos.delete_many({"consecutivo_vehiculo": veh})
+            movidos.append(veh)
+
+    return {
+        "mensaje": f"{actualizados} documentos actualizados; "
+                   f"{len(movidos)} vehículos movidos a completados",
+        "vehiculos_completados": movidos
+    }
 
 
-
-# ------------------------------
-# 📤 Exportar pedidos COMPLETADOS filtrados por fechas y regional con permisos de perfil
-# ------------------------------
-@ruta_pedidos.get("/exportar-completados")
+# Exportar a excel COMPLETADOS por rango fechas
+@ruta_pedidos.get(
+    "/exportar-completados",
+    summary="Exportar a excel COMPLETADOS por rango fechas"
+)
 async def exportar_completados(
     usuario: str = Query(..., description="Usuario que exporta"),
-    fecha_inicial: str = Query(..., description="Fecha inicial en formato YYYY-MM-DD"),
-    fecha_final: str = Query(..., description="Fecha final en formato YYYY-MM-DD"),
-    regionales: List[str] = Query(None, description="Lista de regionales (opcional para OPERADOR)")
+    fecha_inicial: str = Query(..., description="YYYY-MM-DD"),
+    fecha_final:   str = Query(..., description="YYYY-MM-DD"),
+    regionales:    List[str] = Query(None, description="Opcional para ADMIN/Gerente/Analista")
 ):
-    # Validar usuario
+    # 1) validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
         raise HTTPException(404, "Usuario no encontrado")
-    perfil = user["perfil"].upper()
-    regional_usuario = user["regional"].upper()
+    perfil, reg_user = user["perfil"].upper(), user["regional"].upper()
 
-    # Validar formato de fechas
+    # 2) validar fechas
     try:
-        fecha_ini_dt = datetime.strptime(fecha_inicial, "%Y-%m-%d")
-        fecha_fin_dt = datetime.strptime(fecha_final, "%Y-%m-%d")
+        datetime.strptime(fecha_inicial, "%Y-%m-%d")
+        datetime.strptime(fecha_final,   "%Y-%m-%d")
     except:
         raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
-    # Construir filtro
+    # 3) armar filtro sólo por fecha_creacion y, si aplica, por regional
     filtro = {
-        "estado": "COMPLETADO",
-        "fecha_actualizacion": {
+        "fecha_creacion": {
             "$gte": f"{fecha_inicial} 00:00:00",
             "$lte": f"{fecha_final} 23:59:59"
         }
     }
+    if perfil in {"ADMIN", "GERENTE", "ANALISTA"} and regionales:
+        filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
+    elif perfil not in {"ADMIN", "GERENTE", "ANALISTA"}:
+        filtro["regional"] = reg_user
 
-    # Lógica de regional según perfil
-    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
-        if regionales:
-            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
-    else:  # OPERADOR u otro perfil limitado
-        filtro["regional"] = regional_usuario
-
-    # Consultar en base de datos
-    docs = list(coleccion_pedidos.find(filtro))
+    # 4) traer todos los campos
+    docs = list(coleccion_pedidos_completados.find(filtro))
     if not docs:
-        raise HTTPException(404, "No se encontraron pedidos COMPLETADOS para los filtros dados.")
+        raise HTTPException(404, "No se encontraron pedidos en ese rango.")
 
-    # Campos a exportar
-    campos = [
-        "fecha", "cliente_nombre", "origen", "destino", "num_cajas", "num_kilos",
-        "tipo_vehiculo", "tipo_viaje", "valor_declarado", "planilla_siscore",
-        "valor_flete", "valor_flete_sistema", "ubicacion_cargue", "ubicacion_descargue",
-        "observaciones", "placa", "creado_por", "regional", "autorizado_por",
-        "fecha_autorizacion", "observaciones_aprobador", "fecha_actualizacion",
-        "numero_pedido", "pedido_actualizado_por"
-    ]
-
-    # Preparar filas
-    rows = []
+    # 5) convertir ObjectId a string
     for d in docs:
-        fila = {}
-        for campo in campos:
-            fila[campo] = d.get(campo, "")
-        rows.append(fila)
+        d["id"] = str(d.pop("_id"))
 
-    # Crear DataFrame y exportar
-    df = pd.DataFrame(rows)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Completados')
-    output.seek(0)
+    # 6) DataFrame con todas las columnas presentes en los documentos
+    df = pd.DataFrame(docs)
 
-    # Devolver como descarga
-    filename = f"pedidos_completados_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    # 7) escribir Excel en memoria
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as w:
+        df.to_excel(w, index=False, sheet_name="Completados")
+    out.seek(0)
+
+    # 8) devolver descarga
+    fn = f"pedidos_completados_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     return StreamingResponse(
-        output,
+        out,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
 
 
-@ruta_pedidos.get("/listar-completados")
-async def listar_completados(
-    usuario: str = Query(...),
-    fecha_inicial: str = Query(...),
-    fecha_final: str = Query(...),
-    regionales: List[str] = Query(None)
+# ------------------------------
+# 🗂 Listar sólo vehículos COMPLETADOS (multiestado = false)
+# ------------------------------
+@ruta_pedidos.post(
+    "/listar-vehiculo-completados",
+    response_model=List[dict],
+    summary="Lista los vehiculos 100% COMPLETADOS"
+)
+async def listar_vehiculos_completados(
+    datos: FiltrosConUsuario,
+    fecha_inicial: str = Query(..., description="Fecha inicial YYYY-MM-DD"),
+    fecha_final:   str = Query(..., description="Fecha final YYYY-MM-DD"),
 ):
-    # Validar usuario
+    usuario = datos.usuario
+    filtros = datos.filtros or FiltrosPedidos()
+
+    # 1) Validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
-        raise HTTPException(404, "Usuario no encontrado")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
     perfil = user["perfil"].upper()
     regional_usuario = user["regional"].upper()
 
-    # Validar formato de fechas
+    # 2) Validar formato de fechas
     try:
-        fecha_ini_dt = datetime.strptime(fecha_inicial, "%Y-%m-%d")
-        fecha_fin_dt = datetime.strptime(fecha_final, "%Y-%m-%d")
+        datetime.strptime(fecha_inicial, "%Y-%m-%d")
+        datetime.strptime(fecha_final,   "%Y-%m-%d")
     except:
         raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
-    # Construir filtro
-    filtro = {
-        "estado": "COMPLETADO",
-        "fecha_actualizacion": {
+    # 3) Construir filtro base (fecha + regional)
+    match_base: Dict[str, any] = {
+        "fecha_pedido_actualizado_vulcano": {
             "$gte": f"{fecha_inicial} 00:00:00",
             "$lte": f"{fecha_final} 23:59:59"
         }
     }
-
-    # Lógica de regional según perfil
     if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
-        if regionales:
-            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
-    else:  # OPERADOR u otro perfil limitado
-        filtro["regional"] = regional_usuario
+        if filtros.regionales:
+            match_base["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
+    else:
+        match_base["regional"] = regional_usuario
 
-    # Consultar en base de datos
-    docs = list(coleccion_pedidos.find(filtro))
-    if not docs:
-        raise HTTPException(404, "No se encontraron pedidos COMPLETADOS.")
+    # 4) Pipeline de agregación sobre la colección de completados
+    pipeline = [
+        {"$match": match_base},
+        {"$group": {
+            "_id": "$consecutivo_vehiculo",
+            "pedidos":       {"$push": "$$ROOT"},
+            "estados_unicos": {"$addToSet": "$estado"}
+        }},
+        # Sólo vehículos cuyo único estado sea COMPLETADO
+        {"$match": {
+            "estados_unicos": {"$size": 1, "$all": ["COMPLETADO"]}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
 
-    # Formatear resultados
-    resultados = []
-    for d in docs:
-        resultados.append(modelo_pedido(d))
+    grupos = list(coleccion_pedidos_completados.aggregate(pipeline))
+    if not grupos:
+        raise HTTPException(404, "No se encontraron vehículos 100% COMPLETADOS en ese rango.")
 
-    return resultados
+    # 5) Formatear la salida
+    respuesta = []
+    for grp in grupos:
+        pedidos_modelados = [modelo_pedido(p) for p in grp["pedidos"]]
+        respuesta.append({
+            "consecutivo_vehiculo": grp["_id"],
+            "pedidos":       pedidos_modelados
+        })
+
+    return respuesta
+
