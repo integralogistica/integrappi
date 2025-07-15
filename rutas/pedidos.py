@@ -747,6 +747,7 @@ async def cargar_numeros_pedido(
 
 
 # Exportar a excel COMPLETADOS por rango fechas
+
 @ruta_pedidos.get(
     "/exportar-completados",
     summary="Exportar a excel COMPLETADOS por rango fechas"
@@ -755,7 +756,8 @@ async def exportar_completados(
     usuario: str = Query(..., description="Usuario que exporta"),
     fecha_inicial: str = Query(..., description="YYYY-MM-DD"),
     fecha_final:   str = Query(..., description="YYYY-MM-DD"),
-    regionales:    List[str] = Query(None, description="Opcional para ADMIN/Gerente/Analista")
+    # Captura tanto ?regionales=R1 como ?regionales=R1&regionales=R2
+    regionales: Optional[List[str]] = Query(None, description="Opcional: lista de regionales")
 ):
     # 1) validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
@@ -771,18 +773,21 @@ async def exportar_completados(
         raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
     # 3) armar filtro sólo por fecha_creacion y, si aplica, por regional
-    filtro = {
+    filtro: Dict[str, any] = {
         "fecha_creacion": {
             "$gte": f"{fecha_inicial} 00:00:00",
             "$lte": f"{fecha_final} 23:59:59"
         }
     }
-    if perfil in {"ADMIN", "GERENTE", "ANALISTA"} and regionales:
-        filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
-    elif perfil not in {"ADMIN", "GERENTE", "ANALISTA"}:
+
+    # Si es ADMIN/Gerente/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
+    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
+        if regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
+    else:
         filtro["regional"] = reg_user
 
-    # 4) traer todos los campos
+    # 4) traer documentos
     docs = list(coleccion_pedidos_completados.find(filtro))
     if not docs:
         raise HTTPException(404, "No se encontraron pedidos en ese rango.")
@@ -791,16 +796,14 @@ async def exportar_completados(
     for d in docs:
         d["id"] = str(d.pop("_id"))
 
-    # 6) DataFrame con todas las columnas presentes en los documentos
+    # 6) DataFrame y Excel
     df = pd.DataFrame(docs)
-
-    # 7) escribir Excel en memoria
     out = BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as w:
-        df.to_excel(w, index=False, sheet_name="Completados")
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Completados")
     out.seek(0)
 
-    # 8) devolver descarga
+    # 7) devolver descarga
     fn = f"pedidos_completados_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     return StreamingResponse(
         out,
@@ -808,14 +811,13 @@ async def exportar_completados(
         headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
 
-
 # ------------------------------
-# 🗂 Listar sólo vehículos COMPLETADOS (multiestado = false)
+# 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
 @ruta_pedidos.post(
     "/listar-vehiculo-completados",
     response_model=List[dict],
-    summary="Lista los vehiculos 100% COMPLETADOS"
+    summary="Lista los vehículos 100% COMPLETADOS"
 )
 async def listar_vehiculos_completados(
     datos: FiltrosConUsuario,
@@ -825,42 +827,53 @@ async def listar_vehiculos_completados(
     usuario = datos.usuario
     filtros = datos.filtros or FiltrosPedidos()
 
-    # 1) Validar usuario
+    # Validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+    
     perfil = user["perfil"].upper()
     regional_usuario = user["regional"].upper()
 
-    # 2) Validar formato de fechas
+    # Validar formato de fechas
     try:
         datetime.strptime(fecha_inicial, "%Y-%m-%d")
         datetime.strptime(fecha_final,   "%Y-%m-%d")
     except:
         raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
-    # 3) Construir filtro base (fecha + regional)
-    match_base: Dict[str, any] = {
-        "fecha_pedido_actualizado_vulcano": {
+    # Construir filtros
+    filtro: Dict[str, any] = {
+        "fecha_creacion": {
             "$gte": f"{fecha_inicial} 00:00:00",
             "$lte": f"{fecha_final} 23:59:59"
         }
     }
+
+    if filtros.estados:
+        filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
+
     if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
         if filtros.regionales:
-            match_base["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
+            filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
     else:
-        match_base["regional"] = regional_usuario
+        filtro["regional"] = regional_usuario
 
-    # 4) Pipeline de agregación sobre la colección de completados
+    # Pipeline de agregación
     pipeline = [
-        {"$match": match_base},
+        {"$match": filtro},
         {"$group": {
             "_id": "$consecutivo_vehiculo",
-            "pedidos":       {"$push": "$$ROOT"},
-            "estados_unicos": {"$addToSet": "$estado"}
+            "tipo_vehiculo":        {"$first": "$tipo_vehiculo"},
+            "pedidos":              {"$push": "$$ROOT"},
+            "estados_unicos":       {"$addToSet": "$estado"},
+            "total_cajas":          {"$first": "$total_cajas_vehiculo"},
+            "total_kilos":          {"$first": "$total_kilos_vehiculo"},
+            "total_flete":          {"$first": "$total_flete_vehiculo"},
+            "valor_flete_sistema":  {"$first": "$valor_flete_sistema"},
+            "diferencia_flete":     {"$first": "$diferencia_flete"}
         }},
-        # Sólo vehículos cuyo único estado sea COMPLETADO
+        # Filtrar solo vehículos cuyo único estado sea COMPLETADO
         {"$match": {
             "estados_unicos": {"$size": 1, "$all": ["COMPLETADO"]}
         }},
@@ -868,17 +881,29 @@ async def listar_vehiculos_completados(
     ]
 
     grupos = list(coleccion_pedidos_completados.aggregate(pipeline))
-    if not grupos:
-        raise HTTPException(404, "No se encontraron vehículos 100% COMPLETADOS en ese rango.")
 
-    # 5) Formatear la salida
-    respuesta = []
-    for grp in grupos:
-        pedidos_modelados = [modelo_pedido(p) for p in grp["pedidos"]]
+    if not grupos:
+        raise HTTPException(404, "No se encontraron vehículos COMPLETADOS en ese rango.")
+
+    respuesta: List[dict] = []
+    for g in grupos:
+        pedidos = [modelo_pedido(p) for p in g["pedidos"]]
+        estados = g.get("estados_unicos", [])
+        multiestado = len(estados) > 1
+
         respuesta.append({
-            "consecutivo_vehiculo": grp["_id"],
-            "pedidos":       pedidos_modelados
+            "consecutivo_vehiculo":     g["_id"],
+            "tipo_vehiculo":            g.get("tipo_vehiculo", ""),
+            "multiestado":              multiestado,
+            "estados":                  estados,
+            "total_cajas_vehiculo":     g.get("total_cajas", 0),
+            "total_kilos_vehiculo":     g.get("total_kilos", 0.0),
+            "total_flete_vehiculo":     g.get("total_flete", 0.0),
+            "valor_flete_sistema":      g.get("valor_flete_sistema", 0.0),
+            "diferencia_flete":         g.get("diferencia_flete", 0.0),
+            "pedidos":                  pedidos
         })
 
     return respuesta
+
 
