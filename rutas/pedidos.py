@@ -126,6 +126,9 @@ async def cargar_pedidos_masivo(
 
     # Para cálculo de fletes máximos por vehiculo+original
     maximo_flete_por_vehiculo_consecutivo: Dict[str, Dict[int, float]] = {}
+    # Para totales de cajas y kilos por vehículo
+    total_cajas_por_vehiculo: Dict[str, int] = {}
+    total_kilos_por_vehiculo: Dict[str, float] = {}
 
     # Validación de duplicados de consecutivo en el mismo archivo
     seen_consecutivos: Dict[int, str] = {}
@@ -211,6 +214,10 @@ async def cargar_pedidos_masivo(
         except:
             errores.append(f"{prefix}Fila {fila}: NUM_CAJAS o NUM_KILOS no son numéricos")
             continue
+
+        # Acumular totales de cajas y kilos por vehículo
+        total_cajas_por_vehiculo[vehiculo] = total_cajas_por_vehiculo.get(vehiculo, 0) + num_cajas
+        total_kilos_por_vehiculo[vehiculo] = total_kilos_por_vehiculo.get(vehiculo, 0.0) + num_kilos
 
         # 10) Leer observaciones
         observaciones = row.get("OBSERVACIONES", "")
@@ -317,7 +324,7 @@ async def cargar_pedidos_masivo(
     if errores:
         raise HTTPException(400, detail={"mensaje": "Errores en archivo masivo", "errores": errores})
 
-    # 16) Calcular total_flete_vehiculo y asignar estado
+    # 16) Calcular total_flete_vehiculo y asignar estado + nuevos campos
     total_flete_por_vehiculo = {
         veh: sum(vals.values())
         for veh, vals in maximo_flete_por_vehiculo_consecutivo.items()
@@ -332,7 +339,7 @@ async def cargar_pedidos_masivo(
         if total <= valor_bd + 50000:
             r["estado"] = "AUTORIZADO"
             r["autorizado_por"] = "NA"
-            r["fecha_autorizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            r["fecha_autorizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M")  # ajustada
         else:
             r["estado"] = "REQUIERE AUTORIZACION"
             r["autorizado_por"] = "NA"
@@ -340,6 +347,9 @@ async def cargar_pedidos_masivo(
 
         r["valor_flete_sistema"] = valor_bd
         r["total_flete_vehiculo"] = total
+        r["total_cajas_vehiculo"] = total_cajas_por_vehiculo.get(veh, 0)
+        r["total_kilos_vehiculo"] = total_kilos_por_vehiculo.get(veh, 0.0)
+        r["diferencia_flete"] = total - valor_bd
 
     # 17) Insertar en bloque y devolver detalles
     if registros:
@@ -358,7 +368,6 @@ async def cargar_pedidos_masivo(
     return {"mensaje": mensaje, "detalles": detalles}
 
 
-
 # ------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
 # ------------------------------
@@ -374,8 +383,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
     perfil = user["perfil"].upper()
     regional_usuario = user["regional"].upper()
 
-    filtro = {}
-
+    filtro: Dict[str, any] = {}
     if filtros.estados:
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
 
@@ -389,25 +397,37 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         {"$match": filtro},
         {"$group": {
             "_id": "$consecutivo_vehiculo",
-            "pedidos": {"$push": "$$ROOT"},
-            "estados_unicos": {"$addToSet": "$estado"}
+            "tipo_vehiculo":      {"$first": "$tipo_vehiculo"},
+            "pedidos":            {"$push": "$$ROOT"},
+            "estados_unicos":     {"$addToSet": "$estado"},
+            "total_cajas":        {"$first": "$total_cajas_vehiculo"},
+            "total_kilos":        {"$first": "$total_kilos_vehiculo"},
+            "total_flete":        {"$first": "$total_flete_vehiculo"},
+            "valor_flete_sistema":{"$first": "$valor_flete_sistema"},
+            "diferencia_flete":   {"$first": "$diferencia_flete"}
         }},
         {"$sort": {"_id": 1}}
     ]
 
-    docs = list(coleccion_pedidos.aggregate(pipeline))
+    grupos = list(coleccion_pedidos.aggregate(pipeline))
 
-    # Formatear la respuesta
-    respuesta = []
-    for grupo in docs:
-        pedidos = [modelo_pedido(p) for p in grupo["pedidos"]]
-        estados = grupo.get("estados_unicos", [])
+    respuesta: List[dict] = []
+    for g in grupos:
+        pedidos = [modelo_pedido(p) for p in g["pedidos"]]
+        estados = g.get("estados_unicos", [])
         multiestado = len(estados) > 1
+
         respuesta.append({
-            "consecutivo_vehiculo": grupo["_id"],
-            "multiestado": multiestado,
-            "estados": estados,
-            "pedidos": pedidos
+            "consecutivo_vehiculo":   g["_id"],
+            "tipo_vehiculo": g.get("tipo_vehiculo", ""),
+            "multiestado":            multiestado,
+            "estados":                estados,
+            "total_cajas_vehiculo":   g.get("total_cajas", 0),
+            "total_kilos_vehiculo":   g.get("total_kilos", 0.0),
+            "total_flete_vehiculo":   g.get("total_flete", 0.0),
+            "valor_flete_sistema":    g.get("valor_flete_sistema", 0.0),
+            "diferencia_flete":       g.get("diferencia_flete", 0.0),
+            "pedidos":                pedidos
         })
 
     return respuesta
@@ -634,6 +654,15 @@ async def cargar_numeros_pedido(
 
     # Leer y limpiar Excel
     df = pd.read_excel(archivo.file)
+
+    # 1. Eliminar filas completamente vacías
+    df = df.dropna(how='all')
+
+    # 2. Eliminar filas donde consecutivo_integrapp esté vacío o solo espacios
+    if "consecutivo_integrapp" in df.columns:
+        df = df[df["consecutivo_integrapp"].notna() & (df["consecutivo_integrapp"].str.strip() != "")]
+
+    # 3. Limpiar espacios y NaNs
     df = df.apply(lambda col: col.map(lambda x: str(x).strip() if pd.notnull(x) else ""))
 
     # Validar columnas
@@ -641,11 +670,10 @@ async def cargar_numeros_pedido(
     if not required_cols.issubset(df.columns):
         raise HTTPException(400, f"El archivo debe contener las columnas: {required_cols}")
 
-    # Eliminar duplicados de input
     df = df.drop_duplicates(subset=["consecutivo_integrapp"])
 
     errores = []
-    actualizados = 0
+    registros_validos = []
     vehiculos_a_verificar = set()
 
     for idx, row in df.iterrows():
@@ -660,22 +688,28 @@ async def cargar_numeros_pedido(
             errores.append(f"Fila {fila}: numero_pedido no puede estar vacío")
             continue
 
-        # Buscar documentos pendientes
         docs = list(coleccion_pedidos.find({
             "consecutivo_integrapp": ci,
             "estado": "AUTORIZADO"
         }))
         if not docs:
-            errores.append(
-                f"Fila {fila}: '{ci}' no existe o no está en estado AUTORIZADO"
-            )
+            errores.append(f"Fila {fila}: '{ci}' no existe o no está en estado AUTORIZADO")
             continue
 
-        # Extraer vehículo para más tarde
         veh = docs[0]["consecutivo_vehiculo"]
         vehiculos_a_verificar.add(veh)
+        registros_validos.append((ci, nped))
 
-        # Actualizar todos los que coincidan
+    # ❌ Si hay errores, no actualizamos nada
+    if errores:
+        raise HTTPException(400, detail={
+            "mensaje": "No se realizó ninguna actualización. Hay errores en el archivo.",
+            "errores": errores
+        })
+
+    # ✅ Si no hay errores, ahora sí actualizamos
+    actualizados = 0
+    for ci, nped in registros_validos:
         res = coleccion_pedidos.update_many(
             {"consecutivo_integrapp": ci, "estado": "AUTORIZADO"},
             {"$set": {
@@ -688,13 +722,7 @@ async def cargar_numeros_pedido(
         if res.modified_count:
             actualizados += res.modified_count
 
-    if errores:
-        raise HTTPException(400, detail={
-            "mensaje": "Se actualizaron parcialmente; errores en algunas filas",
-            "errores": errores
-        })
-
-    # Ahora: para cada vehículo actualizado, comprobar si TODOS sus docs ya están COMPLETADOS
+    # Verificar vehículos completos
     movidos = []
     for veh in vehiculos_a_verificar:
         total_docs = coleccion_pedidos.count_documents({"consecutivo_vehiculo": veh})
@@ -703,9 +731,7 @@ async def cargar_numeros_pedido(
             "estado": "COMPLETADO"
         })
         if total_docs > 0 and total_docs == completados:
-            # moverlos a la colección de completados
             docs_para_mover = list(coleccion_pedidos.find({"consecutivo_vehiculo": veh}))
-            # eliminar _id para reinsertar sin conflictos
             for d in docs_para_mover:
                 d.pop("_id")
             coleccion_pedidos_completados.insert_many(docs_para_mover)
@@ -717,6 +743,7 @@ async def cargar_numeros_pedido(
                    f"{len(movidos)} vehículos movidos a completados",
         "vehiculos_completados": movidos
     }
+
 
 
 # Exportar a excel COMPLETADOS por rango fechas
