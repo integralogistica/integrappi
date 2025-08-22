@@ -14,6 +14,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
 db = client["integra"]
 coleccion_fletes = db["tarifas"]
+coleccion_otros_costos = db["otros_costos"]
 
 # ------------------------------
 # 🚦 Configuración Router
@@ -169,3 +170,41 @@ async def eliminar_flete(origen: str, destino: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Flete no encontrado para eliminar")
     return {"mensaje": "Flete eliminado exitosamente"}
+
+
+
+# ------------------------------
+# ✅ Carga masiva de otros costos
+# ------------------------------
+@ruta_fletes.post("/cargar-otros-costos", response_model=dict)
+async def cargar_otros_costos(archivo: UploadFile = File(...)):
+    try:
+        df = pd.read_excel(archivo.file)
+        df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
+
+        columnas_requeridas = {"TIPO_VEHICULO", "MAX_PUNTOS", "VALOR_PUNTO_ADICIONAL", "CARGUE_DESCARGUE"}
+        if not columnas_requeridas.issubset(df.columns):
+            raise HTTPException(
+                status_code=400,
+                detail=f"El archivo debe contener las columnas: {', '.join(columnas_requeridas)}"
+            )
+
+        registros = []
+        for _, row in df.iterrows():
+            registro = {
+                "tipo_vehiculo": str(row["TIPO_VEHICULO"]).strip().upper(),
+                "max_puntos": int(row["MAX_PUNTOS"]),
+                "valor_punto_adicional": float(row["VALOR_PUNTO_ADICIONAL"]),
+                "cargue_descargue": float(row["CARGUE_DESCARGUE"]),
+            }
+            registros.append(registro)
+
+        coleccion_otros_costos.delete_many({})  # Borra registros anteriores
+        if registros:
+            coleccion_otros_costos.insert_many(registros)
+
+        return {"mensaje": f"{len(registros)} registros de otros costos cargados exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
