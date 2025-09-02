@@ -779,7 +779,8 @@ async def exportar_autorizados():
         # Primera fila del vehículo
         es_primera_veh = veh not in vistos_veh
         if es_primera_veh:
-            toneladas_val = kilos_sic_por_veh.get(veh, 0.0)      # valor TAL CUAL en kilos
+            kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0) # está en kg
+            toneladas_val = round(kilos_veh / 1000.0, 3)
             punto_adicional_val = punto_adic_por_veh.get(veh, 0.0)
             extra_desvio_para_flete_unidad = desvio_por_veh.get(veh, 0.0)
             vistos_veh.add(veh)
@@ -832,11 +833,10 @@ async def exportar_autorizados():
 
             # 👉 Kilos (SICETAC) del vehículo – 1ª fila del vehículo
             "Toneladas":                toneladas_val,
-
             "Tipo pago":                "CUPO",
 
             # 👉 SOLICITADO: Flete unidad = valor_flete_doc + total_desvio_vehiculo (solo 1ª fila del vehículo)
-            "Flete unidad":             valor_flete_doc + extra_desvio_para_flete_unidad,
+            "Flete unidad":             valor_flete_doc + extra_desvio_para_flete_unidad + punto_adicional_val,
 
             "Tolerancia":               0,
             "Vlr hora STBY":            0,
@@ -845,7 +845,7 @@ async def exportar_autorizados():
             "Flete por":                "CUPO",
 
             # 👉 Valor unitario: vuelve a tu fórmula de redondeo por documento
-            "Valor unitario":           int((((valor_flete_doc / 0.7) + 49) // 50) * 50),
+            "Valor unitario":           int(((((valor_flete_doc  + extra_desvio_para_flete_unidad + punto_adicional_val) / 0.7) + 49) // 50) * 50),
 
             "Aprobar cupo credito":     1,
             "Aprobar rentabilidad":     1,
@@ -880,7 +880,7 @@ async def exportar_autorizados():
 
 
 
-# ------------------------------
+# ------------------------------    
 # 📥 Cargar masivo numero_pedido desde Excel (por consecutivo_integrapp)
 #   y mover vehículos completamente terminados
 # ------------------------------
@@ -1078,6 +1078,7 @@ async def exportar_completados(
         headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
 
+
 # ------------------------------
 # 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
@@ -1150,13 +1151,19 @@ async def listar_vehiculos_completados(
         {"$group": {
             "_id": "$consecutivo_vehiculo",
             "tipo_vehiculo": {"$first": "$tipo_vehiculo"},
+            "tipo_vehiculo_sicetac": {"$first": "$tipo_vehiculo_sicetac"},
             "destino": {"$first": "$destino"},
-            "pedidos": {"$push": "$$ROOT"},
+            "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},            
+            "pedidos": {"$push": "$$ROOT"},  
             "estados": {"$addToSet": "$estado"},
+            "flete_solicitado":{"$sum": "$valor_flete"},
+            "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
+            "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},            
+            "cargue_descargue_total": {"$sum": "$cargue_descargue"},
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
-                "kilos_sicetac": "$total_kilos_vehiculo_sicetac",
+                "kilos_sicetac": "$total_kilos_vehiculo_sicetac", 
                 "flete": "$total_flete_vehiculo",
                 "desvio": "$total_desvio_vehiculo",
                 "puntos": "$total_puntos_vehiculo",
@@ -1166,9 +1173,6 @@ async def listar_vehiculos_completados(
                 "costo_real": "$total_flete_vehiculo",
                 "diferencia": "$diferencia_flete",
             }},
-            "flete_solicitado":{"$sum": "$valor_flete"},
-            "punto_adicional_total": {"$sum": "$punto_adicional"},
-            "cargue_descargue_total": {"$sum": "$cargue_descargue"},
         }},
         {"$set": {
             "punto_adicional_total": {
@@ -1181,7 +1185,7 @@ async def listar_vehiculos_completados(
 
     grupos = list(coleccion_pedidos_completados.aggregate(pipeline))
     if not grupos:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No se encontraron vehículos COMPLETADOS en ese rango.")
+        return [] 
 
     # 6) Formar la respuesta con los mismos campos que el multiestado
     respuesta = []
@@ -1199,6 +1203,7 @@ async def listar_vehiculos_completados(
         respuesta.append({
             "consecutivo_vehiculo":            g["_id"],
             "tipo_vehiculo":                   g["tipo_vehiculo"],
+            "tipo_vehiculo_sicetac":           g.get("tipo_vehiculo_sicetac"),
             "destino":                         g["destino"],
             "multiestado":                     False,
             "estados":                         g["estados"],
