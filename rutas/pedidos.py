@@ -269,7 +269,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 
         # evitar consecutivo_integrapp repetido
         cons_int = f"{region}-{fecha_corta}-{cons}"
-        if pedidos_col.find_one({"consecutivo_integrapp": cons_int, "estado": {"$in": ["AUTORIZADO","REQUIERE AUTORIZACION"]}}):
+        if pedidos_col.find_one({"consecutivo_integrapp": cons_int, "estado": {"$in": ["PREAUTORIZADO","REQUIERE AUTORIZACION"]}}):
             errores.append(f"{prefijo}Fila {num_fila}: Consecutivo_integrapp ya usado: {cons_int}")
             continue
 
@@ -337,7 +337,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "punto_adicional_teorico": pad_teo,
             "cargue_descargue_teorico": cargue_teo,
             "costo_teorico_vehiculo": costo_teorico,
-            "estado": "AUTORIZADO" if autorizado else "REQUIERE AUTORIZACION",
+            "estado": "PREAUTORIZADO" if autorizado else "REQUIERE AUTORIZACION",
             "autorizado_por": "NA",
             "fecha_autorizacion": fecha_creacion if autorizado else "NA",
             "diferencia_flete": real - costo_teorico
@@ -431,9 +431,9 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         costo_real = suma_flete + suma_cargue + total_desvio_vehiculo + total_punto_adicional
         diferencia = costo_real - costo_teorico
 
-        nuevo_estado = "AUTORIZADO" if costo_real <= costo_teorico else "REQUIERE AUTORIZACION"
-        set_aut_por = usuario if nuevo_estado == "AUTORIZADO" else "NA"
-        set_fecha_aut = ahora_str if nuevo_estado == "AUTORIZADO" else "NA"
+        nuevo_estado = "PREAUTORIZADO" if costo_real <= costo_teorico else "REQUIERE AUTORIZACION"
+        set_aut_por = usuario if nuevo_estado == "PREAUTORIZADO" else "NA"
+        set_fecha_aut = ahora_str if nuevo_estado == "PREAUTORIZADO" else "NA"
 
         # 8) Campos a actualizar
         update_fields = {
@@ -642,6 +642,119 @@ async def autorizar_por_consecutivo_vehiculo(
     return {
         "mensaje": f"{len(set(consecutivos))} vehiculo autorizado correctamente por {user['usuario']}"
     }
+
+
+# -----------------------------------------------------
+# ✅ Confirmar PREAUTORIZADOS → AUTORIZADO por consecutivo_vehiculo
+#    Perfiles permitidos: ADMIN, DESPACHADOR, OPERADOR
+# -----------------------------------------------------
+@ruta_pedidos.put(
+    "/confirmar-preautorizados",
+    response_model=dict,
+    summary="Cambiar de PREAUTORIZADO a AUTORIZADO por vehiculo"
+)
+async def confirmar_preautorizados_por_consecutivo_vehiculo(
+    consecutivos: List[str] = Body(..., embed=True, description="Lista de consecutivo_vehiculo a confirmar"),
+    usuario: str = Body(..., embed=True, description="Usuario que realiza la confirmación"),
+    observaciones_aprobador: Optional[str] = Body(
+        None,
+        embed=True,
+        description="Observaciones del aprobador (opcional)"
+    )
+):
+    # 1) Validar usuario y perfil
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+
+    perfil = (user.get("perfil") or "").upper()
+    if perfil not in {"ADMIN", "DESPACHADOR", "OPERADOR"}:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="Solo ADMIN, DESPACHADOR u OPERADOR pueden confirmar PREAUTORIZADOS"
+        )
+
+    regional_usuario = (user.get("regional") or "").upper()
+
+    # 2) Validar input
+    consecutivos = [c.strip() for c in (consecutivos or []) if c and c.strip()]
+    if not consecutivos:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Debes indicar al menos un consecutivo_vehiculo")
+
+    ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    vehiculos_autorizados = []
+    vehiculos_sin_permiso = []
+    vehiculos_no_encontrados = []
+    vehiculos_sin_preaut = []
+    detalles = []
+
+    # 3) Procesar uno a uno para poder validar regional por vehículo
+    for cv in sorted(set(consecutivos)):
+        # a) Traer cualquier doc del vehículo (para ver regional) y contar PREAUTORIZADOS
+        docs_veh = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv}))
+        if not docs_veh:
+            vehiculos_no_encontrados.append(cv)
+            continue
+
+        # b) Validación de regional para DESPACHADOR / OPERADOR
+        regional_doc = (docs_veh[0].get("regional") or "").upper()
+        if perfil in {"DESPACHADOR", "OPERADOR"} and regional_doc != regional_usuario:
+            vehiculos_sin_permiso.append({"consecutivo_vehiculo": cv, "regional": regional_doc})
+            continue
+
+        # c) Verificar que haya al menos un PREAUTORIZADO
+        preaut_count = coleccion_pedidos.count_documents({
+            "consecutivo_vehiculo": cv,
+            "estado": "PREAUTORIZADO"
+        })
+        if preaut_count == 0:
+            vehiculos_sin_preaut.append(cv)
+            continue
+
+        # d) Autorizar todos los PREAUTORIZADOS del vehículo
+        filtro = {
+            "consecutivo_vehiculo": cv,
+            "estado": "PREAUTORIZADO"
+        }
+        # (para DESP/OPER ya validamos regional antes; no es necesario filtrar aquí)
+        set_fields = {
+            "estado": "AUTORIZADO",
+            "autorizado_por": user["usuario"],
+            "fecha_autorizacion": ahora_str
+        }
+        if observaciones_aprobador is not None:
+            set_fields["observaciones_aprobador"] = observaciones_aprobador
+
+        res = coleccion_pedidos.update_many(filtro, {"$set": set_fields})
+        vehiculos_autorizados.append(cv)
+        detalles.append({
+            "consecutivo_vehiculo": cv,
+            "docs_autorizados": res.modified_count,
+            "regional": regional_doc
+        })
+
+    # 4) Si no se logró autorizar ninguno, devolver 404 con explicación
+    if not vehiculos_autorizados:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={
+                "mensaje": "No se autorizó ningún vehículo",
+                "vehiculos_no_encontrados": vehiculos_no_encontrados,
+                "vehiculos_sin_permiso": vehiculos_sin_permiso,
+                "vehiculos_sin_preautorizados": vehiculos_sin_preaut
+            }
+        )
+
+    return {
+        "mensaje": f"{len(vehiculos_autorizados)} vehículo(s) confirmados a AUTORIZADO por {user['usuario']}",
+        "vehiculos_autorizados": vehiculos_autorizados,
+        "detalles": detalles,
+        "vehiculos_no_encontrados": vehiculos_no_encontrados,
+        "vehiculos_sin_permiso": vehiculos_sin_permiso,
+        "vehiculos_sin_preautorizados": vehiculos_sin_preaut
+    }
+
 
 
 # ------------------------------
