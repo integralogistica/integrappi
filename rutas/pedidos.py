@@ -96,10 +96,25 @@ class AjusteVehiculo(BaseModel):
     total_desvio_vehiculo: Optional[float] = None
     total_punto_adicional: Optional[float] = None
     Observaciones_ajustes: Optional[str] = None
+    total_cargue_descargue: Optional[float] = None
+    total_flete_solicitado: Optional[float] = None
+
 
 class AjustesVehiculosPayload(BaseModel):
     usuario: str
     ajustes: List[AjusteVehiculo]
+
+# ====== MODELO PARA FUSIONAR VEHÍCULOS ======
+class FusionVehiculosPayload(BaseModel):
+    usuario: str
+    consecutivos: List[str]               # 2 o más consecutivos a fusionar
+    nuevo_destino: str                    # nuevo destino a aplicar a todos los docs
+    tipo_vehiculo_sicetac: str            # tipo (RUNT) a validar y aplicar
+    total_flete_solicitado: float         # override vehicular
+    total_cargue_descargue: float         # override vehicular
+    total_punto_adicional: float          # override vehicular
+    total_desvio_vehiculo: float          # override vehicular
+    observacion_fusion: Optional[str] = None  # opcional
 
 
 
@@ -108,6 +123,43 @@ def formatear_salida(doc: dict) -> dict:
     doc["id"] = str(doc.pop("_id"))
     return doc
 
+# ------------------------------
+# 🔧 Helpers de autorización (porcentaje sobre teórico)
+# ------------------------------
+def estado_por_autorizacion(costo_real: float, costo_teorico: float):
+    """
+    Devuelve (estado, porcentaje_sobre_teorico)
+    Estados posibles:
+      - 'PREAUTORIZADO'
+      - 'REQUIERE AUTORIZACION COORDINADOR'
+      - 'REQUIERE AUTORIZACION GERENTE'
+    """
+    if costo_teorico <= 0:
+        return ("REQUIERE AUTORIZACION GERENTE", 0.0)
+
+    diff = costo_real - costo_teorico
+    porc = round((diff / costo_teorico) * 100.0, 2)
+
+    if diff <= 0:
+        return ("PREAUTORIZADO", max(porc, 0.0))
+
+    if porc <= 7.0:
+        return ("REQUIERE AUTORIZACION COORDINADOR", porc)
+
+    return ("REQUIERE AUTORIZACION GERENTE", porc)
+
+
+# Jerarquía para autorizar en función del estado textual
+def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
+    p = (perfil or "").upper()
+    e = (estado or "").upper()
+    if p == "ADMIN":
+        return True
+    if "GERENTE" in e:
+        return p == "GERENTE"
+    if "COORDINADOR" in e:
+        return p in {"COORDINADOR", "GERENTE"}
+    return False  # por seguridad
 
 
 # ------------------------
@@ -269,7 +321,15 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 
         # evitar consecutivo_integrapp repetido
         cons_int = f"{region}-{fecha_corta}-{cons}"
-        if pedidos_col.find_one({"consecutivo_integrapp": cons_int, "estado": {"$in": ["PREAUTORIZADO","REQUIERE AUTORIZACION"]}}):
+        if pedidos_col.find_one({
+            "consecutivo_integrapp": cons_int,
+            "estado": {"$in": [
+                "PREAUTORIZADO",
+                "REQUIERE AUTORIZACION COORDINADOR",
+                "REQUIERE AUTORIZACION GERENTE",
+                "AUTORIZADO"  # opcional, evita reusar incluso si ya está autorizado
+            ]}
+        }):
             errores.append(f"{prefijo}Fila {num_fila}: Consecutivo_integrapp ya usado: {cons_int}")
             continue
 
@@ -325,10 +385,12 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
         pad_teo = exceso * float(otros["valor_punto_adicional"])
         cargue_teo = float(otros["cargue_descargue"])
         costo_teorico = tbase + pad_teo + cargue_teo
-        autorizado = real <= costo_teorico
+        costo_real    = real  # total_flete_vehiculo
+        estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+
         r.update({
             "valor_flete_sistema": tbase,
-            "total_flete_vehiculo": real,
+            "total_flete_vehiculo": costo_real,
             "total_desvio_vehiculo": desvio_total,
             "total_cajas_vehiculo": cajas_por_veh.get(veh, 0),
             "total_kilos_vehiculo": kilos_por_veh.get(veh, 0),
@@ -337,10 +399,11 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "punto_adicional_teorico": pad_teo,
             "cargue_descargue_teorico": cargue_teo,
             "costo_teorico_vehiculo": costo_teorico,
-            "estado": "PREAUTORIZADO" if autorizado else "REQUIERE AUTORIZACION",
-            "autorizado_por": "NA",
-            "fecha_autorizacion": fecha_creacion if autorizado else "NA",
-            "diferencia_flete": real - costo_teorico
+            "estado": estado_calc,
+            "porcentaje_sobre_teorico": porc,
+            "autorizado_por": "SISTEMA" if estado_calc == "PREAUTORIZADO" else "NA",
+            "fecha_autorizacion": fecha_creacion if estado_calc == "PREAUTORIZADO" else "NA",
+            "diferencia_flete": costo_real - costo_teorico
         })
 
     # 6) Insertar y responder
@@ -364,7 +427,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 )
 async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
     usuario = payload.usuario.upper().strip()
-    solicitante = usuario  
+    solicitante = usuario
 
     # 1) Validar usuario y perfil
     user = coleccion_usuarios.find_one({"usuario": usuario})
@@ -406,48 +469,60 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             errores.append(f"{cv}: no se puede ajustar, contiene documentos COMPLETADO")
             continue
 
-        # 5) Valores actuales / derivados
+        # 5) Valores actuales / derivados (sumas reales por documentos)
         doc0 = docs[0]
-        suma_flete  = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
-        suma_cargue = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
+        suma_flete   = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
+        suma_cargue  = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
 
-        desvio_actual = float(doc0.get("total_desvio_vehiculo", 0) or sum(float(d.get("desvio", 0) or 0) for d in docs))
-        punto_extra_actual = float(doc0.get("total_punto_adicional", 0) or sum(float(d.get("punto_adicional", 0) or 0) for d in docs))
-        kilos_sic_actual = float(doc0.get("total_kilos_vehiculo_sicetac", 0) or sum(float(d.get("num_kilos_sicetac", 0) or 0) for d in docs))
-        tipo_sic_actual = (doc0.get("tipo_vehiculo_sicetac") or doc0.get("tipo_vehiculo") or "").upper()
+        desvio_actual       = float(doc0.get("total_desvio_vehiculo", 0) or sum(float(d.get("desvio", 0) or 0) for d in docs))
+        punto_extra_actual  = float(doc0.get("total_punto_adicional", 0) or sum(float(d.get("punto_adicional", 0) or 0) for d in docs))
+        kilos_sic_actual    = float(doc0.get("total_kilos_vehiculo_sicetac", 0) or sum(float(d.get("num_kilos_sicetac", 0) or 0) for d in docs))
+        tipo_sic_actual     = (doc0.get("tipo_vehiculo_sicetac") or doc0.get("tipo_vehiculo") or "").upper()
 
-        # 6) Overrides recibidos
-        total_desvio_vehiculo = float(adj.total_desvio_vehiculo) if adj.total_desvio_vehiculo is not None else desvio_actual
-        total_punto_adicional = float(adj.total_punto_adicional) if adj.total_punto_adicional is not None else punto_extra_actual
+        # 6) Overrides recibidos (si vienen en el payload, se usan)
+        total_desvio_vehiculo        = float(adj.total_desvio_vehiculo) if adj.total_desvio_vehiculo is not None else desvio_actual
+        total_punto_adicional        = float(adj.total_punto_adicional) if adj.total_punto_adicional is not None else punto_extra_actual
         total_kilos_vehiculo_sicetac = float(adj.total_kilos_vehiculo_sicetac) if adj.total_kilos_vehiculo_sicetac is not None else kilos_sic_actual
-        tipo_vehiculo_sicetac = (adj.tipo_vehiculo_sicetac or tipo_sic_actual).upper()
+        tipo_vehiculo_sicetac        = (adj.tipo_vehiculo_sicetac or tipo_sic_actual).upper()
+
+        # 👉 Overrides vehiculares
+        total_cargue_descargue = float(adj.total_cargue_descargue) if getattr(adj, "total_cargue_descargue", None) is not None else float(suma_cargue)
+        total_flete_solicitado = float(adj.total_flete_solicitado) if getattr(adj, "total_flete_solicitado", None) is not None else float(suma_flete)
 
         # 7) Recalcular real/teórico y estado
-        valor_flete_sistema = float(doc0.get("valor_flete_sistema", 0) or 0)
-        punto_adicional_teorico = float(doc0.get("punto_adicional_teorico", 0) or 0)
+        valor_flete_sistema      = float(doc0.get("valor_flete_sistema", 0) or 0)
+        punto_adicional_teorico  = float(doc0.get("punto_adicional_teorico", 0) or 0)
         cargue_descargue_teorico = float(doc0.get("cargue_descargue_teorico", 0) or 0)
 
         costo_teorico = valor_flete_sistema + punto_adicional_teorico + cargue_descargue_teorico
-        costo_real = suma_flete + suma_cargue + total_desvio_vehiculo + total_punto_adicional
-        diferencia = costo_real - costo_teorico
+        # 👇 ahora usa el flete solicitado (override si lo enviaron)
+        costo_real    = total_flete_solicitado + total_cargue_descargue + total_desvio_vehiculo + total_punto_adicional
 
-        nuevo_estado = "PREAUTORIZADO" if costo_real <= costo_teorico else "REQUIERE AUTORIZACION"
-        set_aut_por = usuario if nuevo_estado == "PREAUTORIZADO" else "NA"
-        set_fecha_aut = ahora_str if nuevo_estado == "PREAUTORIZADO" else "NA"
+        estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        set_aut_por   = usuario if estado_calc == "PREAUTORIZADO" else "NA"
+        set_fecha_aut = ahora_str if estado_calc == "PREAUTORIZADO" else "NA"
 
-        # 8) Campos a actualizar
+        # 8) Campos a actualizar en TODOS los docs del vehículo
         update_fields = {
-            "tipo_vehiculo_sicetac": tipo_vehiculo_sicetac,
-            "total_kilos_vehiculo_sicetac": total_kilos_vehiculo_sicetac,
-            "total_desvio_vehiculo": total_desvio_vehiculo,
-            "total_punto_adicional": total_punto_adicional,
-            "usr_solicita_ajuste": solicitante,
-            "total_flete_vehiculo": costo_real,
-            "costo_teorico_vehiculo": costo_teorico,
-            "diferencia_flete": diferencia,
-            "estado": nuevo_estado,
-            "autorizado_por": set_aut_por,
-            "fecha_autorizacion": set_fecha_aut,
+            "tipo_vehiculo_sicetac":         tipo_vehiculo_sicetac,
+            "total_kilos_vehiculo_sicetac":  total_kilos_vehiculo_sicetac,
+            "total_desvio_vehiculo":         total_desvio_vehiculo,
+            "total_punto_adicional":         total_punto_adicional,
+            "total_cargue_descargue":        total_cargue_descargue,
+            "total_flete_solicitado":        total_flete_solicitado,  # 👈 NUEVO
+            "usr_solicita_ajuste":           solicitante,
+
+            # Totales y diferenciales
+            "total_flete_vehiculo":          costo_real,
+            "costo_teorico_vehiculo":        costo_teorico,
+            "diferencia_flete":              costo_real - costo_teorico,
+
+            # Estado y % sobre teórico
+            "estado":                        estado_calc,
+            "porcentaje_sobre_teorico":      porc,
+
+            "autorizado_por":                set_aut_por,
+            "fecha_autorizacion":            set_fecha_aut,
         }
 
         # Observaciones_ajustes solo si viene (para no sobreescribir vacíos)
@@ -460,25 +535,27 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         )
 
         resultados.append({
-            "consecutivo_vehiculo": cv,
-            "regional": regional_doc,
-            "docs_actualizados": res.modified_count,
-            "usr_solicita_ajuste": solicitante,
-            "tipo_vehiculo_sicetac": tipo_vehiculo_sicetac,
-            "total_kilos_vehiculo_sicetac": total_kilos_vehiculo_sicetac,
-            "total_desvio_vehiculo": total_desvio_vehiculo,
-            "total_punto_adicional": total_punto_adicional,
-            "costo_real_vehiculo": costo_real,
-            "costo_teorico_vehiculo": costo_teorico,
-            "diferencia_flete": diferencia,
-            "nuevo_estado": nuevo_estado
+            "consecutivo_vehiculo":            cv,
+            "regional":                        regional_doc,
+            "docs_actualizados":               res.modified_count,
+            "usr_solicita_ajuste":             solicitante,
+            "tipo_vehiculo_sicetac":           tipo_vehiculo_sicetac,
+            "total_kilos_vehiculo_sicetac":    total_kilos_vehiculo_sicetac,
+            "total_desvio_vehiculo":           total_desvio_vehiculo,
+            "total_punto_adicional":           total_punto_adicional,
+            "total_cargue_descargue":          total_cargue_descargue,
+            "total_flete_solicitado":          total_flete_solicitado,  # 👈 en respuesta
+            "costo_real_vehiculo":             costo_real,
+            "costo_teorico_vehiculo":          costo_teorico,
+            "diferencia_flete":                costo_real - costo_teorico,
+            "nuevo_estado":                    estado_calc,
+            "porcentaje_sobre_teorico":        porc,
         })
 
     mensaje = f"{len(resultados)} vehículo(s) ajustado(s)"
     if errores:
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
-
 
 # -----------------------------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
@@ -498,7 +575,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
     filtro["regional"] = (
         {"$in": [r.upper().strip() for r in filtros.regionales]}
-        if perfil in {"ADMIN", "GERENTE", "ANALISTA"} and filtros.regionales
+        if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"} and filtros.regionales
         else regional
     )
 
@@ -515,7 +592,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         {"$unwind": {
             "path": "$cliente",
             "preserveNullAndEmptyArrays": True
-        }},    
+        }},
 
         # 2) Propagar el nombre al documento del pedido (no al grupo)
         {"$set": {"nombre_cliente": {"$ifNull": ["$cliente.nombre", "edwin"]}}},
@@ -523,23 +600,30 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         # (opcional) limpia el objeto cliente para no inflar respuesta
         {"$project": {"cliente": 0}},
 
-        # 3) Agrupa por vehículo, pero SIN nombre_cliente aquí
+        # 3) Agrupa por vehículo
         {"$group": {
             "_id": "$consecutivo_vehiculo",
             "tipo_vehiculo": {"$first": "$tipo_vehiculo"},
             "tipo_vehiculo_sicetac": {"$first": "$tipo_vehiculo_sicetac"},
             "destino": {"$first": "$destino"},
-            "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},            
-            "pedidos": {"$push": "$$ROOT"},  
+            "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},
+            "pedidos": {"$push": "$$ROOT"},
             "estados": {"$addToSet": "$estado"},
-            "flete_solicitado":{"$sum": "$valor_flete"},
+
+            # 👇 Suma por documentos y override vehicular para FLETE SOLICITADO
+            "flete_solicitado_sum_docs": {"$sum": "$valor_flete"},
+            "flete_solicitado_override": {"$first": "$total_flete_solicitado"},
+
+            # Puntos y cargue: override vehicular + sum-docs para fallback
             "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
-            "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},            
-            "cargue_descargue_total": {"$sum": "$cargue_descargue"},
+            "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},
+            "cargue_descargue_total": {"$first": "$total_cargue_descargue"},
+
+            # Totales varios
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
-                "kilos_sicetac": "$total_kilos_vehiculo_sicetac", 
+                "kilos_sicetac": "$total_kilos_vehiculo_sicetac",
                 "flete": "$total_flete_vehiculo",
                 "desvio": "$total_desvio_vehiculo",
                 "puntos": "$total_puntos_vehiculo",
@@ -550,26 +634,36 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
                 "diferencia": "$diferencia_flete",
             }},
         }},
+
+        # 4) Coalesce de campos calculados (preferir override si existe)
         {"$set": {
             "punto_adicional_total": {
                 "$ifNull": ["$punto_adicional_total_veh", "$punto_adicional_sum_docs"]
+            },
+            "flete_solicitado": {
+                "$ifNull": ["$flete_solicitado_override", "$flete_solicitado_sum_docs"]
             }
         }},
+
         {"$sort": {"_id": 1}}
     ]
 
     grupos = list(coleccion_pedidos.aggregate(pipeline))
+
     return [{
         "consecutivo_vehiculo": g["_id"],
         "tipo_vehiculo": g["tipo_vehiculo"],
         "tipo_vehiculo_sicetac": g.get("tipo_vehiculo_sicetac"),
         "destino": g["destino"],
-        "Observaciones_ajustes": g["Observaciones_ajustes"],        
+        "Observaciones_ajustes": g.get("Observaciones_ajustes"),
         "multiestado": len(g["estados"]) > 1,
         "estados": g["estados"],
+
         "total_cajas_vehiculo": g["totales"].get("cajas", 0),
         "total_kilos_vehiculo": g["totales"].get("kilos", 0.0),
         "total_kilos_vehiculo_sicetac": g["totales"].get("kilos_sicetac", 0.0),
+
+        # Totales reales / costos
         "total_flete_vehiculo": g["totales"].get("flete", 0.0),
         "total_desvio_vehiculo": g["totales"].get("desvio", 0.0),
         "total_puntos_vehiculo": g["totales"].get("puntos", 0),
@@ -583,9 +677,13 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         ]),
         "costo_real_vehiculo": g["totales"].get("costo_real", 0.0),
         "diferencia_flete": g["totales"].get("diferencia", 0.0),
+
+        # Adicionales y solicitados (usando override si existe)
         "total_punto_adicional": g.get("punto_adicional_total", 0.0),
         "total_cargue_descargue": g.get("cargue_descargue_total", 0.0),
         "total_flete_solicitado": g.get("flete_solicitado", 0.0),
+
+        # Detalle de pedidos
         "pedidos": [modelo_pedido(p) for p in g["pedidos"]],
     } for g in grupos]
 
@@ -593,56 +691,83 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
 # ---------------------------------------------------
 # 🔄 Autorizar pedidos por consecutivo_vehiculo
 # ---------------------------------------------------
-@ruta_pedidos.put("/autorizar-por-consecutivo-vehiculo", response_model=dict,  summary="Autorizar pedidos por vehiculo")
+@ruta_pedidos.put("/autorizar-por-consecutivo-vehiculo", response_model=dict, summary="Autorizar pedidos por vehiculo (según estado requerido)")
 async def autorizar_por_consecutivo_vehiculo(
     consecutivos: List[str] = Body(..., embed=True, description="Lista de consecutivo_vehiculo a autorizar"),
     usuario: str = Body(..., embed=True, description="Usuario que realiza la autorización"),
-    observaciones_aprobador: Optional[str] = Body(
-        None,
-        embed=True,
-        description="Observaciones del aprobador (opcional)"
-    )
+    observaciones_aprobador: Optional[str] = Body(None, embed=True, description="Observaciones del aprobador (opcional)")
 ):
     # 1) Validar usuario
     user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
-    perfil = user["perfil"].upper()
-    if perfil not in {"ADMIN", "GERENTE"}:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Solo ADMIN o GERENTE pueden autorizar pedidos")
+    perfil = (user.get("perfil") or "").upper()
+    if perfil not in {"ADMIN", "COORDINADOR", "GERENTE"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Solo ADMIN, COORDINADOR o GERENTE pueden autorizar pedidos")
 
-    # 2) Validar input
+    # 2) Sanitizar input
+    consecutivos = [c.strip() for c in (consecutivos or []) if c and c.strip()]
     if not consecutivos:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Debes indicar al menos un consecutivo_vehiculo")
 
-    # 3) Construir filtro y datos a actualizar
-    filtro = {
-        "consecutivo_vehiculo": {"$in": consecutivos},
-        "estado": "REQUIERE AUTORIZACION"
-    }
-    datos_a_setear = {
-        "estado": "AUTORIZADO",
-        "autorizado_por": user["usuario"],
-        "fecha_autorizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    # Solo añadir observaciones_aprobador si viene en la petición
-    if observaciones_aprobador is not None:
-        datos_a_setear["observaciones_aprobador"] = observaciones_aprobador
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    autorizados_ok, rechazados = [], []
 
-    # 4) Ejecutar la actualización
-    res = coleccion_pedidos.update_many(filtro, {"$set": datos_a_setear})
+    # 3) Procesar cada vehículo
+    for cv in sorted(set(consecutivos)):
+        docs = list(coleccion_pedidos.find({
+            "consecutivo_vehiculo": cv,
+            "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION GERENTE"]}
+        }))
 
-    if res.matched_count == 0:
+        if not docs:
+            rechazados.append({"consecutivo_vehiculo": cv, "motivo": "No está en estado de REQUIERE AUTORIZACION"})
+            continue
+
+        # Determinar el requerimiento máximo entre documentos (si hubiese mezcla)
+        estados = { (d.get("estado") or "").upper() for d in docs }
+        # Si alguno exige GERENTE, tomamos GERENTE
+        estado_requerido = "REQUIERE AUTORIZACION GERENTE" if any("GERENTE" in e for e in estados) else "REQUIERE AUTORIZACION COORDINADOR"
+
+        # Validar perfil con el estado requerido
+        if not perfil_puede_autorizar(perfil, estado_requerido):
+            rechazados.append({"consecutivo_vehiculo": cv, "motivo": f"Requiere perfil acorde a '{estado_requerido}'. Perfil actual: {perfil}"})
+            continue
+
+        # Autorizar todos los documentos del vehículo que estén en cualquiera de los dos estados de 'requiere'
+        set_fields = {
+            "estado": "AUTORIZADO",
+            "autorizado_por": user["usuario"],
+            "fecha_autorizacion": ahora
+        }
+        if observaciones_aprobador is not None:
+            set_fields["observaciones_aprobador"] = observaciones_aprobador
+
+        res = coleccion_pedidos.update_many(
+            {
+                "consecutivo_vehiculo": cv,
+                "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION GERENTE"]}
+            },
+            {"$set": set_fields}
+        )
+
+        if res.matched_count == 0:
+            rechazados.append({"consecutivo_vehiculo": cv, "motivo": "No hubo documentos para autorizar"})
+        else:
+            autorizados_ok.append({"consecutivo_vehiculo": cv, "docs_autorizados": res.modified_count, "estado_requerido": estado_requerido})
+
+    if not autorizados_ok:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            detail="No se encontraron pedidos en estado REQUIERE AUTORIZACION para los consecutivo_vehiculo dados"
+            detail={"mensaje": "No se autorizó ningún vehículo", "rechazados": rechazados}
         )
 
     return {
-        "mensaje": f"{len(set(consecutivos))} vehiculo autorizado correctamente por {user['usuario']}"
+        "mensaje": f"{len(autorizados_ok)} vehículo(s) autorizados por {user['usuario']}",
+        "autorizados": autorizados_ok,
+        "rechazados": rechazados
     }
-
 
 # -----------------------------------------------------
 # ✅ Confirmar PREAUTORIZADOS → AUTORIZADO por consecutivo_vehiculo
@@ -770,8 +895,8 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
         raise HTTPException(404, "Usuario no encontrado")
 
     perfil = user["perfil"].upper()
-    if perfil == "GERENTE":
-        raise HTTPException(403, "Los usuarios con perfil GERENTE no pueden eliminar pedidos.")
+    if perfil in {"COORDINADOR", "GERENTE"}:
+        raise HTTPException(403, "Los usuarios con perfil GERENTE O COORDINADOR no pueden eliminar pedidos.")
 
     # Buscar al menos un pedido que coincida
     pedido = coleccion_pedidos.find_one({
@@ -781,13 +906,20 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
     if not pedido:
         raise HTTPException(404, f"No se encontró ningún pedido con consecutivo_vehiculo '{consecutivo_vehiculo}'")
 
-    if pedido["estado"] not in {"AUTORIZADO", "REQUIERE AUTORIZACION", "COMPLETADO"}:
-        raise HTTPException(400, "Solo se pueden eliminar pedidos en estado AUTORIZADO o REQUIERE AUTORIZACION")
+    estados_eliminables = {
+        "AUTORIZADO",
+        "REQUIERE AUTORIZACION COORDINADOR",
+        "REQUIERE AUTORIZACION GERENTE",
+        "COMPLETADO"
+    }
+    if pedido["estado"] not in estados_eliminables:
+        raise HTTPException(400, "Solo se pueden eliminar pedidos en estado AUTORIZADO o REQUIERE AUTORIZACION (Coord./Gerente) o COMPLETADO")
+
 
     # Eliminar todos los pedidos con ese consecutivo y estado válido
     res = coleccion_pedidos.delete_many({
         "consecutivo_vehiculo": consecutivo_vehiculo,
-        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION", "COMPLETADO"]}
+        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION COORDINADOR",  "REQUIERE AUTORIZACION GERENTE","COMPLETADO"]}
     })
 
     return {"mensaje": f"Se elimino el vehiculo '{consecutivo_vehiculo}'"}
@@ -1160,8 +1292,8 @@ async def exportar_completados(
         }
     }
 
-    # Si es ADMIN/Gerente/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
-    if perfil in {"ADMIN", "GERENTE", "ANALISTA"}:
+    # Si es ADMIN/COORDINADOR/GERENTE/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
+    if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"}:
         if regionales:
             filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
     else:
@@ -1233,7 +1365,7 @@ async def listar_vehiculos_completados(
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
 
     # 4) Filtrar por regional según perfil
-    if perfil in {"ADMIN", "GERENTE", "ANALISTA"} and filtros.regionales:
+    if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"} and filtros.regionales:
         filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
     else:
         filtro["regional"] = regional_usuario
@@ -1272,7 +1404,7 @@ async def listar_vehiculos_completados(
             "flete_solicitado":{"$sum": "$valor_flete"},
             "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
             "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},            
-            "cargue_descargue_total": {"$sum": "$cargue_descargue"},
+            "cargue_descargue_total": {"$first": "$total_cargue_descargue"},
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
@@ -1347,3 +1479,210 @@ async def listar_vehiculos_completados(
         })
 
     return respuesta
+
+
+
+# ------------------------------
+# 🗂 Fusionar vehículos (con logs y errores claros)
+# ------------------------------
+@ruta_pedidos.post(
+    "/fusionar-vehiculos",
+    response_model=dict,
+    summary="Fusionar 2+ consecutivo_vehiculo en uno solo, recalculando totales y estado"
+)
+async def fusionar_vehiculos(payload: FusionVehiculosPayload):
+    try:
+        usuario = (payload.usuario or "").upper().strip()
+        user = coleccion_usuarios.find_one({"usuario": usuario})
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+
+        perfil = (user.get("perfil") or "").upper()
+        if perfil not in {"ADMIN", "DESPACHADOR", "OPERADOR"}:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes permisos para fusionar vehículos")
+
+        # 1) Sanitizar consecutivos (mínimo 2)
+        consecutivos = [c.strip() for c in (payload.consecutivos or []) if c and c.strip()]
+        if len(consecutivos) < 2:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Debes enviar al menos 2 consecutivo_vehiculo")
+
+        # 🔐 Sólo estados permitidos
+        estados_permitidos = {
+            "PREAUTORIZADO",
+            "REQUIERE AUTORIZACION COORDINADOR",
+            "REQUIERE AUTORIZACION GERENTE",
+        }
+
+        for cv in consecutivos:
+            total_cv = coleccion_pedidos.count_documents({"consecutivo_vehiculo": cv})
+            if total_cv == 0:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"{cv}: no se encontró ningún documento")
+
+            fuera_permitidos = coleccion_pedidos.count_documents({
+                "consecutivo_vehiculo": cv,
+                "estado": {"$nin": list(estados_permitidos)}
+            })
+            if fuera_permitidos > 0:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"{cv}: solo se pueden fusionar vehículos en PREAUTORIZADO o REQUIERE AUTORIZACION (Coord./Gerente)"
+                )
+
+        # 2) Traer docs de todos los consecutivos
+        docs = list(coleccion_pedidos.find({"consecutivo_vehiculo": {"$in": consecutivos}}))
+        if not docs:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No se encontraron documentos para esos consecutivos")
+
+        # Defensa extra
+        if any((d.get("estado") or "").upper() == "COMPLETADO" for d in docs):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede fusionar: hay documentos en estado COMPLETADO")
+
+        # 3) Regional homogénea y permiso por regional
+        regionales = {(d.get("regional") or "").upper() for d in docs}
+        if len(regionales) != 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Todos los consecutivos deben pertenecer a la misma regional")
+        regional_doc = next(iter(regionales))
+        if perfil in {"DESPACHADOR", "OPERADOR"} and (user.get("regional") or "").upper() != regional_doc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Sin permiso: tu regional es distinta ({regional_doc})")
+
+        # 4) Mismo ORIGEN (para tarifario)
+        origenes = {(d.get("origen") or "").upper() for d in docs}
+        if len(origenes) != 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Todos los consecutivos deben tener el mismo ORIGEN para poder fusionar")
+        origen = next(iter(origenes))
+
+        # 5) Consecutivo resultante = primero
+        target_cv = consecutivos[0]
+
+        # 6) Agregados por documentos
+        total_cajas = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
+        total_kilos = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
+        total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
+        total_puntos_docs = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
+
+        # 7) Tarifas / otros costos según tipo y destino nuevos
+        tipo_sic = (payload.tipo_vehiculo_sicetac or "").upper().strip()
+        nuevo_destino = (payload.nuevo_destino or "").upper().strip()
+        if not tipo_sic or not nuevo_destino:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Debes enviar tipo_vehiculo_sicetac y nuevo_destino")
+
+        tf = db["tarifas"].find_one({"origen": origen, "destino": nuevo_destino})
+        if not tf or "tarifas" not in tf or tipo_sic not in tf["tarifas"]:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"No hay tarifa para {origen}→{nuevo_destino} con tipo '{tipo_sic}'"
+            )
+        tbase = float(tf["tarifas"][tipo_sic])
+
+        otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
+        if not otros:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"No hay configuración de 'otros_costos' para el tipo '{tipo_sic}'"
+            )
+        max_p = int(otros.get("max_puntos", 0) or 0)
+        val_pto = float(otros.get("valor_punto_adicional", 0) or 0)
+        cargue_teorico = float(otros.get("cargue_descargue", 0) or 0)
+
+        exceso = max(0, total_puntos_docs - max_p)
+        pto_teorico = exceso * val_pto
+        costo_teorico = tbase + pto_teorico + cargue_teorico
+
+        # 8) Overrides solicitados
+        total_flete_solicitado = float(payload.total_flete_solicitado or 0)
+        total_cargue_descargue = float(payload.total_cargue_descargue or 0)
+        total_punto_adicional  = float(payload.total_punto_adicional or 0)
+        total_desvio_vehiculo  = float(payload.total_desvio_vehiculo or 0)
+
+        costo_real = total_flete_solicitado + total_cargue_descargue + total_desvio_vehiculo + total_punto_adicional
+
+        estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 9) Update masivo
+        set_fields = {
+            "consecutivo_vehiculo":             target_cv,
+            "destino":                          nuevo_destino,
+            "tipo_vehiculo_sicetac":            tipo_sic,
+
+            # Totales vehiculares
+            "total_cajas_vehiculo":             total_cajas,
+            "total_kilos_vehiculo":             total_kilos,
+            "total_kilos_vehiculo_sicetac":     total_kilos_sic,
+            "total_puntos_vehiculo":            total_puntos_docs,
+
+            # Teóricos
+            "valor_flete_sistema":              tbase,
+            "punto_adicional_teorico":          pto_teorico,
+            "cargue_descargue_teorico":         cargue_teorico,
+            "costo_teorico_vehiculo":           costo_teorico,
+
+            # Solicitados (overrides)
+            "total_flete_solicitado":           total_flete_solicitado,
+            "total_cargue_descargue":           total_cargue_descargue,
+            "total_punto_adicional":            total_punto_adicional,
+            "total_desvio_vehiculo":            total_desvio_vehiculo,
+
+            # Reales y diferencia
+            "total_flete_vehiculo":             costo_real,
+            "diferencia_flete":                 costo_real - costo_teorico,
+
+            # Estado
+            "estado":                           estado_calc,
+            "porcentaje_sobre_teorico":         porc,
+            "autorizado_por":                   "SISTEMA" if estado_calc == "PREAUTORIZADO" else "NA",
+            "fecha_autorizacion":               ahora_str if estado_calc == "PREAUTORIZADO" else "NA",
+
+            # Trazabilidad fusión
+            "usuario_fusion":                   usuario,
+            "observacion_fusion":               (payload.observacion_fusion or ""),
+            "fecha_fusion":                     ahora_str,
+        }
+
+        res = coleccion_pedidos.update_many(
+            {"consecutivo_vehiculo": {"$in": consecutivos}},
+            {"$set": set_fields}
+        )
+
+        # 📌 Log útil en backend (aparece en consola del server)
+        print("[fusionar_vehiculos] OK",
+              {"consecutivos": consecutivos, "target": target_cv, "docs_actualizados": res.modified_count})
+
+        return {
+            "mensaje": f"Fusionados {len(consecutivos)} consecutivos en '{target_cv}'",
+            "consecutivo_resultante": target_cv,
+            "docs_actualizados": res.modified_count,
+            "totales": {
+                "total_cajas_vehiculo":         total_cajas,
+                "total_kilos_vehiculo":         total_kilos,
+                "total_kilos_vehiculo_sicetac": total_kilos_sic,
+                "total_puntos_vehiculo":        total_puntos_docs,
+                "valor_flete_sistema":          tbase,
+                "punto_adicional_teorico":      pto_teorico,
+                "cargue_descargue_teorico":     cargue_teorico,
+                "costo_teorico_vehiculo":       costo_teorico,
+                "total_flete_solicitado":       total_flete_solicitado,
+                "total_cargue_descargue":       total_cargue_descargue,
+                "total_punto_adicional":        total_punto_adicional,
+                "total_desvio_vehiculo":        total_desvio_vehiculo,
+                "total_flete_vehiculo":         costo_real,
+                "diferencia_flete":             costo_real - costo_teorico,
+            },
+            "estado": {
+                "nuevo_estado":             estado_calc,
+                "porcentaje_sobre_teorico": porc
+            },
+            "consecutivos_fusionados": consecutivos
+        }
+
+    except HTTPException:
+        # Deja pasar errores con detail claro para que el front los vea
+        raise
+    except Exception as e:
+        # Log del stacktrace y error claro al front (evita {} vacíos)
+        import traceback
+        print("[fusionar_vehiculos][ERROR]", traceback.format_exc())
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno en fusionar_vehiculos: {e}"
+        )
