@@ -435,7 +435,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
 
     perfil = (user.get("perfil") or "").upper()
-    if perfil not in {"ADMIN", "DESPACHADOR", "OPERADOR"}:
+    if perfil not in {"ADMIN", "DESPACHADOR","ANALISTA","OPERADOR"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes permisos para ajustar vehículos")
 
     regional_usuario = (user.get("regional") or "").upper()
@@ -793,7 +793,7 @@ async def confirmar_preautorizados_por_consecutivo_vehiculo(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
     perfil = (user.get("perfil") or "").upper()
-    if perfil not in {"ADMIN", "DESPACHADOR", "OPERADOR"}:
+    if perfil not in {"ADMIN", "DESPACHADOR", "ANALISTA", "OPERADOR"}:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             detail="Solo ADMIN, DESPACHADOR u OPERADOR pueden confirmar PREAUTORIZADOS"
