@@ -132,10 +132,10 @@ def estado_por_autorizacion(costo_real: float, costo_teorico: float):
     Estados posibles:
       - 'PREAUTORIZADO'
       - 'REQUIERE AUTORIZACION COORDINADOR'
-      - 'REQUIERE AUTORIZACION GERENTE'
+      - 'REQUIERE AUTORIZACION CONTROL'
     """
     if costo_teorico <= 0:
-        return ("REQUIERE AUTORIZACION GERENTE", 0.0)
+        return ("REQUIERE AUTORIZACION CONTROL", 0.0)
 
     diff = costo_real - costo_teorico
     porc = round((diff / costo_teorico) * 100.0, 2)
@@ -146,7 +146,7 @@ def estado_por_autorizacion(costo_real: float, costo_teorico: float):
     if porc <= 7.0:
         return ("REQUIERE AUTORIZACION COORDINADOR", porc)
 
-    return ("REQUIERE AUTORIZACION GERENTE", porc)
+    return ("REQUIERE AUTORIZACION CONTROL", porc)
 
 
 # Jerarquía para autorizar en función del estado textual
@@ -155,10 +155,10 @@ def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     e = (estado or "").upper()
     if p == "ADMIN":
         return True
-    if "GERENTE" in e:
-        return p == "GERENTE"
+    if "CONTROL" in e:
+        return p == "CONTROL"
     if "COORDINADOR" in e:
-        return p in {"COORDINADOR", "GERENTE"}
+        return p in {"COORDINADOR", "CONTROL"}
     return False  # por seguridad
 
 
@@ -326,7 +326,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "estado": {"$in": [
                 "PREAUTORIZADO",
                 "REQUIERE AUTORIZACION COORDINADOR",
-                "REQUIERE AUTORIZACION GERENTE",
+                "REQUIERE AUTORIZACION CONTROL",
                 "AUTORIZADO"  # opcional, evita reusar incluso si ya está autorizado
             ]}
         }):
@@ -575,7 +575,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
     filtro["regional"] = (
         {"$in": [r.upper().strip() for r in filtros.regionales]}
-        if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"} and filtros.regionales
+        if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"} and filtros.regionales
         else regional
     )
 
@@ -703,8 +703,8 @@ async def autorizar_por_consecutivo_vehiculo(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
     perfil = (user.get("perfil") or "").upper()
-    if perfil not in {"ADMIN", "COORDINADOR", "GERENTE"}:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Solo ADMIN, COORDINADOR o GERENTE pueden autorizar pedidos")
+    if perfil not in {"ADMIN", "COORDINADOR", "CONTROL"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Solo ADMIN, COORDINADOR o CONTROL pueden autorizar pedidos")
 
     # 2) Sanitizar input
     consecutivos = [c.strip() for c in (consecutivos or []) if c and c.strip()]
@@ -718,7 +718,7 @@ async def autorizar_por_consecutivo_vehiculo(
     for cv in sorted(set(consecutivos)):
         docs = list(coleccion_pedidos.find({
             "consecutivo_vehiculo": cv,
-            "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION GERENTE"]}
+            "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION CONTROL"]}
         }))
 
         if not docs:
@@ -727,8 +727,8 @@ async def autorizar_por_consecutivo_vehiculo(
 
         # Determinar el requerimiento máximo entre documentos (si hubiese mezcla)
         estados = { (d.get("estado") or "").upper() for d in docs }
-        # Si alguno exige GERENTE, tomamos GERENTE
-        estado_requerido = "REQUIERE AUTORIZACION GERENTE" if any("GERENTE" in e for e in estados) else "REQUIERE AUTORIZACION COORDINADOR"
+        # Si alguno exige CONTROL, tomamos CONTROL
+        estado_requerido = "REQUIERE AUTORIZACION CONTROL" if any("CONTROL" in e for e in estados) else "REQUIERE AUTORIZACION COORDINADOR"
 
         # Validar perfil con el estado requerido
         if not perfil_puede_autorizar(perfil, estado_requerido):
@@ -747,7 +747,7 @@ async def autorizar_por_consecutivo_vehiculo(
         res = coleccion_pedidos.update_many(
             {
                 "consecutivo_vehiculo": cv,
-                "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION GERENTE"]}
+                "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION CONTROL"]}
             },
             {"$set": set_fields}
         )
@@ -895,8 +895,8 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
         raise HTTPException(404, "Usuario no encontrado")
 
     perfil = user["perfil"].upper()
-    if perfil in {"COORDINADOR", "GERENTE"}:
-        raise HTTPException(403, "Los usuarios con perfil GERENTE O COORDINADOR no pueden eliminar pedidos.")
+    if perfil in {"COORDINADOR", "CONTROL"}:
+        raise HTTPException(403, "Los usuarios con perfil CONTROL O COORDINADOR no pueden eliminar pedidos.")
 
     # Buscar al menos un pedido que coincida
     pedido = coleccion_pedidos.find_one({
@@ -909,17 +909,17 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
     estados_eliminables = {
         "AUTORIZADO",
         "REQUIERE AUTORIZACION COORDINADOR",
-        "REQUIERE AUTORIZACION GERENTE",
+        "REQUIERE AUTORIZACION CONTROL",
         "COMPLETADO"
     }
     if pedido["estado"] not in estados_eliminables:
-        raise HTTPException(400, "Solo se pueden eliminar pedidos en estado AUTORIZADO o REQUIERE AUTORIZACION (Coord./Gerente) o COMPLETADO")
+        raise HTTPException(400, "Solo se pueden eliminar pedidos en estado AUTORIZADO o REQUIERE AUTORIZACION (Coord./CONTROL) o COMPLETADO")
 
 
     # Eliminar todos los pedidos con ese consecutivo y estado válido
     res = coleccion_pedidos.delete_many({
         "consecutivo_vehiculo": consecutivo_vehiculo,
-        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION COORDINADOR",  "REQUIERE AUTORIZACION GERENTE","COMPLETADO"]}
+        "estado": {"$in": ["AUTORIZADO", "REQUIERE AUTORIZACION COORDINADOR",  "REQUIERE AUTORIZACION CONTROL","COMPLETADO"]}
     })
 
     return {"mensaje": f"Se elimino el vehiculo '{consecutivo_vehiculo}'"}
@@ -1292,8 +1292,8 @@ async def exportar_completados(
         }
     }
 
-    # Si es ADMIN/COORDINADOR/GERENTE/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
-    if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"}:
+    # Si es ADMIN/COORDINADOR/CONTROL/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
         if regionales:
             filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
     else:
@@ -1365,7 +1365,7 @@ async def listar_vehiculos_completados(
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
 
     # 4) Filtrar por regional según perfil
-    if perfil in {"ADMIN", "COORDINADOR", "GERENTE", "ANALISTA"} and filtros.regionales:
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"} and filtros.regionales:
         filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
     else:
         filtro["regional"] = regional_usuario
@@ -1510,7 +1510,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         estados_permitidos = {
             "PREAUTORIZADO",
             "REQUIERE AUTORIZACION COORDINADOR",
-            "REQUIERE AUTORIZACION GERENTE",
+            "REQUIERE AUTORIZACION CONTROL",
         }
 
         for cv in consecutivos:
@@ -1525,7 +1525,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             if fuera_permitidos > 0:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
-                    f"{cv}: solo se pueden fusionar vehículos en PREAUTORIZADO o REQUIERE AUTORIZACION (Coord./Gerente)"
+                    f"{cv}: solo se pueden fusionar vehículos en PREAUTORIZADO o REQUIERE AUTORIZACION (Coord./CONTROL)"
                 )
 
         # 2) Traer docs de todos los consecutivos
