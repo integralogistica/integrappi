@@ -64,7 +64,8 @@ async def crear_flete(data: Flete):
         "destino": destino,
         "ruta": data.ruta.upper().strip(),
         "tipo": data.tipo.upper().strip(),
-        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),        
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),    
+        "pago_cargue_desc": data.tipo.upper().strip(),
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
     }
     coleccion_fletes.insert_one(nuevo)
@@ -87,12 +88,13 @@ async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
             destino = str(row["DESTINO"]).strip().upper()
             ruta = str(row["RUTA"]).strip().upper()
             tipo = str(row["TIPO"]).strip().upper()
+            pago_cargue_desc = str(row["PAGO_CARGUE_DESC"]).strip().upper()
             equivalencia_centro_costo  = str(row["EQUIVALENCIA_CENTRO_COSTO"]).strip().upper()
             tarifas = {}
             for col in df.columns:
-                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO","EQUIVALENCIA_CENTRO_COSTO"}:
+                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO","PAGO_CARGUE_DESC","EQUIVALENCIA_CENTRO_COSTO"}:
                     tarifas[col] = float(row[col])
-            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo,"equivalencia_centro_costo": equivalencia_centro_costo, "tarifas": tarifas})
+            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "pago_cargue_desc": pago_cargue_desc,"equivalencia_centro_costo": equivalencia_centro_costo, "tarifas": tarifas})
         coleccion_fletes.delete_many({})
         if registros:
             coleccion_fletes.insert_many(registros)

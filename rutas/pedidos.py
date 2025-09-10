@@ -13,7 +13,6 @@ from typing import Literal
 from datetime import datetime
 import time
 from collections import defaultdict 
-import unicodedata, re
 
 # ------------------------------
 # 🔗 Conexión MongoDB
@@ -186,8 +185,6 @@ def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     if "COORDINADOR" in e:
         return p in {"COORDINADOR", "CONTROL"}
     return False  # por seguridad
-
-
 # ------------------------
 # carga masivo excel
 # ------------------------
@@ -197,12 +194,14 @@ def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     summary="Cargar masivo para autorizar"
 )
 async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(...)):
+    import unicodedata
     start_time = time.time()
+
     # 1) Usuario y prefijo
     usuario_db = db["baseusuarios"].find_one({"usuario": creado_por.upper().strip()})
     if not usuario_db:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
-    region = usuario_db["regional"].upper()
+    region = (usuario_db["regional"] or "").upper().strip()
     prefijo = {
         "GIRARDOTA": "Ave Maria!, ",
         "CALI": "¡mirá ve!, ",
@@ -220,7 +219,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
     # 3) Columnas obligatorias
     columnas_req = [
         "NIT_CLIENTE","ORIGEN","DESTINO","NUM_CAJAS","NUM_KILOS","NUM_KILOS_SICETAC",
-        "TIPO_VEHICULO",  "TIPO_VEHICULO_SICETAC","VEHICULO","VALOR_DECLARADO","PLANILLA_SISCORE",
+        "TIPO_VEHICULO","TIPO_VEHICULO_SICETAC","VEHICULO","VALOR_DECLARADO","PLANILLA_SISCORE",
         "VALOR_FLETE","UBICACION_CARGUE","DIRECCION_CARGUE",
         "UBICACION_DESCARGUE","DIRECCION_DESCARGUE","OBSERVACIONES",
         "TIPO_VIAJE","CONSECUTIVO_PEDIDO","DESVIO","CARGUE_DESCARGUE",
@@ -239,13 +238,14 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
     reales_por_veh, desviaciones_por_veh = {}, {}
     cajas_por_veh, kilos_por_veh, puntos_por_veh = {}, {}, {}
     vistos_cons, tipo_por_veh, destino_por_veh = {}, {}, {}
-    kilos_sic_por_veh = {} 
+    kilos_sic_por_veh = {}
+    destinos_reales_por_veh = {}  # set de DESTINO_REAL únicos por vehículo
 
     # Helper para números
     def to_num(campo: str, valor: str) -> float:
         try:
             return float(valor) if valor else 0.0
-        except:
+        except Exception:
             raise ValueError(f"{campo} '{valor}' no es numérico")
 
     # 4) Procesar cada fila
@@ -258,16 +258,14 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
         num_fila = idx + 2
         vehiculo = fila["VEHICULO"].upper()
 
-        # ===== tipo_vehiculo (principal) =====
+        # tipo_vehiculo (principal) y sicetac
         tipo_veh = fila["TIPO_VEHICULO"].upper()
-
-        # ===== tipo_vehiculo_sicetac (desde Excel si viene; si no, igual al principal) =====
         tipo_veh_sic = (fila.get("TIPO_VEHICULO_SICETAC", "") or "").upper() or tipo_veh
 
         # consecutivo
         try:
             cons = int(fila["CONSECUTIVO_PEDIDO"])
-        except:
+        except Exception:
             errores.append(f"{prefijo}Fila {num_fila}: CONSECUTIVO_PEDIDO '{fila['CONSECUTIVO_PEDIDO']}' no es numérico")
             continue
 
@@ -276,7 +274,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             continue
         vistos_cons[cons] = vehiculo
 
-        # consistencia tipo y destino (usa el 'principal' que ya validabas)
+        # consistencia tipo y destino
         if vehiculo in tipo_por_veh and tipo_por_veh[vehiculo] != tipo_veh:
             errores.append(f"{prefijo}Fila {num_fila}: TIPO_VEHICULO inconsistente para {vehiculo}")
             continue
@@ -288,26 +286,26 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             continue
         destino_por_veh[vehiculo] = destino
 
-        # valor_flete sin tope
+        # valor_flete
         try:
             valor_flete = float(fila["VALOR_FLETE"])
-        except:
+        except Exception:
             errores.append(f"{prefijo}Fila {num_fila}: VALOR_FLETE '{fila['VALOR_FLETE']}' no es numérico")
             continue
 
         # tipo viaje
         tipo_viaje = fila["TIPO_VIAJE"].upper()
-        if tipo_viaje not in {"CARGA MASIVA","PAQUETEO"}:
+        if tipo_viaje not in {"CARGA MASIVA", "PAQUETEO"}:
             errores.append(f"{prefijo}Fila {num_fila}: TIPO_VIAJE inválido")
             continue
 
-        # cliente_nit existe
+        # cliente existe
         cliente_nit = fila["NIT_CLIENTE"]
         if not clientes_col.find_one({"nit": cliente_nit}):
             errores.append(f"{prefijo}Fila {num_fila}: Cliente '{cliente_nit}' no existe")
             continue
 
-        # tarifa definida (usa el principal para validar)
+        # tarifa definida
         tf = tarifas_col.find_one({"origen": fila["ORIGEN"].upper(), "destino": destino})
         if not tf or tipo_veh not in tf["tarifas"]:
             errores.append(f"{prefijo}Fila {num_fila}: Tarifa no definida para {fila['ORIGEN']}→{destino}, tipo '{tipo_veh}'")
@@ -321,27 +319,32 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             puntos = int(fila["TOTAL_PUNTOS"])
             cajas = int(fila["NUM_CAJAS"])
             kilos = float(fila["NUM_KILOS"])
-            
         except Exception as e:
             errores.append(f"{prefijo}Fila {num_fila}: {e}")
             continue
 
-        # ===== num_kilos_sicetac (desde Excel si viene; si no, igual al principal) =====
+        # num_kilos_sicetac (si no viene, usa kilos)
         try:
-            # Toma la columna si existe y tiene algo; si no, usa 'kilos'
             if "NUM_KILOS_SICETAC" in df_pedidos.columns and str(fila.get("NUM_KILOS_SICETAC", "")).strip() != "":
                 kilos_sic = float(fila["NUM_KILOS_SICETAC"])
             else:
                 kilos_sic = kilos
-        except:
+        except Exception:
             errores.append(f"{prefijo}Fila {num_fila}: NUM_KILOS_SICETAC '{fila.get('NUM_KILOS_SICETAC')}' no es numérico")
             continue
 
-        # acumular (nota: aquí acumulamos por el principal como ya venía)
-        reales_por_veh[vehiculo] = reales_por_veh.get(vehiculo, 0) + valor_flete + desvio + cargue + punto_extra
-        desviaciones_por_veh[vehiculo] = desviaciones_por_veh.get(vehiculo, 0) + desvio
+        # DESTINO_REAL por vehículo (para puntos por destinos únicos)
+        destino_real_up = (fila["DESTINO_REAL"] or "").upper().strip()
+        if vehiculo not in destinos_reales_por_veh:
+            destinos_reales_por_veh[vehiculo] = set()
+        if destino_real_up:
+            destinos_reales_por_veh[vehiculo].add(destino_real_up)
+
+        # acumuladores por vehículo
+        reales_por_veh[vehiculo] = reales_por_veh.get(vehiculo, 0.0) + valor_flete + desvio + cargue + punto_extra
+        desviaciones_por_veh[vehiculo] = desviaciones_por_veh.get(vehiculo, 0.0) + desvio
         cajas_por_veh[vehiculo] = cajas_por_veh.get(vehiculo, 0) + cajas
-        kilos_por_veh[vehiculo] = kilos_por_veh.get(vehiculo, 0) + kilos
+        kilos_por_veh[vehiculo] = kilos_por_veh.get(vehiculo, 0.0) + kilos
         kilos_sic_por_veh[vehiculo] = kilos_sic_por_veh.get(vehiculo, 0.0) + kilos_sic
         puntos_por_veh[vehiculo] = puntos_por_veh.get(vehiculo, 0) + puntos
 
@@ -353,13 +356,13 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
                 "PREAUTORIZADO",
                 "REQUIERE AUTORIZACION COORDINADOR",
                 "REQUIERE AUTORIZACION CONTROL",
-                "AUTORIZADO"  # opcional, evita reusar incluso si ya está autorizado
+                "AUTORIZADO"
             ]}
         }):
             errores.append(f"{prefijo}Fila {num_fila}: Consecutivo_integrapp ya usado: {cons_int}")
             continue
 
-        # registrar en base de datos (incluye los nuevos campos si venían; si no, van con el valor espejo)
+        # registrar (fila -> documento)
         registros.append({
             "fecha_creacion": fecha_creacion,
             "nit_cliente": cliente_nit,
@@ -386,7 +389,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "punto_adicional": punto_extra,
             "total_puntos": puntos,
             "flete_real": float(fila["FLETE_REAL"] or 0),
-            "destino_real": fila["DESTINO_REAL"].upper(),
+            "destino_real": destino_real_up,
             "creado_por": usuario_db["usuario"],
             "regional": region,
             "consecutivo_pedido": cons,
@@ -394,34 +397,65 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "consecutivo_vehiculo": f"{region}-{fecha_corta}-{vehiculo}"
         })
 
-
     if errores:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"mensaje": "Errores en archivo masivo", "errores": errores})
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"mensaje": "Errores en archivo masivo", "errores": errores}
+        )
 
-    # 5) Calcular teóricos y estado
+    # 5) Calcular teóricos y estado (punto adicional independiente del cargue)
+    def _is_truthy(v) -> bool:
+        s = str(v or "").strip()
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(c for c in s if not unicodedata.combining(c)).upper()
+        return s in {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
+
     for r in registros:
         veh = r["vehiculo"]
-        real = reales_por_veh.get(veh, 0)
-        desvio_total = desviaciones_por_veh.get(veh, 0)
+        real = float(reales_por_veh.get(veh, 0.0))
+        desvio_total = float(desviaciones_por_veh.get(veh, 0.0))
         origen, destino = r["origen"], r["destino"]
-        tbase = tarifas_col.find_one({"origen": origen, "destino": destino})["tarifas"][r["tipo_vehiculo"]]
-        otros = otros_col.find_one({"tipo_vehiculo": r["tipo_vehiculo"]})
-        max_p = int(otros["max_puntos"])
-        exceso = max(0, puntos_por_veh.get(veh, 0) - max_p)
-        pad_teo = exceso * float(otros["valor_punto_adicional"])
-        cargue_teo = float(otros["cargue_descargue"])
+
+        tf_doc = tarifas_col.find_one({"origen": origen, "destino": destino})
+        if not tf_doc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay tarifa para {origen}→{destino}")
+
+        # Base por tipo de vehículo
+        tbase = float(tf_doc["tarifas"][r["tipo_vehiculo"]])
+
+        # Otros costos (por tipo de vehículo)
+        otros = otros_col.find_one({"tipo_vehiculo": r["tipo_vehiculo"]}) or {}
+        val_pto = float(otros.get("valor_punto_adicional", 0) or 0)
+        cargue_cfg = float(otros.get("cargue_descargue", 0) or 0)
+
+        # Flag para cargue/descargue
+        paga_cd = _is_truthy(tf_doc.get("pago_cargue_desc"))
+
+        # Puntos: max entre destinos reales únicos y lo sumado del Excel
+        destinos_unicos = len(destinos_reales_por_veh.get(veh, set()))
+        puntos_excel = int(puntos_por_veh.get(veh, 0) or 0)
+        total_puntos_calc = max(destinos_unicos, puntos_excel)
+
+        # Punto adicional teórico (independiente del flag de cargue)
+        adicionales = max(0, total_puntos_calc - 1)
+        pad_teo = adicionales * val_pto
+
+        # Cargue/descargue teórico (solo si la tarifa lo paga)
+        cargue_teo = cargue_cfg if paga_cd else 0.0
+
+        # Costos y estado
         costo_teorico = tbase + pad_teo + cargue_teo
-        costo_real    = real  # total_flete_vehiculo
+        costo_real = real
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
 
         r.update({
             "valor_flete_sistema": tbase,
             "total_flete_vehiculo": costo_real,
             "total_desvio_vehiculo": desvio_total,
-            "total_cajas_vehiculo": cajas_por_veh.get(veh, 0),
-            "total_kilos_vehiculo": kilos_por_veh.get(veh, 0),
-            "total_kilos_vehiculo_sicetac": kilos_sic_por_veh.get(veh, 0.0), 
-            "total_puntos_vehiculo": puntos_por_veh.get(veh, 0),
+            "total_cajas_vehiculo": int(cajas_por_veh.get(veh, 0)),
+            "total_kilos_vehiculo": float(kilos_por_veh.get(veh, 0.0)),
+            "total_kilos_vehiculo_sicetac": float(kilos_sic_por_veh.get(veh, 0.0)),
+            "total_puntos_vehiculo": total_puntos_calc,
             "punto_adicional_teorico": pad_teo,
             "cargue_descargue_teorico": cargue_teo,
             "costo_teorico_vehiculo": costo_teorico,
@@ -437,10 +471,13 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
     insertados = list(pedidos_col.find({"_id": {"$in": resultado.inserted_ids}})) if resultado else []
     detalles = [formatear_salida(doc) for doc in insertados[:5]]
     vehiculos_cargados = len({r["consecutivo_vehiculo"] for r in registros})
-    elapsed = time.time() - start_time
-    elapsed = round(elapsed, 3)   # en segundos, con 3 decimales
-    return {"mensaje": f"{vehiculos_cargados} vehículo{'s' if vehiculos_cargados>1 else ''} cargado{'s' if vehiculos_cargados>1 else ''}", "tiempo_segundos": elapsed,"detalles": detalles}
+    elapsed = round(time.time() - start_time, 3)
 
+    return {
+        "mensaje": f"{vehiculos_cargados} vehículo{'s' if vehiculos_cargados > 1 else ''} cargado{'s' if vehiculos_cargados > 1 else ''}",
+        "tiempo_segundos": elapsed,
+        "detalles": detalles
+    }
 
 
 # -----------------------------------------------------
@@ -1508,9 +1545,8 @@ async def listar_vehiculos_completados(
     return respuesta
 
 
-
 # ------------------------------
-# 🗂 Fusionar vehículos (con logs y errores claros)
+# 🗂 Fusionar vehículos 
 # ------------------------------
 @ruta_pedidos.post(
     "/fusionar-vehiculos",
@@ -1607,12 +1643,24 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
                 status.HTTP_400_BAD_REQUEST,
                 f"No hay configuración de 'otros_costos' para el tipo '{tipo_sic}'"
             )
-        max_p = int(otros.get("max_puntos", 0) or 0)
-        val_pto = float(otros.get("valor_punto_adicional", 0) or 0)
-        cargue_teorico = float(otros.get("cargue_descargue", 0) or 0)
+        val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
+        cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
 
-        exceso = max(0, total_puntos_docs - max_p)
-        pto_teorico = exceso * val_pto
+        # ✅ Nuevo criterio: usar DESTINO_REAL únicos si la ciudad paga cargue/descargue
+        YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
+        paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
+
+        destinos_unicos = len({
+            (d.get("destino_real") or "").strip().upper()
+            for d in docs if (d.get("destino_real") or "").strip() != ""
+        })
+
+        # 👇 reglas unificadas
+        total_puntos_calc = max(destinos_unicos, total_puntos_docs)
+        adicionales = max(0, total_puntos_calc - 1)
+        pto_teorico = adicionales * val_pto_cfg
+        cargue_teorico = cargue_cfg if paga_cd else 0.0
+
         costo_teorico = tbase + pto_teorico + cargue_teorico
 
         # 8) Overrides solicitados
@@ -1636,12 +1684,12 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             "total_cajas_vehiculo":             total_cajas,
             "total_kilos_vehiculo":             total_kilos,
             "total_kilos_vehiculo_sicetac":     total_kilos_sic,
-            "total_puntos_vehiculo":            total_puntos_docs,
+            "total_puntos_vehiculo":            total_puntos_calc,   # 👈 nuevo criterio
 
             # Teóricos
             "valor_flete_sistema":              tbase,
-            "punto_adicional_teorico":          pto_teorico,
-            "cargue_descargue_teorico":         cargue_teorico,
+            "punto_adicional_teorico":          pto_teorico,         # 👈 basado en DESTINO_REAL si paga_cd
+            "cargue_descargue_teorico":         cargue_teorico,      # 👈 solo si paga_cd
             "costo_teorico_vehiculo":           costo_teorico,
 
             # Solicitados (overrides)
@@ -1683,7 +1731,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
                 "total_cajas_vehiculo":         total_cajas,
                 "total_kilos_vehiculo":         total_kilos,
                 "total_kilos_vehiculo_sicetac": total_kilos_sic,
-                "total_puntos_vehiculo":        total_puntos_docs,
+                "total_puntos_vehiculo":        total_puntos_calc,   # 👈 reflejado en respuesta
                 "valor_flete_sistema":          tbase,
                 "punto_adicional_teorico":      pto_teorico,
                 "cargue_descargue_teorico":     cargue_teorico,
@@ -1713,7 +1761,8 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno en fusionar_vehiculos: {e}"
         )
-    
+
+
 # ------------------------------
 # 🗂 Dividir vehículos (sobrescribe C.I. y C.P.)
 # ------------------------------
@@ -1793,7 +1842,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     # Mapa de CI -> lista de docs
     docs_por_ci = defaultdict(list)
     for d in docs_origen:
-        docs_por_ci[d.get("consecutivo_integrapp")].append(d)
+        docs_por_ci[d.get("consecutivo_integrapp")] = docs_por_ci.get(d.get("consecutivo_integrapp"), []) + [d]
 
     def _leer_campo_dest(d: dict) -> str:
         raw = d.get(campo_dest, None)
@@ -1862,33 +1911,49 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ---------- Helpers de cálculo ----------
-    def _puntos_por_ubicacion(docs: list) -> int:
-        """Cuenta ubicaciones de descargue únicas (vacíos no cuentan)."""
-        ubicaciones = {_norm((d.get("ubicacion_descargue") or "")) for d in docs}
-        ubicaciones.discard("")  # no contar vacíos
-        return len(ubicaciones)
+    def _destinos_reales_unicos(docs: list) -> int:
+        """Cuenta DESTINO_REAL únicos (ignora vacíos)."""
+        vals = {
+            _norm(d.get("destino_real") or "")
+            for d in docs
+        }
+        vals.discard("")
+        return len(vals)
 
     def _calc(tipo_sic: str, docs: list, overrides):
+        # Tarifa + bandera de pago cargue/descargue en el DESTINO objetivo
         tf = db["tarifas"].find_one({"origen": origen_tarifa, "destino": destino_unico})
         if not tf or "tarifas" not in tf or tipo_sic not in tf["tarifas"]:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay tarifa para {origen_tarifa}→{destino_unico} con tipo '{tipo_sic}'")
         tbase = float(tf["tarifas"][tipo_sic])
 
+        # Otros costos del tipo de vehículo
         otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
         if not otros:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay configuración de 'otros_costos' para '{tipo_sic}'")
-        max_p = int(otros.get("max_puntos", 0) or 0)
-        val_pto = float(otros.get("valor_punto_adicional", 0) or 0)
-        cargue_teorico = float(otros.get("cargue_descargue", 0) or 0)
+        val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
+        cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
 
+        # Totales físicos
         total_cajas     = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
         total_kilos     = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
         total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
 
-        # 🔸 PUNTOS = ubicaciones de descargue únicas
-        puntos_unicos = _puntos_por_ubicacion(docs)
+        # ✅ Nuevo criterio: si el destino paga cargue/descargue,
+        #    los puntos se basan en DESTINO_REAL únicos y los adicionales = (N-1)
+        YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
+        paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
 
-        # costos desde docs (fallback si no hay overrides)
+        destinos_unicos = _destinos_reales_unicos(docs)
+        puntos_excel = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
+
+        # 👇 reglas unificadas
+        puntos_calc = max(destinos_unicos, puntos_excel)
+        adicionales = max(0, puntos_calc - 1)
+        pto_teorico = adicionales * val_pto_cfg
+        cargue_teorico = cargue_cfg if paga_cd else 0.0
+
+        # Costos desde docs (fallback si no hay overrides)
         sum_flete = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
         sum_cargue = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
         sum_desvio = sum(float(d.get("desvio", 0) or 0) for d in docs)
@@ -1899,8 +1964,6 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         tdesv  = overrides.total_desvio_vehiculo  if (overrides and overrides.total_desvio_vehiculo  is not None) else sum_desvio
         tpad   = overrides.total_punto_adicional  if (overrides and overrides.total_punto_adicional  is not None) else sum_punto
 
-        exceso = max(0, puntos_unicos - max_p)
-        pto_teorico = exceso * val_pto
         costo_teorico = tbase + pto_teorico + cargue_teorico
         costo_real = float(tflete) + float(tcarg) + float(tdesv) + float(tpad)
 
@@ -1915,7 +1978,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             "cajas": total_cajas,
             "kilos": total_kilos,
             "kilos_sic": total_kilos_sic,
-            "puntos": puntos_unicos,
+            "puntos": puntos_calc,         # 👈 puntos del vehículo según nuevo criterio
             "tflete": float(tflete),
             "tcarg": float(tcarg),
             "tdesv": float(tdesv),
