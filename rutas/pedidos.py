@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException, status, UploadFile, File, Body, Form, Query
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
-# from bson import ObjectId
+from bson import ObjectId
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from io import BytesIO
@@ -124,11 +124,19 @@ class OverridesVehiculo(BaseModel):
     total_punto_adicional: Optional[float] = None
     total_desvio_vehiculo: Optional[float] = None
 
+class SplitConfig(BaseModel):
+    # uno de los dos:
+    doc_id: Optional[str] = None
+    consecutivo_integrapp: Optional[str] = None
+    kilos: float
+    cajas: Optional[int] = None
+
 class GrupoDivision(BaseModel):
     # Puedes indicar el subset por destinatarios o por consecutivos_integrapp:
     destinatarios: Optional[List[str]] = None
     consecutivos_integrapp: Optional[List[str]] = None
-    overrides: Optional[OverridesVehiculo] = None  # overrides por carro
+    overrides: Optional[OverridesVehiculo] = None
+    split: Optional[SplitConfig] = None  
 
 class DividirHastaTresPayload(BaseModel):
     usuario: str
@@ -185,6 +193,8 @@ def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     if "COORDINADOR" in e:
         return p in {"COORDINADOR", "CONTROL"}
     return False  # por seguridad
+
+
 # ------------------------
 # carga masivo excel
 # ------------------------
@@ -620,6 +630,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
 
+
 # -----------------------------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
 # -----------------------------------------------------
@@ -638,7 +649,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
     filtro["regional"] = (
         {"$in": [r.upper().strip() for r in filtros.regionales]}
-        if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"} and filtros.regionales
+        if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "DESPACHADOR"} and filtros.regionales
         else regional
     )
 
@@ -1545,6 +1556,7 @@ async def listar_vehiculos_completados(
     return respuesta
 
 
+
 # ------------------------------
 # 🗂 Fusionar vehículos 
 # ------------------------------
@@ -1621,7 +1633,6 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         total_cajas = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
         total_kilos = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
         total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
-        total_puntos_docs = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
 
         # 7) Tarifas / otros costos según tipo y destino nuevos
         tipo_sic = (payload.tipo_vehiculo_sicetac or "").upper().strip()
@@ -1646,22 +1657,29 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
         cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
 
-        # ✅ Nuevo criterio: usar DESTINO_REAL únicos si la ciudad paga cargue/descargue
+        # ✅ Puntos = cantidad de DESTINO_REAL únicos (normalizados)
+        import unicodedata, re
         YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
-        paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
 
+        def _norm_city(s: str) -> str:
+            s = unicodedata.normalize("NFKD", (s or "").strip())
+            s = "".join(ch for ch in s if not unicodedata.combining(ch))
+            s = re.sub(r"\s+", " ", s).upper()
+            return s
+
+        paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
         destinos_unicos = len({
-            (d.get("destino_real") or "").strip().upper()
-            for d in docs if (d.get("destino_real") or "").strip() != ""
+            _norm_city(d.get("destino_real"))
+            for d in docs
+            if _norm_city(d.get("destino_real")) != ""
         })
 
-        # 👇 reglas unificadas
-        total_puntos_calc = max(destinos_unicos, total_puntos_docs)
-        adicionales = max(0, total_puntos_calc - 1)
-        pto_teorico = adicionales * val_pto_cfg
-        cargue_teorico = cargue_cfg if paga_cd else 0.0
-
-        costo_teorico = tbase + pto_teorico + cargue_teorico
+        # El total de puntos del vehículo = número de destinos únicos (mínimo 1)
+        total_puntos_calc = max(1, destinos_unicos)
+        adicionales       = max(0, total_puntos_calc - 1)
+        pto_teorico       = adicionales * val_pto_cfg
+        cargue_teorico    = cargue_cfg if paga_cd else 0.0
+        costo_teorico     = tbase + pto_teorico + cargue_teorico
 
         # 8) Overrides solicitados
         total_flete_solicitado = float(payload.total_flete_solicitado or 0)
@@ -1674,7 +1692,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
         ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 9) Update masivo
+        # 9) Update masivo (incluye CI del primer carro)
         set_fields = {
             "consecutivo_vehiculo":             target_cv,
             "destino":                          nuevo_destino,
@@ -1684,12 +1702,12 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             "total_cajas_vehiculo":             total_cajas,
             "total_kilos_vehiculo":             total_kilos,
             "total_kilos_vehiculo_sicetac":     total_kilos_sic,
-            "total_puntos_vehiculo":            total_puntos_calc,   # 👈 nuevo criterio
+            "total_puntos_vehiculo":            total_puntos_calc,
 
             # Teóricos
             "valor_flete_sistema":              tbase,
-            "punto_adicional_teorico":          pto_teorico,         # 👈 basado en DESTINO_REAL si paga_cd
-            "cargue_descargue_teorico":         cargue_teorico,      # 👈 solo si paga_cd
+            "punto_adicional_teorico":          pto_teorico,
+            "cargue_descargue_teorico":         cargue_teorico,
             "costo_teorico_vehiculo":           costo_teorico,
 
             # Solicitados (overrides)
@@ -1714,24 +1732,36 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             "fecha_fusion":                     ahora_str,
         }
 
+        # --- Unificar consecutivo_integrapp al del primer carro ---
+        from collections import Counter
+        docs_primer_carro = [d for d in docs if (d.get("consecutivo_vehiculo") or "").strip() == target_cv]
+        ci_candidatos = [
+            (d.get("consecutivo_integrapp") or "").strip()
+            for d in docs_primer_carro
+            if (d.get("consecutivo_integrapp") or "").strip()
+        ]
+        if ci_candidatos:
+            ci_a_conservar = Counter(ci_candidatos).most_common(1)[0][0]
+            set_fields["consecutivo_integrapp"] = ci_a_conservar  # ← todos quedarán con este CI
+
         res = coleccion_pedidos.update_many(
             {"consecutivo_vehiculo": {"$in": consecutivos}},
             {"$set": set_fields}
         )
 
-        # 📌 Log útil en backend (aparece en consola del server)
         print("[fusionar_vehiculos] OK",
               {"consecutivos": consecutivos, "target": target_cv, "docs_actualizados": res.modified_count})
 
         return {
             "mensaje": f"Fusionados {len(consecutivos)} consecutivos en '{target_cv}'",
             "consecutivo_resultante": target_cv,
+            "consecutivo_integrapp_conservado": set_fields.get("consecutivo_integrapp"),
             "docs_actualizados": res.modified_count,
             "totales": {
                 "total_cajas_vehiculo":         total_cajas,
                 "total_kilos_vehiculo":         total_kilos,
                 "total_kilos_vehiculo_sicetac": total_kilos_sic,
-                "total_puntos_vehiculo":        total_puntos_calc,   # 👈 reflejado en respuesta
+                "total_puntos_vehiculo":        total_puntos_calc,
                 "valor_flete_sistema":          tbase,
                 "punto_adicional_teorico":      pto_teorico,
                 "cargue_descargue_teorico":     cargue_teorico,
@@ -1751,10 +1781,8 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         }
 
     except HTTPException:
-        # Deja pasar errores con detail claro para que el front los vea
         raise
     except Exception as e:
-        # Log del stacktrace y error claro al front (evita {} vacíos)
         import traceback
         print("[fusionar_vehiculos][ERROR]", traceback.format_exc())
         raise HTTPException(
@@ -1762,24 +1790,22 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             detail=f"Error interno en fusionar_vehiculos: {e}"
         )
 
-
 # ------------------------------
-# 🗂 Dividir vehículos (sobrescribe C.I. y C.P.)
+# 🗂 Dividir vehículos (sobrescribe C.I./C.P. y permite split por kilos RUNT)
 # ------------------------------
-
-from datetime import datetime
-from fastapi import HTTPException, status
+from bson import ObjectId
 
 @ruta_pedidos.post(
     "/dividir-vehiculo",
     response_model=dict,
     summary=("Divide un consecutivo_vehiculo en hasta 3 (A conserva; B y C se crean con sufijos). "
-             "Puedes seleccionar por destinatario, consecutivo_integrapp o ubicacion_descargue "
-             "(usando campo_destinatario='ubicacion_descargue').")
+             "Puedes seleccionar por destinatario, consecutivo_integrapp o ubicacion_descargue, "
+             "y también partir un único documento por KILOS (RUNT) hacia B y/o C.")
 )
 async def dividir_vehiculo(payload: DividirHastaTresPayload):
     import re, unicodedata
     from collections import defaultdict
+    from copy import deepcopy
 
     usuario = (payload.usuario or "").upper().strip()
     user = coleccion_usuarios.find_one({"usuario": usuario})
@@ -1839,7 +1865,6 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     # 5) Armado de grupos por destinatario/campo dinámico o por consecutivo_integrapp
     campo_dest = (payload.campo_destinatario or "destinatario").strip()
 
-    # Mapa de CI -> lista de docs
     docs_por_ci = defaultdict(list)
     for d in docs_origen:
         docs_por_ci[d.get("consecutivo_integrapp")] = docs_por_ci.get(d.get("consecutivo_integrapp"), []) + [d]
@@ -1882,78 +1907,55 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     docs_B = filtrar_docs(payload.grupo_B)
     docs_C = filtrar_docs(payload.grupo_C)
 
-    # A = lo que no esté en B ni en C
-    ids_B = {d["_id"] for d in docs_B}
-    ids_C = {d["_id"] for d in docs_C}
+    # Si hay split, no queremos además mover ese mismo CI completo por filtro.
+    if payload.grupo_B and payload.grupo_B.split:
+        ci_b = (payload.grupo_B.split.consecutivo_integrapp or "").strip()
+        docs_B = [d for d in docs_B if (d.get("consecutivo_integrapp") or "") != ci_b]
+    if payload.grupo_C and payload.grupo_C.split:
+        ci_c = (payload.grupo_C.split.consecutivo_integrapp or "").strip()
+        docs_C = [d for d in docs_C if (d.get("consecutivo_integrapp") or "") != ci_c]
 
-    # 🚫 No permitir un doc a la vez en B y C
-    inter = ids_B & ids_C
-    if inter:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"Un mismo documento fue asignado a B y C: {[str(x) for x in sorted(inter)]}"
-        )
+    # Sufijos y nuevos consecutivos vehiculares (SIN guion)
+    quiere_B = bool(docs_B) or bool(getattr(getattr(payload, "grupo_B", None), "split", None))
+    quiere_C = bool(docs_C) or bool(getattr(getattr(payload, "grupo_C", None), "split", None))
 
-    docs_A = [d for d in docs_origen if d["_id"] not in (ids_B | ids_C)]
-
-    # Validaciones básicas de división
-    if not docs_A:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo A no puede quedar vacío (A conserva el consecutivo original)")
-    if len(docs_B) == 0 and len(docs_C) > 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear C sin B")
-    if len(docs_B) == 0 and len(docs_C) == 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir; asigna docs a B o C")
-
-    # 6) Sufijos y nuevos consecutivos vehiculares (SIN guion)
-    cv_B = f"{cv_origen}B" if docs_B else None
-    cv_C = f"{cv_origen}C" if docs_C else None
+    cv_B = f"{cv_origen}B" if quiere_B else None
+    cv_C = f"{cv_origen}C" if quiere_C else None
 
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ---------- Helpers de cálculo ----------
+    YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
+
     def _destinos_reales_unicos(docs: list) -> int:
-        """Cuenta DESTINO_REAL únicos (ignora vacíos)."""
-        vals = {
-            _norm(d.get("destino_real") or "")
-            for d in docs
-        }
+        vals = {_norm(d.get("destino_real") or "") for d in docs}
         vals.discard("")
         return len(vals)
 
     def _calc(tipo_sic: str, docs: list, overrides):
-        # Tarifa + bandera de pago cargue/descargue en el DESTINO objetivo
         tf = db["tarifas"].find_one({"origen": origen_tarifa, "destino": destino_unico})
         if not tf or "tarifas" not in tf or tipo_sic not in tf["tarifas"]:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay tarifa para {origen_tarifa}→{destino_unico} con tipo '{tipo_sic}'")
         tbase = float(tf["tarifas"][tipo_sic])
 
-        # Otros costos del tipo de vehículo
         otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
         if not otros:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay configuración de 'otros_costos' para '{tipo_sic}'")
         val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
         cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
 
-        # Totales físicos
         total_cajas     = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
         total_kilos     = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
         total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
 
-        # ✅ Nuevo criterio: si el destino paga cargue/descargue,
-        #    los puntos se basan en DESTINO_REAL únicos y los adicionales = (N-1)
-        YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
         paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
-
         destinos_unicos = _destinos_reales_unicos(docs)
         puntos_excel = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
-
-        # 👇 reglas unificadas
         puntos_calc = max(destinos_unicos, puntos_excel)
         adicionales = max(0, puntos_calc - 1)
         pto_teorico = adicionales * val_pto_cfg
         cargue_teorico = cargue_cfg if paga_cd else 0.0
 
-        # Costos desde docs (fallback si no hay overrides)
         sum_flete = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
         sum_cargue = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
         sum_desvio = sum(float(d.get("desvio", 0) or 0) for d in docs)
@@ -1966,7 +1968,6 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
 
         costo_teorico = tbase + pto_teorico + cargue_teorico
         costo_real = float(tflete) + float(tcarg) + float(tdesv) + float(tpad)
-
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
 
         return {
@@ -1978,7 +1979,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             "cajas": total_cajas,
             "kilos": total_kilos,
             "kilos_sic": total_kilos_sic,
-            "puntos": puntos_calc,         # 👈 puntos del vehículo según nuevo criterio
+            "puntos": puntos_calc,
             "tflete": float(tflete),
             "tcarg": float(tcarg),
             "tdesv": float(tdesv),
@@ -2019,7 +2020,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             }}
         )
 
-    # 7) Mover docs a B/C y SOBRESCRIBIR C.I. / C.P. con sufijos SIN guion
+    # 6) Movimientos por filtro (si los hay) – actualiza CV y sufijos de CI/CP
     def _sobrescribir_campos_doc(doc: dict, sufijo: str) -> dict:
         ci_orig = str(doc.get("consecutivo_integrapp") or "")
         cp_orig = str(doc.get("consecutivo_pedido") or "")
@@ -2028,10 +2029,9 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             "consecutivo_pedido":    f"{cp_orig}{sufijo}",
         }
 
-    # ---- B ----
     if docs_B:
         coleccion_pedidos.update_many(
-            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": list(ids_B)}},
+            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_B]}},
             {"$set": {
                 "consecutivo_vehiculo": cv_B,
                 "destino": destino_unico,
@@ -2041,15 +2041,11 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             }}
         )
         for d in docs_B:
-            coleccion_pedidos.update_one(
-                {"_id": d["_id"]},
-                {"$set": _sobrescribir_campos_doc(d, "B")}
-            )
+            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "B")})
 
-    # ---- C ----
     if docs_C:
         coleccion_pedidos.update_many(
-            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": list(ids_C)}},
+            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_C]}},
             {"$set": {
                 "consecutivo_vehiculo": cv_C,
                 "destino": destino_unico,
@@ -2059,33 +2055,167 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             }}
         )
         for d in docs_C:
-            coleccion_pedidos.update_one(
-                {"_id": d["_id"]},
-                {"$set": _sobrescribir_campos_doc(d, "C")}
+            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "C")})
+
+    # 7) SPLIT por KILOS (RUNT) hacia B/C – requiere doc_id si el CI no es único en A
+    def _split_por_kilos(
+        ci_objetivo: str,
+        kilos_a_mover: float,
+        sufijo: str,
+        cv_destino: str,
+        cajas_explicit: Optional[int] = None,
+        doc_id: Optional[str] = None
+    ):
+        ci_objetivo = (ci_objetivo or "").strip()
+        if not ci_objetivo:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: consecutivo_integrapp requerido")
+        if not cv_destino:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: no hay consecutivo destino")
+
+        # Buscar el doc en A. Si hay muchos CI iguales, exige doc_id
+        query_base = {"consecutivo_vehiculo": cv_origen, "consecutivo_integrapp": ci_objetivo}
+        candidatos = list(coleccion_pedidos.find(query_base, projection={"_id": 1}))
+        if len(candidatos) == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: no se encontró el C.I. '{ci_objetivo}' en A")
+        if len(candidatos) > 1:
+            if not doc_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"split.{sufijo}: el consecutivo_integrapp '{ci_objetivo}' no es único en A (hay {len(candidatos)}). Envía doc_id."
+                )
+            try:
+                oid = ObjectId(str(doc_id))
+            except Exception:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: doc_id inválido")
+            query_base["_id"] = oid
+
+        doc_src = coleccion_pedidos.find_one(query_base)
+        if not doc_src:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: no se encontró el documento indicado en A")
+
+        # Base del corte = kilos RUNT (SICETAC). Si no existe, cae a kilos físicos
+        kilos_runt_total = float(doc_src.get("num_kilos_sicetac") or doc_src.get("num_kilos") or 0.0)
+        kilos_fis_total  = float(doc_src.get("num_kilos") or doc_src.get("num_kilos_sicetac") or 0.0)
+        cajas_total      = int(doc_src.get("num_cajas", 0) or 0)
+        flete_total      = float(doc_src.get("valor_flete", 0) or 0.0)
+
+        if kilos_a_mover is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: kilos requerido")
+        kilos_a_mover = float(kilos_a_mover)
+        if kilos_a_mover <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: kilos debe ser > 0")
+
+        EPS = 1e-6
+        if kilos_a_mover >= kilos_runt_total - EPS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"split.{sufijo}: kilos ({kilos_a_mover}) exceden o igualan el total del doc RUNT ({kilos_runt_total})"
             )
 
-    # 8) Recalcular por carro (tipo_vehiculo_sicetac heredado del primer doc de cada grupo)
+        # Proporción del corte usando la base RUNT
+        p = kilos_a_mover / kilos_runt_total
+
+        # Destino (lo que va a B/C)
+        kilos_runt_dest = round(kilos_a_mover, 2)
+        kilos_fis_dest  = round(kilos_fis_total * p, 2)
+        flete_dest      = round(flete_total * p, 2)
+
+        # Cajas
+        if cajas_explicit is not None:
+            cajas_dest = max(0, int(cajas_explicit))
+        else:
+            cajas_dest = int(round(cajas_total * p)) if cajas_total else 0
+            if cajas_total and cajas_dest == 0:
+                cajas_dest = 1
+
+        # Remanente en A
+        kilos_runt_rem = round(kilos_runt_total - kilos_runt_dest, 2)
+        kilos_fis_rem  = round(kilos_fis_total - kilos_fis_dest, 2)
+        cajas_rem      = max(0, cajas_total - cajas_dest)
+        flete_rem      = round(flete_total - flete_dest, 2)
+        if kilos_runt_rem <= EPS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: el remanente quedaría en 0 kg RUNT")
+
+        # Clonar hacia el destino
+        doc_new = deepcopy(doc_src)
+        doc_new.pop("_id", None)
+        doc_new["consecutivo_vehiculo"] = cv_destino
+        doc_new["consecutivo_integrapp"] = f"{doc_src['consecutivo_integrapp']}{sufijo}"
+        doc_new["consecutivo_pedido"]    = f"{str(doc_src.get('consecutivo_pedido',''))}{sufijo}"
+        doc_new["num_cajas"]             = cajas_dest
+        doc_new["num_kilos_sicetac"]     = kilos_runt_dest
+        doc_new["num_kilos"]             = kilos_fis_dest
+        doc_new["valor_flete"]           = flete_dest
+        doc_new["destino"]               = destino_unico
+        doc_new["usuario_division"]      = usuario
+        doc_new["observacion_division"]  = (payload.observacion_division or "")
+        doc_new["fecha_division"]        = ahora_str
+
+        # Actualizar el doc origen (A)
+        coleccion_pedidos.update_one(
+            {"_id": doc_src["_id"]},
+            {"$set": {
+                "num_cajas":         cajas_rem,
+                "num_kilos_sicetac": kilos_runt_rem,
+                "num_kilos":         kilos_fis_rem,
+                "valor_flete":       flete_rem
+            }}
+        )
+        coleccion_pedidos.insert_one(doc_new)
+
+    # Ejecutar splits si vienen (doc_id es opcional pero requerido si el CI no es único)
+    if getattr(getattr(payload, "grupo_B", None), "split", None):
+        _split_por_kilos(
+            payload.grupo_B.split.consecutivo_integrapp,
+            float(payload.grupo_B.split.kilos),
+            "B",
+            cv_B,
+            getattr(payload.grupo_B.split, "cajas", None),
+            getattr(payload.grupo_B.split, "doc_id", None)
+        )
+
+    if getattr(getattr(payload, "grupo_C", None), "split", None):
+        _split_por_kilos(
+            payload.grupo_C.split.consecutivo_integrapp,
+            float(payload.grupo_C.split.kilos),
+            "C",
+            cv_C,
+            getattr(payload.grupo_C.split, "cajas", None),
+            getattr(payload.grupo_C.split, "doc_id", None)
+        )
+
+    # 8) Refrescar grupos A/B/C tras movimientos/splits
+    docs_A = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
+    docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B})) if cv_B else []
+    docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C})) if cv_C else []
+
+    if not docs_A:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo A no puede quedar vacío (A conserva el consecutivo original)")
+    if cv_C and not cv_B:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear C sin B")
+    if not docs_B2 and not docs_C2:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
+
+    # 9) Recalcular por carro (tipo_vehiculo_sicetac heredado del primer doc de cada grupo)
     if docs_A:
         tipo_A = (docs_A[0].get("tipo_vehiculo_sicetac") or docs_A[0].get("tipo_vehiculo") or "").upper()
         calc_A = _calc(tipo_A, docs_A, payload.grupo_A.overrides if payload.grupo_A else None)
         _apply(cv_origen, calc_A)
 
-    if docs_B:
-        docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B}))
+    if docs_B2:
         tipo_B = (docs_B2[0].get("tipo_vehiculo_sicetac") or docs_B2[0].get("tipo_vehiculo") or "").upper()
         calc_B = _calc(tipo_B, docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)
         _apply(cv_B, calc_B)
 
-    if docs_C:
-        docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C}))
+    if docs_C2:
         tipo_C = (docs_C2[0].get("tipo_vehiculo_sicetac") or docs_C2[0].get("tipo_vehiculo") or "").upper()
         calc_C = _calc(tipo_C, docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)
         _apply(cv_C, calc_C)
 
     resumen = {
         "A": {"vehiculo": cv_origen, "docs": len(docs_A)},
-        "B": {"vehiculo": cv_B, "docs": len(docs_B)} if docs_B else None,
-        "C": {"vehiculo": cv_C, "docs": len(docs_C)} if docs_C else None,
+        "B": {"vehiculo": cv_B, "docs": len(docs_B2)} if docs_B2 else None,
+        "C": {"vehiculo": cv_C, "docs": len(docs_C2)} if docs_C2 else None,
         "destino_unico": destino_unico
     }
     return {"mensaje": "División realizada", "resumen": resumen}
