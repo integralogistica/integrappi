@@ -1164,8 +1164,8 @@ async def exportar_autorizados():
             "Aprobar Poliza":           1,
             "Flete por":                "CUPO",
 
-            # 👉 Valor unitario: vuelve a tu fórmula de redondeo por documento
-            "Valor unitario":           int(((((valor_flete_doc  + extra_desvio_para_flete_unidad + punto_adicional_val) / 0.7) + 49) // 50) * 50),
+            # 👉 Valor unitario: es el cobro al cliente, se aumenta el 30% del valor
+            "Valor unitario":           int(((((valor_flete_doc) / 0.7) + 49) // 50) * 50),
 
             "Aprobar cupo credito":     1,
             "Aprobar rentabilidad":     1,
