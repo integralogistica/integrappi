@@ -195,6 +195,55 @@ def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     return False  # por seguridad
 
 
+
+# ======== Visibilidad/permiso por regional ========
+REGIONALES_PAREADAS = {"CELTA", "FUNZA"}
+
+def regionales_visibles_para(user: dict):
+    """
+    Devuelve:
+      - None  -> sin restricción (ADMIN/COORDINADOR/CONTROL/ANALISTA)
+      - [..]  -> lista de regionales visibles (DESPACHADOR/OPERADOR: CELTA+FUNZA si aplica; de lo contrario, su propia regional)
+    """
+    perfil = (user.get("perfil") or "").upper()
+    reg    = (user.get("regional") or "").upper()
+
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+        return None  # sin restricción por regional, se respeta lo que manden por filtros
+
+    if perfil in {"DESPACHADOR", "OPERADOR"}:
+        if reg in REGIONALES_PAREADAS:
+            return list(REGIONALES_PAREADAS)  # puede ver CELTA y FUNZA
+        return [reg]
+
+    # perfiles no contemplados: restringir a su regional por seguridad
+    return [reg]
+
+
+def usuario_puede_operar_en_regional(user: dict, regional_doc: str) -> bool:
+    """
+    True si el usuario está autorizado para operar (ajustar/autorizar/etc.) en la regional del documento.
+    DESPACHADOR/OPERADOR de CELTA o FUNZA puede operar en ambas.
+    """
+    perfil = (user.get("perfil") or "").upper()
+    reg_doc = (regional_doc or "").upper()
+    reg_user = (user.get("regional") or "").upper()
+
+    if perfil == "ADMIN":
+        return True
+
+    if perfil in {"COORDINADOR", "CONTROL", "ANALISTA"}:
+        # estos roles suelen operar multi-región (ajusta si quieres limitar)
+        return True
+
+    if perfil in {"DESPACHADOR", "OPERADOR"}:
+        if reg_user in REGIONALES_PAREADAS and reg_doc in REGIONALES_PAREADAS:
+            return True
+        return reg_doc == reg_user
+
+    return False
+
+
 # ------------------------
 # carga masivo excel
 # ------------------------
@@ -533,9 +582,10 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
 
         # 3) Restringir por regional para DESPACHADOR/OPERADOR
         regional_doc = (docs[0].get("regional") or "").upper()
-        if perfil in {"DESPACHADOR", "OPERADOR"} and regional_doc != regional_usuario:
+        if not usuario_puede_operar_en_regional(user, regional_doc):
             errores.append(f"{cv}: sin permiso, el vehículo pertenece a la regional {regional_doc}")
             continue
+
 
         # 4) Bloquear COMPLETADO en esta colección (por seguridad)
         if any(d.get("estado") == "COMPLETADO" for d in docs):
@@ -630,7 +680,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
 
-
 # -----------------------------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
 # -----------------------------------------------------
@@ -643,15 +692,28 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
     if not usuario_db:
         raise HTTPException(404, "Usuario no encontrado")
 
-    perfil, regional = usuario_db["perfil"].upper(), usuario_db["regional"].upper()
+    perfil = (usuario_db.get("perfil") or "").upper()
+    # 🔑 Usa el helper para calcular qué regionales puede ver el usuario.
+    #   - ADMIN/COORDINADOR/CONTROL/ANALISTA -> None (sin restricción)
+    #   - DESPACHADOR/OPERADOR de CELTA o FUNZA -> ["CELTA","FUNZA"]
+    #   - Otros -> [su propia regional]
+    visibles = regionales_visibles_para(usuario_db)
+
+    # --------- Construcción del filtro base ----------
     filtro = {}
     if filtros.estados:
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
-    filtro["regional"] = (
-        {"$in": [r.upper().strip() for r in filtros.regionales]}
-        if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "DESPACHADOR"} and filtros.regionales
-        else regional
-    )
+
+    # Regional:
+    # - Perfiles amplios: si envían filtros.regionales, se respetan; si no, sin restricción.
+    # - Otros (incluye DESPACHADOR/OPERADOR): se restringe a 'visibles' calculado por el helper.
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+        if filtros.regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
+        # else: sin filtro de regional (puede ver todas)
+    else:
+        # visibles siempre es lista para estos perfiles
+        filtro["regional"] = {"$in": visibles}
 
     pipeline = [
         {"$match": filtro},
@@ -761,7 +823,6 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         "pedidos": [modelo_pedido(p) for p in g["pedidos"]],
     } for g in grupos]
 
-
 # ---------------------------------------------------
 # 🔄 Autorizar pedidos por consecutivo_vehiculo
 # ---------------------------------------------------
@@ -790,26 +851,47 @@ async def autorizar_por_consecutivo_vehiculo(
 
     # 3) Procesar cada vehículo
     for cv in sorted(set(consecutivos)):
-        docs = list(coleccion_pedidos.find({
-            "consecutivo_vehiculo": cv,
-            "estado": {"$in": ["REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION CONTROL"]}
-        }))
+        # a) Verificar que exista el consecutivo (en cualquier estado)
+        docs_any = list(coleccion_pedidos.find(
+            {"consecutivo_vehiculo": cv},
+            projection={"regional": 1, "estado": 1}
+        ))
+        if not docs_any:
+            rechazados.append({"consecutivo_vehiculo": cv, "motivo": "Consecutivo no encontrado"})
+            continue
+
+        # b) Validar permiso por regional (COORDINADOR/CONTROL/ADMIN aceptados; otros perfíles serían rechazados arriba)
+        regional_doc = (docs_any[0].get("regional") or "").upper()
+        if not usuario_puede_operar_en_regional(user, regional_doc):
+            rechazados.append({"consecutivo_vehiculo": cv, "motivo": f"Sin permiso en regional {regional_doc}"})
+            continue
+
+        # c) Traer sólo los docs que están en estados que requieren autorización
+        docs = [d for d in docs_any if (d.get("estado") or "").upper() in {
+            "REQUIERE AUTORIZACION COORDINADOR", "REQUIERE AUTORIZACION CONTROL"
+        }]
 
         if not docs:
             rechazados.append({"consecutivo_vehiculo": cv, "motivo": "No está en estado de REQUIERE AUTORIZACION"})
             continue
 
-        # Determinar el requerimiento máximo entre documentos (si hubiese mezcla)
-        estados = { (d.get("estado") or "").upper() for d in docs }
-        # Si alguno exige CONTROL, tomamos CONTROL
-        estado_requerido = "REQUIERE AUTORIZACION CONTROL" if any("CONTROL" in e for e in estados) else "REQUIERE AUTORIZACION COORDINADOR"
+        # d) Determinar el requerimiento máximo entre documentos (si hubiese mezcla)
+        estados = {(d.get("estado") or "").upper() for d in docs}
+        estado_requerido = (
+            "REQUIERE AUTORIZACION CONTROL"
+            if any("CONTROL" in e for e in estados)
+            else "REQUIERE AUTORIZACION COORDINADOR"
+        )
 
-        # Validar perfil con el estado requerido
+        # e) Validar perfil con el estado requerido
         if not perfil_puede_autorizar(perfil, estado_requerido):
-            rechazados.append({"consecutivo_vehiculo": cv, "motivo": f"Requiere perfil acorde a '{estado_requerido}'. Perfil actual: {perfil}"})
+            rechazados.append({
+                "consecutivo_vehiculo": cv,
+                "motivo": f"Requiere perfil acorde a '{estado_requerido}'. Perfil actual: {perfil}"
+            })
             continue
 
-        # Autorizar todos los documentos del vehículo que estén en cualquiera de los dos estados de 'requiere'
+        # f) Autorizar todos los documentos del vehículo en cualquiera de los dos estados de 'requiere'
         set_fields = {
             "estado": "AUTORIZADO",
             "autorizado_por": user["usuario"],
@@ -829,7 +911,11 @@ async def autorizar_por_consecutivo_vehiculo(
         if res.matched_count == 0:
             rechazados.append({"consecutivo_vehiculo": cv, "motivo": "No hubo documentos para autorizar"})
         else:
-            autorizados_ok.append({"consecutivo_vehiculo": cv, "docs_autorizados": res.modified_count, "estado_requerido": estado_requerido})
+            autorizados_ok.append({
+                "consecutivo_vehiculo": cv,
+                "docs_autorizados": res.modified_count,
+                "estado_requerido": estado_requerido
+            })
 
     if not autorizados_ok:
         raise HTTPException(
@@ -898,7 +984,7 @@ async def confirmar_preautorizados_por_consecutivo_vehiculo(
 
         # b) Validación de regional para DESPACHADOR / OPERADOR
         regional_doc = (docs_veh[0].get("regional") or "").upper()
-        if perfil in {"DESPACHADOR", "OPERADOR"} and regional_doc != regional_usuario:
+        if not usuario_puede_operar_en_regional(user, regional_doc):
             vehiculos_sin_permiso.append({"consecutivo_vehiculo": cv, "regional": regional_doc})
             continue
 
@@ -999,20 +1085,38 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
 
     return {"mensaje": f"Se elimino el vehiculo '{consecutivo_vehiculo}'"}
 
-
 # ------------------------------
-# ✅ Exportar pedidos AUTORIZADOS a Excel (con datos de facturación)
+# ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
 # ------------------------------
-from collections import defaultdict  # asegúrate de tener este import arriba
+from collections import defaultdict
 
 @ruta_pedidos.get("/exportar-autorizados", summary="Exportar pedidos AUTORIZADOS a Excel")
 async def exportar_autorizados():
-    # 1) Traer AUTORIZADOS
-    docs = list(coleccion_pedidos.find({"estado": "AUTORIZADO"}))
+    # 1) Traer AUTORIZADOS ordenados asc por consecutivo_vehiculo (y CI para estabilidad)
+    cursor = coleccion_pedidos.find({"estado": "AUTORIZADO"}).sort([
+        ("consecutivo_vehiculo", 1),
+        ("consecutivo_integrapp", 1)
+    ])
+    docs = list(cursor)
     if not docs:
         raise HTTPException(404, "No hay pedidos AUTORIZADOS para exportar")
 
-    # --- Agrupar por consecutivo_integrapp (para concatenar docs) ---
+    # Caches para evitar consultas repetidas
+    cliente_cache = {}
+    tarifa_cache = {}
+
+    def get_cliente(nit: str) -> dict:
+        if nit not in cliente_cache:
+            cliente_cache[nit] = coleccion_clientes.find_one({"nit": nit}) or {}
+        return cliente_cache[nit]
+
+    def get_tarifa(origen: str, destino: str) -> dict:
+        key = (origen, destino)
+        if key not in tarifa_cache:
+            tarifa_cache[key] = coleccion_fletes.find_one({"origen": origen, "destino": destino}) or {}
+        return tarifa_cache[key]
+
+    # --- Agrupar por consecutivo_integrapp (para concatenar guías/planillas) ---
     docs_por_ci = defaultdict(list)
     for d in docs:
         docs_por_ci[d["consecutivo_integrapp"]].append(d)
@@ -1021,6 +1125,60 @@ async def exportar_autorizados():
     docs_por_veh = defaultdict(list)
     for d in docs:
         docs_por_veh[d["consecutivo_vehiculo"]].append(d)
+
+    # === Totales/flags por vehículo (respetando overrides si existen) ===
+    flete_solicitado_por_veh = {}
+    cargue_por_veh = {}
+    desvio_por_veh = {}
+    punto_adic_por_veh = {}
+    kilos_sic_por_veh = {}
+    seguro_por_veh = {}           # ← 6.000 si hay NIT 900402080 en el vehículo; si no, suma de 'seguro'
+
+    NIT_FRESENIUS = "900402080"
+
+    for veh, lst in docs_por_veh.items():
+        doc0 = lst[0]
+
+        # Flete solicitado vehicular: override si existe; si no suma de docs
+        flete_override = doc0.get("total_flete_solicitado")
+        if flete_override is None:
+            flete_override = sum(float(x.get("valor_flete", 0) or 0) for x in lst)
+        flete_solicitado_por_veh[veh] = float(flete_override or 0)
+
+        # Cargue/descargue vehicular: override si existe; si no suma de docs
+        carg_override = doc0.get("total_cargue_descargue")
+        if carg_override is None:
+            carg_override = sum(float(x.get("cargue_descargue", 0) or 0) for x in lst)
+        cargue_por_veh[veh] = float(carg_override or 0)
+
+        # Desvío vehicular: override si existe; si no suma de docs
+        desv_override = doc0.get("total_desvio_vehiculo")
+        if desv_override is None:
+            desv_override = sum(float(x.get("desvio", 0) or 0) for x in lst)
+        desvio_por_veh[veh] = float(desv_override or 0)
+
+        # Punto adicional vehicular: override si existe; si no suma de docs
+        pto_override = doc0.get("total_punto_adicional")
+        if pto_override is None:
+            pto_override = sum(float(x.get("punto_adicional", 0) or 0) for x in lst)
+        punto_adic_por_veh[veh] = float(pto_override or 0)
+
+        # Kilos SICETAC del vehículo (override si existe; si no suma de docs)
+        total_kilos_sic = doc0.get("total_kilos_vehiculo_sicetac")
+        if total_kilos_sic is None:
+            total_kilos_sic = sum(float(x.get("num_kilos_sicetac", 0) or 0) for x in lst)
+        kilos_sic_por_veh[veh] = float(total_kilos_sic or 0)
+
+        # ¿Este vehículo es de Fresenius Kabi? -> por NIT exacto 900402080
+        es_fresenius = any((x.get("nit_cliente") or "").strip() == NIT_FRESENIUS for x in lst)
+
+        # Seguro por vehículo:
+        # - Si es Fresenius -> 6.000 obligatorio
+        # - Si no, suma de 'seguro' de los docs
+        if es_fresenius:
+            seguro_por_veh[veh] = 6000.0
+        else:
+            seguro_por_veh[veh] = sum(float(x.get("seguro", 0) or 0) for x in lst)
 
     # Concatenar planillas por CI (únicas y en orden)
     def concat_docs(lista_docs):
@@ -1034,34 +1192,6 @@ async def exportar_autorizados():
         return ", ".join(resultado)
 
     docs_concat_por_ci = {ci: concat_docs(lst) for ci, lst in docs_por_ci.items()}
-
-    # --- Totales vehiculares con fallback ---
-    # Kilos SICETAC del vehículo
-    kilos_sic_por_veh = {}
-    for veh, lst in docs_por_veh.items():
-        doc0 = lst[0]
-        total_kilos_sic = doc0.get("total_kilos_vehiculo_sicetac")
-        if total_kilos_sic is None:
-            total_kilos_sic = sum(float(x.get("num_kilos_sicetac", 0) or 0) for x in lst)
-        kilos_sic_por_veh[veh] = float(total_kilos_sic or 0)
-
-    # Punto adicional del vehículo
-    punto_adic_por_veh = {}
-    for veh, lst in docs_por_veh.items():
-        doc0 = lst[0]
-        total_pa = doc0.get("total_punto_adicional")
-        if total_pa is None:
-            total_pa = sum(float(x.get("punto_adicional", 0) or 0) for x in lst)
-        punto_adic_por_veh[veh] = float(total_pa or 0)
-
-    # Desvío del vehículo
-    desvio_por_veh = {}
-    for veh, lst in docs_por_veh.items():
-        doc0 = lst[0]
-        total_desv = doc0.get("total_desvio_vehiculo")
-        if total_desv is None:
-            total_desv = sum(float(x.get("desvio", 0) or 0) for x in lst)
-        desvio_por_veh[veh] = float(total_desv or 0)
 
     rows = []
     vistos_ci = set()     # primera fila por consecutivo_integrapp
@@ -1084,49 +1214,61 @@ async def exportar_autorizados():
         ci = d["consecutivo_integrapp"]
         veh = d["consecutivo_vehiculo"]
 
-        # Primera fila del CI
+        # --- Primera fila de CI: solo para concatenar "Pedido cliente" ---
         es_primera_ci = ci not in vistos_ci
         if es_primera_ci:
-            seguro = d.get("seguro", 0)
-            cargue_desc = d.get("cargue_descargue_teorico", 0)  # teórico por CI
             pedido_cliente_concat = docs_concat_por_ci.get(ci, "")
             vistos_ci.add(ci)
         else:
-            seguro = 0
-            cargue_desc = 0
             pedido_cliente_concat = ""
 
-        # Primera fila del vehículo
+        # --- Primera fila del vehículo: escribir Toneladas, Seguro y valores vehiculares ---
         es_primera_veh = veh not in vistos_veh
         if es_primera_veh:
-            kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0) # está en kg
+            kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0)
             toneladas_val = round(kilos_veh / 1000.0, 3)
-            punto_adicional_val = punto_adic_por_veh.get(veh, 0.0)
-            extra_desvio_para_flete_unidad = desvio_por_veh.get(veh, 0.0)
+
+            punto_adicional_val = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
+            desvio_val = float(desvio_por_veh.get(veh, 0.0) or 0.0)
+            cargue_solicitado_val = float(cargue_por_veh.get(veh, 0.0) or 0.0)
+
+            flete_base_veh = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
+            flete_unidad_val = flete_base_veh + desvio_val + punto_adicional_val
+
+            # Seguro según regla de Fresenius (6.000) o suma normal
+            seguro_val = float(seguro_por_veh.get(veh, 0.0) or 0.0)
+
             vistos_veh.add(veh)
         else:
             toneladas_val = 0
             punto_adicional_val = 0
-            extra_desvio_para_flete_unidad = 0
+            desvio_val = 0
+            cargue_solicitado_val = 0
+            flete_unidad_val = 0
+            seguro_val = 0
 
-        # Datos de cliente y tarifa
-        cliente_nit = coleccion_clientes.find_one({"nit": d["nit_cliente"]})
-        flete = coleccion_fletes.find_one({"origen": d["origen"], "destino": d["destino"]})
-        if not flete:
+        # Teórico por CI (si lo quieres mantener en la plantilla)
+        cargue_desc_teorico_ci = float(d.get("cargue_descargue_teorico", 0) or 0)
+
+        # "Valor unitario" calculado sobre el total vehicular
+        valor_base_para_unitario = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
+        valor_unitario = int(((((valor_base_para_unitario) / 0.7) + 49) // 50) * 50)
+
+        # Datos auxiliares (cacheados)
+        cliente_doc = get_cliente(d["nit_cliente"])
+        flete_doc = get_tarifa(d["origen"], d["destino"])
+        if not flete_doc:
             raise HTTPException(500, f"No se encontró tarifa para {d['origen']}→{d['destino']}")
 
-        getc = lambda k: cliente_nit.get(k, "") if cliente_nit else ""
-        producto = "VARIOS"
-        if d["nit_cliente"] in {"901689684", "900402080"}:
-            producto = "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30"
-
-        observacion = f"DN {pedido_cliente_concat}" if d["nit_cliente"] == "900402080" else (d.get("observaciones") or "").upper()
-
-        valor_flete_doc = float(d.get("valor_flete", 0) or 0)
+        observacion = (
+            f"DN {docs_concat_por_ci.get(ci,'')}"
+            if d["nit_cliente"] == "900402080"
+            else (d.get("observaciones") or "").upper()
+        )
 
         rows.append({
             "Consecutivo":              ci,
-            "Tipo de viaje":            flete["tipo"],
+            "Tipo de viaje":            flete_doc.get("tipo", ""),
             "Linea de negocio":         "MASIVO",
             "Estado":                   "PENDIENTE",
             "Observación":              observacion,
@@ -1138,12 +1280,14 @@ async def exportar_autorizados():
             "Pedido cliente":           pedido_cliente_concat,
 
             "Guía":                     (d.get("planilla_siscore") or "").upper(),
-            "CENTRO COSTO":             f"{flete.get('equivalencia_centro_costo', '')} {d.get('tipo_viaje','')} OPERACIONES CARGA {getc('equivalencia_centro_costo')}",
+            "CENTRO COSTO":             f"{flete_doc.get('equivalencia_centro_costo', '')} {d.get('tipo_viaje','')} "
+                                        f"OPERACIONES CARGA {cliente_doc.get('equivalencia_centro_costo','') if cliente_doc else ''}",
             "Ubicación Cargue":         (d.get("ubicacion_cargue") or "").upper(),
             "Direccion cargue":         (d.get("direccion_cargue") or "").upper(),
             "Ubicación Descargue":      (d.get("ubicacion_descargue") or "").upper(),
             "Direccion Descargue":      (d.get("direccion_descargue") or "").upper(),
-            "Producto":                 producto,
+            "Producto":                 "VARIOS" if d["nit_cliente"] not in {"901689684", "900402080"} else
+                                        "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",
             "Naturaleza":               "NORMAL",
             "Tipo de vehiculo":         mapear_tipo_vehiculo((d.get("tipo_vehiculo_sicetac") or d.get("tipo_vehiculo") or "")),
 
@@ -1151,21 +1295,21 @@ async def exportar_autorizados():
             "Cantidad":                 1,
             "Tipo embalaje":            "PAQUETES",
 
-            # 👉 Kilos (SICETAC) del vehículo – 1ª fila del vehículo
+            # === Vehicular, solo en 1ª fila del vehículo ===
             "Toneladas":                toneladas_val,
+            "Flete unidad":             flete_unidad_val,
+            "PUNTO ADICIONAL":          punto_adicional_val,
+            "CARGUE-DESCARGUE PER JURIDICA": cargue_solicitado_val,
+            "SEGURO":                   seguro_val,  # ← 6.000 si hay NIT 900402080 en el vehículo
             "Tipo pago":                "CUPO",
-
-            # 👉 SOLICITADO: Flete unidad = valor_flete_doc + total_desvio_vehiculo (solo 1ª fila del vehículo)
-            "Flete unidad":             valor_flete_doc + extra_desvio_para_flete_unidad + punto_adicional_val,
-
             "Tolerancia":               0,
             "Vlr hora STBY":            0,
             "Vlr Declar Mercancia":     d.get("valor_declarado", 0),
             "Aprobar Poliza":           1,
             "Flete por":                "CUPO",
 
-            # 👉 Valor unitario: es el cobro al cliente, se aumenta el 30% del valor
-            "Valor unitario":           int(((((valor_flete_doc) / 0.7) + 49) // 50) * 50),
+            # Unitario calculado sobre el total vehicular
+            "Valor unitario":           valor_unitario,
 
             "Aprobar cupo credito":     1,
             "Aprobar rentabilidad":     1,
@@ -1174,13 +1318,6 @@ async def exportar_autorizados():
             "REMISION DEL CLIENTE":     1,
             "GUIA DE TRANSPORTE":       1,
             "MANIFIESTO":               1,
-
-            # 👉 Total vehicular ajustado (o fallback) – 1ª fila del vehículo
-            "PUNTO ADICIONAL":          punto_adicional_val,
-
-            "SEGURO":                   seguro,
-            # Teórico por CI
-            "CARGUE-DESCARGUE PER JURIDICA": cargue_desc,
         })
 
     # 2) DataFrame → Excel en memoria
@@ -1398,7 +1535,6 @@ async def exportar_completados(
         headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
 
-
 # ------------------------------
 # 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
@@ -1419,8 +1555,13 @@ async def listar_vehiculos_completados(
     user = coleccion_usuarios.find_one({"usuario": usuario})
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
-    perfil = user["perfil"].upper()
-    regional_usuario = user["regional"].upper()
+    perfil = (user.get("perfil") or "").upper()
+
+    # 🔑 Regionales visibles según perfil (usa el helper global)
+    #   - ADMIN/COORDINADOR/CONTROL/ANALISTA -> None (sin restricción)
+    #   - DESPACHADOR/OPERADOR de CELTA o FUNZA -> ["CELTA","FUNZA"]
+    #   - Otros -> [su propia regional]
+    visibles = regionales_visibles_para(user)
 
     # 2) Validar formato de fechas
     try:
@@ -1439,11 +1580,15 @@ async def listar_vehiculos_completados(
     if filtros.estados:
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
 
-    # 4) Filtrar por regional según perfil
-    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"} and filtros.regionales:
-        filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
+    # 4) Filtrar por regional según perfil/visibilidad
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+        # Perfiles amplios: si envían 'regionales' en filtros, se respetan; si no, sin restricción
+        if filtros.regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
     else:
-        filtro["regional"] = regional_usuario
+        # Otros perfiles (incluye DESPACHADOR/OPERADOR): limitar a 'visibles'
+        if visibles is not None:
+            filtro["regional"] = {"$in": visibles}
 
     # 5) Pipeline de agregación
     pipeline = [
@@ -1473,17 +1618,17 @@ async def listar_vehiculos_completados(
             "tipo_vehiculo": {"$first": "$tipo_vehiculo"},
             "tipo_vehiculo_sicetac": {"$first": "$tipo_vehiculo_sicetac"},
             "destino": {"$first": "$destino"},
-            "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},            
-            "pedidos": {"$push": "$$ROOT"},  
+            "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},
+            "pedidos": {"$push": "$$ROOT"},
             "estados": {"$addToSet": "$estado"},
-            "flete_solicitado":{"$sum": "$valor_flete"},
+            "flete_solicitado": {"$sum": "$valor_flete"},
             "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
-            "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},            
+            "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},
             "cargue_descargue_total": {"$first": "$total_cargue_descargue"},
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
-                "kilos_sicetac": "$total_kilos_vehiculo_sicetac", 
+                "kilos_sicetac": "$total_kilos_vehiculo_sicetac",
                 "flete": "$total_flete_vehiculo",
                 "desvio": "$total_desvio_vehiculo",
                 "puntos": "$total_puntos_vehiculo",
@@ -1502,10 +1647,9 @@ async def listar_vehiculos_completados(
         {"$sort": {"_id": 1}}
     ]
 
-
     grupos = list(coleccion_pedidos_completados.aggregate(pipeline))
     if not grupos:
-        return [] 
+        return []
 
     # 6) Formar la respuesta con los mismos campos que el multiestado
     respuesta = []
@@ -1554,6 +1698,7 @@ async def listar_vehiculos_completados(
         })
 
     return respuesta
+
 
 
 
@@ -1617,8 +1762,9 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         if len(regionales) != 1:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Todos los consecutivos deben pertenecer a la misma regional")
         regional_doc = next(iter(regionales))
-        if perfil in {"DESPACHADOR", "OPERADOR"} and (user.get("regional") or "").upper() != regional_doc:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Sin permiso: tu regional es distinta ({regional_doc})")
+        if not usuario_puede_operar_en_regional(user, regional_doc):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Sin permiso en regional {regional_doc}")
+
 
         # 4) Mismo ORIGEN (para tarifario)
         origenes = {(d.get("origen") or "").upper() for d in docs}
@@ -1846,8 +1992,9 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     if len(regionales) != 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "El vehículo origen debe tener regional homogénea")
     regional_doc = next(iter(regionales))
-    if perfil in {"DESPACHADOR", "OPERADOR"} and (user.get("regional") or "").upper() != regional_doc:
+    if not usuario_puede_operar_en_regional(user, regional_doc):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Sin permiso: vehículo de regional {regional_doc}")
+
 
     # 4) Origen homogéneo (para tarifario)
     origenes = {(d.get("origen") or "").upper() for d in docs_origen}
