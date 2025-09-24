@@ -25,7 +25,9 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",       # Frontend en local
         "http://127.0.0.1:5173",       # Otra variante en local
-        "https://tu-frontend.com",     # Producción (ajusta al dominio real)
+        "https://tu-frontend.com",
+        "https://integralogistica.com",   
+        "https://www.integralogistica.com", 
     ],
     allow_credentials=True,
     allow_methods=["*"],
