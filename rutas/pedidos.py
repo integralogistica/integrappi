@@ -13,6 +13,8 @@ from typing import Literal
 from datetime import datetime
 import time
 from collections import defaultdict 
+from zoneinfo import ZoneInfo
+
 
 # ------------------------------
 # 🔗 Conexión MongoDB
@@ -1328,11 +1330,14 @@ async def exportar_autorizados():
     output.seek(0)
 
     # 3) Respuesta de descarga
-    filename = f"pedidos_autorizados_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    # Hora local de Bogotá (24h), sin caracteres problemáticos
+    ahora_co = datetime.now(ZoneInfo("America/Bogota"))
+    filename = f"pedidos_autorizados_{ahora_co:%Y%m%d_%H%M%S}.xlsx"
+
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
 

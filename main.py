@@ -19,13 +19,20 @@ app.title = "integra"
 app.version = "1"
 
 # Configuración de CORS
+# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permite todas las orígenes. Cambia esto para permitir solo orígenes específicos
+    allow_origins=[
+        "http://localhost:5173",       # Frontend en local
+        "http://127.0.0.1:5173",       # Otra variante en local
+        "https://tu-frontend.com",     # Producción (ajusta al dominio real)
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos los métodos (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],  # Permite todos los encabezados
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],  # 👈 Necesario para que el front lea el filename
 )
+
 
 app.include_router(ruta_usuario)
 app.include_router(ruta_manifiestos)
