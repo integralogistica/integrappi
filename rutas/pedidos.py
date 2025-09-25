@@ -15,7 +15,6 @@ import time
 from collections import defaultdict 
 from zoneinfo import ZoneInfo
 
-
 # ------------------------------
 # 🔗 Conexión MongoDB
 # ------------------------------
@@ -100,6 +99,9 @@ class AjusteVehiculo(BaseModel):
     Observaciones_ajustes: Optional[str] = None
     total_cargue_descargue: Optional[float] = None
     total_flete_solicitado: Optional[float] = None
+    nuevo_destino: Optional[str] = None
+    destino_desde_real: Optional[str] = None
+
 
 
 class AjustesVehiculosPayload(BaseModel):
@@ -562,13 +564,20 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
     if perfil not in {"ADMIN", "DESPACHADOR","ANALISTA","OPERADOR"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes permisos para ajustar vehículos")
 
-    regional_usuario = (user.get("regional") or "").upper()
-
     if not payload.ajustes:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Debes enviar al menos un ajuste")
 
     resultados, errores = [], []
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
+
+    def _norm(s: str) -> str:
+        import unicodedata, re
+        s = unicodedata.normalize("NFKD", (s or "").strip())
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = re.sub(r"\s+", " ", s).upper()
+        return s
 
     for adj in payload.ajustes:
         cv = (adj.consecutivo_vehiculo or "").strip()
@@ -588,9 +597,8 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             errores.append(f"{cv}: sin permiso, el vehículo pertenece a la regional {regional_doc}")
             continue
 
-
         # 4) Bloquear COMPLETADO en esta colección (por seguridad)
-        if any(d.get("estado") == "COMPLETADO" for d in docs):
+        if any((d.get("estado") or "").upper() == "COMPLETADO" for d in docs):
             errores.append(f"{cv}: no se puede ajustar, contiene documentos COMPLETADO")
             continue
 
@@ -610,17 +618,69 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         total_kilos_vehiculo_sicetac = float(adj.total_kilos_vehiculo_sicetac) if adj.total_kilos_vehiculo_sicetac is not None else kilos_sic_actual
         tipo_vehiculo_sicetac        = (adj.tipo_vehiculo_sicetac or tipo_sic_actual).upper()
 
-        # 👉 Overrides vehiculares
+        # 👉 Overrides vehiculares (fletes/cargue)
         total_cargue_descargue = float(adj.total_cargue_descargue) if getattr(adj, "total_cargue_descargue", None) is not None else float(suma_cargue)
         total_flete_solicitado = float(adj.total_flete_solicitado) if getattr(adj, "total_flete_solicitado", None) is not None else float(suma_flete)
 
+        # ====== 👇 NUEVO: edición de DESTINO ======
+        # si adj.nuevo_destino viene, lo usamos; si no, si viene adj.destino_desde_real, validamos que exista entre los docs
+        destino_actual = (doc0.get("destino") or "").upper().strip()
+        destino_seleccionado = None
+
+        # origen homogéneo obligatorio si se cambia destino (para tarifario)
+        origenes = {(d.get("origen") or "").upper().strip() for d in docs}
+        if len(origenes) == 0:
+            errores.append(f"{cv}: no tiene ORIGEN en los documentos")
+            continue
+        origen = next(iter(origenes))
+
+        if (adj.nuevo_destino or adj.destino_desde_real):
+            if adj.nuevo_destino:
+                destino_seleccionado = adj.nuevo_destino.upper().strip()
+            else:
+                # elegir desde destinos reales del vehículo (normalizados)
+                destinos_reales_set = {_norm(d.get("destino_real")) for d in docs if (d.get("destino_real") or "").strip()}
+                candidato = _norm(adj.destino_desde_real)
+                if candidato not in destinos_reales_set:
+                    errores.append(f"{cv}: 'destino_desde_real' no coincide con los destino_real del vehículo")
+                    continue
+                destino_seleccionado = candidato  # ya normalizado
+
         # 7) Recalcular real/teórico y estado
-        valor_flete_sistema      = float(doc0.get("valor_flete_sistema", 0) or 0)
-        punto_adicional_teorico  = float(doc0.get("punto_adicional_teorico", 0) or 0)
-        cargue_descargue_teorico = float(doc0.get("cargue_descargue_teorico", 0) or 0)
+        # Si NO hay cambio de destino: usamos los teóricos existentes.
+        # Si SÍ hay cambio de destino: recalculamos teóricos con el nuevo destino + tipo_sic (override o actual)
+        if destino_seleccionado:
+            tf = db["tarifas"].find_one({"origen": origen, "destino": destino_seleccionado})
+            if not tf or "tarifas" not in tf or tipo_vehiculo_sicetac not in tf["tarifas"]:
+                errores.append(
+                    f"{cv}: No hay tarifa para {origen}→{destino_seleccionado} con tipo '{tipo_vehiculo_sicetac}'"
+                )
+                continue
+            tbase = float(tf["tarifas"][tipo_vehiculo_sicetac])
+
+            otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_vehiculo_sicetac}) or {}
+            val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
+            cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
+
+            paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
+
+            # Puntos: max entre # de destino_real únicos y lo sumado en docs
+            destinos_unicos = len({_norm(d.get("destino_real")) for d in docs if _norm(d.get("destino_real")) != ""})
+            puntos_excel = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
+            total_puntos_calc = max(destinos_unicos, puntos_excel)
+
+            adicionales = max(0, total_puntos_calc - 1)
+            punto_adicional_teorico  = adicionales * val_pto_cfg
+            cargue_descargue_teorico = cargue_cfg if paga_cd else 0.0
+            valor_flete_sistema      = tbase
+
+        else:
+            # mantener teóricos existentes
+            valor_flete_sistema      = float(doc0.get("valor_flete_sistema", 0) or 0)
+            punto_adicional_teorico  = float(doc0.get("punto_adicional_teorico", 0) or 0)
+            cargue_descargue_teorico = float(doc0.get("cargue_descargue_teorico", 0) or 0)
 
         costo_teorico = valor_flete_sistema + punto_adicional_teorico + cargue_descargue_teorico
-        # 👇 ahora usa el flete solicitado (override si lo enviaron)
         costo_real    = total_flete_solicitado + total_cargue_descargue + total_desvio_vehiculo + total_punto_adicional
 
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
@@ -634,7 +694,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             "total_desvio_vehiculo":         total_desvio_vehiculo,
             "total_punto_adicional":         total_punto_adicional,
             "total_cargue_descargue":        total_cargue_descargue,
-            "total_flete_solicitado":        total_flete_solicitado,  # 👈 NUEVO
+            "total_flete_solicitado":        total_flete_solicitado,
             "usr_solicita_ajuste":           solicitante,
 
             # Totales y diferenciales
@@ -645,10 +705,21 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             # Estado y % sobre teórico
             "estado":                        estado_calc,
             "porcentaje_sobre_teorico":      porc,
-
             "autorizado_por":                set_aut_por,
             "fecha_autorizacion":            set_fecha_aut,
         }
+
+        # 👇 si cambiamos destino, persistimos nuevo destino y teóricos recalculados
+        if destino_seleccionado:
+            update_fields.update({
+                "destino":                    destino_seleccionado,
+                "valor_flete_sistema":        valor_flete_sistema,
+                "punto_adicional_teorico":    punto_adicional_teorico,
+                "cargue_descargue_teorico":   cargue_descargue_teorico,
+            })
+            # huella de auditoría del cambio de destino (opcional)
+            update_fields["usuario_ajusta_destino"] = usuario
+            update_fields["fecha_ajuste_destino"]   = ahora_str
 
         # Observaciones_ajustes solo si viene (para no sobreescribir vacíos)
         if adj.Observaciones_ajustes is not None:
@@ -669,18 +740,20 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             "total_desvio_vehiculo":           total_desvio_vehiculo,
             "total_punto_adicional":           total_punto_adicional,
             "total_cargue_descargue":          total_cargue_descargue,
-            "total_flete_solicitado":          total_flete_solicitado,  # 👈 en respuesta
+            "total_flete_solicitado":          total_flete_solicitado,
             "costo_real_vehiculo":             costo_real,
             "costo_teorico_vehiculo":          costo_teorico,
             "diferencia_flete":                costo_real - costo_teorico,
             "nuevo_estado":                    estado_calc,
             "porcentaje_sobre_teorico":        porc,
+            "destino_actualizado_a":           destino_seleccionado or destino_actual,
         })
 
     mensaje = f"{len(resultados)} vehículo(s) ajustado(s)"
     if errores:
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
+
 
 # -----------------------------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
@@ -1944,8 +2017,6 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
 # ------------------------------
 # 🗂 Dividir vehículos (sobrescribe C.I./C.P. y permite split por kilos RUNT)
 # ------------------------------
-from bson import ObjectId
-
 @ruta_pedidos.post(
     "/dividir-vehiculo",
     response_model=dict,
@@ -1957,6 +2028,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     import re, unicodedata
     from collections import defaultdict
     from copy import deepcopy
+    from bson import ObjectId
 
     usuario = (payload.usuario or "").upper().strip()
     user = coleccion_usuarios.find_one({"usuario": usuario})
@@ -1999,7 +2071,6 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     regional_doc = next(iter(regionales))
     if not usuario_puede_operar_en_regional(user, regional_doc):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Sin permiso: vehículo de regional {regional_doc}")
-
 
     # 4) Origen homogéneo (para tarifario)
     origenes = {(d.get("origen") or "").upper() for d in docs_origen}
@@ -2084,7 +2155,31 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         vals.discard("")
         return len(vals)
 
-    def _calc(tipo_sic: str, docs: list, overrides):
+    # ⇩⇩⇩ AQUÍ el mapeo idéntico a la macro
+    def tipo_por_kilos(kilos_sic: float) -> str:
+        k = float(kilos_sic or 0)
+        if k <= 2300:
+            return "NHR"
+        if k <= 4500:
+            return "TURBO"
+        if k <= 6100:
+            return "NIES"
+        if k <= 9000:
+            return "SENCILLO"
+        if k <= 17000:
+            return "PATINETA"
+        return "TRACTOMULA"
+
+    def _calc(docs: list, overrides):
+        # Totales del grupo
+        total_cajas     = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
+        total_kilos     = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
+        total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
+
+        # Tipo por kilos (SICETAC) según macro
+        tipo_sic = tipo_por_kilos(total_kilos_sic)
+
+        # Tarifas/otros costos para el tipo calculado
         tf = db["tarifas"].find_one({"origen": origen_tarifa, "destino": destino_unico})
         if not tf or "tarifas" not in tf or tipo_sic not in tf["tarifas"]:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay tarifa para {origen_tarifa}→{destino_unico} con tipo '{tipo_sic}'")
@@ -2095,10 +2190,6 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay configuración de 'otros_costos' para '{tipo_sic}'")
         val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
         cargue_cfg  = float(otros.get("cargue_descargue", 0) or 0)
-
-        total_cajas     = sum(int(d.get("num_cajas", 0) or 0) for d in docs)
-        total_kilos     = sum(float(d.get("num_kilos", 0) or 0) for d in docs)
-        total_kilos_sic = sum(float(d.get("num_kilos_sicetac", d.get("num_kilos", 0)) or 0) for d in docs)
 
         paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
         destinos_unicos = _destinos_reales_unicos(docs)
@@ -2123,7 +2214,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
 
         return {
-            "tipo_sic": (docs[0].get("tipo_vehiculo_sicetac") or docs[0].get("tipo_vehiculo") or "").upper(),
+            "tipo_sic": tipo_sic,
             "tbase": tbase,
             "pto_teo": pto_teorico,
             "carg_teo": cargue_teorico,
@@ -2337,7 +2428,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         )
 
     # 8) Refrescar grupos A/B/C tras movimientos/splits
-    docs_A = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
+    docs_A  = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
     docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B})) if cv_B else []
     docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C})) if cv_C else []
 
@@ -2348,20 +2439,17 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     if not docs_B2 and not docs_C2:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
 
-    # 9) Recalcular por carro (tipo_vehiculo_sicetac heredado del primer doc de cada grupo)
+    # 9) Recalcular por carro (tipo_vehiculo_sicetac calculado por kilos del grupo)
     if docs_A:
-        tipo_A = (docs_A[0].get("tipo_vehiculo_sicetac") or docs_A[0].get("tipo_vehiculo") or "").upper()
-        calc_A = _calc(tipo_A, docs_A, payload.grupo_A.overrides if payload.grupo_A else None)
+        calc_A = _calc(docs_A, payload.grupo_A.overrides if payload.grupo_A else None)
         _apply(cv_origen, calc_A)
 
     if docs_B2:
-        tipo_B = (docs_B2[0].get("tipo_vehiculo_sicetac") or docs_B2[0].get("tipo_vehiculo") or "").upper()
-        calc_B = _calc(tipo_B, docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)
+        calc_B = _calc(docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)
         _apply(cv_B, calc_B)
 
     if docs_C2:
-        tipo_C = (docs_C2[0].get("tipo_vehiculo_sicetac") or docs_C2[0].get("tipo_vehiculo") or "").upper()
-        calc_C = _calc(tipo_C, docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)
+        calc_C = _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)
         _apply(cv_C, calc_C)
 
     resumen = {
