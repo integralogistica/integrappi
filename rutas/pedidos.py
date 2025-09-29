@@ -80,6 +80,7 @@ class Pedido(BaseModel):
     consecutivo_integrapp: str
     desvio: float
     cargue_descargue: float
+    descargue_kabi: float
     punto_adicional: float
     creado_por: str
     tipo_viaje: typedef
@@ -285,7 +286,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
         "TIPO_VEHICULO","TIPO_VEHICULO_SICETAC","VEHICULO","VALOR_DECLARADO","PLANILLA_SISCORE",
         "VALOR_FLETE","UBICACION_CARGUE","DIRECCION_CARGUE",
         "UBICACION_DESCARGUE","DIRECCION_DESCARGUE","OBSERVACIONES",
-        "TIPO_VIAJE","CONSECUTIVO_PEDIDO","DESVIO","CARGUE_DESCARGUE",
+        "TIPO_VIAJE","CONSECUTIVO_PEDIDO","DESVIO","CARGUE_DESCARGUE","DESCARGUE_KABI",
         "PUNTO_ADICIONAL","TOTAL_PUNTOS","SEGURO","FLETE_REAL","DESTINO_REAL"
     ]
     faltantes = set(columnas_req) - set(df_pedidos.columns)
@@ -378,6 +379,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
         try:
             desvio = to_num("DESVIO", fila["DESVIO"])
             cargue = to_num("CARGUE_DESCARGUE", fila["CARGUE_DESCARGUE"])
+            descargue_kabi=to_num("DESCARGUE_KABI", fila["DESCARGUE_KABI"])
             punto_extra = to_num("PUNTO_ADICIONAL", fila["PUNTO_ADICIONAL"])
             puntos = int(fila["TOTAL_PUNTOS"])
             cajas = int(fila["NUM_CAJAS"])
@@ -449,6 +451,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "seguro": float(fila["SEGURO"] or 0),
             "desvio": desvio,
             "cargue_descargue": cargue,
+            "descargue_kabi": descargue_kabi,
             "punto_adicional": punto_extra,
             "total_puntos": puntos,
             "flete_real": float(fila["FLETE_REAL"] or 0),
@@ -1160,6 +1163,10 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
 
     return {"mensaje": f"Se elimino el vehiculo '{consecutivo_vehiculo}'"}
 
+
+# ------------------------------
+# ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
+# ------------------------------
 # ------------------------------
 # ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
 # ------------------------------
@@ -1204,6 +1211,7 @@ async def exportar_autorizados():
     # === Totales/flags por vehículo (respetando overrides si existen) ===
     flete_solicitado_por_veh = {}
     cargue_por_veh = {}
+    descargue_kabi_por_veh = {}
     desvio_por_veh = {}
     punto_adic_por_veh = {}
     kilos_sic_por_veh = {}
@@ -1225,6 +1233,9 @@ async def exportar_autorizados():
         if carg_override is None:
             carg_override = sum(float(x.get("cargue_descargue", 0) or 0) for x in lst)
         cargue_por_veh[veh] = float(carg_override or 0)
+
+        # Descargue KABI por vehículo (suma de docs)
+        descargue_kabi_por_veh[veh] = sum(float(x.get("descargue_kabi", 0) or 0) for x in lst)
 
         # Desvío vehicular: override si existe; si no suma de docs
         desv_override = doc0.get("total_desvio_vehiculo")
@@ -1303,12 +1314,17 @@ async def exportar_autorizados():
             kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0)
             toneladas_val = round(kilos_veh / 1000.0, 3)
 
-            punto_adicional_val = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
-            desvio_val = float(desvio_por_veh.get(veh, 0.0) or 0.0)
+            punto_adicional_val   = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
+            desvio_val            = float(desvio_por_veh.get(veh, 0.0) or 0.0)
             cargue_solicitado_val = float(cargue_por_veh.get(veh, 0.0) or 0.0)
+            descargue_kabi_val    = float(descargue_kabi_por_veh.get(veh, 0.0) or 0.0)
+
+            # Mayor entre descargue_kabi y cargue_solicitado
+            mayor_cargue_per_juridica = max(descargue_kabi_val, cargue_solicitado_val)
 
             flete_base_veh = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
-            flete_unidad_val = flete_base_veh + desvio_val + punto_adicional_val
+            # Mantengo la fórmula original (si quieres incluir el "mayor" aquí, me dices)
+            flete_unidad_val = flete_base_veh + desvio_val + punto_adicional_val + cargue_solicitado_val
 
             # Seguro según regla de Fresenius (6.000) o suma normal
             seguro_val = float(seguro_por_veh.get(veh, 0.0) or 0.0)
@@ -1319,11 +1335,10 @@ async def exportar_autorizados():
             punto_adicional_val = 0
             desvio_val = 0
             cargue_solicitado_val = 0
+            descargue_kabi_val = 0
+            mayor_cargue_per_juridica = 0
             flete_unidad_val = 0
             seguro_val = 0
-
-        # Teórico por CI (si lo quieres mantener en la plantilla)
-        cargue_desc_teorico_ci = float(d.get("cargue_descargue_teorico", 0) or 0)
 
         # "Valor unitario" calculado sobre el total vehicular
         valor_base_para_unitario = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
@@ -1374,7 +1389,7 @@ async def exportar_autorizados():
             "Toneladas":                toneladas_val,
             "Flete unidad":             flete_unidad_val,
             "PUNTO ADICIONAL":          punto_adicional_val,
-            "CARGUE-DESCARGUE PER JURIDICA": cargue_solicitado_val,
+            "CARGUE-DESCARGUE PER JURIDICA": mayor_cargue_per_juridica,
             "SEGURO":                   seguro_val,  # ← 6.000 si hay NIT 900402080 en el vehículo
             "Tipo pago":                "CUPO",
             "Tolerancia":               0,
@@ -1412,8 +1427,6 @@ async def exportar_autorizados():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
-
-
 
 # ------------------------------    
 # 📥 Cargar masivo numero_pedido desde Excel (por consecutivo_integrapp)
