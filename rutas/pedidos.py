@@ -549,6 +549,9 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 # -----------------------------------------------------
 # 🗂 Solicitar ajustes por consecutivo_vehiculo 
 # -----------------------------------------------------
+# -----------------------------------------------------
+# 🗂 Solicitar ajustes por consecutivo_vehiculo 
+# -----------------------------------------------------
 @ruta_pedidos.put(
     "/ajustar-totales-vehiculo",
     response_model=dict,
@@ -609,6 +612,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         doc0 = docs[0]
         suma_flete   = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
         suma_cargue  = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
+        suma_descargue_kabi = sum(float(d.get("descargue_kabi", 0) or 0) for d in docs)  # <<< NUEVO
 
         desvio_actual       = float(doc0.get("total_desvio_vehiculo", 0) or sum(float(d.get("desvio", 0) or 0) for d in docs))
         punto_extra_actual  = float(doc0.get("total_punto_adicional", 0) or sum(float(d.get("punto_adicional", 0) or 0) for d in docs))
@@ -625,8 +629,10 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         total_cargue_descargue = float(adj.total_cargue_descargue) if getattr(adj, "total_cargue_descargue", None) is not None else float(suma_cargue)
         total_flete_solicitado = float(adj.total_flete_solicitado) if getattr(adj, "total_flete_solicitado", None) is not None else float(suma_flete)
 
+        # === Mayor entre cargue y descargue_kabi por vehículo ===
+        total_cargue_per_juridica = max(total_cargue_descargue, suma_descargue_kabi)  # <<< NUEVO
+
         # ====== 👇 NUEVO: edición de DESTINO ======
-        # si adj.nuevo_destino viene, lo usamos; si no, si viene adj.destino_desde_real, validamos que exista entre los docs
         destino_actual = (doc0.get("destino") or "").upper().strip()
         destino_seleccionado = None
 
@@ -641,7 +647,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             if adj.nuevo_destino:
                 destino_seleccionado = adj.nuevo_destino.upper().strip()
             else:
-                # elegir desde destinos reales del vehículo (normalizados)
                 destinos_reales_set = {_norm(d.get("destino_real")) for d in docs if (d.get("destino_real") or "").strip()}
                 candidato = _norm(adj.destino_desde_real)
                 if candidato not in destinos_reales_set:
@@ -650,8 +655,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 destino_seleccionado = candidato  # ya normalizado
 
         # 7) Recalcular real/teórico y estado
-        # Si NO hay cambio de destino: usamos los teóricos existentes.
-        # Si SÍ hay cambio de destino: recalculamos teóricos con el nuevo destino + tipo_sic (override o actual)
         if destino_seleccionado:
             tf = db["tarifas"].find_one({"origen": origen, "destino": destino_seleccionado})
             if not tf or "tarifas" not in tf or tipo_vehiculo_sicetac not in tf["tarifas"]:
@@ -667,7 +670,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
 
             paga_cd = str(tf.get("pago_cargue_desc", "")).strip().upper() in YES
 
-            # Puntos: max entre # de destino_real únicos y lo sumado en docs
             destinos_unicos = len({_norm(d.get("destino_real")) for d in docs if _norm(d.get("destino_real")) != ""})
             puntos_excel = sum(int(d.get("total_puntos", 0) or 0) for d in docs)
             total_puntos_calc = max(destinos_unicos, puntos_excel)
@@ -676,15 +678,14 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             punto_adicional_teorico  = adicionales * val_pto_cfg
             cargue_descargue_teorico = cargue_cfg if paga_cd else 0.0
             valor_flete_sistema      = tbase
-
         else:
-            # mantener teóricos existentes
             valor_flete_sistema      = float(doc0.get("valor_flete_sistema", 0) or 0)
             punto_adicional_teorico  = float(doc0.get("punto_adicional_teorico", 0) or 0)
             cargue_descargue_teorico = float(doc0.get("cargue_descargue_teorico", 0) or 0)
 
         costo_teorico = valor_flete_sistema + punto_adicional_teorico + cargue_descargue_teorico
-        costo_real    = total_flete_solicitado + total_cargue_descargue + total_desvio_vehiculo + total_punto_adicional
+        # >>> Usa el MAYOR entre cargue y descargue_kabi en el real:
+        costo_real    = total_flete_solicitado + total_desvio_vehiculo + total_punto_adicional + total_cargue_per_juridica  # <<< NUEVO
 
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
         set_aut_por   = usuario if estado_calc == "PREAUTORIZADO" else "NA"
@@ -696,7 +697,9 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             "total_kilos_vehiculo_sicetac":  total_kilos_vehiculo_sicetac,
             "total_desvio_vehiculo":         total_desvio_vehiculo,
             "total_punto_adicional":         total_punto_adicional,
-            "total_cargue_descargue":        total_cargue_descargue,
+            "total_cargue_descargue":        total_cargue_descargue,    # coalesced u override
+            "total_descargue_kabi":          float(suma_descargue_kabi), # <<< opcional, para trazabilidad
+            "total_cargue_per_juridica":     float(total_cargue_per_juridica),  # <<< NUEVO (el mayor)
             "total_flete_solicitado":        total_flete_solicitado,
             "usr_solicita_ajuste":           solicitante,
 
@@ -712,7 +715,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             "fecha_autorizacion":            set_fecha_aut,
         }
 
-        # 👇 si cambiamos destino, persistimos nuevo destino y teóricos recalculados
         if destino_seleccionado:
             update_fields.update({
                 "destino":                    destino_seleccionado,
@@ -720,11 +722,9 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 "punto_adicional_teorico":    punto_adicional_teorico,
                 "cargue_descargue_teorico":   cargue_descargue_teorico,
             })
-            # huella de auditoría del cambio de destino (opcional)
             update_fields["usuario_ajusta_destino"] = usuario
             update_fields["fecha_ajuste_destino"]   = ahora_str
 
-        # Observaciones_ajustes solo si viene (para no sobreescribir vacíos)
         if adj.Observaciones_ajustes is not None:
             update_fields["Observaciones_ajustes"] = adj.Observaciones_ajustes
 
@@ -743,6 +743,8 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             "total_desvio_vehiculo":           total_desvio_vehiculo,
             "total_punto_adicional":           total_punto_adicional,
             "total_cargue_descargue":          total_cargue_descargue,
+            "total_descargue_kabi":            float(suma_descargue_kabi),
+            "total_cargue_per_juridica":       float(total_cargue_per_juridica),
             "total_flete_solicitado":          total_flete_solicitado,
             "costo_real_vehiculo":             costo_real,
             "costo_teorico_vehiculo":          costo_teorico,
@@ -756,7 +758,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
     if errores:
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
-
 
 # -----------------------------------------------------
 # 🗂 Listar pedidos por consecutivo_vehiculo con multiestado
