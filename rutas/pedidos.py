@@ -627,7 +627,8 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         total_flete_solicitado = float(adj.total_flete_solicitado) if getattr(adj, "total_flete_solicitado", None) is not None else float(suma_flete)
 
         # === Mayor entre cargue y descargue_kabi por vehículo ===
-        total_cargue_per_juridica = max(total_cargue_descargue, suma_descargue_kabi)  # <<< NUEVO
+        total_cargue_per_juridica = (total_cargue_descargue if total_cargue_descargue > 0 else suma_descargue_kabi )
+        # total_cargue_per_juridica=suma_descargue_kabi
 
         # ====== 👇 NUEVO: edición de DESTINO ======
         destino_actual = (doc0.get("destino") or "").upper().strip()

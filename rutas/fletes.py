@@ -184,7 +184,7 @@ async def cargar_otros_costos(archivo: UploadFile = File(...)):
         df = pd.read_excel(archivo.file)
         df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
 
-        columnas_requeridas = {"TIPO_VEHICULO", "MAX_PUNTOS", "VALOR_PUNTO_ADICIONAL", "CARGUE_DESCARGUE"}
+        columnas_requeridas = {"TIPO_VEHICULO", "MAX_PUNTOS", "VALOR_PUNTO_ADICIONAL", "CARGUE_DESCARGUE","VALOR_PUNTO_ADICIONAL_CLIENTE","CARGUE_DESCARGUE_CLIENTE"}
         if not columnas_requeridas.issubset(df.columns):
             raise HTTPException(
                 status_code=400,
@@ -198,6 +198,8 @@ async def cargar_otros_costos(archivo: UploadFile = File(...)):
                 "max_puntos": int(row["MAX_PUNTOS"]),
                 "valor_punto_adicional": float(row["VALOR_PUNTO_ADICIONAL"]),
                 "cargue_descargue": float(row["CARGUE_DESCARGUE"]),
+                "valor_punto_adicional_cliente": float(row["VALOR_PUNTO_ADICIONAL_CLIENTE"]),
+                "cargue_descargue_cliente": float(row["CARGUE_DESCARGUE_CLIENTE"]),
             }
             registros.append(registro)
 
