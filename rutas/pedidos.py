@@ -549,9 +549,6 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 # -----------------------------------------------------
 # 🗂 Solicitar ajustes por consecutivo_vehiculo 
 # -----------------------------------------------------
-# -----------------------------------------------------
-# 🗂 Solicitar ajustes por consecutivo_vehiculo 
-# -----------------------------------------------------
 @ruta_pedidos.put(
     "/ajustar-totales-vehiculo",
     response_model=dict,
@@ -825,16 +822,18 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
             "pedidos": {"$push": "$$ROOT"},
             "estados": {"$addToSet": "$estado"},
 
-            # 👇 Suma por documentos y override vehicular para FLETE SOLICITADO
             "flete_solicitado_sum_docs": {"$sum": "$valor_flete"},
             "flete_solicitado_override": {"$first": "$total_flete_solicitado"},
 
-            # Puntos y cargue: override vehicular + sum-docs para fallback
             "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
             "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},
-            "cargue_descargue_total": {"$first": "$total_cargue_descargue"},
 
-            # Totales varios
+            # 👇 NUEVO: override + suma por documentos
+            "cargue_descargue_total_veh": {"$first": "$total_cargue_descargue"},
+            "cargue_descargue_sum_docs": {"$sum": "$cargue_descargue"},
+            # (opcional) si quieres tenerlo a mano:
+            "cargue_per_juridica": {"$first": "$total_cargue_per_juridica"},
+
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
@@ -850,6 +849,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
             }},
         }},
 
+
         # 4) Coalesce de campos calculados (preferir override si existe)
         {"$set": {
             "punto_adicional_total": {
@@ -857,6 +857,10 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
             },
             "flete_solicitado": {
                 "$ifNull": ["$flete_solicitado_override", "$flete_solicitado_sum_docs"]
+            },
+            # 👇 NUEVO: override vehicular si existe; si no, suma de documentos
+            "cargue_descargue_total": {
+                "$ifNull": ["$cargue_descargue_total_veh", "$cargue_descargue_sum_docs"]
             }
         }},
 
