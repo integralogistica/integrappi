@@ -1176,8 +1176,6 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
 # ------------------------------
 # ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
 # ------------------------------
-from collections import defaultdict
-
 @ruta_pedidos.get("/exportar-autorizados", summary="Exportar pedidos AUTORIZADOS a Excel")
 async def exportar_autorizados():
     # 1) Traer AUTORIZADOS ordenados asc por consecutivo_vehiculo (y CI para estabilidad)
@@ -1219,9 +1217,10 @@ async def exportar_autorizados():
     cargue_por_veh = {}
     descargue_kabi_por_veh = {}
     desvio_por_veh = {}
-    punto_adic_por_veh = {}
+    punto_adic_por_veh = {}        # valor monetario (suma u override)
     kilos_sic_por_veh = {}
-    seguro_por_veh = {}           # ← 6.000 si hay NIT 900402080 en el vehículo; si no, suma de 'seguro'
+    seguro_por_veh = {}            # ← 6.000 si hay NIT 900402080 en el vehículo; si no, suma de 'seguro'
+    adicionales_cnt_por_veh = {}   # ← NUEVO: cantidad de puntos adicionales (= total_puntos_vehiculo - 1, mínimo 0)
 
     NIT_FRESENIUS = "900402080"
 
@@ -1249,7 +1248,7 @@ async def exportar_autorizados():
             desv_override = sum(float(x.get("desvio", 0) or 0) for x in lst)
         desvio_por_veh[veh] = float(desv_override or 0)
 
-        # Punto adicional vehicular: override si existe; si no suma de docs
+        # Punto adicional vehicular (VALOR): override si existe; si no suma de docs
         pto_override = doc0.get("total_punto_adicional")
         if pto_override is None:
             pto_override = sum(float(x.get("punto_adicional", 0) or 0) for x in lst)
@@ -1260,6 +1259,10 @@ async def exportar_autorizados():
         if total_kilos_sic is None:
             total_kilos_sic = sum(float(x.get("num_kilos_sicetac", 0) or 0) for x in lst)
         kilos_sic_por_veh[veh] = float(total_kilos_sic or 0)
+
+        # Cantidad de puntos adicionales = total_puntos_vehiculo - 1 (mínimo 0)
+        total_puntos_veh = int(doc0.get("total_puntos_vehiculo", 0) or 0)
+        adicionales_cnt_por_veh[veh] = max(total_puntos_veh - 1, 0)
 
         # ¿Este vehículo es de Fresenius Kabi? -> por NIT exacto 900402080
         es_fresenius = any((x.get("nit_cliente") or "").strip() == NIT_FRESENIUS for x in lst)
@@ -1320,7 +1323,16 @@ async def exportar_autorizados():
             kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0)
             toneladas_val = round(kilos_veh / 1000.0, 3)
 
-            punto_adicional_val   = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
+            # ====== PUNTO ADICIONAL ======
+            # Monetario ya consolidado (override o suma)
+            punto_adic_monetario = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
+            # Cantidad de puntos adicionales
+            puntos_adic_cnt = int(adicionales_cnt_por_veh.get(veh, 0) or 0)
+            # Piso mínimo: 70.000 por cada punto adicional
+            piso_min_por_puntos = 70000.0 * puntos_adic_cnt
+            # Tomar el mayor entre lo monetario existente y el piso mínimo
+            punto_adicional_val = max(punto_adic_monetario, piso_min_por_puntos)
+
             desvio_val            = float(desvio_por_veh.get(veh, 0.0) or 0.0)
             cargue_solicitado_val = float(cargue_por_veh.get(veh, 0.0) or 0.0)
             descargue_kabi_val    = float(descargue_kabi_por_veh.get(veh, 0.0) or 0.0)
@@ -1329,8 +1341,8 @@ async def exportar_autorizados():
             mayor_cargue_per_juridica = max(descargue_kabi_val, cargue_solicitado_val)
 
             flete_base_veh = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
-            # Mantengo la fórmula original (si quieres incluir el "mayor" aquí, me dices)
-            flete_unidad_val = flete_base_veh + desvio_val + punto_adicional_val + cargue_solicitado_val
+            # Fórmula de flete unidad (manteniendo cargue_solicitado_val aquí)
+            flete_unidad_val = flete_base_veh + desvio_val + punto_adic_monetario + cargue_solicitado_val
 
             # Seguro según regla de Fresenius (6.000) o suma normal
             seguro_val = float(seguro_por_veh.get(veh, 0.0) or 0.0)
