@@ -672,13 +672,15 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         if add_line_for_special:
             destinos_reales_set = {_norm(d.get("destino_real")) for d in docs if (d.get("destino_real") or "").strip()}
             if special_city not in destinos_reales_set:
-                from copy import deepcopy, copy
+                from copy import deepcopy
                 nuevo = deepcopy(doc0)
                 nuevo.pop("_id", None)
                 nuevo["fecha_creacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # El destino del doc lo actualizaremos más abajo junto con TODOS los docs; por ahora conservamos.
+
+                # Marca el destino real y la ubicación de la bodega especial
                 nuevo["destino_real"] = special_city
                 nuevo["ubicacion_descargue"] = SPECIAL_DESTS[special_city]
+
                 # Cantidades/valores en 0 para no alterar agregados
                 nuevo["num_cajas"] = 0
                 nuevo["num_kilos"] = 0.0
@@ -688,20 +690,18 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 nuevo["cargue_descargue"] = 0.0
                 nuevo["descargue_kabi"] = 0.0
                 nuevo["punto_adicional"] = 0.0
+
                 # Trazabilidad
                 nuevo["observaciones"] = f"{(doc0.get('observaciones') or '').upper()} | SE ENVIA A BODEGA"
-                # Ajuste de CI/CP para no colisionar
-                suf = f"AD-{special_city[:3]}-{int(time.time()) % 100000}"
-                nuevo["consecutivo_integrapp"] = f"{doc0.get('consecutivo_integrapp','')}-{suf}".strip("-")
-                try:
-                    nuevo["consecutivo_pedido"] = str(doc0.get("consecutivo_pedido", "")) + f"{suf}"
-                except Exception:
-                    nuevo["consecutivo_pedido"] = str(doc0.get("consecutivo_pedido", "")) + f"{suf}"
+
+                # ❗❗ Mantener mismos CI/CP para que el nuevo punto herede el mismo código
+                nuevo["consecutivo_integrapp"] = doc0.get("consecutivo_integrapp", "")
+                nuevo["consecutivo_pedido"] = doc0.get("consecutivo_pedido", "")
 
                 coleccion_pedidos.insert_one(nuevo)
-                # Refrescar docs
+
+                # Refrescar docs y sumas
                 docs = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv}))
-                # Recalcular sumas base (valores siguen igual pues el doc especial es 0s)
                 suma_flete = sum(float(d.get("valor_flete", 0) or 0) for d in docs)
                 suma_cargue = sum(float(d.get("cargue_descargue", 0) or 0) for d in docs)
                 suma_descargue_kabi = sum(float(d.get("descargue_kabi", 0) or 0) for d in docs)
