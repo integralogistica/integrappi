@@ -14,6 +14,7 @@ from datetime import datetime
 import time
 from collections import defaultdict 
 from zoneinfo import ZoneInfo
+from fastapi import Request
 
 # ------------------------------
 # 🔗 Conexión MongoDB
@@ -554,7 +555,16 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
     response_model=dict,
     summary="Ajustar totales por vehiculo y recalcular estado (permite agregar línea extra para destinos especiales)"
 )
-async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
+async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Request):
+    # --- DEBUG seguro (opcional) ---
+    try:
+        raw = await request.body()
+        print("[DEBUG request body]", raw.decode()[:1000])
+    except Exception:
+        pass
+
+    from datetime import datetime
+
     usuario = payload.usuario.upper().strip()
     solicitante = usuario
 
@@ -582,12 +592,35 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     YES = {"SI", "S", "1", "TRUE", "VERDADERO", "YES", "Y"}
 
+    # ---------- Normalización segura ----------
     def _norm(s) -> str:
         import unicodedata, re
         s = "" if s is None else str(s)
         s = unicodedata.normalize("NFKD", s.strip())
         s = "".join(ch for ch in s if not unicodedata.combining(ch))
         return re.sub(r"\s+", " ", s).upper()
+
+    # ---------- Búsqueda de tarifa tolerante a acentos ----------
+    def find_tarifa(origen_raw: str, destino_raw: str):
+        # Mantén las formas "bonitas" para reportar, pero busca también normalizado
+        o1 = (origen_raw or "").upper().strip()
+        d1 = (destino_raw or "").upper().strip()
+        oN, dN = _norm(o1), _norm(d1)
+
+        # 1) intento exacto (con tildes) si existen
+        doc = db["tarifas"].find_one({"origen": o1, "destino": d1})
+        if doc:
+            return doc
+
+        # 2) intento normalizado (si guardas campos *_norm en la colección)
+        doc = db["tarifas"].find_one({"origen_norm": oN, "destino_norm": dN})
+        if doc:
+            return doc
+
+        # 3) último intento: consulta por normalizado con $expr (si no tienes campos *_norm)
+        #    Esto requiere haber guardado datos normalizados o una vista/materialización previa.
+        #    Si no aplicara en tu Mongo, puedes omitir este paso.
+        return None
 
     for adj in payload.ajustes:
         cv = (adj.consecutivo_vehiculo or "").strip()
@@ -633,40 +666,54 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
         total_flete_solicitado = float(adj.total_flete_solicitado) if getattr(adj, "total_flete_solicitado", None) is not None else float(suma_flete)
 
         # === Mayor entre cargue y descargue_kabi por vehículo ===
-        total_cargue_per_juridica = max(float(total_cargue_descargue), float(suma_descargue_kabi))
+        total_cargue_per_juridica = total_cargue_descargue
 
         # ====== Edición de DESTINO / o Adición de línea especial ======
-        destino_actual = (doc0.get("destino") or "").upper().strip()
+        destino_actual_bonito = (doc0.get("destino") or "").strip()           # conserva acentos para reportar
+        destino_actual_up = destino_actual_bonito.upper()
         origenes = {(d.get("origen") or "").upper().strip() for d in docs}
         if len(origenes) == 0:
             errores.append(f"{cv}: no tiene ORIGEN en los documentos")
             continue
         origen = next(iter(origenes))
 
-        destino_seleccionado = None
+        # Variables de control de destino
+        destino_lookup_label = None  # lo que usaré para buscar tarifa (con/ sin tildes)
+        destino_a_reportar = destino_actual_up  # lo que guardaré en el campo "destino" (con tildes si existen)
         add_line_for_special = False
         special_city = None
 
         if (adj.nuevo_destino or adj.destino_desde_real):
-            # Si viene 'nuevo_destino', puede ser ciudad especial o destino normal
+            # Caso 1: se envió un destino de input (puede ser especial)
             if adj.nuevo_destino:
-                candidato = _norm(adj.nuevo_destino)
-                if candidato in SPECIAL_DESTS:
-                    # Agregar línea (si falta) Y además mover el vehículo a esa ciudad
+                label_bonito = (adj.nuevo_destino or "").strip()  # podría traer tildes
+                cand_norm = _norm(label_bonito)
+                if cand_norm in SPECIAL_DESTS:
+                    # Agregar línea (si falta) y mover destino del vehículo a esa ciudad especial
                     add_line_for_special = True
-                    special_city = candidato
-                    destino_seleccionado = candidato  # 👈 también cambia el destino del vehículo
+                    special_city = cand_norm
+                    destino_lookup_label = label_bonito
+                    destino_a_reportar = cand_norm  # nombres de SPECIAL_DESTS no tienen acentos
                 else:
-                    # Cambio de destino normal (como antes)
-                    destino_seleccionado = candidato
+                    # Cambio de destino normal: busca con label "bonito" pero reporta el mismo "bonito"
+                    destino_lookup_label = label_bonito
+                    destino_a_reportar = label_bonito.upper()
             else:
-                # Selección desde un destino_real existente (comportamiento previo)
-                destinos_reales_set = {_norm(d.get("destino_real")) for d in docs if (d.get("destino_real") or "").strip()}
-                candidato = _norm(adj.destino_desde_real)
-                if candidato not in destinos_reales_set:
+                # Caso 2: eligió desde un destino_real existente
+                candidato_norm = _norm(adj.destino_desde_real)
+                destinos_reales_norm = {_norm(d.get("destino_real")) for d in docs if (d.get("destino_real") or "").strip()}
+                if candidato_norm not in destinos_reales_norm:
                     errores.append(f"{cv}: 'destino_desde_real' no coincide con los destino_real del vehículo")
                     continue
-                destino_seleccionado = candidato
+
+                # Recupero la forma original (con tildes) desde el doc para reportar y buscar
+                original = next(
+                    ((d.get("destino_real") or "").strip().upper()
+                     for d in docs if _norm(d.get("destino_real")) == candidato_norm),
+                    candidato_norm
+                )
+                destino_lookup_label = original
+                destino_a_reportar = original
 
         # 6.1) Si debe adicionarse una línea para ciudad especial y aún no existe, insertar doc "virtual"
         if add_line_for_special:
@@ -694,9 +741,9 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 # Trazabilidad
                 nuevo["observaciones"] = f"{(doc0.get('observaciones') or '').upper()} | SE ENVIA A BODEGA"
 
-                # ❗❗ Mantener mismos CI/CP para que el nuevo punto herede el mismo código
+                # Mantener mismos CI/CP
                 nuevo["consecutivo_integrapp"] = doc0.get("consecutivo_integrapp", "")
-                nuevo["consecutivo_pedido"] = doc0.get("consecutivo_pedido", "")
+                nuevo["consecutivo_pedido"]    = doc0.get("consecutivo_pedido", "")
 
                 coleccion_pedidos.insert_one(nuevo)
 
@@ -707,11 +754,11 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 suma_descargue_kabi = sum(float(d.get("descargue_kabi", 0) or 0) for d in docs)
 
         # 7) Recalcular real/teórico y estado
-        if destino_seleccionado:
-            tf = db["tarifas"].find_one({"origen": origen, "destino": destino_seleccionado})
+        if destino_lookup_label:  # hubo cambio de destino (o especial)
+            tf = find_tarifa(origen, destino_lookup_label)
             if not tf or "tarifas" not in tf or tipo_vehiculo_sicetac not in tf["tarifas"]:
                 errores.append(
-                    f"{cv}: No hay tarifa para {origen}→{destino_seleccionado} con tipo '{tipo_vehiculo_sicetac}'"
+                    f"{cv}: No hay tarifa para {origen}→{destino_lookup_label.upper()} con tipo '{tipo_vehiculo_sicetac}'"
                 )
                 continue
             tbase = float(tf["tarifas"][tipo_vehiculo_sicetac])
@@ -730,10 +777,9 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
             punto_adicional_teorico = adicionales * val_pto_cfg
             cargue_descargue_teorico = cargue_cfg if paga_cd else 0.0
             valor_flete_sistema = tbase
-            destino_a_reportar = destino_seleccionado
         else:
-            # Mantener destino y actualizar teóricos (p.ej. si solo se añadió línea especial)
-            tf_doc = db["tarifas"].find_one({"origen": origen, "destino": destino_actual})
+            # Mantener destino y actualizar teóricos
+            tf_doc = find_tarifa(origen, destino_actual_bonito)
             if not tf_doc or "tarifas" not in tf_doc:
                 valor_flete_sistema = float(doc0.get("valor_flete_sistema", 0) or 0)
                 punto_adicional_teorico = float(doc0.get("punto_adicional_teorico", 0) or 0)
@@ -754,7 +800,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
                 cargue_descargue_teorico = cargue_cfg if paga_cd else 0.0
                 valor_flete_sistema = tbase
 
-            destino_a_reportar = destino_actual
+            destino_a_reportar = destino_actual_up  # sin cambios
 
         costo_teorico = float(valor_flete_sistema) + float(punto_adicional_teorico) + float(cargue_descargue_teorico)
         # Real: mayor entre cargue y descargue_kabi + desvío + puntos adicionales + flete solicitado
@@ -790,13 +836,13 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
 
         # Actualización de destino/teóricos
         update_fields.update({
-            "destino":                   destino_a_reportar,
+            "destino":                   destino_a_reportar,   # ← conserva tildes si existían
             "valor_flete_sistema":       valor_flete_sistema,
             "punto_adicional_teorico":   punto_adicional_teorico,
             "cargue_descargue_teorico":  cargue_descargue_teorico,
         })
 
-        if destino_seleccionado:
+        if destino_lookup_label:
             update_fields["usuario_ajusta_destino"] = usuario
             update_fields["fecha_ajuste_destino"] = ahora_str
 
@@ -835,7 +881,6 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload):
     if errores:
         return {"mensaje": mensaje, "resultados": resultados, "errores": errores}
     return {"mensaje": mensaje, "resultados": resultados}
-
 
 
 # -----------------------------------------------------
