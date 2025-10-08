@@ -2619,11 +2619,12 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
 # 📊 Power BI — Completados (GET)
 # Plano, por rango de fechas y paginado
 # ================================
+from bson.son import SON
 @ruta_pedidos.get(
-    "/pbi/completados",
-    summary="Endpoint friendly para Power BI: pedidos COMPLETADOS por rango de fechas (plano, paginado)"
+    "/pbi/documentos",
+    summary="Power BI: TODOS los pedidos (cualquier estado) por rango de fechas, plano y paginado"
 )
-async def pbi_completados(
+async def pbi_documentos(
     fecha_desde: str = Query(..., description="YYYY-MM-DD"),
     fecha_hasta: str = Query(..., description="YYYY-MM-DD"),
     regionales: Optional[List[str]] = Query(None, description="Opcional: lista de regionales"),
@@ -2631,50 +2632,64 @@ async def pbi_completados(
     page_size: int = Query(500, ge=1, le=5000)
 ):
     """
-    Devuelve documentos *COMPLETADOS* de la colección 'pedidos_completados' en formato plano,
-    filtrados por fecha_creacion (string 'YYYY-MM-DD HH:MM:SS'), con paginación estable.
+    Une 'pedidos' + 'pedidos_completados' y devuelve TODOS los documentos,
+    filtrados por fecha_creacion (string 'YYYY-MM-DD HH:MM:SS'), con orden estable y paginación.
     """
-    # 1) Validar formato de fechas (reutiliza tu criterio)
+    # 1) Validación de fechas
     try:
         datetime.strptime(fecha_desde, "%Y-%m-%d")
         datetime.strptime(fecha_hasta, "%Y-%m-%d")
     except:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
-    # 2) Filtro base por rango
+    # 2) Filtro base: por rango de fecha_creacion (string)
     f_ini = f"{fecha_desde} 00:00:00"
     f_fin = f"{fecha_hasta} 23:59:59"
-    filtro: Dict[str, any] = {
-        "fecha_creacion": {"$gte": f_ini, "$lte": f_fin},
-        "estado": "COMPLETADO"
+
+    filtro_base: Dict[str, any] = {
+        "fecha_creacion": {"$gte": f_ini, "$lte": f_fin}
     }
-
-    # 3) Si envían regionales, filtra (útil para datasets por región)
     if regionales:
-        filtro["regional"] = {"$in": [r.upper().strip() for r in regionales if r and r.strip()]}
+        filtro_base["regional"] = {"$in": [r.upper().strip() for r in regionales if r and r.strip()]}
 
-    # 4) Paginación estable (fecha_creacion asc, _id asc)
+    # 3) Paginación
     skip = (page - 1) * page_size
-    cursor = coleccion_pedidos_completados.find(filtro)\
-        .sort([("fecha_creacion", 1), ("_id", 1)])\
-        .skip(skip).limit(page_size)
 
-    items: List[dict] = []
-    for d in cursor:
+    # 4) Aggregation: pedidos ∪ pedidos_completados → sort → facet (slice + total)
+    pipeline = [
+        {"$match": filtro_base},
+        {"$unionWith": {
+            "coll": "pedidos_completados",
+            "pipeline": [{"$match": filtro_base}]
+        }},
+        {"$sort": SON([("fecha_creacion", 1), ("_id", 1)])},
+        {"$facet": {
+            "items": [{"$skip": skip}, {"$limit": page_size}],
+            "total": [{"$count": "n"}]
+        }}
+    ]
+
+    agg = list(coleccion_pedidos.aggregate(pipeline))
+    if not agg:
+        return {"page": page, "page_size": page_size, "count": 0, "has_more": False, "next_page": None, "items": []}
+
+    items = agg[0].get("items", [])
+    total = (agg[0].get("total", [{}])[0].get("n", 0)) if agg[0].get("total") else 0
+
+    # 5) _id → id (string)
+    out: List[dict] = []
+    for d in items:
         d["id"] = str(d.pop("_id"))
-        # 🔹 Si quieres devolver solo ciertos campos, filtra aquí
-        # d = {k: d[k] for k in ["id","fecha_creacion","regional","nit_cliente","origen","destino","valor_flete", ...] if k in d}
-        items.append(d)
+        out.append(d)
 
-    # 5) Señalizar si hay más páginas (consulta 1 doc extra)
-    has_more = len(items) == page_size and coleccion_pedidos_completados.count_documents(filtro) > skip + len(items)
+    has_more = (skip + len(out)) < total
     next_page = page + 1 if has_more else None
 
     return {
         "page": page,
         "page_size": page_size,
-        "count": len(items),
+        "count": len(out),
         "has_more": has_more,
         "next_page": next_page,
-        "items": items
+        "items": out
     }
