@@ -2629,7 +2629,7 @@ async def pbi_documentos(
     fecha_hasta: str = Query(..., description="YYYY-MM-DD"),
     regionales: Optional[List[str]] = Query(None, description="Opcional: lista de regionales"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(500, ge=1, le=5000)
+    page_size: int = Query(500, ge=1, le=50000000)
 ):
     """
     Une 'pedidos' + 'pedidos_completados' y devuelve TODOS los documentos,
