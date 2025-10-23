@@ -102,7 +102,7 @@ class AjusteVehiculo(BaseModel):
     total_flete_solicitado: Optional[float] = None
     nuevo_destino: Optional[str] = None
     destino_desde_real: Optional[str] = None
-
+    usr_solicita_ajuste: Optional[str] = None
 
 
 class AjustesVehiculosPayload(BaseModel):
@@ -621,6 +621,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
 
     for adj in payload.ajustes:
         cv = (adj.consecutivo_vehiculo or "").strip()
+        solicitante = (adj.usr_solicita_ajuste or usuario).upper().strip()
         if not cv:
             errores.append("Se envió un ajuste sin consecutivo_vehiculo")
             continue
@@ -957,6 +958,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
             "cargue_descargue_sum_docs": {"$sum": "$cargue_descargue"},
             # (opcional) si quieres tenerlo a mano:
             "cargue_per_juridica": {"$first": "$total_cargue_per_juridica"},
+            "usr_solicita_ajuste": {"$first": "$usr_solicita_ajuste"},
 
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
@@ -1028,6 +1030,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
 
         # Detalle de pedidos
         "pedidos": [modelo_pedido(p) for p in g["pedidos"]],
+        "usr_solicita_ajuste": g.get("usr_solicita_ajuste"),
     } for g in grupos]
 
 # ---------------------------------------------------

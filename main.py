@@ -24,7 +24,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",       # Frontend en local
-        "http://127.0.0.1:5173",       # Otra variante en local
+        "http://127.0.0.1:5173", 
+        "http://localhost:5173/integrapp/",
         "https://tu-frontend.com",
         "https://integralogistica.com",   
         "https://www.integralogistica.com", 

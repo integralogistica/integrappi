@@ -22,6 +22,11 @@ except Exception:
     # Si ya existe o no hay permisos, seguimos sin romper la app
     pass
 
+try:
+    coleccion_usuarios.create_index("perfil")
+except Exception:
+    pass
+
 # ------------------------------
 # 🚦 Configuración Router
 # ------------------------------
@@ -42,6 +47,12 @@ class BaseUsuario(BaseModel):
     perfil: str
     usuario: str
     clave: str
+
+# ---- Modelo de salida mínimo ----
+class UsuarioLite(BaseModel):
+    id: str
+    nombre: str
+    usuario: str
 
 # ------------------------------
 # 📌 Modelo de salida (sin clave)
@@ -87,6 +98,17 @@ async def crear_baseusuario(data: BaseUsuario):
 async def obtener_baseusuarios():
     usuarios = coleccion_usuarios.find()
     return [modelo_usuario(u) for u in usuarios]
+
+
+# ✅ Listar solo usuarios con perfil DESPACHADOR (nombre y usuario)
+@ruta_baseusuarios.get("/despachadores", response_model=List[UsuarioLite])
+async def listar_despachadores():
+    cursor = (
+        coleccion_usuarios
+        .find({"perfil": "DESPACHADOR"}, {"nombre": 1, "usuario": 1})
+        .sort("nombre", 1)
+    )
+    return [{"id": str(u["_id"]), "nombre": u["nombre"], "usuario": u["usuario"]} for u in cursor]
 
 # ------------------------------
 # ✅ Obtener usuario por ID
