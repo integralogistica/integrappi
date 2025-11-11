@@ -1769,7 +1769,6 @@ async def exportar_completados(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
-
 # ------------------------------
 # 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
@@ -1792,10 +1791,7 @@ async def listar_vehiculos_completados(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
     perfil = (user.get("perfil") or "").upper()
 
-    # 🔑 Regionales visibles según perfil (usa el helper global)
-    #   - ADMIN/COORDINADOR/CONTROL/ANALISTA -> None (sin restricción)
-    #   - DESPACHADOR/OPERADOR de CELTA o FUNZA -> ["CELTA","FUNZA"]
-    #   - Otros -> [su propia regional]
+    # 🔑 Regionales visibles según perfil
     visibles = regionales_visibles_para(user)
 
     # 2) Validar formato de fechas
@@ -1803,7 +1799,10 @@ async def listar_vehiculos_completados(
         datetime.strptime(fecha_inicial, "%Y-%m-%d")
         datetime.strptime(fecha_final,   "%Y-%m-%d")
     except:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Formato de fecha inválido. Use YYYY-MM-DD.")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Formato de fecha inválido. Use YYYY-MM-DD."
+        )
 
     # 3) Construir filtro base (fecha + estado opcional)
     filtro: Dict[str, any] = {
@@ -1817,7 +1816,7 @@ async def listar_vehiculos_completados(
 
     # 4) Filtrar por regional según perfil/visibilidad
     if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
-        # Perfiles amplios: si envían 'regionales' en filtros, se respetan; si no, sin restricción
+        # Perfiles amplios: si envían 'regionales' en filtros, se respetan
         if filtros.regionales:
             filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}
     else:
@@ -1825,7 +1824,7 @@ async def listar_vehiculos_completados(
         if visibles is not None:
             filtro["regional"] = {"$in": visibles}
 
-    # 5) Pipeline de agregación
+    # 5) Pipeline de agregación (MISMA LÓGICA QUE listar_pedidos_vehiculos)
     pipeline = [
         {"$match": filtro},
 
@@ -1847,7 +1846,7 @@ async def listar_vehiculos_completados(
         # (opcional) limpia el objeto cliente para no inflar respuesta
         {"$project": {"cliente": 0}},
 
-        # 3) Agrupa por vehículo, pero SIN nombre_cliente aquí
+        # 3) Agrupa por vehículo, MISMO shape que listar_pedidos_vehiculos
         {"$group": {
             "_id": "$consecutivo_vehiculo",
             "tipo_vehiculo": {"$first": "$tipo_vehiculo"},
@@ -1856,10 +1855,19 @@ async def listar_vehiculos_completados(
             "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},
             "pedidos": {"$push": "$$ROOT"},
             "estados": {"$addToSet": "$estado"},
-            "flete_solicitado": {"$sum": "$valor_flete"},
+
+            "flete_solicitado_sum_docs": {"$sum": "$valor_flete"},
+            "flete_solicitado_override": {"$first": "$total_flete_solicitado"},
+
             "punto_adicional_total_veh": {"$first": "$total_punto_adicional"},
             "punto_adicional_sum_docs": {"$sum": "$punto_adicional"},
-            "cargue_descargue_total": {"$first": "$total_cargue_descargue"},
+
+            "cargue_descargue_total_veh": {"$first": "$total_cargue_descargue"},
+            "cargue_descargue_sum_docs": {"$sum": "$cargue_descargue"},
+
+            "cargue_per_juridica": {"$first": "$total_cargue_per_juridica"},
+            "usr_solicita_ajuste": {"$first": "$usr_solicita_ajuste"},
+
             "totales": {"$first": {
                 "cajas": "$total_cajas_vehiculo",
                 "kilos": "$total_kilos_vehiculo",
@@ -1874,11 +1882,20 @@ async def listar_vehiculos_completados(
                 "diferencia": "$diferencia_flete",
             }},
         }},
+
+        # 4) Coalesce de campos calculados (igual que en listar_pedidos_vehiculos)
         {"$set": {
             "punto_adicional_total": {
                 "$ifNull": ["$punto_adicional_total_veh", "$punto_adicional_sum_docs"]
+            },
+            "flete_solicitado": {
+                "$ifNull": ["$flete_solicitado_override", "$flete_solicitado_sum_docs"]
+            },
+            "cargue_descargue_total": {
+                "$ifNull": ["$cargue_descargue_total_veh", "$cargue_descargue_sum_docs"]
             }
         }},
+
         {"$sort": {"_id": 1}}
     ]
 
@@ -1886,55 +1903,49 @@ async def listar_vehiculos_completados(
     if not grupos:
         return []
 
-    # 6) Formar la respuesta con los mismos campos que el multiestado
+    # 6) Formar la respuesta con los MISMOS campos que listar_pedidos_vehiculos
     respuesta = []
     for g in grupos:
-        totales = g["totales"]
-        costo_teorico = (
-            totales.get("flete_sistema", 0.0)
-            + totales.get("punto_teorico", 0.0)
-            + totales.get("cargue_teorico", 0.0)
-            + totales.get("desvio", 0.0)
-        )
-        costo_real = totales.get("costo_real", 0.0)
-        diferencia = totales.get("diferencia", costo_real - costo_teorico)
-
+        tot = g["totales"]
         respuesta.append({
-            "consecutivo_vehiculo":            g["_id"],
-            "tipo_vehiculo":                   g["tipo_vehiculo"],
-            "tipo_vehiculo_sicetac":           g.get("tipo_vehiculo_sicetac"),
-            "destino":                         g["destino"],
-            "multiestado":                     False,
-            "estados":                         g["estados"],
+            "consecutivo_vehiculo":         g["_id"],
+            "tipo_vehiculo":                g["tipo_vehiculo"],
+            "tipo_vehiculo_sicetac":        g.get("tipo_vehiculo_sicetac"),
+            "destino":                      g["destino"],
+            "Observaciones_ajustes":        g.get("Observaciones_ajustes"),
+            "multiestado":                  len(g["estados"]) > 1,
+            "estados":                      g["estados"],
 
-            # Totales reales
-            "total_cajas_vehiculo":            totales.get("cajas", 0),
-            "total_kilos_vehiculo":            totales.get("kilos", 0.0),
-            "total_kilos_vehiculo_sicetac":    totales.get("kilos_sicetac", 0.0),
-            "total_flete_vehiculo":            costo_real,
-            "total_desvio_vehiculo":           totales.get("desvio", 0.0),
-            "total_puntos_vehiculo":           totales.get("puntos", 0),
+            "total_cajas_vehiculo":         tot.get("cajas", 0),
+            "total_kilos_vehiculo":         tot.get("kilos", 0.0),
+            "total_kilos_vehiculo_sicetac": tot.get("kilos_sicetac", 0.0),
 
-            # Totales teóricos
-            "valor_flete_sistema":             totales.get("flete_sistema", 0.0),
-            "total_punto_adicional_teorico":   totales.get("punto_teorico", 0.0),
-            "total_cargue_descargue_teorico":  totales.get("cargue_teorico", 0.0),
-            "costo_teorico_vehiculo":          costo_teorico,
+            # Totales reales / costos
+            "total_flete_vehiculo":         tot.get("flete", 0.0),
+            "total_desvio_vehiculo":        tot.get("desvio", 0.0),
+            "total_puntos_vehiculo":        tot.get("puntos", 0),
+            "valor_flete_sistema":          tot.get("flete_sistema", 0.0),
+            "total_punto_adicional_teorico":tot.get("punto_teorico", 0.0),
+            "total_cargue_descargue_teorico": tot.get("cargue_teorico", 0.0),
+            "costo_teorico_vehiculo":       sum([
+                                                tot.get("flete_sistema", 0.0),
+                                                tot.get("punto_teorico", 0.0),
+                                                tot.get("cargue_teorico", 0.0)
+                                             ]),
+            "costo_real_vehiculo":          tot.get("costo_real", 0.0),
+            "diferencia_flete":             tot.get("diferencia", 0.0),
 
-            # Diferenciales y adicionales
-            "costo_real_vehiculo":             costo_real,
-            "diferencia_flete":                diferencia,
-            "total_punto_adicional":           g.get("punto_adicional_total", 0.0),
-            "total_cargue_descargue":          g.get("cargue_descargue_total", 0.0),
-            "total_flete_solicitado":          g.get("flete_solicitado", 0.0),
+            # Adicionales y solicitados (usando override si existe)
+            "total_punto_adicional":        g.get("punto_adicional_total", 0.0),
+            "total_cargue_descargue":       g.get("cargue_descargue_total", 0.0),
+            "total_flete_solicitado":       g.get("flete_solicitado", 0.0),
 
             # Detalle de pedidos
-            "pedidos":                         [modelo_pedido(p) for p in g["pedidos"]],
+            "pedidos":                      [modelo_pedido(p) for p in g["pedidos"]],
+            "usr_solicita_ajuste":          g.get("usr_solicita_ajuste"),
         })
 
     return respuesta
-
-
 
 
 # ------------------------------
