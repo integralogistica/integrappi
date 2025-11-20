@@ -12,6 +12,8 @@ from rutas.baseusuarios import ruta_baseusuarios
 from rutas.clientes import ruta_clientes
 from rutas.fletes import ruta_fletes
 from rutas.pedidos import ruta_pedidos
+from rutas.consultar_biometrico import ruta_verificacion
+
 
 
 app = FastAPI()
@@ -33,7 +35,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],  # 👈 Necesario para que el front lea el filename
+    expose_headers=["Content-Disposition"],  # Necesario para que el front lea el filename
 )
 
 
@@ -47,6 +49,7 @@ app.include_router(ruta_baseusuarios)
 app.include_router(ruta_clientes)
 app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
+app.include_router(ruta_verificacion)
 
 
 @app.get("/", tags=['Home'])
