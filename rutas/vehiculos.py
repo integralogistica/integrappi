@@ -253,12 +253,31 @@ async def obtener_vehiculo(placa: str):
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
 
 @ruta_vehiculos.get("/obtener-vehiculos")
-def obtener_vehiculos(id_usuario: str):
+def obtener_vehiculos(id_usuario: str, estadoIntegra: str | None = None):
+    filtro = {"idUsuario": id_usuario}
 
-    vehiculos = list(coleccion_vehiculos.find({"idUsuario": id_usuario}, {"_id": 0, "placa": 1}))
+    # Si el estado viene en el query, filtrar también por estadoIntegra
+    if estadoIntegra:
+        filtro["estadoIntegra"] = estadoIntegra
+
+    vehiculos = list(coleccion_vehiculos.find(
+        filtro,
+        {"_id": 0, "placa": 1, "estadoIntegra": 1}
+    ))
+
     if not vehiculos:
-        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"message": "No se encontraron vehículos para este usuario."})
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículos encontrados", "vehicles": vehiculos})
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "message": "No se encontraron vehículos con ese filtro.",
+                "vehiculos": []
+            }
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": "Vehículos encontrados", "vehiculos": vehiculos}
+    )
 
 
 # Actualiza la informacion de datos
