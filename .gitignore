@@ -1,0 +1,11 @@
+.env
+venv
+__pycache__
+novedades
+subirNovedades.spec
+subirNovedades.py
+novedades.xlsx
+dist
+build
+sunlit-analyst-448516-p8-25c05fe7366d.json
+credenciales.json
