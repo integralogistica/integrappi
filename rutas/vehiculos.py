@@ -252,34 +252,46 @@ async def obtener_vehiculo(placa: str):
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
 
+
 @ruta_vehiculos.get("/obtener-vehiculos")
-def obtener_vehiculos(id_usuario: str, estadoIntegra: str | None = None):
-    filtro = {"idUsuario": id_usuario}
-
-    # Si el estado viene en el query, filtrar también por estadoIntegra
-    if estadoIntegra:
-        filtro["estadoIntegra"] = estadoIntegra
-
-    vehiculos = list(coleccion_vehiculos.find(
-        filtro,
-        {"_id": 0, "placa": 1, "estadoIntegra": 1}
-    ))
+def obtener_vehiculos(id_usuario: str):
+    vehiculos = list(
+        coleccion_vehiculos.find(
+            {"idUsuario": id_usuario, "estadoIntegra": "registro_incompleto"},
+            {"_id": 0}
+        )
+    )
 
     if not vehiculos:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "message": "No se encontraron vehículos con ese filtro.",
-                "vehiculos": []
-            }
+            content={"message": "No se encontraron vehículos para este usuario."}
         )
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Vehículos encontrados", "vehiculos": vehiculos}
+        content={"message": "Vehículos encontrados", "vehicles": vehiculos}
     )
 
+@ruta_vehiculos.get("/obtener-vehiculos-incompletos")
+def obtener_vehiculos_incompletos():
+    # Trae solo los vehículos con estadoIntegra = "registro_incompleto"
+    vehiculos = list(coleccion_vehiculos.find({"estadoIntegra": "registro_incompleto"}))
 
+    # Convertir ObjectId a string
+    for v in vehiculos:
+        v["_id"] = str(v["_id"])
+
+    if not vehiculos:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "No hay vehículos con estado 'registro_incompleto'."}
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": "Vehículos encontrados", "vehicles": vehiculos}
+    )
 # Actualiza la informacion de datos
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict):
