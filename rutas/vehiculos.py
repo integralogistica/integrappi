@@ -257,7 +257,7 @@ async def obtener_vehiculo(placa: str):
 def obtener_vehiculos(id_usuario: str):
     vehiculos = list(
         coleccion_vehiculos.find(
-            {"idUsuario": id_usuario, "estadoIntegra": "creado"},
+            {"idUsuario": id_usuario, "estadoIntegra": "registro_incompleto"},
             {"_id": 0}
         )
     )
@@ -273,6 +273,25 @@ def obtener_vehiculos(id_usuario: str):
         content={"message": "Vehículos encontrados", "vehicles": vehiculos}
     )
 
+@ruta_vehiculos.get("/obtener-vehiculos-incompletos")
+def obtener_vehiculos_incompletos():
+    # Trae solo los vehículos con estadoIntegra = "registro_incompleto"
+    vehiculos = list(coleccion_vehiculos.find({"estadoIntegra": "registro_incompleto"}))
+
+    # Convertir ObjectId a string
+    for v in vehiculos:
+        v["_id"] = str(v["_id"])
+
+    if not vehiculos:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": "No hay vehículos con estado 'registro_incompleto'."}
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": "Vehículos encontrados", "vehicles": vehiculos}
+    )
 # Actualiza la informacion de datos
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict):

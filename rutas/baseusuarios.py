@@ -109,6 +109,7 @@ async def listar_despachadores():
         .sort("nombre", 1)
     )
     return [{"id": str(u["_id"]), "nombre": u["nombre"], "usuario": u["usuario"]} for u in cursor]
+    
 
 # ------------------------------
 # ✅ Obtener usuario por ID
@@ -196,5 +197,34 @@ async def login_baseusuario(
             "usuario": encontrado["usuario"],
             "perfil": encontrado["perfil"],
             "regional": encontrado["regional"],
+        },
+    }
+
+@ruta_baseusuarios.post("/loginseguridad", response_model=dict)
+async def login_seguridad(
+    usuario: str = Body(..., embed=True),
+    clave: str = Body(..., embed=True)
+):
+    usuario_norm = usuario.strip().upper()
+    clave_ingresada = clave.strip()
+
+    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
+    if not encontrado:
+        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+
+    clave_almacenada = str(encontrado.get("clave", "")).strip()
+    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+
+    perfil = encontrado.get("perfil", "").strip().upper()
+    if perfil != "SEGURIDAD":
+        raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
+
+    return {
+        "mensaje": "Login seguridad exitoso",
+        "usuario": {
+            "id": str(encontrado["_id"]),
+            "usuario": encontrado["usuario"],
+            "perfil": perfil,
         },
     }

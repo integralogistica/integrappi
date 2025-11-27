@@ -7,6 +7,7 @@ from rutas.pagoSaldos import ruta_manifiestos
 from rutas.novedades import ruta_novedades
 from rutas.vehiculos import ruta_vehiculos
 from rutas.empleados import ruta_empleado
+from rutas.revision import ruta_revision
 from rutas.puente_biometrico import ruta_biometria
 from rutas.baseusuarios import ruta_baseusuarios
 from rutas.clientes import ruta_clientes
@@ -50,6 +51,7 @@ app.include_router(ruta_clientes)
 app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
+app.include_router(ruta_revision)
 
 
 @app.get("/", tags=['Home'])
