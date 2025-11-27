@@ -25,7 +25,6 @@ load_dotenv()
 mongo_uri = os.getenv("MONGO_URI")
 if not mongo_uri:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
-
 client = MongoClient(mongo_uri)
 db = client["integra"]
 coleccion_empleados = db["empleados"]
@@ -36,7 +35,6 @@ resend_api_key = os.getenv("RESEND_API_KEY")
 if not resend_api_key:
     raise ValueError("La variable de entorno RESEND_API_KEY no está configurada.")
 resend.api_key = resend_api_key
-
 
 # ——— Modelos Pydantic ———
 class Empleado(BaseModel):
