@@ -56,12 +56,12 @@ async def enviar_revision(
             detail="No existe ningún vehículo registrado con esta cédula (ni en idUsuario ni en tenedor)"
         )
 
-    # Obtener correo desde campo tenedCorreo
-    correo = veh.get("tenedCorreo")
+    # Obtener correo desde campo CondCorreo
+    correo = veh.get("propCorreo") or veh.get("CondCorreo")
     if not correo:
         raise HTTPException(
             status_code=400,
-            detail="Este tenedor no tiene un correo registrado en el campo 'tenedCorreo'"
+            detail="Este tenedor no tiene un correo registrado en el campo 'propCorreo' ni en 'CondCorreo'"
         )
 
     mensaje_html = f"""

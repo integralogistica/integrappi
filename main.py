@@ -17,6 +17,7 @@ from rutas.consultar_biometrico import ruta_verificacion
 
 
 
+
 app = FastAPI()
 app.title = "integra"
 app.version = "1"
@@ -52,6 +53,7 @@ app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
+
 
 
 @app.get("/", tags=['Home'])
