@@ -1299,9 +1299,6 @@ async def eliminar_pedidos_por_consecutivo_vehiculo(
 # ------------------------------
 # ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
 # ------------------------------
-# ------------------------------
-# ✅ Exportar pedidos AUTORIZADOS a Excel (ordenado por consecutivo_vehiculo)
-# ------------------------------
 @ruta_pedidos.get("/exportar-autorizados", summary="Exportar pedidos AUTORIZADOS a Excel")
 async def exportar_autorizados():
     # 1) Traer AUTORIZADOS ordenados asc por consecutivo_vehiculo (y CI para estabilidad)
@@ -1314,8 +1311,8 @@ async def exportar_autorizados():
         raise HTTPException(404, "No hay pedidos AUTORIZADOS para exportar")
 
     # Caches para evitar consultas repetidas
-    cliente_cache = {}
-    tarifa_cache = {}
+    cliente_cache: dict[str, dict] = {}
+    tarifa_cache: dict[tuple[str, str], dict] = {}
 
     def get_cliente(nit: str) -> dict:
         if nit not in cliente_cache:
@@ -1328,78 +1325,70 @@ async def exportar_autorizados():
             tarifa_cache[key] = coleccion_fletes.find_one({"origen": origen, "destino": destino}) or {}
         return tarifa_cache[key]
 
-    # --- Agrupar por consecutivo_integrapp (para concatenar guías/planillas) ---
+    # --- Agrupar por consecutivo_integrapp (para concatenar guías/planillas y totales por CI) ---
     docs_por_ci = defaultdict(list)
     for d in docs:
         docs_por_ci[d["consecutivo_integrapp"]].append(d)
 
-    # --- Agrupar por consecutivo_vehiculo (totales vehiculares) ---
-    docs_por_veh = defaultdict(list)
-    for d in docs:
-        docs_por_veh[d["consecutivo_vehiculo"]].append(d)
-
-    # === Totales/flags por vehículo (respetando overrides si existen) ===
-    flete_solicitado_por_veh = {}
-    cargue_por_veh = {}
-    descargue_kabi_por_veh = {}
-    desvio_por_veh = {}
-    punto_adic_por_veh = {}        # valor monetario (suma u override)
-    kilos_sic_por_veh = {}
-    seguro_por_veh = {}            # ← 6.000 si hay NIT 900402080 en el vehículo; si no, suma de 'seguro'
-    adicionales_cnt_por_veh = {}   # ← NUEVO: cantidad de puntos adicionales (= total_puntos_vehiculo - 1, mínimo 0)
-
     NIT_FRESENIUS = "900402080"
 
-    for veh, lst in docs_por_veh.items():
+    # === Totales por CONSECUTIVO (CI), usando overrides si existen ===
+    kilos_sic_por_ci: dict[str, float] = {}
+    flete_solicitado_por_ci: dict[str, float] = {}
+    desvio_por_ci: dict[str, float] = {}
+    punto_adic_por_ci: dict[str, float] = {}
+    cargue_por_ci: dict[str, float] = {}
+    descargue_kabi_por_ci: dict[str, float] = {}
+    seguro_por_ci: dict[str, float] = {}
+    adicionales_cnt_por_ci: dict[str, int] = {}
+
+    for ci, lst in docs_por_ci.items():
+        # En la práctica, todos los docs de un CI pertenecen al mismo vehículo:
         doc0 = lst[0]
 
-        # Flete solicitado vehicular: override si existe; si no suma de docs
-        flete_override = doc0.get("total_flete_solicitado")
-        if flete_override is None:
-            flete_override = sum(float(x.get("valor_flete", 0) or 0) for x in lst)
-        flete_solicitado_por_veh[veh] = float(flete_override or 0)
+        # Base por documentos
+        base_flete_ci = sum(float(x.get("valor_flete", 0) or 0) for x in lst)
+        base_desvio_ci = sum(float(x.get("desvio", 0) or 0) for x in lst)
+        base_punto_ci = sum(float(x.get("punto_adicional", 0) or 0) for x in lst)
+        base_cargue_ci = sum(float(x.get("cargue_descargue", 0) or 0) for x in lst)
+        base_descargue_ci = sum(float(x.get("descargue_kabi", 0) or 0) for x in lst)
+        base_kilos_sic_ci = sum(float(x.get("num_kilos_sicetac", 0) or 0) for x in lst)
 
-        # Cargue/descargue vehicular: override si existe; si no suma de docs
-        carg_override = doc0.get("total_cargue_descargue")
-        if carg_override is None:
-            carg_override = sum(float(x.get("cargue_descargue", 0) or 0) for x in lst)
-        cargue_por_veh[veh] = float(carg_override or 0)
+        # Overrides vehiculares (si los hay) – se comparten para todos los CI de ese vehículo
+        ovr_flete = doc0.get("total_flete_solicitado")
+        ovr_desvio = doc0.get("total_desvio_vehiculo")
+        ovr_punto = doc0.get("total_punto_adicional")
+        ovr_cargue = doc0.get("total_cargue_descargue")
+        ovr_descargue = doc0.get("total_descargue_kabi")
+        # IMPORTANTE: NO usamos override de kilos para que Toneladas sea por consecutivo
+        # ovr_kilos_sic = doc0.get("total_kilos_vehiculo_sicetac")
 
-        # Descargue KABI por vehículo (suma de docs)
-        descargue_kabi_por_veh[veh] = sum(float(x.get("descargue_kabi", 0) or 0) for x in lst)
+        # Coalesce: override si existe, si no la suma por documentos del CI
+        flete_ci = float(ovr_flete if ovr_flete is not None else base_flete_ci)
+        desvio_ci = float(ovr_desvio if ovr_desvio is not None else base_desvio_ci)
+        punto_ci = float(ovr_punto if ovr_punto is not None else base_punto_ci)
+        cargue_ci = float(ovr_cargue if ovr_cargue is not None else base_cargue_ci)
+        descargue_ci = float(ovr_descargue if ovr_descargue is not None else base_descargue_ci)
+        # Para toneladas por consecutivo, usamos SOLO los kilos de ese CI
+        kilos_sic_ci = float(base_kilos_sic_ci)
 
-        # Desvío vehicular: override si existe; si no suma de docs
-        desv_override = doc0.get("total_desvio_vehiculo")
-        if desv_override is None:
-            desv_override = sum(float(x.get("desvio", 0) or 0) for x in lst)
-        desvio_por_veh[veh] = float(desv_override or 0)
+        kilos_sic_por_ci[ci] = kilos_sic_ci
+        flete_solicitado_por_ci[ci] = flete_ci
+        desvio_por_ci[ci] = desvio_ci
+        punto_adic_por_ci[ci] = punto_ci
+        cargue_por_ci[ci] = cargue_ci
+        descargue_kabi_por_ci[ci] = descargue_ci
 
-        # Punto adicional vehicular (VALOR): override si existe; si no suma de docs
-        pto_override = doc0.get("total_punto_adicional")
-        if pto_override is None:
-            pto_override = sum(float(x.get("punto_adicional", 0) or 0) for x in lst)
-        punto_adic_por_veh[veh] = float(pto_override or 0)
-
-        # Kilos SICETAC del vehículo (override si existe; si no suma de docs)
-        total_kilos_sic = doc0.get("total_kilos_vehiculo_sicetac")
-        if total_kilos_sic is None:
-            total_kilos_sic = sum(float(x.get("num_kilos_sicetac", 0) or 0) for x in lst)
-        kilos_sic_por_veh[veh] = float(total_kilos_sic or 0)
-
-        # Cantidad de puntos adicionales = total_puntos_vehiculo - 1 (mínimo 0)
-        total_puntos_veh = int(doc0.get("total_puntos_vehiculo", 0) or 0)
-        adicionales_cnt_por_veh[veh] = max(total_puntos_veh - 1, 0)
-
-        # ¿Este vehículo es de Fresenius Kabi? -> por NIT exacto 900402080
-        es_fresenius = any((x.get("nit_cliente") or "").strip() == NIT_FRESENIUS for x in lst)
-
-        # Seguro por vehículo:
-        # - Si es Fresenius -> 6.000 obligatorio
-        # - Si no, suma de 'seguro' de los docs
-        if es_fresenius:
-            seguro_por_veh[veh] = 6000.0
+        # Seguro por CI (regla Fresenius)
+        es_fresenius_ci = any((x.get("nit_cliente") or "").strip() == NIT_FRESENIUS for x in lst)
+        if es_fresenius_ci:
+            seguro_por_ci[ci] = 6000.0
         else:
-            seguro_por_veh[veh] = sum(float(x.get("seguro", 0) or 0) for x in lst)
+            seguro_por_ci[ci] = sum(float(x.get("seguro", 0) or 0) for x in lst)
+
+        # Puntos adicionales: tomamos total_puntos_vehiculo del doc (vehicular)
+        total_puntos_veh = int(doc0.get("total_puntos_vehiculo", 0) or 0)
+        adicionales_cnt_por_ci[ci] = max(total_puntos_veh - 1, 0)
 
     # Concatenar planillas por CI (únicas y en orden)
     def concat_docs(lista_docs):
@@ -1415,8 +1404,7 @@ async def exportar_autorizados():
     docs_concat_por_ci = {ci: concat_docs(lst) for ci, lst in docs_por_ci.items()}
 
     rows = []
-    vistos_ci = set()     # primera fila por consecutivo_integrapp
-    vistos_veh = set()    # primera fila por consecutivo_vehiculo
+    vistos_ci = set()  # primera fila por consecutivo_integrapp (Consecutivo)
 
     def mapear_tipo_vehiculo(vehiculo: str) -> str:
         if vehiculo == "CARRY":
@@ -1433,60 +1421,52 @@ async def exportar_autorizados():
 
     for d in docs:
         ci = d["consecutivo_integrapp"]
-        veh = d["consecutivo_vehiculo"]
 
-        # --- Primera fila de CI: solo para concatenar "Pedido cliente" ---
+        # --- Primera fila de CI: totales por consecutivo ---
         es_primera_ci = ci not in vistos_ci
         if es_primera_ci:
             pedido_cliente_concat = docs_concat_por_ci.get(ci, "")
             vistos_ci.add(ci)
+
+            kilos_ci = float(kilos_sic_por_ci.get(ci, 0.0) or 0.0)
+            toneladas_val = round(kilos_ci / 1000.0, 3)
+
+            desvio_ci = float(desvio_por_ci.get(ci, 0.0) or 0.0)
+            cargue_ci = float(cargue_por_ci.get(ci, 0.0) or 0.0)
+            punto_ci_monetario = float(punto_adic_por_ci.get(ci, 0.0) or 0.0)
+            descargue_ci = float(descargue_kabi_por_ci.get(ci, 0.0) or 0.0)
+            flete_ci = float(flete_solicitado_por_ci.get(ci, 0.0) or 0.0)
+
+            # Piso mínimo de punto adicional por CI: 70.000 * (# puntos adicionales)
+            puntos_adic_cnt_ci = int(adicionales_cnt_por_ci.get(ci, 0) or 0)
+            piso_min_por_puntos_ci = 70000.0 * puntos_adic_cnt_ci
+            punto_adicional_val = max(punto_ci_monetario, piso_min_por_puntos_ci)
+
+            # Cargue-descargue per jurídica por CI: mayor entre descargue y cargue
+            mayor_cargue_per_juridica = max(descargue_ci, cargue_ci)
+
+            # Flete unidad por CI
+            flete_unidad_val = flete_ci + desvio_ci + punto_ci_monetario + cargue_ci
+
+            # Seguro por CI
+            seguro_val = float(seguro_por_ci.get(ci, 0.0) or 0.0)
+
+            # Valor unitario por CI (ya no por vehículo)
+            valor_base_para_unitario_ci = flete_ci
+            if valor_base_para_unitario_ci > 0:
+                valor_unitario = int(
+                    ((((valor_base_para_unitario_ci) / 0.7) + 49) // 50) * 50
+                )
+            else:
+                valor_unitario = 0
         else:
             pedido_cliente_concat = ""
-
-        # --- Primera fila del vehículo: escribir Toneladas, Seguro y valores vehiculares ---
-        es_primera_veh = veh not in vistos_veh
-        if es_primera_veh:
-            kilos_veh = float(kilos_sic_por_veh.get(veh, 0.0) or 0.0)
-            toneladas_val = round(kilos_veh / 1000.0, 3)
-
-            # ====== PUNTO ADICIONAL ======
-            # Monetario ya consolidado (override o suma)
-            punto_adic_monetario = float(punto_adic_por_veh.get(veh, 0.0) or 0.0)
-            # Cantidad de puntos adicionales
-            puntos_adic_cnt = int(adicionales_cnt_por_veh.get(veh, 0) or 0)
-            # Piso mínimo: 70.000 por cada punto adicional
-            piso_min_por_puntos = 70000.0 * puntos_adic_cnt
-            # Tomar el mayor entre lo monetario existente y el piso mínimo
-            punto_adicional_val = max(punto_adic_monetario, piso_min_por_puntos)
-
-            desvio_val            = float(desvio_por_veh.get(veh, 0.0) or 0.0)
-            cargue_solicitado_val = float(cargue_por_veh.get(veh, 0.0) or 0.0)
-            descargue_kabi_val    = float(descargue_kabi_por_veh.get(veh, 0.0) or 0.0)
-
-            # Mayor entre descargue_kabi y cargue_solicitado
-            mayor_cargue_per_juridica = max(descargue_kabi_val, cargue_solicitado_val)
-
-            flete_base_veh = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
-            # Fórmula de flete unidad (manteniendo cargue_solicitado_val aquí)
-            flete_unidad_val = flete_base_veh + desvio_val + punto_adic_monetario + cargue_solicitado_val
-
-            # Seguro según regla de Fresenius (6.000) o suma normal
-            seguro_val = float(seguro_por_veh.get(veh, 0.0) or 0.0)
-
-            vistos_veh.add(veh)
-        else:
             toneladas_val = 0
-            punto_adicional_val = 0
-            desvio_val = 0
-            cargue_solicitado_val = 0
-            descargue_kabi_val = 0
-            mayor_cargue_per_juridica = 0
             flete_unidad_val = 0
+            punto_adicional_val = 0
+            mayor_cargue_per_juridica = 0
             seguro_val = 0
-
-        # "Valor unitario" calculado sobre el total vehicular
-        valor_base_para_unitario = float(flete_solicitado_por_veh.get(veh, 0.0) or 0.0)
-        valor_unitario = int(((((valor_base_para_unitario) / 0.7) + 49) // 50) * 50)
+            valor_unitario = 0
 
         # Datos auxiliares (cacheados)
         cliente_doc = get_cliente(d["nit_cliente"])
@@ -1529,12 +1509,13 @@ async def exportar_autorizados():
             "Cantidad":                 1,
             "Tipo embalaje":            "PAQUETES",
 
-            # === Vehicular, solo en 1ª fila del vehículo ===
+            # === Totales por CONSECUTIVO (solo primera fila del CI) ===
             "Toneladas":                toneladas_val,
             "Flete unidad":             flete_unidad_val,
             "PUNTO ADICIONAL":          punto_adicional_val,
             "CARGUE-DESCARGUE PER JURIDICA": mayor_cargue_per_juridica,
-            "SEGURO":                   seguro_val,  # ← 6.000 si hay NIT 900402080 en el vehículo
+            "SEGURO":                   seguro_val,
+
             "Tipo pago":                "CUPO",
             "Tolerancia":               0,
             "Vlr hora STBY":            0,
@@ -1542,7 +1523,7 @@ async def exportar_autorizados():
             "Aprobar Poliza":           1,
             "Flete por":                "CUPO",
 
-            # Unitario calculado sobre el total vehicular
+            # Unitario calculado sobre el total del CONSECUTIVO (solo 1ª fila del CI)
             "Valor unitario":           valor_unitario,
 
             "Aprobar cupo credito":     1,
@@ -1562,7 +1543,6 @@ async def exportar_autorizados():
     output.seek(0)
 
     # 3) Respuesta de descarga
-    # Hora local de Bogotá (24h), sin caracteres problemáticos
     ahora_co = datetime.now(ZoneInfo("America/Bogota"))
     filename = f"pedidos_autorizados_{ahora_co:%Y%m%d_%H%M%S}.xlsx"
 
@@ -1571,6 +1551,7 @@ async def exportar_autorizados():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
 
 # ------------------------------    
 # 📥 Cargar masivo numero_pedido desde Excel (por consecutivo_integrapp)
