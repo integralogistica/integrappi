@@ -275,23 +275,47 @@ def obtener_vehiculos(id_usuario: str):
 
 @ruta_vehiculos.get("/obtener-vehiculos-incompletos")
 def obtener_vehiculos_incompletos():
-    # Trae solo los vehículos con estadoIntegra = "registro_incompleto"
-    vehiculos = list(coleccion_vehiculos.find({"estadoIntegra": "registro_incompleto"}))
 
-    # Convertir ObjectId a string
-    for v in vehiculos:
-        v["_id"] = str(v["_id"])
+    # Trae los vehículos incompletos, sin excluir _id
+    vehiculos_raw = list(
+        coleccion_vehiculos.find(
+            {"estadoIntegra": "registro_incompleto"}
+        )
+    )
 
-    if not vehiculos:
+    if not vehiculos_raw:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content={"message": "No hay vehículos con estado 'registro_incompleto'."}
         )
 
+    vehiculos_final = []
+
+    for veh in vehiculos_raw:
+
+        # Convertir ObjectId a string
+        veh["_id"] = str(veh["_id"])
+
+        # Agrupar documentos
+        documentos = {
+            k: v for k, v in veh.items()
+            if isinstance(v, str) and v.startswith("https://storage.googleapis.com")
+        }
+
+        veh["documentos"] = documentos
+
+        # Opcional: eliminar URLs sueltas del documento original
+        for k in documentos.keys():
+            del veh[k]
+
+        vehiculos_final.append(veh)
+
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Vehículos encontrados", "vehicles": vehiculos}
+        content={"message": "Vehículos encontrados", "vehicles": vehiculos_final}
     )
+
+
 # Actualiza la informacion de datos
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict):
