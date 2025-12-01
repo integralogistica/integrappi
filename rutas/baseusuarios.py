@@ -217,7 +217,7 @@ async def login_seguridad(
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
 
     perfil = encontrado.get("perfil", "").strip().upper()
-    if perfil != "SEGURIDAD":
+    if perfil not in["SEGURIDAD", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
 
     return {
