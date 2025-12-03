@@ -83,8 +83,8 @@ async def crear_baseusuario(data: BaseUsuario):
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
         "perfil": data.perfil.upper(),
-        "usuario": data.usuario.upper(),     # usuario normalizado a MAYÚSCULAS
-        "clave": data.clave.strip(),         # clave tal cual (sensible a mayúsculas/minúsculas)
+        "usuario": data.usuario.upper(),     
+        "clave": data.clave.strip(),         
     }
 
     id_insertado = coleccion_usuarios.insert_one(nuevo).inserted_id
@@ -218,6 +218,35 @@ async def login_seguridad(
 
     perfil = encontrado.get("perfil", "").strip().upper()
     if perfil not in["SEGURIDAD", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
+
+    return {
+        "mensaje": "Login seguridad exitoso",
+        "usuario": {
+            "id": str(encontrado["_id"]),
+            "usuario": encontrado["usuario"],
+            "perfil": perfil,
+        },
+    }
+
+@ruta_baseusuarios.post("/loginConductor", response_model=dict)
+async def login_Conductor(
+    usuario: str = Body(..., embed=True),
+    clave: str = Body(..., embed=True)
+):
+    usuario_norm = usuario.strip().upper()
+    clave_ingresada = clave.strip()
+
+    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
+    if not encontrado:
+        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+
+    clave_almacenada = str(encontrado.get("clave", "")).strip()
+    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+
+    perfil = encontrado.get("perfil", "").strip().upper()
+    if perfil not in["CONDUCTOR", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
 
     return {
