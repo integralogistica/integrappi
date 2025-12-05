@@ -363,9 +363,7 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
         content={"message": "Vehículos encontrados", "vehicles": vehiculos_final}
     )
 
-# ====================================================================
-# ENDPOINT OPTIMIZADO: BUSQUEDA Y PAGINACIÓN DE APROBADOS
-# ====================================================================
+
 @ruta_vehiculos.get("/obtener-aprobados-paginados")
 def obtener_aprobados_paginados(
     search: Optional[str] = None, 
