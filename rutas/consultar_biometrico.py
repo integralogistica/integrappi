@@ -4,6 +4,10 @@ import os
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional
+import base64
+from PIL import Image
+import io
+
 
 load_dotenv()
 
@@ -68,3 +72,59 @@ async def verificar_biometria(tenedor: str = Body(..., embed=True)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error del servidor: {str(e)}")
+
+@ruta_verificacion.get("/obtener-huellas-pdf/{cedula}")
+def obtener_huellas_pdf(cedula: str):
+    try:
+        biometria = coleccion_verificacion.find_one({"tenedor": str(cedula)})
+        
+        if not biometria:
+            return {"encontrado": False, "huellas": []}
+
+        raw_huellas = biometria.get("huellas", {})
+        lista_imagenes_base64 = []
+
+        for i in range(10):
+            key = str(i)
+            url = None
+            
+            if key in raw_huellas and "imagen_url" in raw_huellas[key]:
+                url = raw_huellas[key]["imagen_url"]
+
+            if url:
+                try:
+                    # 1. Descargamos la imagen
+                    respuesta_img = requests.get(url, timeout=5)
+                    
+                    if respuesta_img.status_code == 200:
+                        # 2. Abrimos la imagen con Pillow (detecta si es webp, jpg, etc)
+                        imagen_pil = Image.open(io.BytesIO(respuesta_img.content))
+                        
+                        # 3. La guardamos en memoria como PNG (Formato soportado por React-PDF)
+                        buffer = io.BytesIO()
+                        imagen_pil.save(buffer, format="PNG")
+                        
+                        # 4. Obtenemos los bytes del PNG y convertimos a Base64
+                        b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        
+                        # 5. Enviamos el string listo con cabecera PNG
+                        imagen_final = f"data:image/png;base64,{b64_data}"
+                        
+                        lista_imagenes_base64.append(imagen_final)
+                    else:
+                        print(f"Error status {url}")
+                        lista_imagenes_base64.append(None)
+                except Exception as e:
+                    print(f"Error convirtiendo imagen {url}: {e}")
+                    lista_imagenes_base64.append(None)
+            else:
+                lista_imagenes_base64.append(None)
+
+        return {
+            "encontrado": True, 
+            "huellas": lista_imagenes_base64 
+        }
+
+    except Exception as e:
+        print(f"Error general: {e}")
+        raise HTTPException(status_code=500, detail="Error interno")
