@@ -15,21 +15,17 @@ from rutas.fletes import ruta_fletes
 from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
 
-
-
-
 app = FastAPI()
 app.title = "integra"
 app.version = "1"
 
 # Configuración de CORS
-# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",       # Frontend en local
+        "http://localhost:5173",       
         "http://127.0.0.1:5173", 
-        "http://localhost:5173/integrapp/",
+        # "http://localhost:5173/integrapp/"
         "https://tu-frontend.com",
         "https://integralogistica.com",   
         "https://www.integralogistica.com", 
@@ -37,9 +33,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],  # Necesario para que el front lea el filename
+    expose_headers=["Content-Disposition"],
 )
-
 
 app.include_router(ruta_usuario)
 app.include_router(ruta_manifiestos)
@@ -53,8 +48,6 @@ app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
-
-
 
 @app.get("/", tags=['Home'])
 async def root():
