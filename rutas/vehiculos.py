@@ -96,8 +96,6 @@ def eliminar_de_google_storage(url: str):
 @ruta_vehiculos.post("/crear")
 async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     placa_limpia = placa.strip().upper()
-    
-    # Validación mejorada para evitar duplicados
     if coleccion_vehiculos.find_one({"placa": placa_limpia}):
         raise HTTPException(status_code=400, detail="La placa ya está registrada.")
     
@@ -129,13 +127,13 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     }
     
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
-    print(f"✅ Vehículo creado: {placa_limpia} para usuario {id_usuario} con estado registro_incompleto")
+    print(f" Vehículo creado: {placa_limpia} para usuario {id_usuario} con estado registro_incompleto")
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "Vehículo registrado exitosamente"})
 
 
 @ruta_vehiculos.get("/obtener-vehiculos")
 def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
-    print(f"🔍 Buscando vehículos para ID: {id_usuario} - Estado: {estadoIntegra}")
+    print(f" Buscando vehículos para ID: {id_usuario} - Estado: {estadoIntegra}")
     
     filtro = {"idUsuario": id_usuario}
     if estadoIntegra:
@@ -143,7 +141,7 @@ def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
 
     vehiculos = list(coleccion_vehiculos.find(filtro, {"_id": 0}))
     
-    print(f"🔢 Se encontraron {len(vehiculos)} vehículos")
+    print(f" Se encontraron {len(vehiculos)} vehículos")
     
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -216,7 +214,7 @@ async def subir_estudio_seguridad(
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
     # Validar tipo de archivo
-    print(f"📂 Tipo de archivo recibido: {archivo.content_type}")
+    print(f"Tipo de archivo recibido: {archivo.content_type}")
     if archivo.content_type == "application/pdf":
         extension = "pdf"
     elif archivo.content_type.startswith("image/"):
@@ -228,7 +226,7 @@ async def subir_estudio_seguridad(
 
     try:
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
-        print(f"✅ Archivo subido a Cloud Storage: {url_archivo}")
+        print(f"Archivo subido a Cloud Storage: {url_archivo}")
         
         resultado = coleccion_vehiculos.update_one(
             {"placa": placa_limpia},
@@ -236,9 +234,9 @@ async def subir_estudio_seguridad(
         )
 
         if resultado.modified_count == 0:
-            print("⚠️ Advertencia: MongoDB encontró el vehículo pero no modificó nada.")
+            print(" Advertencia: MongoDB encontró el vehículo pero no modificó nada.")
         else:
-            print("🎉 Éxito: Base de datos actualizada con el campo estudioSeguridad")
+            print(" Éxito: Base de datos actualizada con el campo estudioSeguridad")
 
         return JSONResponse(
             status_code=status.HTTP_200_OK,
