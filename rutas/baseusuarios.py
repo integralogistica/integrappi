@@ -6,7 +6,7 @@ from typing import List, Optional
 import os
 import random
 import resend 
-
+import requests
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================

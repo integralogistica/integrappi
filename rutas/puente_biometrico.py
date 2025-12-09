@@ -8,6 +8,7 @@ from google.cloud import storage
 from io import BytesIO
 from PIL import Image
 import certifi
+import requests
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
