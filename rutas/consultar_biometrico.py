@@ -7,6 +7,7 @@ from typing import List, Optional
 import base64
 from PIL import Image
 import io
+import requests
 
 
 load_dotenv()

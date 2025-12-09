@@ -15,7 +15,6 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
 from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from bson import ObjectId
@@ -24,10 +23,8 @@ from pydantic import BaseModel, EmailStr
 import jwt
 import resend
 from dotenv import load_dotenv
-
 from bd.bd_cliente import bd_cliente
-from bd.models.usuario import modelo_usuario  # Debe normalizar _id -> id y ocultar 'clave'
-
+from bd.models.usuario import modelo_usuario  
 # =========================
 # Carga de variables de entorno
 # =========================
