@@ -316,31 +316,38 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
 
 
 @ruta_baseusuarios.post("/loginseguridad", response_model=dict)
-async def login_seguridad(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
-    usuario_norm = usuario.strip().upper()
+async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
+
+    correo_limpio = correo.strip()
     clave_ingresada = clave.strip()
+    encontrado = coleccion_usuarios.find_one({
+        "correo": {"$regex": f"^{correo_limpio}$", "$options": "i"}
+    })
     
-    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
     if not encontrado:
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+        raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
+    # 3. Validar Clave
     clave_almacenada = str(encontrado.get("clave", "")).strip()
     if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+        raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
+    # 4. Validar Perfil
     perfil = encontrado.get("perfil", "").strip().upper()
     if perfil not in ["SEGURIDAD", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
         
+    # 5. Retornar datos 
     return {
         "mensaje": "Login seguridad exitoso", 
         "usuario": {
             "id": str(encontrado["_id"]), 
-            "usuario": encontrado["usuario"], 
+            "nombre": encontrado.get("nombre", "Usuario"), 
+            "usuario": encontrado.get("usuario", ""), 
+            "correo": encontrado.get("correo", ""),
             "perfil": perfil
         }
     }
-
 
 @ruta_baseusuarios.post("/loginConductor", response_model=dict)
 async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
