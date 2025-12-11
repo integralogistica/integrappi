@@ -328,17 +328,14 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
     if not encontrado:
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
-    # 3. Validar Clave
     clave_almacenada = str(encontrado.get("clave", "")).strip()
     if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
-    # 4. Validar Perfil
     perfil = encontrado.get("perfil", "").strip().upper()
     if perfil not in ["SEGURIDAD", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
         
-    # 5. Retornar datos 
     return {
         "mensaje": "Login seguridad exitoso", 
         "usuario": {
