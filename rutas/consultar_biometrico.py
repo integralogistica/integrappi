@@ -77,11 +77,10 @@ async def verificar_biometria(tenedor: str = Body(..., embed=True)):
 @ruta_verificacion.get("/obtener-huellas-pdf/{cedula}")
 def obtener_huellas_pdf(cedula: str):
     try:
-        
         biometria = coleccion_verificacion.find_one({"tenedor": str(cedula)})
         
         if not biometria:
-            print(f"No se encontró biometría buscando en campo 'tenedor' el valor: {cedula}")
+            print(f"No se encontró biometría para: {cedula}")
             return {"encontrado": False, "huellas": []}
 
         raw_huellas = biometria.get("huellas", {})
@@ -92,23 +91,31 @@ def obtener_huellas_pdf(cedula: str):
             url = None
             if key in raw_huellas and "imagen_url" in raw_huellas[key]:
                 url = raw_huellas[key]["imagen_url"]
+            imagen_final = "" 
 
             if url:
                 try:
                     respuesta_img = requests.get(url, timeout=5)
+                    
                     if respuesta_img.status_code == 200:
+                        # Proceso de conversión a Base64
                         imagen_pil = Image.open(io.BytesIO(respuesta_img.content))
                         buffer = io.BytesIO()
+                        # Guardamos la imagen en formato PNG para asegurar la compatibilidad
                         imagen_pil.save(buffer, format="PNG")
                         b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        # Se añade el prefijo MIME necesario para react-pdf/renderer
                         imagen_final = f"data:image/png;base64,{b64_data}"
-                        lista_imagenes_base64.append(imagen_final)
                     else:
-                        lista_imagenes_base64.append(None)
-                except Exception:
-                    lista_imagenes_base64.append(None)
-            else:
-                lista_imagenes_base64.append(None)
+                        print(f"Advertencia: URL {url} devolvió status {respuesta_img.status_code}")
+                
+                except requests.exceptions.Timeout:
+                    print(f"Advertencia: Tiempo de espera agotado para {url}")
+                except Exception as ex:
+                    print(f"Error al procesar la imagen de huella {url}: {ex}")
+            
+            # Se añade la imagen Base64 (si se obtuvo) o la cadena vacía ("") (si falló o no había URL)
+            lista_imagenes_base64.append(imagen_final)
 
         return {
             "encontrado": True, 
@@ -116,5 +123,5 @@ def obtener_huellas_pdf(cedula: str):
         }
 
     except Exception as e:
-        print(f"Error general: {e}")
-        raise HTTPException(status_code=500, detail="Error interno")
+        print(f"Error general en obtener-huellas-pdf: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")

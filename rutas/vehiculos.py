@@ -4,13 +4,17 @@ from typing import List, Optional
 from uuid import uuid4
 import resend 
 from dotenv import load_dotenv
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException,Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from google.cloud import storage
 from PIL import Image
 from pymongo import MongoClient
 from bson import ObjectId
 import re
+import requests
+import base64
+from PIL import Image
+import io
 
 # ==========================================
 # Carga de variables de entorno
@@ -120,27 +124,21 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
             print(f"[RESEND] ⚠️ No se encontraron usuarios SEGURIDAD para la placa {placa}.")
             return
 
-        # 2. Obtener datos del conductor (CORREGIDO: BÚSQUEDA POR NOMBRE)
-        nombre_final_para_email = nombre_conductor_busqueda # Valor por defecto por si falla la DB
+        # 2. Obtener datos del conductor
+        nombre_final_para_email = nombre_conductor_busqueda 
 
         try:
-            print(f"[DEBUG] Buscando conductor por nombre: '{nombre_conductor_busqueda}'")
             filtro_nombre = {
                 "nombre": {
                     "$regex": f"^{re.escape(nombre_conductor_busqueda)}$", 
                     "$options": "i"
                 }
             }
-            
             conductor_doc = coleccion_usuarios.find_one(filtro_nombre)
             
             if conductor_doc:
-                # Obtenemos el nombre exacto de la base de datos
                 nombre_final_para_email = conductor_doc.get("nombre", nombre_conductor_busqueda)
-                print(f"[DEBUG] ✅ Conductor encontrado en DB: {nombre_final_para_email} | Correo: {conductor_doc.get('correo')}")
-            else:
-                print(f"[DEBUG] ⚠️ No se encontró conductor en DB con nombre: '{nombre_conductor_busqueda}'. Se usará el nombre proporcionado.")
-                
+            
         except Exception as e:
             print(f"[DEBUG] Error en consulta de conductor: {e}")
 
@@ -211,6 +209,7 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
         "documentoIdentidadPropietario": None,
         "rutPropietario": None,
         "vehMarca": None,
+        "firmaUrl": None # Inicializamos campo firma
     }
     
     coleccion_vehiculos.insert_one(nuevo_vehiculo)
@@ -245,18 +244,15 @@ async def actualizar_estado(
     nuevo_estado: str = Form(...),
     usuario_id: str = Form(...),
     observaciones: Optional[str] = Form(None),
-    # 1. AGREGAMOS ESTE PARÁMETRO PARA RECIBIR EL NOMBRE DEL FRONTEND
     nombre_conductor: str = Form("Conductor") 
 ):
-    # Validar existencia del vehículo
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     
-    # Datos a actualizar en la BD
     datos_actualizar = {
         "estadoIntegra": nuevo_estado,
-        "usuarioIntegra": usuario_id # Guardamos el ID en la BD por referencia técnica
+        "usuarioIntegra": usuario_id
     }
 
     if observaciones:
@@ -267,12 +263,7 @@ async def actualizar_estado(
         {"$set": datos_actualizar}
     )
 
-    # --- DISPARADOR DE CORREO ---
     if nuevo_estado == "completado_revision":
-        # 2. AQUÍ ESTÁ EL CAMBIO CLAVE:
-        # En lugar de pasar 'usuario_id', pasamos 'nombre_conductor'
-        # La función 'enviar_notificacion_seguridad' ahora buscará por este nombre.
-        print(f"[DEBUG] Enviando a notificar. Placa: {placa}, Conductor: {nombre_conductor}")
         enviar_notificacion_seguridad(placa, nombre_conductor)
 
     return JSONResponse(
@@ -373,6 +364,82 @@ async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
 
     coleccion_vehiculos.update_one({"placa": placa}, {"$push": {"fotos": {"$each": urls_fotos}}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Fotos subidas correctamente", "urls": urls_fotos})
+
+
+
+@ruta_vehiculos.put("/subir-firma")
+async def subir_firma(
+    archivo: UploadFile = File(...),
+    placa: str = Form(...),
+
+    tipo_documento: Optional[str] = Form(None) 
+):
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    try:
+        # Generar nombre único. Usamos .png o .webp 
+        nombre_archivo = f"Firma_{placa}_{uuid4().hex[:8]}.webp"
+        
+        # Reutilizamos la lógica existente de Google Cloud
+        url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+        
+        # Actualizamos campo firmaUrl 
+        coleccion_vehiculos.update_one(
+            {"placa": placa},
+            {"$set": {"firmaUrl": url_archivo}}
+        )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"message": "Firma subida correctamente", "url": url_archivo}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error subiendo firma: {str(e)}")
+
+@ruta_vehiculos.get("/obtener-firma")
+async def obtener_firma(placa: str):
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa}, {"firmaUrl": 1, "_id": 0})
+    
+    if not vehiculo or not vehiculo.get("firmaUrl"):
+        raise HTTPException(status_code=404, detail="Firma no encontrada")
+    
+    url_firma = vehiculo.get("firmaUrl")
+
+    try:
+        respuesta_imagen = requests.get(url_firma)
+        
+        if respuesta_imagen.status_code == 200:
+            
+            try:
+                # 1. Abrir la imagen binaria (sin importar el formato original)
+                imagen_pil = Image.open(io.BytesIO(respuesta_imagen.content))
+                
+                # 2. Convertir y guardar en un buffer como PNG
+                buffer = io.BytesIO()
+                imagen_pil.save(buffer, format="PNG")
+                
+                # 3. Codificar el buffer PNG a Base64
+                b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                # 4. Crear la Data URL completa
+                imagen_final_base64 = f"data:image/png;base64,{b64_data}"
+
+                # Retornar el Base64 dentro de un JSON
+                return {"firma_b64": imagen_final_base64}
+            
+            except Exception as convert_error:
+                print(f"Error al convertir la firma a Base64/PNG: {convert_error}")
+                # Si falla la conversión
+                raise HTTPException(status_code=500, detail="Error al procesar y codificar la imagen de firma")
+
+        else:
+            raise HTTPException(status_code=404, detail="No se pudo descargar la imagen remota")
+            
+    except Exception as e:
+        print(f"Error general en el proxy de firma: {e}")
+        raise HTTPException(status_code=500, detail="Error al procesar la imagen")
 
 
 @ruta_vehiculos.delete("/eliminar-documento")
