@@ -7,6 +7,7 @@ import os
 import random
 import resend 
 import requests
+import re
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================
@@ -349,12 +350,16 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
         }
     }
 
+
 @ruta_baseusuarios.post("/loginConductor", response_model=dict)
 async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
-    usuario_norm = usuario.strip().upper()
-    clave_ingresada = clave.strip()
     
-    encontrado = coleccion_usuarios.find_one({"correo": usuario_norm})
+    usuario_ingresado = usuario.strip()
+    clave_ingresada = clave.strip()
+    encontrado = coleccion_usuarios.find_one({
+        "correo": {"$regex": re.escape(usuario_ingresado), "$options": "i"}
+    })
+    
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
