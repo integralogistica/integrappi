@@ -354,7 +354,7 @@ async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Bod
     usuario_norm = usuario.strip().upper()
     clave_ingresada = clave.strip()
     
-    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
+    encontrado = coleccion_usuarios.find_one({"correo": usuario_norm})
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
@@ -366,11 +366,15 @@ async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Bod
     if perfil not in ["CONDUCTOR", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
         
+    nombre_completo = encontrado.get("nombre", "").strip() 
+    primer_nombre = nombre_completo.split(' ')[0] 
+        
     return {
         "mensaje": "Login Conductor exitoso", 
         "usuario": {
             "id": str(encontrado["_id"]), 
             "usuario": encontrado["usuario"], 
-            "perfil": perfil
+            "perfil": perfil,
+            "primerNombre": primer_nombre 
         }
     }
