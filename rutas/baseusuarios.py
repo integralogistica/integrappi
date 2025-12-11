@@ -7,6 +7,7 @@ import os
 import random
 import resend 
 import requests
+import re
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================
@@ -327,17 +328,14 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
     if not encontrado:
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
-    # 3. Validar Clave
     clave_almacenada = str(encontrado.get("clave", "")).strip()
     if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
-    # 4. Validar Perfil
     perfil = encontrado.get("perfil", "").strip().upper()
     if perfil not in ["SEGURIDAD", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
         
-    # 5. Retornar datos 
     return {
         "mensaje": "Login seguridad exitoso", 
         "usuario": {
@@ -348,13 +346,17 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
             "perfil": perfil
         }
     }
+#login conductor
 
 @ruta_baseusuarios.post("/loginConductor", response_model=dict)
 async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
-    usuario_norm = usuario.strip().upper()
-    clave_ingresada = clave.strip()
     
-    encontrado = coleccion_usuarios.find_one({"correo": usuario_norm})
+    usuario_ingresado = usuario.strip()
+    clave_ingresada = clave.strip()
+    encontrado = coleccion_usuarios.find_one({
+        "correo": {"$regex": re.escape(usuario_ingresado), "$options": "i"}
+    })
+    
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
