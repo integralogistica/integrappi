@@ -1,7 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-# Importación de rutas
 from rutas.aut2 import ruta_usuario
 from rutas.pagoSaldos import ruta_manifiestos
 from rutas.novedades import ruta_novedades
@@ -20,13 +18,12 @@ app.title = "integra"
 app.version = "1"
 
 # Configuración de CORS
+# Se incluyen dominios de producción y localhost para desarrollo
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",       
         "http://127.0.0.1:5173", 
-        # "http://localhost:5173/integrapp/"
-        "https://tu-frontend.com",
         "https://integralogistica.com",   
         "https://www.integralogistica.com", 
     ],
@@ -53,7 +50,6 @@ app.include_router(ruta_revision)
 async def root():
     return {"message": "Hello integra"}
 
-# Ejecuta el servidor
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
