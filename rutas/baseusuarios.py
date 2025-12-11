@@ -346,7 +346,7 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
             "perfil": perfil
         }
     }
-
+#login conductor
 
 @ruta_baseusuarios.post("/loginConductor", response_model=dict)
 async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
