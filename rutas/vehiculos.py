@@ -316,6 +316,36 @@ async def subir_estudio_seguridad(
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
 
 
+
+@ruta_vehiculos.put("/subir-foto-seguridad")
+async def subir_foto_seguridad(
+    archivo: UploadFile = File(...),
+    placa: str = Form(...)
+):
+    placa_limpia = placa.strip().upper()
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa_limpia})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    if not archivo.content_type.startswith("image/"):
+         raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen para la foto del conductor.")
+
+    nombre_archivo = f"Seguridad_FotoConductor_{placa_limpia}_{uuid4().hex[:8]}.webp"
+
+    try:
+        url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+        coleccion_vehiculos.update_one(
+            {"placa": placa_limpia},
+            {"$set": {"fotoconductorseguridad": url_archivo}}
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"message": "Foto de seguridad subida correctamente", "url": url_archivo}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar la foto de seguridad: {str(e)}")
+
+
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(archivo: UploadFile, placa: str = Form(...), tipo: str = Form(...)):
     tipos_validos = [
@@ -486,7 +516,9 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
         veh["_id"] = str(veh["_id"])
         documentos = {
             k: v for k, v in veh.items()
-            if isinstance(v, str) and v.startswith("https://storage.googleapis.com") and k != "estudioSeguridad"
+            # SE HA MODIFICADO AQUÍ PARA QUE NO DEVUELVA estudioSeguridad NI fotoconductorseguridad 
+            # SI NO QUIERES QUE EL CONDUCTOR LOS VEA (Opcional, pero recomendado por seguridad)
+            if isinstance(v, str) and v.startswith("https://storage.googleapis.com") and k not in ["estudioSeguridad", "fotoconductorseguridad"]
         }
         veh["documentos"] = documentos
         vehiculos_final.append(veh)
