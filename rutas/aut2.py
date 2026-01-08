@@ -25,6 +25,9 @@ import resend
 from dotenv import load_dotenv
 from bd.bd_cliente import bd_cliente
 from bd.models.usuario import modelo_usuario  
+from typing import List
+from pydantic import BaseModel
+
 # =========================
 # Carga de variables de entorno
 # =========================
@@ -46,6 +49,11 @@ ruta_usuario = APIRouter(
     tags=["Usuarios"],
     responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}
 )
+
+class UsuarioCedulaNombre(BaseModel):
+    cedula: str
+    nombre: str
+
 
 esquema_oauth2 = OAuth2PasswordBearer(tokenUrl="usuarios/token")
 
@@ -329,3 +337,36 @@ async def cambiar_clave(payload: CambiarClaveIn, usuario_actual: dict = Depends(
         raise HTTPException(status_code=400, detail="La clave actual no es correcta")
     base_datos.usuarios.update_one({"_id": doc["_id"]}, {"$set": {"clave": crear_hash(payload.clave_nueva)}})
     return {"mensaje": "Clave actualizada correctamente"}
+
+
+
+# =========================
+# 🚀 GET /usuarios/cedula-nombre
+# 📌 Devuelve solo cédula (tenedor) y nombre
+# =========================
+@ruta_usuario.get("/cedula-nombre", response_model=List[UsuarioCedulaNombre])
+async def listar_usuarios_cedula_nombre():
+    """
+    Retorna una lista con: cedula (campo 'tenedor') y nombre.
+    """
+    try:
+        cursor = base_datos.usuarios.find(
+            {},
+            {"_id": 0, "tenedor": 1, "nombre": 1}
+        )
+
+        resultados: List[UsuarioCedulaNombre] = []
+        for doc in cursor:
+            tenedor = doc.get("tenedor")
+            nombre = doc.get("nombre")
+            if tenedor and nombre:
+                resultados.append(
+                    UsuarioCedulaNombre(cedula=str(tenedor), nombre=str(nombre))
+                )
+
+        return resultados
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al consultar usuarios"
+        )

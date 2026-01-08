@@ -9,6 +9,7 @@ from rutas.revision import ruta_revision
 from rutas.puente_biometrico import ruta_biometria
 from rutas.baseusuarios import ruta_baseusuarios
 from rutas.clientes import ruta_clientes
+from rutas.clientes_siscore import ruta_clientes_siscore
 from rutas.fletes import ruta_fletes
 from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
@@ -41,6 +42,7 @@ app.include_router(ruta_empleado)
 app.include_router(ruta_biometria)
 app.include_router(ruta_baseusuarios)
 app.include_router(ruta_clientes)
+app.include_router(ruta_clientes_siscore)
 app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
