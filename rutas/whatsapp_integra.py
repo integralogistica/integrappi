@@ -282,3 +282,6 @@ async def webhook(request: Request):
     await enviar_texto(numero, texto_inicio())
     log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="fallback menu inicio", state="START")
     return JSONResponse({"status": "ok"})
+
+
+
