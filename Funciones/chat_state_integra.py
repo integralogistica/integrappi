@@ -1,3 +1,5 @@
+# Funciones/chat_state_integra.py
+
 from typing import Dict, Any
 
 _STATE: Dict[str, Dict[str, Any]] = {}
