@@ -268,8 +268,6 @@ async def webhook(request: Request):
             numero,
             "✅ Solicitud completada.\n\n"
             f"Tu certificado laboral fue enviado al correo:\n*{correo}*\n\n"
-            "Si deseas otra gestión, responde con una opción:\n"
-            "1️⃣ 📄 Descargar certificado laboral\n\n"
             "Escribe *menu* para volver al inicio."
         )
         log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
