@@ -15,6 +15,7 @@ from rutas.ciudades_general import ruta_ciudades_general
 from rutas.fletes import ruta_fletes
 from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
+from rutas.whatsapp_integra import ruta_whatsapp_integra
 
 app = FastAPI()
 app.title = "integra"
@@ -51,6 +52,7 @@ app.include_router(ruta_fletes)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
+app.include_router(ruta_whatsapp_integra)
 
 @app.get("/", tags=['Home'])
 async def root():
