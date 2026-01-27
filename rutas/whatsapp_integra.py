@@ -1,7 +1,7 @@
 # rutas/whatsapp_integra.py
 import os
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Request
@@ -23,6 +23,9 @@ SISCORE_PUBLIC_URL = "https://integra.appsiscore.com/app/app-cliente/cons_public
 
 # TTL estado
 STATE_TTL_MINUTES = 60
+
+# Dedup: cuántos msg_id guardamos por usuario
+PROCESSED_IDS_MAX = 30
 
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",
@@ -162,7 +165,7 @@ def _parse_dt_iso(dt_str: str) -> Optional[datetime]:
 
 
 def set_state_with_ts(phone: str, state: str, context: Dict[str, Any]):
-    # ✅ Firma correcta: set_state(phone, state, context, updated_at=?)
+    # set_state debe aceptar updated_at (tu chat_state_integra ya lo tiene)
     set_state(phone, state, context or {}, updated_at=_utc_now_iso())
 
 
@@ -189,11 +192,44 @@ def _estado_expirado(updated_at: Optional[str]) -> bool:
     return (datetime.now(timezone.utc) - d) > timedelta(minutes=STATE_TTL_MINUTES)
 
 
-def _ctx_set_last_msg_id(context: Dict[str, Any], msg_id: Optional[str]) -> Dict[str, Any]:
+def _ctx_get_processed_ids(context: Dict[str, Any]) -> List[str]:
+    ids = (context or {}).get("processed_msg_ids") or []
+    if not isinstance(ids, list):
+        return []
+    # filtra solo strings
+    return [x for x in ids if isinstance(x, str)]
+
+
+def _ctx_has_processed_id(context: Dict[str, Any], msg_id: Optional[str]) -> bool:
+    if not msg_id:
+        return False
+    return msg_id in _ctx_get_processed_ids(context)
+
+
+def _ctx_add_processed_id(context: Dict[str, Any], msg_id: Optional[str]) -> Dict[str, Any]:
     ctx = dict(context or {})
-    if msg_id:
-        ctx["last_msg_id"] = msg_id
+    if not msg_id:
+        return ctx
+
+    ids = _ctx_get_processed_ids(ctx)
+    if msg_id in ids:
+        ctx["processed_msg_ids"] = ids
+        return ctx
+
+    ids.append(msg_id)
+    if len(ids) > PROCESSED_IDS_MAX:
+        ids = ids[-PROCESSED_IDS_MAX:]
+    ctx["processed_msg_ids"] = ids
     return ctx
+
+
+def _ctx_only_processed_ids(context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Cuando cambias de estado y no quieres arrastrar context viejo,
+    pero sí quieres conservar la lista de dedup.
+    """
+    ids = _ctx_get_processed_ids(context or {})
+    return {"processed_msg_ids": ids} if ids else {}
 
 
 # -------------------------
@@ -257,25 +293,24 @@ async def webhook(request: Request):
 
         # Estado actual + TTL
         estado = _get_state_normalizado(numero)
-
-        # -------------------------
-        # DEDUP: si Meta reintenta el MISMO msg_id, no respondas de nuevo
-        # -------------------------
-        last_id = (estado.get("context") or {}).get("last_msg_id")
-        if msg_id and last_id == msg_id:
-            return JSONResponse({"status": "ok"})
-
         state = estado.get("state") or "START"
         context = estado.get("context") or {}
 
+        # -------------------------
+        # DEDUP robusto: si Meta reintenta un msg_id antiguo, no respondas otra vez
+        # -------------------------
+        if _ctx_has_processed_id(context, msg_id):
+            return JSONResponse({"status": "ok"})
+
         # Marca este msg_id como procesado ANTES de seguir (idempotencia)
-        context = _ctx_set_last_msg_id(context, msg_id)
+        context = _ctx_add_processed_id(context, msg_id)
         set_state_with_ts(numero, state, context)
 
-        # TTL
+        # TTL (si expiró, resetea y manda menú)
         if _estado_expirado(estado.get("updated_at")):
             reset_state(numero)
-            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            ctx = _ctx_add_processed_id({}, msg_id)
+            set_state_with_ts(numero, "START", ctx)
             log_whatsapp_event(
                 phone=numero,
                 direction="SYSTEM",
@@ -291,7 +326,8 @@ async def webhook(request: Request):
         # Atajo menú
         if _es_menu(texto_lower):
             reset_state(numero)
-            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            ctx = _ctx_add_processed_id({}, msg_id)
+            set_state_with_ts(numero, "START", ctx)
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
             await enviar_texto(numero, texto_inicio())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="(menu inicio)", state="START")
@@ -302,22 +338,25 @@ async def webhook(request: Request):
         # -------------------------
         if state == "START":
             if texto_lower in ["1", "2", "3"]:
+                base_ctx = _ctx_only_processed_ids(context)
+                base_ctx = _ctx_add_processed_id(base_ctx, msg_id)
+
                 if texto_lower == "1":
-                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", base_ctx)
                     log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={})
                     await enviar_texto(numero, "🚚 Módulo transportador: *en construcción*.\n\nEscribe *menu* para volver.")
                     log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="transportador en construcción", state="TRANSPORTADOR_MENU")
                     return JSONResponse({"status": "ok"})
 
                 if texto_lower == "2":
-                    set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    set_state_with_ts(numero, "EMPLOYEE_MENU", base_ctx)
                     log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
                     await enviar_texto(numero, texto_menu_empleado())
                     log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu empleado", state="EMPLOYEE_MENU")
                     return JSONResponse({"status": "ok"})
 
                 if texto_lower == "3":
-                    set_state_with_ts(numero, "CLIENTE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    set_state_with_ts(numero, "CLIENTE_MENU", base_ctx)
                     log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={})
                     await enviar_texto(numero, texto_menu_cliente())
                     log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente", state="CLIENTE_MENU")
@@ -325,7 +364,10 @@ async def webhook(request: Request):
 
             await enviar_texto(numero, texto_inicio())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu inicio", state="START")
-            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            # refresca estado START conservando dedup
+            ctx = _ctx_only_processed_ids(context)
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "START", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
@@ -333,14 +375,20 @@ async def webhook(request: Request):
         # -------------------------
         if state == "EMPLOYEE_MENU":
             if texto_lower == "1":
-                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id({"incluir_salario": False}, msg_id))
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"incluir_salario": False})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": False})
                 await enviar_texto(numero, texto_pedir_cedula())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula sin salario", state="EMPLOYEE_CERT_ASK_CEDULA")
                 return JSONResponse({"status": "ok"})
 
             if texto_lower == "2":
-                set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"incluir_salario": True})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_CONFIRM_SALARIO", context={"incluir_salario": True})
                 await enviar_texto(
                     numero,
@@ -354,22 +402,31 @@ async def webhook(request: Request):
 
             await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_empleado())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu empleado", state="EMPLOYEE_MENU")
-            set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+            ctx = _ctx_only_processed_ids(context)
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "EMPLOYEE_MENU", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
         # EMPLOYEE_CERT_CONFIRM_SALARIO
         # -------------------------
         if state == "EMPLOYEE_CERT_CONFIRM_SALARIO":
+            incluir_salario = bool((context or {}).get("incluir_salario", True))
+
             if texto_lower == "1":
-                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"incluir_salario": True})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": True})
                 await enviar_texto(numero, texto_pedir_cedula())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula con salario", state="EMPLOYEE_CERT_ASK_CEDULA")
                 return JSONResponse({"status": "ok"})
 
             if texto_lower == "2":
-                set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_only_processed_ids(context)
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_MENU", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
                 await enviar_texto(numero, "Listo. No se enviará certificado.\n\n" + texto_menu_empleado())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cancelar certificado con salario", state="EMPLOYEE_MENU")
@@ -377,7 +434,10 @@ async def webhook(request: Request):
 
             await enviar_texto(numero, "Opción no válida.\n\nResponde 1️⃣ Confirmo o 2️⃣ Cancelar.")
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida confirm salario", state="EMPLOYEE_CERT_CONFIRM_SALARIO")
-            set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"incluir_salario": incluir_salario})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
@@ -389,38 +449,44 @@ async def webhook(request: Request):
             if not CEDULA_REGEX.match(cedula):
                 await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula invalida", state="EMPLOYEE_CERT_ASK_CEDULA")
-                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id(context if isinstance(context, dict) else {}, msg_id))
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"incluir_salario": bool((context or {}).get("incluir_salario", False))})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", ctx)
                 return JSONResponse({"status": "ok"})
 
             incluir_salario = bool((context or {}).get("incluir_salario", False))
-            context_proc = _ctx_set_last_msg_id(
-                {"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario},
-                msg_id,
-            )
-            set_state_with_ts(numero, "EMPLOYEE_CERT_PROCESSING", context_proc)
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
+            ctx_proc = _ctx_only_processed_ids(context)
+            ctx_proc.update({"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario})
+            ctx_proc = _ctx_add_processed_id(ctx_proc, msg_id)
+
+            set_state_with_ts(numero, "EMPLOYEE_CERT_PROCESSING", ctx_proc)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=ctx_proc)
 
             await enviar_texto(numero, "Procesando tu solicitud…")
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=ctx_proc)
 
             try:
                 ok, mensaje, correo = generar_y_enviar_certificado_por_cedula(cedula, incluir_salario=incluir_salario)
             except Exception as e:
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=context_proc, meta={"error": str(e)})
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=ctx_proc, meta={"error": str(e)})
                 reset_state(numero)
-                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
                 await enviar_texto(numero, "Ocurrió un error generando el certificado. Por favor intenta de nuevo.\n\n" + texto_inicio())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="error certificado", state="START")
                 return JSONResponse({"status": "ok"})
 
             if not ok:
-                set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "EMPLOYEE_MENU", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
                 await enviar_texto(numero, f"❗ {mensaje}\n\n" + texto_menu_empleado())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"fallo: {mensaje}", state="EMPLOYEE_MENU", context={"cedula": cedula})
                 return JSONResponse({"status": "ok"})
 
-            set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+            ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+            set_state_with_ts(numero, "EMPLOYEE_MENU", ctx)
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
 
             await enviar_texto(
@@ -437,7 +503,8 @@ async def webhook(request: Request):
         # -------------------------
         if state == "CLIENTE_MENU":
             if texto_lower == "1":
-                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
                 await enviar_texto(numero, texto_pedir_guia())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir guia", state="CLIENTE_GUIA_ASK")
@@ -445,7 +512,8 @@ async def webhook(request: Request):
 
             if texto_lower == "2":
                 reset_state(numero)
-                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
                 await enviar_texto(numero, texto_inicio())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
@@ -453,7 +521,8 @@ async def webhook(request: Request):
 
             await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_cliente())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu cliente", state="CLIENTE_MENU")
-            set_state_with_ts(numero, "CLIENTE_MENU", _ctx_set_last_msg_id({}, msg_id))
+            ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+            set_state_with_ts(numero, "CLIENTE_MENU", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
@@ -465,11 +534,16 @@ async def webhook(request: Request):
             if not GUIA_REGEX.match(guia):
                 await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
-                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", ctx)
                 return JSONResponse({"status": "ok"})
 
             url = _url_guia(guia)
-            set_state_with_ts(numero, "CLIENTE_POST", _ctx_set_last_msg_id({"guia": guia, "url": url}, msg_id))
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"guia": guia, "url": url})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+
+            set_state_with_ts(numero, "CLIENTE_POST", ctx)
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_POST", context={"guia": guia, "url": url})
 
             await enviar_texto(numero, texto_post_guia(url))
@@ -481,7 +555,8 @@ async def webhook(request: Request):
         # -------------------------
         if state == "CLIENTE_POST":
             if texto_lower == "1":
-                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
                 await enviar_texto(numero, texto_pedir_guia())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultar otra guia", state="CLIENTE_GUIA_ASK")
@@ -489,7 +564,8 @@ async def webhook(request: Request):
 
             if texto_lower == "2":
                 reset_state(numero)
-                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
                 await enviar_texto(numero, texto_inicio())
                 log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
@@ -502,14 +578,19 @@ async def webhook(request: Request):
                 + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
             )
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida cliente_post", state="CLIENTE_POST")
-            set_state_with_ts(numero, "CLIENTE_POST", _ctx_set_last_msg_id(context if isinstance(context, dict) else {}, msg_id))
+
+            # refresca CLIENTE_POST, conserva url/guia + dedup
+            ctx = dict(context or {})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "CLIENTE_POST", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
         # Fallback general
         # -------------------------
         reset_state(numero)
-        set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+        ctx = _ctx_add_processed_id({}, msg_id)
+        set_state_with_ts(numero, "START", ctx)
         log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
         await enviar_texto(numero, texto_inicio())
         log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="fallback menu inicio", state="START")
