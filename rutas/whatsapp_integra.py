@@ -22,7 +22,7 @@ GUIA_REGEX = re.compile(r"^\d{5,20}$")  # ajusta si tus guías son más largas
 SISCORE_PUBLIC_URL = "https://integra.appsiscore.com/app/app-cliente/cons_publica.php"
 
 # TTL estado
-STATE_TTL_MINUTES = 3
+STATE_TTL_MINUTES = 60
 
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",
