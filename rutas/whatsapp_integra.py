@@ -1,9 +1,9 @@
 # rutas/whatsapp_integra.py
 import os
 import re
-from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 
@@ -14,12 +14,20 @@ from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "integra_verify_2026")
 
+# Ajusta estos regex si aplica
+CEDULA_REGEX = re.compile(r"^\d{5,15}$")
+GUIA_REGEX = re.compile(r"^\d{5,20}$")
+
+# Texto que Siscore muestra cuando no hay resultados (según tu lógica actual)
+NO_RESULT_TXT = "No se encontraron resultados"
+
+# URL base Siscore
+SISCORE_PUBLIC_URL = "https://integra.appsiscore.com/app/app-cliente/cons_publica.php"
+
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",
     tags=["whatsapp-integra"],
 )
-
-CEDULA_REGEX = re.compile(r"^\d{5,15}$")  # ajustable
 
 # -------------------------
 # Textos
@@ -33,6 +41,7 @@ def texto_inicio() -> str:
         "3️⃣ 🧾 Soy cliente\n\n"
         "Para volver a este menú escribe *menu*."
     )
+
 
 def texto_menu_empleado() -> str:
     return (
@@ -51,10 +60,43 @@ def texto_pedir_cedula() -> str:
         "Ejemplo: 1020304050"
     )
 
+
+def texto_menu_cliente() -> str:
+    return (
+        "🧾 *Menú Cliente*\n\n"
+        "Responde con un número:\n"
+        "1️⃣ 🔎 Consultar guía\n"
+        "2️⃣ ↩️ Volver al menú principal\n\n"
+        "Para volver en cualquier momento escribe *menu*."
+    )
+
+
+def texto_pedir_guia() -> str:
+    return (
+        "🔎 *Consultar guía*\n\n"
+        "Escribe el número de la *guía* (solo números).\n"
+        "Ejemplo: 801203424"
+    )
+
+
+def texto_post_guia(url: str) -> str:
+    return (
+        "✅ Guía encontrada.\n\n"
+        f"🔗 Consulta aquí:\n{url}\n\n"
+        "¿Qué deseas hacer ahora?\n"
+        "1️⃣ Consultar otra guía\n"
+        "2️⃣ Volver al menú principal"
+    )
+
+
 # -------------------------
 # Extraer mensaje (text / interactive)
 # -------------------------
 def extraer_mensaje(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extrae el primer mensaje entrante del webhook (texto o interactive).
+    Devuelve dict con: from, type, text, id
+    """
     try:
         value = data["entry"][0]["changes"][0]["value"]
         mensajes = value.get("messages", [])
@@ -85,9 +127,94 @@ def extraer_mensaje(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         print(f"❌ extraer_mensaje error: {e}")
         return None
 
+
 def _es_menu(t: str) -> bool:
     t = (t or "").strip().lower()
     return t in ["menu", "menú", "inicio", "volver", "reiniciar", "cancelar", "reset"]
+
+
+def _limpiar_numero(t: str) -> str:
+    return (t or "").replace(".", "").replace(" ", "").strip()
+
+
+def _url_guia(guia: str) -> str:
+    return f"{SISCORE_PUBLIC_URL}?GUIA={guia}"
+
+
+# -------------------------
+# HTTP client (reutilizable)
+# -------------------------
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+@ruta_whatsapp_integra.on_event("startup")
+async def _startup():
+    global _http_client
+    if _http_client is None:
+        # timeout más fino: conexión rápida, lectura un poco más amplia
+        timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=10.0)
+        _http_client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+
+
+@ruta_whatsapp_integra.on_event("shutdown")
+async def _shutdown():
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+
+# -------------------------
+# saber si existe la guia
+# -------------------------
+async def guia_existe_en_siscore(guia: str) -> Tuple[Optional[bool], str]:
+    """
+    Valida si la guía existe consultando la página pública.
+    Retorna (existe, motivo):
+      - existe=True/False si se pudo determinar
+      - existe=None si NO se pudo validar (timeout/red/bloqueo)
+    """
+    url = _url_guia(guia)
+
+    client = _http_client
+    if client is None:
+        # fallback si por alguna razón no corrió startup
+        timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=10.0)
+        client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+
+    try:
+        r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None, f"status_code={r.status_code}"
+
+        html = (r.text or "")
+        html_lower = html.lower()
+
+        # No resultados
+        if NO_RESULT_TXT.lower() in html_lower:
+            return False, "no_result_text"
+
+        # Si devuelve pantalla de login/denegado (heurística)
+        if ("login" in html_lower and "password" in html_lower) or ("iniciar sesión" in html_lower):
+            return None, "login_or_denied"
+
+        # Otra heurística: si es una página vacía o demasiado corta, no confiamos
+        if len(html_lower.strip()) < 200:
+            return None, "html_too_short"
+
+        return True, "ok"
+
+    except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+        print(f"❌ guia_existe_en_siscore timeout: {e}")
+        return None, "timeout"
+    except Exception as e:
+        print(f"❌ guia_existe_en_siscore error: {e}")
+        return None, "error"
+    finally:
+        # Si usamos fallback client local (cuando _http_client era None), lo cerramos
+        if _http_client is None and isinstance(client, httpx.AsyncClient):
+            await client.aclose()
+
 
 # -------------------------
 # GET verificación
@@ -100,6 +227,7 @@ async def verify_webhook(request: Request):
     if hub_verify_token == VERIFY_TOKEN:
         return PlainTextResponse(str(hub_challenge))
     return PlainTextResponse("Error de verificación", status_code=403)
+
 
 # -------------------------
 # POST mensajes
@@ -165,8 +293,8 @@ async def webhook(request: Request):
             if texto_lower == "3":
                 set_state(numero, "CLIENTE_MENU", {})
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={})
-                await enviar_texto(numero, "🧾 Módulo cliente: *en construcción*.\n\nEscribe *menu* para volver.")
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cliente en construcción", state="CLIENTE_MENU")
+                await enviar_texto(numero, texto_menu_cliente())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente", state="CLIENTE_MENU")
                 return JSONResponse({"status": "ok"})
 
         # si escribe cualquier cosa, le mostramos menú
@@ -202,6 +330,9 @@ async def webhook(request: Request):
         log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu empleado", state="EMPLOYEE_MENU")
         return JSONResponse({"status": "ok"})
 
+    # -------------------------
+    # EMPLOYEE_CERT_CONFIRM_SALARIO
+    # -------------------------
     if state == "EMPLOYEE_CERT_CONFIRM_SALARIO":
         if texto_lower == "1":
             # confirmado
@@ -226,26 +357,25 @@ async def webhook(request: Request):
     # EMPLOYEE_CERT_ASK_CEDULA
     # -------------------------
     if state == "EMPLOYEE_CERT_ASK_CEDULA":
-        cedula = texto.replace(".", "").replace(" ", "").strip()
+        cedula = _limpiar_numero(texto)
 
         if not CEDULA_REGEX.match(cedula):
             await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula invalida", state="EMPLOYEE_CERT_ASK_CEDULA")
             return JSONResponse({"status": "ok"})
 
-        # Guardar contexto
         incluir_salario = bool(context.get("incluir_salario", False))
-        context = {"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario}
-        set_state(numero, "EMPLOYEE_CERT_PROCESSING", context)
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=context)
+        context_proc = {"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario}
+        set_state(numero, "EMPLOYEE_CERT_PROCESSING", context_proc)
+        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
 
         await enviar_texto(numero, "Procesando tu solicitud…")
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=context)
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
 
         try:
             ok, mensaje, correo = generar_y_enviar_certificado_por_cedula(cedula, incluir_salario=incluir_salario)
         except Exception as e:
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=context, meta={"error": str(e)})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=context_proc, meta={"error": str(e)})
             reset_state(numero)
             set_state(numero, "START", {})
             await enviar_texto(numero, "Ocurrió un error generando el certificado. Por favor intenta de nuevo.\n\n" + texto_inicio())
@@ -253,14 +383,12 @@ async def webhook(request: Request):
             return JSONResponse({"status": "ok"})
 
         if not ok:
-            # vuelve al menú empleado
             set_state(numero, "EMPLOYEE_MENU", {})
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
             await enviar_texto(numero, f"❗ {mensaje}\n\n" + texto_menu_empleado())
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"fallo: {mensaje}", state="EMPLOYEE_MENU", context={"cedula": cedula})
             return JSONResponse({"status": "ok"})
 
-        # éxito
         set_state(numero, "EMPLOYEE_MENU", {})
         log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
 
@@ -273,13 +401,123 @@ async def webhook(request: Request):
         log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
         return JSONResponse({"status": "ok"})
 
+    # -------------------------
+    # CLIENTE_MENU
+    # -------------------------
+    if state == "CLIENTE_MENU":
+        if texto_lower == "1":
+            set_state(numero, "CLIENTE_GUIA_ASK", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+            await enviar_texto(numero, texto_pedir_guia())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir guia", state="CLIENTE_GUIA_ASK")
+            return JSONResponse({"status": "ok"})
+
+        if texto_lower == "2":
+            reset_state(numero)
+            set_state(numero, "START", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+            await enviar_texto(numero, texto_inicio())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
+            return JSONResponse({"status": "ok"})
+
+        await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_cliente())
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu cliente", state="CLIENTE_MENU")
+        return JSONResponse({"status": "ok"})
+
+    # -------------------------
+    # CLIENTE_GUIA_ASK
+    # -------------------------
+    if state == "CLIENTE_GUIA_ASK":
+        guia = _limpiar_numero(texto)
+
+        if not GUIA_REGEX.match(guia):
+            await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
+            return JSONResponse({"status": "ok"})
+
+        set_state(numero, "CLIENTE_GUIA_CHECKING", {"guia": guia})
+        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_CHECKING", context={"guia": guia})
+
+        await enviar_texto(numero, "Validando tu guía…")
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="validando guia", state="CLIENTE_GUIA_CHECKING", context={"guia": guia})
+
+        existe, motivo = await guia_existe_en_siscore(guia)
+
+        if existe is None:
+            # No pudimos validar (timeout/bloqueo/etc). NO decir "no existe"
+            set_state(numero, "CLIENTE_GUIA_ASK", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+            await enviar_texto(
+                numero,
+                "⚠️ En este momento no pude validar la guía (problema de conexión).\n"
+                "Por favor intenta nuevamente en unos minutos.\n\n"
+                + texto_pedir_guia()
+            )
+            log_whatsapp_event(
+                phone=numero,
+                direction="SYSTEM",
+                event="SISCORE_VALIDATE_INDETERMINATE",
+                state="CLIENTE_GUIA_ASK",
+                context={"guia": guia},
+                meta={"motivo": motivo},
+            )
+            return JSONResponse({"status": "ok"})
+
+        if existe is False:
+            set_state(numero, "CLIENTE_GUIA_ASK", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+            await enviar_texto(
+                numero,
+                "❗ No encontramos resultados para esa guía.\n\n"
+                "Verifica el número e intenta de nuevo.\n\n"
+                + texto_pedir_guia()
+            )
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia no existe", state="CLIENTE_GUIA_ASK", context={"guia": guia})
+            return JSONResponse({"status": "ok"})
+
+        # existe True
+        url = _url_guia(guia)
+        set_state(numero, "CLIENTE_POST", {"guia": guia, "url": url})
+        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_POST", context={"guia": guia, "url": url})
+
+        await enviar_texto(numero, texto_post_guia(url))
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="enviar link guia", state="CLIENTE_POST", context={"guia": guia})
+        return JSONResponse({"status": "ok"})
+
+    # -------------------------
+    # CLIENTE_POST (FALTABA)
+    # -------------------------
+    if state == "CLIENTE_POST":
+        if texto_lower == "1":
+            set_state(numero, "CLIENTE_GUIA_ASK", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+            await enviar_texto(numero, texto_pedir_guia())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultar otra guia", state="CLIENTE_GUIA_ASK")
+            return JSONResponse({"status": "ok"})
+
+        if texto_lower == "2":
+            reset_state(numero)
+            set_state(numero, "START", {})
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+            await enviar_texto(numero, texto_inicio())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
+            return JSONResponse({"status": "ok"})
+
+        url = (context or {}).get("url") or ""
+        await enviar_texto(
+            numero,
+            "Opción no válida.\n\n"
+            + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
+        )
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida cliente_post", state="CLIENTE_POST")
+        return JSONResponse({"status": "ok"})
+
+    # -------------------------
     # Fallback general
+    # -------------------------
     reset_state(numero)
     set_state(numero, "START", {})
     log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
     await enviar_texto(numero, texto_inicio())
     log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="fallback menu inicio", state="START")
     return JSONResponse({"status": "ok"})
-
-
-
