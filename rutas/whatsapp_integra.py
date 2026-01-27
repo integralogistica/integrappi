@@ -78,6 +78,7 @@ def texto_pedir_guia() -> str:
 def texto_post_guia(url: str) -> str:
     return (
         "🔎 Aquí puedes consultar tu guía:\n"
+        "(Ten presente que si la guía no existe te aparecera un mensaje indicando que No se encontraron resultados\n\n"
         f"{url}\n\n"
         "¿Qué deseas hacer ahora?\n"
         "1️⃣ Consultar otra guía\n"
