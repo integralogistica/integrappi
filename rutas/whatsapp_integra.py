@@ -151,11 +151,9 @@ def _parse_dt_iso(dt_str: str) -> Optional[datetime]:
     if not dt_str:
         return None
     try:
-        # Soporta "Z" si llega así
         if dt_str.endswith("Z"):
             dt_str = dt_str.replace("Z", "+00:00")
         d = datetime.fromisoformat(dt_str)
-        # Garantizar tz-aware
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         return d
@@ -164,27 +162,15 @@ def _parse_dt_iso(dt_str: str) -> Optional[datetime]:
 
 
 def set_state_with_ts(phone: str, state: str, context: Dict[str, Any]):
-    """
-    Wrapper para asegurar que SIEMPRE guardes timestamp en el objeto de estado.
-    Requiere que tu set_state soporte guardar un dict completo (state/context/updated_at).
-    Si tu implementación actual NO lo soporta, ajusta Funciones/chat_state_integra.py.
-    """
-    payload = {"state": state, "context": context or {}, "updated_at": _utc_now_iso()}
-    set_state(phone, payload)  # <-- IMPORTANTE: tu set_state debe guardar este dict tal cual
+    # ✅ Firma correcta: set_state(phone, state, context, updated_at=?)
+    set_state(phone, state, context or {}, updated_at=_utc_now_iso())
 
 
 def _get_state_normalizado(phone: str) -> Dict[str, Any]:
-    """
-    Normaliza el estado para soportar ambos formatos:
-    A) {"state": "...", "context": {...}, "updated_at": "..."}  (nuevo)
-    B) {"state": "...", "context": {...}}                      (viejo)
-    C) None
-    """
     estado = get_state(phone)
     if not estado:
         return {"state": "START", "context": {}, "updated_at": None}
 
-    # Si tu storage devolviera solo {"state": "...", "context": {...}} está OK.
     state = estado.get("state") if isinstance(estado, dict) else None
     context = estado.get("context") if isinstance(estado, dict) else None
     updated_at = estado.get("updated_at") if isinstance(estado, dict) else None
@@ -199,8 +185,15 @@ def _get_state_normalizado(phone: str) -> Dict[str, Any]:
 def _estado_expirado(updated_at: Optional[str]) -> bool:
     d = _parse_dt_iso(updated_at or "")
     if not d:
-        return False  # si no hay timestamp, no expira (compatibilidad)
+        return False
     return (datetime.now(timezone.utc) - d) > timedelta(minutes=STATE_TTL_MINUTES)
+
+
+def _ctx_set_last_msg_id(context: Dict[str, Any], msg_id: Optional[str]) -> Dict[str, Any]:
+    ctx = dict(context or {})
+    if msg_id:
+        ctx["last_msg_id"] = msg_id
+    return ctx
 
 
 # -------------------------
@@ -231,279 +224,298 @@ async def webhook_no_slash(request: Request):
 
 @ruta_whatsapp_integra.post("/")
 async def webhook(request: Request):
+    # 1) Lee JSON (si falla, responde 200 para que Meta NO reintente)
     try:
         data = await request.json()
     except Exception as e:
         print(f"❌ No pude leer JSON: {e}")
         return JSONResponse({"status": "ok"})
 
-    msg = extraer_mensaje(data)
-    if not msg:
-        return JSONResponse({"status": "ok"})
+    # 2) Wrapper general: evita 500 (si hay 500, Meta reintenta y spamea)
+    try:
+        msg = extraer_mensaje(data)
+        if not msg:
+            return JSONResponse({"status": "ok"})
 
-    numero = msg.get("from")
-    texto = (msg.get("text") or "").strip()
-    texto_lower = texto.lower().strip()
+        numero = msg.get("from")
+        texto = (msg.get("text") or "").strip()
+        texto_lower = texto.lower().strip()
+        msg_id = msg.get("id")
 
-    # LOG entrada
-    log_whatsapp_event(
-        phone=numero,
-        direction="IN",
-        event="MESSAGE_RECEIVED",
-        text=texto,
-        meta={"msg_id": msg.get("id"), "type": msg.get("type")},
-    )
-
-    # Si llega vacío, ignora (opcional pero recomendado)
-    if not texto:
-        return JSONResponse({"status": "ok"})
-
-    # Atajo menú
-    if _es_menu(texto_lower):
-        reset_state(numero)
-        set_state_with_ts(numero, "START", {})
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
-        await enviar_texto(numero, texto_inicio())
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="(menu inicio)", state="START")
-        return JSONResponse({"status": "ok"})
-
-    # Estado actual + TTL
-    estado = _get_state_normalizado(numero)
-
-    if _estado_expirado(estado.get("updated_at")):
-        reset_state(numero)
-        set_state_with_ts(numero, "START", {})
+        # LOG entrada
         log_whatsapp_event(
             phone=numero,
-            direction="SYSTEM",
-            event="STATE_EXPIRED",
-            state="START",
-            context={},
-            meta={"ttl_minutes": STATE_TTL_MINUTES},
+            direction="IN",
+            event="MESSAGE_RECEIVED",
+            text=texto,
+            meta={"msg_id": msg_id, "type": msg.get("type")},
         )
-        await enviar_texto(numero, "⏳ Tu sesión expiró por inactividad.\n\n" + texto_inicio())
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="sesion expirada -> menu", state="START")
-        return JSONResponse({"status": "ok"})
 
-    state = estado.get("state") or "START"
-    context = estado.get("context") or {}
+        # Si llega vacío, ignora
+        if not texto:
+            return JSONResponse({"status": "ok"})
 
-    # -------------------------
-    # START
-    # -------------------------
-    if state == "START":
-        if texto_lower in ["1", "2", "3"]:
+        # Estado actual + TTL
+        estado = _get_state_normalizado(numero)
+
+        # -------------------------
+        # DEDUP: si Meta reintenta el MISMO msg_id, no respondas de nuevo
+        # -------------------------
+        last_id = (estado.get("context") or {}).get("last_msg_id")
+        if msg_id and last_id == msg_id:
+            return JSONResponse({"status": "ok"})
+
+        state = estado.get("state") or "START"
+        context = estado.get("context") or {}
+
+        # Marca este msg_id como procesado ANTES de seguir (idempotencia)
+        context = _ctx_set_last_msg_id(context, msg_id)
+        set_state_with_ts(numero, state, context)
+
+        # TTL
+        if _estado_expirado(estado.get("updated_at")):
+            reset_state(numero)
+            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            log_whatsapp_event(
+                phone=numero,
+                direction="SYSTEM",
+                event="STATE_EXPIRED",
+                state="START",
+                context={},
+                meta={"ttl_minutes": STATE_TTL_MINUTES},
+            )
+            await enviar_texto(numero, "⏳ Tu sesión expiró por inactividad.\n\n" + texto_inicio())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="sesion expirada -> menu", state="START")
+            return JSONResponse({"status": "ok"})
+
+        # Atajo menú
+        if _es_menu(texto_lower):
+            reset_state(numero)
+            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+            await enviar_texto(numero, texto_inicio())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="(menu inicio)", state="START")
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # START
+        # -------------------------
+        if state == "START":
+            if texto_lower in ["1", "2", "3"]:
+                if texto_lower == "1":
+                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={})
+                    await enviar_texto(numero, "🚚 Módulo transportador: *en construcción*.\n\nEscribe *menu* para volver.")
+                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="transportador en construcción", state="TRANSPORTADOR_MENU")
+                    return JSONResponse({"status": "ok"})
+
+                if texto_lower == "2":
+                    set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
+                    await enviar_texto(numero, texto_menu_empleado())
+                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu empleado", state="EMPLOYEE_MENU")
+                    return JSONResponse({"status": "ok"})
+
+                if texto_lower == "3":
+                    set_state_with_ts(numero, "CLIENTE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={})
+                    await enviar_texto(numero, texto_menu_cliente())
+                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente", state="CLIENTE_MENU")
+                    return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, texto_inicio())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu inicio", state="START")
+            set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # EMPLOYEE_MENU
+        # -------------------------
+        if state == "EMPLOYEE_MENU":
             if texto_lower == "1":
-                set_state_with_ts(numero, "TRANSPORTADOR_MENU", {})
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={})
-                await enviar_texto(numero, "🚚 Módulo transportador: *en construcción*.\n\nEscribe *menu* para volver.")
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="transportador en construcción", state="TRANSPORTADOR_MENU")
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id({"incluir_salario": False}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": False})
+                await enviar_texto(numero, texto_pedir_cedula())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula sin salario", state="EMPLOYEE_CERT_ASK_CEDULA")
                 return JSONResponse({"status": "ok"})
 
             if texto_lower == "2":
-                set_state_with_ts(numero, "EMPLOYEE_MENU", {})
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
-                await enviar_texto(numero, texto_menu_empleado())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu empleado", state="EMPLOYEE_MENU")
+                set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_CONFIRM_SALARIO", context={"incluir_salario": True})
+                await enviar_texto(
+                    numero,
+                    "⚠️ Este certificado incluye información salarial.\n\n"
+                    "Responde:\n"
+                    "1️⃣ ✅ Confirmo\n"
+                    "2️⃣ ❌ Cancelar\n"
+                )
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="confirmar certificado con salario", state="EMPLOYEE_CERT_CONFIRM_SALARIO")
                 return JSONResponse({"status": "ok"})
 
-            if texto_lower == "3":
-                set_state_with_ts(numero, "CLIENTE_MENU", {})
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={})
-                await enviar_texto(numero, texto_menu_cliente())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente", state="CLIENTE_MENU")
-                return JSONResponse({"status": "ok"})
-
-        await enviar_texto(numero, texto_inicio())
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu inicio", state="START")
-        # refresca timestamp aunque siga en START
-        set_state_with_ts(numero, "START", {})
-        return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # EMPLOYEE_MENU
-    # -------------------------
-    if state == "EMPLOYEE_MENU":
-        if texto_lower == "1":
-            set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", {"incluir_salario": False})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": False})
-            await enviar_texto(numero, texto_pedir_cedula())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula sin salario", state="EMPLOYEE_CERT_ASK_CEDULA")
+            await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_empleado())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu empleado", state="EMPLOYEE_MENU")
+            set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
             return JSONResponse({"status": "ok"})
 
-        if texto_lower == "2":
-            set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", {"incluir_salario": True})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_CONFIRM_SALARIO", context={"incluir_salario": True})
+        # -------------------------
+        # EMPLOYEE_CERT_CONFIRM_SALARIO
+        # -------------------------
+        if state == "EMPLOYEE_CERT_CONFIRM_SALARIO":
+            if texto_lower == "1":
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": True})
+                await enviar_texto(numero, texto_pedir_cedula())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula con salario", state="EMPLOYEE_CERT_ASK_CEDULA")
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
+                await enviar_texto(numero, "Listo. No se enviará certificado.\n\n" + texto_menu_empleado())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cancelar certificado con salario", state="EMPLOYEE_MENU")
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida.\n\nResponde 1️⃣ Confirmo o 2️⃣ Cancelar.")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida confirm salario", state="EMPLOYEE_CERT_CONFIRM_SALARIO")
+            set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", _ctx_set_last_msg_id({"incluir_salario": True}, msg_id))
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # EMPLOYEE_CERT_ASK_CEDULA
+        # -------------------------
+        if state == "EMPLOYEE_CERT_ASK_CEDULA":
+            cedula = _limpiar_numero(texto)
+
+            if not CEDULA_REGEX.match(cedula):
+                await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula invalida", state="EMPLOYEE_CERT_ASK_CEDULA")
+                set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", _ctx_set_last_msg_id(context if isinstance(context, dict) else {}, msg_id))
+                return JSONResponse({"status": "ok"})
+
+            incluir_salario = bool((context or {}).get("incluir_salario", False))
+            context_proc = _ctx_set_last_msg_id(
+                {"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario},
+                msg_id,
+            )
+            set_state_with_ts(numero, "EMPLOYEE_CERT_PROCESSING", context_proc)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
+
+            await enviar_texto(numero, "Procesando tu solicitud…")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
+
+            try:
+                ok, mensaje, correo = generar_y_enviar_certificado_por_cedula(cedula, incluir_salario=incluir_salario)
+            except Exception as e:
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=context_proc, meta={"error": str(e)})
+                reset_state(numero)
+                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                await enviar_texto(numero, "Ocurrió un error generando el certificado. Por favor intenta de nuevo.\n\n" + texto_inicio())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="error certificado", state="START")
+                return JSONResponse({"status": "ok"})
+
+            if not ok:
+                set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
+                await enviar_texto(numero, f"❗ {mensaje}\n\n" + texto_menu_empleado())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"fallo: {mensaje}", state="EMPLOYEE_MENU", context={"cedula": cedula})
+                return JSONResponse({"status": "ok"})
+
+            set_state_with_ts(numero, "EMPLOYEE_MENU", _ctx_set_last_msg_id({}, msg_id))
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
+
             await enviar_texto(
                 numero,
-                "⚠️ Este certificado incluye información salarial.\n\n"
-                "Responde:\n"
-                "1️⃣ ✅ Confirmo\n"
-                "2️⃣ ❌ Cancelar\n"
+                "✅ Solicitud completada.\n\n"
+                f"Tu certificado laboral fue enviado al correo:\n*{correo}*\n\n"
+                "Escribe *menu* para volver al inicio."
             )
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="confirmar certificado con salario", state="EMPLOYEE_CERT_CONFIRM_SALARIO")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
             return JSONResponse({"status": "ok"})
 
-        await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_empleado())
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu empleado", state="EMPLOYEE_MENU")
-        set_state_with_ts(numero, "EMPLOYEE_MENU", {})
+        # -------------------------
+        # CLIENTE_MENU
+        # -------------------------
+        if state == "CLIENTE_MENU":
+            if texto_lower == "1":
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+                await enviar_texto(numero, texto_pedir_guia())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir guia", state="CLIENTE_GUIA_ASK")
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                reset_state(numero)
+                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+                await enviar_texto(numero, texto_inicio())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_cliente())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu cliente", state="CLIENTE_MENU")
+            set_state_with_ts(numero, "CLIENTE_MENU", _ctx_set_last_msg_id({}, msg_id))
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # CLIENTE_GUIA_ASK
+        # -------------------------
+        if state == "CLIENTE_GUIA_ASK":
+            guia = _limpiar_numero(texto)
+
+            if not GUIA_REGEX.match(guia):
+                await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                return JSONResponse({"status": "ok"})
+
+            url = _url_guia(guia)
+            set_state_with_ts(numero, "CLIENTE_POST", _ctx_set_last_msg_id({"guia": guia, "url": url}, msg_id))
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_POST", context={"guia": guia, "url": url})
+
+            await enviar_texto(numero, texto_post_guia(url))
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="enviar link guia (sin validar)", state="CLIENTE_POST", context={"guia": guia})
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # CLIENTE_POST
+        # -------------------------
+        if state == "CLIENTE_POST":
+            if texto_lower == "1":
+                set_state_with_ts(numero, "CLIENTE_GUIA_ASK", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
+                await enviar_texto(numero, texto_pedir_guia())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultar otra guia", state="CLIENTE_GUIA_ASK")
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                reset_state(numero)
+                set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+                await enviar_texto(numero, texto_inicio())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
+                return JSONResponse({"status": "ok"})
+
+            url = (context or {}).get("url") or ""
+            await enviar_texto(
+                numero,
+                "Opción no válida.\n\n"
+                + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
+            )
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida cliente_post", state="CLIENTE_POST")
+            set_state_with_ts(numero, "CLIENTE_POST", _ctx_set_last_msg_id(context if isinstance(context, dict) else {}, msg_id))
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # Fallback general
+        # -------------------------
+        reset_state(numero)
+        set_state_with_ts(numero, "START", _ctx_set_last_msg_id({}, msg_id))
+        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+        await enviar_texto(numero, texto_inicio())
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="fallback menu inicio", state="START")
         return JSONResponse({"status": "ok"})
 
-    # -------------------------
-    # EMPLOYEE_CERT_CONFIRM_SALARIO
-    # -------------------------
-    if state == "EMPLOYEE_CERT_CONFIRM_SALARIO":
-        if texto_lower == "1":
-            set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", {"incluir_salario": True})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_ASK_CEDULA", context={"incluir_salario": True})
-            await enviar_texto(numero, texto_pedir_cedula())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula con salario", state="EMPLOYEE_CERT_ASK_CEDULA")
-            return JSONResponse({"status": "ok"})
-
-        if texto_lower == "2":
-            set_state_with_ts(numero, "EMPLOYEE_MENU", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
-            await enviar_texto(numero, "Listo. No se enviará certificado.\n\n" + texto_menu_empleado())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cancelar certificado con salario", state="EMPLOYEE_MENU")
-            return JSONResponse({"status": "ok"})
-
-        await enviar_texto(numero, "Opción no válida.\n\nResponde 1️⃣ Confirmo o 2️⃣ Cancelar.")
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida confirm salario", state="EMPLOYEE_CERT_CONFIRM_SALARIO")
-        # mantener mismo estado pero refrescar ts
-        set_state_with_ts(numero, "EMPLOYEE_CERT_CONFIRM_SALARIO", {"incluir_salario": True})
+    except Exception as e:
+        print(f"❌ ERROR webhook general: {e}")
+        # Importante: responder 200 para que Meta NO reintente
         return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # EMPLOYEE_CERT_ASK_CEDULA
-    # -------------------------
-    if state == "EMPLOYEE_CERT_ASK_CEDULA":
-        cedula = _limpiar_numero(texto)
-
-        if not CEDULA_REGEX.match(cedula):
-            await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula invalida", state="EMPLOYEE_CERT_ASK_CEDULA")
-            # refresca ts manteniendo contexto actual
-            set_state_with_ts(numero, "EMPLOYEE_CERT_ASK_CEDULA", context if isinstance(context, dict) else {})
-            return JSONResponse({"status": "ok"})
-
-        incluir_salario = bool(context.get("incluir_salario", False))
-        context_proc = {"cedula": cedula, "accion": "certificado_laboral", "incluir_salario": incluir_salario}
-        set_state_with_ts(numero, "EMPLOYEE_CERT_PROCESSING", context_proc)
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
-
-        await enviar_texto(numero, "Procesando tu solicitud…")
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="procesando", state="EMPLOYEE_CERT_PROCESSING", context=context_proc)
-
-        try:
-            ok, mensaje, correo = generar_y_enviar_certificado_por_cedula(cedula, incluir_salario=incluir_salario)
-        except Exception as e:
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="EMPLOYEE_CERT_PROCESSING", context=context_proc, meta={"error": str(e)})
-            reset_state(numero)
-            set_state_with_ts(numero, "START", {})
-            await enviar_texto(numero, "Ocurrió un error generando el certificado. Por favor intenta de nuevo.\n\n" + texto_inicio())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="error certificado", state="START")
-            return JSONResponse({"status": "ok"})
-
-        if not ok:
-            set_state_with_ts(numero, "EMPLOYEE_MENU", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
-            await enviar_texto(numero, f"❗ {mensaje}\n\n" + texto_menu_empleado())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"fallo: {mensaje}", state="EMPLOYEE_MENU", context={"cedula": cedula})
-            return JSONResponse({"status": "ok"})
-
-        set_state_with_ts(numero, "EMPLOYEE_MENU", {})
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="EMPLOYEE_MENU", context={})
-
-        await enviar_texto(
-            numero,
-            "✅ Solicitud completada.\n\n"
-            f"Tu certificado laboral fue enviado al correo:\n*{correo}*\n\n"
-            "Escribe *menu* para volver al inicio."
-        )
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
-        return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # CLIENTE_MENU
-    # -------------------------
-    if state == "CLIENTE_MENU":
-        if texto_lower == "1":
-            set_state_with_ts(numero, "CLIENTE_GUIA_ASK", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
-            await enviar_texto(numero, texto_pedir_guia())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir guia", state="CLIENTE_GUIA_ASK")
-            return JSONResponse({"status": "ok"})
-
-        if texto_lower == "2":
-            reset_state(numero)
-            set_state_with_ts(numero, "START", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
-            await enviar_texto(numero, texto_inicio())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
-            return JSONResponse({"status": "ok"})
-
-        await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_cliente())
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida menu cliente", state="CLIENTE_MENU")
-        set_state_with_ts(numero, "CLIENTE_MENU", {})
-        return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # CLIENTE_GUIA_ASK (sin validación: solo envía link)
-    # -------------------------
-    if state == "CLIENTE_GUIA_ASK":
-        guia = _limpiar_numero(texto)
-
-        if not GUIA_REGEX.match(guia):
-            await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
-            set_state_with_ts(numero, "CLIENTE_GUIA_ASK", {})
-            return JSONResponse({"status": "ok"})
-
-        url = _url_guia(guia)
-
-        set_state_with_ts(numero, "CLIENTE_POST", {"guia": guia, "url": url})
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_POST", context={"guia": guia, "url": url})
-
-        await enviar_texto(numero, texto_post_guia(url))
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="enviar link guia (sin validar)", state="CLIENTE_POST", context={"guia": guia})
-        return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # CLIENTE_POST
-    # -------------------------
-    if state == "CLIENTE_POST":
-        if texto_lower == "1":
-            set_state_with_ts(numero, "CLIENTE_GUIA_ASK", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
-            await enviar_texto(numero, texto_pedir_guia())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultar otra guia", state="CLIENTE_GUIA_ASK")
-            return JSONResponse({"status": "ok"})
-
-        if texto_lower == "2":
-            reset_state(numero)
-            set_state_with_ts(numero, "START", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
-            await enviar_texto(numero, texto_inicio())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
-            return JSONResponse({"status": "ok"})
-
-        url = (context or {}).get("url") or ""
-        await enviar_texto(
-            numero,
-            "Opción no válida.\n\n"
-            + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
-        )
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida cliente_post", state="CLIENTE_POST")
-        # mantener contexto actual y refrescar ts
-        set_state_with_ts(numero, "CLIENTE_POST", context if isinstance(context, dict) else {})
-        return JSONResponse({"status": "ok"})
-
-    # -------------------------
-    # Fallback general
-    # -------------------------
-    reset_state(numero)
-    set_state_with_ts(numero, "START", {})
-    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
-    await enviar_texto(numero, texto_inicio())
-    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="fallback menu inicio", state="START")
-    return JSONResponse({"status": "ok"})
