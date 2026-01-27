@@ -1,10 +1,8 @@
 # rutas/whatsapp_integra.py
 import os
 import re
-import asyncio
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 
@@ -15,10 +13,11 @@ from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "integra_verify_2026")
 
+# Regex
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
-GUIA_REGEX = re.compile(r"^\d{5,20}$")
+GUIA_REGEX = re.compile(r"^\d{5,20}$")  # ajusta si tus guías son más largas
 
-NO_RESULT_TXT = "No se encontraron resultados"
+# URL base Siscore
 SISCORE_PUBLIC_URL = "https://integra.appsiscore.com/app/app-cliente/cons_publica.php"
 
 ruta_whatsapp_integra = APIRouter(
@@ -78,7 +77,7 @@ def texto_pedir_guia() -> str:
 
 def texto_post_guia(url: str) -> str:
     return (
-        "✅ Te dejo el enlace para consultar la guía:\n"
+        "🔎 Aquí puedes consultar tu guía:\n"
         f"{url}\n\n"
         "¿Qué deseas hacer ahora?\n"
         "1️⃣ Consultar otra guía\n"
@@ -87,9 +86,13 @@ def texto_post_guia(url: str) -> str:
 
 
 # -------------------------
-# Extraer mensaje (text / interactive)
+# Helpers
 # -------------------------
 def extraer_mensaje(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extrae el primer mensaje entrante del webhook (texto o interactive).
+    Devuelve dict con: from, type, text, id
+    """
     try:
         value = data["entry"][0]["changes"][0]["value"]
         mensajes = value.get("messages", [])
@@ -132,64 +135,6 @@ def _limpiar_numero(t: str) -> str:
 
 def _url_guia(guia: str) -> str:
     return f"{SISCORE_PUBLIC_URL}?GUIA={guia}"
-
-
-# -------------------------
-# saber si existe la guia (con reintentos)
-# -------------------------
-async def guia_existe_en_siscore(guia: str) -> Tuple[Optional[bool], str]:
-    """
-    Retorna:
-      - (True, "ok") si parece existir
-      - (False, "no_results") si no existe
-      - (None, "timeout"/"network"/"blocked"/"bad_status") si no se pudo validar
-    """
-    url = _url_guia(guia)
-
-    timeout = httpx.Timeout(connect=8.0, read=35.0, write=10.0, pool=10.0)
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
-        "Connection": "close",
-    }
-
-    # 2 intentos
-    for intento in range(1, 3):
-        try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
-                r = await client.get(url)
-
-            if r.status_code != 200:
-                return None, f"bad_status:{r.status_code}"
-
-            html_lower = (r.text or "").lower()
-
-            if NO_RESULT_TXT.lower() in html_lower:
-                return False, "no_results"
-
-            # heurística simple de bloqueo/login
-            if ("login" in html_lower and "password" in html_lower) or ("iniciar sesión" in html_lower):
-                return None, "blocked_or_login"
-
-            # si la respuesta es demasiado corta, no confiamos
-            if len(html_lower.strip()) < 200:
-                return None, "html_too_short"
-
-            return True, "ok"
-
-        except (httpx.ReadTimeout, httpx.ConnectTimeout):
-            if intento < 2:
-                await asyncio.sleep(0.6)
-                continue
-            return None, "timeout"
-        except httpx.RequestError as e:
-            if intento < 2:
-                await asyncio.sleep(0.6)
-                continue
-            return None, f"network:{type(e).__name__}"
-        except Exception as e:
-            return None, f"error:{type(e).__name__}"
 
 
 # -------------------------
@@ -409,7 +354,7 @@ async def webhook(request: Request):
         return JSONResponse({"status": "ok"})
 
     # -------------------------
-    # CLIENTE_GUIA_ASK
+    # CLIENTE_GUIA_ASK (sin validación: solo envía link)
     # -------------------------
     if state == "CLIENTE_GUIA_ASK":
         guia = _limpiar_numero(texto)
@@ -419,49 +364,13 @@ async def webhook(request: Request):
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
             return JSONResponse({"status": "ok"})
 
-        set_state(numero, "CLIENTE_GUIA_CHECKING", {"guia": guia})
-        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_CHECKING", context={"guia": guia})
-
-        await enviar_texto(numero, "Validando tu guía…")
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="validando guia", state="CLIENTE_GUIA_CHECKING", context={"guia": guia})
-
-        existe, motivo = await guia_existe_en_siscore(guia)
         url = _url_guia(guia)
 
-        # Si Siscore confirma "no resultados", ahí sí rechazamos.
-        if existe is False:
-            set_state(numero, "CLIENTE_GUIA_ASK", {})
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_GUIA_ASK", context={})
-            await enviar_texto(
-                numero,
-                "❗ No encontramos resultados para esa guía.\n\n"
-                "Verifica el número e intenta de nuevo.\n\n"
-                + texto_pedir_guia()
-            )
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia no existe", state="CLIENTE_GUIA_ASK", context={"guia": guia})
-            return JSONResponse({"status": "ok"})
-
-        # Si existe=True o existe=None (timeout/bloqueo), NO bloqueamos al usuario: enviamos link igual.
         set_state(numero, "CLIENTE_POST", {"guia": guia, "url": url})
         log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_POST", context={"guia": guia, "url": url})
 
-        nota = ""
-        if existe is None:
-            nota = (
-                "⚠️ Nota: en este momento no pude validar automáticamente la guía "
-                "(conexión lenta o Siscore no respondió). Igual te dejo el enlace.\n\n"
-            )
-            log_whatsapp_event(
-                phone=numero,
-                direction="SYSTEM",
-                event="SISCORE_VALIDATE_INDETERMINATE",
-                state="CLIENTE_POST",
-                context={"guia": guia},
-                meta={"motivo": motivo},
-            )
-
-        await enviar_texto(numero, nota + texto_post_guia(url))
-        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="enviar link guia", state="CLIENTE_POST", context={"guia": guia})
+        await enviar_texto(numero, texto_post_guia(url))
+        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="enviar link guia (sin validar)", state="CLIENTE_POST", context={"guia": guia})
         return JSONResponse({"status": "ok"})
 
     # -------------------------
@@ -486,7 +395,8 @@ async def webhook(request: Request):
         url = (context or {}).get("url") or ""
         await enviar_texto(
             numero,
-            "Opción no válida.\n\n" + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
+            "Opción no válida.\n\n"
+            + (texto_post_guia(url) if url else "Responde 1️⃣ o 2️⃣. Escribe *menu* para volver.")
         )
         log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="opcion invalida cliente_post", state="CLIENTE_POST")
         return JSONResponse({"status": "ok"})
