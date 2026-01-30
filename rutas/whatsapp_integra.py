@@ -12,11 +12,16 @@ from Funciones.whatsapp_utils_integra import enviar_texto
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
 
+# ✅ Vulcano (consulta por cédula del tenedor)
+# Ajusta el import si tu ruta es diferente (por ejemplo: from rutas.vulcano import consultar_por_tenedor)
+from rutas.vulcano import consultar_por_tenedor
+
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "integra_verify_2026")
 
 # Regex
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
 GUIA_REGEX = re.compile(r"^\d{5,20}$")  # ajusta si tus guías son más largas
+YEAR_REGEX = re.compile(r"^(19|20)\d{2}$")
 
 # URL base Siscore
 SISCORE_PUBLIC_URL = "https://integra.appsiscore.com/app/app-cliente/cons_publica.php"
@@ -26,6 +31,12 @@ STATE_TTL_MINUTES = 60
 
 # Dedup: cuántos msg_id guardamos por usuario
 PROCESSED_IDS_MAX = 30
+
+# Defaults Transportador (para no pedir 1000 de una)
+TRANSP_DEFAULT_YEAR = "2024"
+TRANSP_DEFAULT_PAGO_SALDO = "No Aplicado"
+TRANSP_DEFAULT_PAGE_SIZE = 200  # recomendado
+TRANSP_DEFAULT_PAGE = 1
 
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",
@@ -91,6 +102,46 @@ def texto_post_guia(url: str) -> str:
         "¿Qué deseas hacer ahora?\n"
         "1️⃣ Consultar otra guía\n"
         "2️⃣ Volver al menú principal"
+    )
+
+
+# -------------------------
+# Transportador (Vulcano)
+# -------------------------
+def texto_menu_transportador() -> str:
+    return (
+        "🚚 *Menú Transportador*\n\n"
+        "Responde con un número:\n"
+        "1️⃣ 🔎 Consultar manifiestos por *cédula del tenedor*\n"
+        "2️⃣ ↩️ Volver al menú principal\n\n"
+        "Para volver en cualquier momento escribe *menu*."
+    )
+
+
+def texto_pedir_cedula_tenedor() -> str:
+    return (
+        "🔎 *Consultar manifiestos (Vulcano)*\n\n"
+        "Escribe la *cédula del tenedor* (solo números).\n"
+        "Ejemplo: 11200427"
+    )
+
+
+def texto_post_transportador(resumen: str) -> str:
+    return (
+        f"{resumen}\n\n"
+        "¿Qué deseas hacer ahora?\n"
+        "1️⃣ Ver más resultados\n"
+        "2️⃣ Cambiar año\n"
+        "3️⃣ Consultar otra cédula\n"
+        "4️⃣ Volver al menú principal"
+    )
+
+
+def _texto_pedir_year_transportador() -> str:
+    return (
+        "📅 Escribe el *año* (4 dígitos).\n"
+        "Ejemplo: 2024\n\n"
+        "Para volver escribe *menu*."
     )
 
 
@@ -232,6 +283,70 @@ def _ctx_only_processed_ids(context: Dict[str, Any]) -> Dict[str, Any]:
     return {"processed_msg_ids": ids} if ids else {}
 
 
+def _safe_int(v: Any, default: int) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _vulcano_consultar_compat(
+    cedula_tenedor: str,
+    year: str,
+    pago_saldo: str,
+    page_size: int,
+    page: int,
+) -> List[Dict[str, Any]]:
+    """
+    Compatibilidad: si tu consultar_por_tenedor NO acepta page/page_size, lo llama sin ellos.
+    """
+    try:
+        return consultar_por_tenedor(
+            cedula_tenedor=cedula_tenedor,
+            year=year,
+            pago_saldo=pago_saldo,
+            page_size=page_size,
+            page=page,
+        )
+    except TypeError:
+        # versión antigua sin paginación
+        return consultar_por_tenedor(
+            cedula_tenedor=cedula_tenedor,
+            year=year,
+            pago_saldo=pago_saldo,
+        )
+
+
+def _resumen_transportador(
+    cedula: str,
+    year: str,
+    pago_saldo: str,
+    filas: List[Dict[str, Any]],
+    page: int,
+    page_size: int,
+) -> str:
+    total = len(filas)
+    manifiestos = [f.get("Manifiesto") for f in filas if isinstance(f, dict) and f.get("Manifiesto")]
+    fechas = [f.get("Fecha") for f in filas if isinstance(f, dict) and f.get("Fecha")]
+
+    top_m = manifiestos[:10]
+    top_f = fechas[:10]
+
+    bloque_m = "\n".join([f"• {m}" for m in top_m]) if top_m else "• (sin manifiestos)"
+    bloque_f = "\n".join([f"• {x}" for x in top_f]) if top_f else "• (sin fechas)"
+
+    return (
+        "✅ *Consulta Vulcano*\n\n"
+        f"👤 Tenedor: *{cedula}*\n"
+        f"📅 Año: *{year}*\n"
+        f"💳 Pago saldo: *{pago_saldo}*\n"
+        f"📄 Página: *{page}* (tamaño {page_size})\n"
+        f"🔢 Registros en esta página: *{total}*\n\n"
+        f"📦 *Manifiestos (primeros {len(top_m)}):*\n{bloque_m}\n\n"
+        f"🗓️ *Fechas (primeras {len(top_f)}):*\n{bloque_f}"
+    )
+
+
 # -------------------------
 # GET verificación (sin slash y con slash) para evitar 307
 # -------------------------
@@ -344,8 +459,8 @@ async def webhook(request: Request):
                 if texto_lower == "1":
                     set_state_with_ts(numero, "TRANSPORTADOR_MENU", base_ctx)
                     log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={})
-                    await enviar_texto(numero, "🚚 Módulo transportador: *en construcción*.\n\nEscribe *menu* para volver.")
-                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="transportador en construcción", state="TRANSPORTADOR_MENU")
+                    await enviar_texto(numero, texto_menu_transportador())
+                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu transportador", state="TRANSPORTADOR_MENU")
                     return JSONResponse({"status": "ok"})
 
                 if texto_lower == "2":
@@ -368,6 +483,200 @@ async def webhook(request: Request):
             ctx = _ctx_only_processed_ids(context)
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "START", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_MENU
+        # -------------------------
+        if state == "TRANSPORTADOR_MENU":
+            if texto_lower == "1":
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_ASK_CEDULA", context={})
+                await enviar_texto(numero, texto_pedir_cedula_tenedor())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula tenedor", state="TRANSPORTADOR_ASK_CEDULA")
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
+                await enviar_texto(numero, texto_inicio())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_transportador())
+            ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_ASK_CEDULA
+        # -------------------------
+        if state == "TRANSPORTADOR_ASK_CEDULA":
+            cedula = _limpiar_numero(texto)
+
+            if not CEDULA_REGEX.match(cedula):
+                await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula_tenedor())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula tenedor invalida", state="TRANSPORTADOR_ASK_CEDULA")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
+                return JSONResponse({"status": "ok"})
+
+            year = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+            pago_saldo = str((context or {}).get("pago_saldo") or TRANSP_DEFAULT_PAGO_SALDO)
+            page_size = _safe_int((context or {}).get("page_size"), TRANSP_DEFAULT_PAGE_SIZE)
+            page = TRANSP_DEFAULT_PAGE
+
+            ctxp = _ctx_only_processed_ids(context)
+            ctxp.update(
+                {
+                    "cedula_tenedor": cedula,
+                    "year": year,
+                    "pago_saldo": pago_saldo,
+                    "page_size": page_size,
+                    "page": page,
+                }
+            )
+            ctxp = _ctx_add_processed_id(ctxp, msg_id)
+
+            set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", ctxp)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_PROCESSING", context=ctxp)
+
+            await enviar_texto(numero, "🔎 Consultando Vulcano, un momento…")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultando vulcano", state="TRANSPORTADOR_PROCESSING")
+
+            try:
+                filas = _vulcano_consultar_compat(
+                    cedula_tenedor=cedula,
+                    year=year,
+                    pago_saldo=pago_saldo,
+                    page_size=page_size,
+                    page=page,
+                )
+            except Exception as e:
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="TRANSPORTADOR_PROCESSING", context=ctxp, meta={"error": str(e)})
+                ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
+                await enviar_texto(
+                    numero,
+                    "❗ No pude consultar en este momento (timeout o error del servicio).\n"
+                    "Intenta de nuevo en unos minutos.\n\n"
+                    + texto_menu_transportador()
+                )
+                return JSONResponse({"status": "ok"})
+
+            resumen = _resumen_transportador(cedula, year, pago_saldo, filas, page=page, page_size=page_size)
+
+            ctx_post = dict(ctxp)
+            ctx_post.update(
+                {
+                    "last_count": len(filas),
+                }
+            )
+            set_state_with_ts(numero, "TRANSPORTADOR_POST", ctx_post)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_POST", context={"cedula_tenedor": cedula, "year": year})
+
+            await enviar_texto(numero, texto_post_transportador(resumen))
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="respuesta vulcano", state="TRANSPORTADOR_POST")
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_ASK_YEAR
+        # -------------------------
+        if state == "TRANSPORTADOR_ASK_YEAR":
+            year = _limpiar_numero(texto)
+
+            if not YEAR_REGEX.match(year):
+                await enviar_texto(numero, "Año inválido.\n\n" + _texto_pedir_year_transportador())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="year invalido", state="TRANSPORTADOR_ASK_YEAR")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_YEAR", ctx)
+                return JSONResponse({"status": "ok"})
+
+            # Conserva dedup y vuelve a pedir cédula (más claro para el usuario)
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"year": year})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
+
+            await enviar_texto(numero, f"Listo ✅ Año configurado en *{year}*.\n\n" + texto_pedir_cedula_tenedor())
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="year actualizado", state="TRANSPORTADOR_ASK_CEDULA")
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_POST
+        # -------------------------
+        if state == "TRANSPORTADOR_POST":
+            if texto_lower == "1":
+                cedula = str((context or {}).get("cedula_tenedor") or "")
+                year = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+                pago_saldo = str((context or {}).get("pago_saldo") or TRANSP_DEFAULT_PAGO_SALDO)
+                page_size = _safe_int((context or {}).get("page_size"), TRANSP_DEFAULT_PAGE_SIZE)
+                page = _safe_int((context or {}).get("page"), TRANSP_DEFAULT_PAGE) + 1
+
+                if not cedula:
+                    ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+                    await enviar_texto(numero, "No tengo la cédula en memoria.\n\n" + texto_menu_transportador())
+                    return JSONResponse({"status": "ok"})
+
+                set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", {**(context or {}), "page": page})
+                await enviar_texto(numero, f"🔎 Consultando página {page}…")
+
+                try:
+                    filas = _vulcano_consultar_compat(
+                        cedula_tenedor=cedula,
+                        year=year,
+                        pago_saldo=pago_saldo,
+                        page_size=page_size,
+                        page=page,
+                    )
+                except Exception as e:
+                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="TRANSPORTADOR_PROCESSING", context=context, meta={"error": str(e)})
+                    set_state_with_ts(numero, "TRANSPORTADOR_POST", context)
+                    await enviar_texto(numero, "❗ No pude traer más resultados ahora.\n\nResponde 2️⃣, 3️⃣ o 4️⃣ (o escribe *menu*).")
+                    return JSONResponse({"status": "ok"})
+
+                if not filas:
+                    set_state_with_ts(numero, "TRANSPORTADOR_POST", {**(context or {}), "page": page})
+                    await enviar_texto(
+                        numero,
+                        "No hay más resultados.\n\n"
+                        "2️⃣ Cambiar año\n"
+                        "3️⃣ Consultar otra cédula\n"
+                        "4️⃣ Volver al menú principal"
+                    )
+                    return JSONResponse({"status": "ok"})
+
+                resumen = _resumen_transportador(cedula, year, pago_saldo, filas, page=page, page_size=page_size)
+                set_state_with_ts(numero, "TRANSPORTADOR_POST", {**(context or {}), "page": page})
+                await enviar_texto(numero, texto_post_transportador(resumen))
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_YEAR", ctx)
+                await enviar_texto(numero, _texto_pedir_year_transportador())
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "3":
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
+                await enviar_texto(numero, texto_pedir_cedula_tenedor())
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "4":
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida.\n\nResponde 1️⃣, 2️⃣, 3️⃣ o 4️⃣. (o escribe *menu*)")
+            ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_POST", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
