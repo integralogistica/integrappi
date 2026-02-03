@@ -122,7 +122,7 @@ def texto_pedir_cedula_tenedor() -> str:
     return (
         "🔎 *Consultar manifiestos (Vulcano)*\n\n"
         "Escribe la *cédula del tenedor* (solo números).\n"
-        "Ejemplo: 11200427"
+        "Ejemplo: 1012455147"
     )
 
 
