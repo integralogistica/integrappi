@@ -3,7 +3,7 @@ import os
 import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-
+import traceback
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 
@@ -851,6 +851,9 @@ async def webhook(request: Request):
             try:
                 payload = await consultar_guia_ws(guia)
             except Exception as e:
+                err_txt = traceback.format_exc()
+                print("❌ ERROR consultar_guia_ws:", repr(e), flush=True)
+                print(err_txt, flush=True)
                 log_whatsapp_event(
                     phone=numero,
                     direction="SYSTEM",

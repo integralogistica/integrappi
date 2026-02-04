@@ -80,8 +80,13 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dic
         "SOAPAction": SOAP_ACTION,
         "Accept": "*/*",
     }
+    timeout = httpx.Timeout(timeout_seconds, connect=30.0, read=timeout_seconds, write=30.0, pool=timeout_seconds)
 
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        print("➡️ SOAP request guia:", num_guia, flush=True)
+        print("➡️ ENDPOINT:", SISCORE_SOAP_ENDPOINT, flush=True)
+        print("➡️ TOKEN_LEN:", len(SISCORE_SOAP_TOKEN or ""), flush=True)
+        
         resp = await client.post(SISCORE_SOAP_ENDPOINT, content=envelope.encode("utf-8"), headers=headers)
         resp.raise_for_status()
 
