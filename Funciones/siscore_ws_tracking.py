@@ -3,7 +3,7 @@ import os
 import html
 import httpx
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 SISCORE_SOAP_ENDPOINT = os.getenv(
     "SISCORE_SOAP_ENDPOINT",
@@ -53,7 +53,7 @@ def _parse_inner_result_xml(inner_xml: str) -> Dict[str, Any]:
             for inf in child.findall(".//*"):
                 # buscamos nodos InformacionMov y extraemos campos
                 if _strip_namespace(inf.tag) == "InformacionMov":
-                    mov = {}
+                    mov: Dict[str, str] = {}
                     for f in list(inf):
                         mov[_strip_namespace(f.tag)] = (f.text or "").strip()
                     if mov:
@@ -69,6 +69,7 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dic
     """
     Consulta el SOAP y retorna un dict normalizado.
     Maneja que <Result> venga con XML escapado (&lt;...&gt;).
+    Además imprime en logs (Render) el error real cuando falle.
     """
     if not SISCORE_SOAP_TOKEN:
         raise RuntimeError("Falta SISCORE_SOAP_TOKEN en variables de entorno.")
@@ -80,19 +81,54 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dic
         "SOAPAction": SOAP_ACTION,
         "Accept": "*/*",
     }
-    timeout = httpx.Timeout(timeout_seconds, connect=30.0, read=timeout_seconds, write=30.0, pool=timeout_seconds)
 
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+    # Timeout más explícito (útil en redes inestables)
+    timeout = httpx.Timeout(
+        timeout_seconds,          # total
+        connect=30.0,             # conexión
+        read=timeout_seconds,     # lectura
+        write=30.0,               # escritura
+        pool=timeout_seconds,     # pool
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
         print("➡️ SOAP request guia:", num_guia, flush=True)
         print("➡️ ENDPOINT:", SISCORE_SOAP_ENDPOINT, flush=True)
+        print("➡️ SOAP_ACTION:", SOAP_ACTION, flush=True)
         print("➡️ TOKEN_LEN:", len(SISCORE_SOAP_TOKEN or ""), flush=True)
-        
-        resp = await client.post(SISCORE_SOAP_ENDPOINT, content=envelope.encode("utf-8"), headers=headers)
-        resp.raise_for_status()
 
-        # La respuesta puede venir en ISO-8859-1; httpx usualmente lo maneja,
-        # pero si hay caracteres raros, puedes forzar latin-1:
-        text = resp.text
+        try:
+            resp = await client.post(
+                SISCORE_SOAP_ENDPOINT,
+                content=envelope.encode("utf-8"),
+                headers=headers,
+            )
+
+            print("⬅️ STATUS_CODE:", resp.status_code, flush=True)
+            print("⬅️ BODY_PREVIEW:", (resp.text or "")[:500], flush=True)
+
+            resp.raise_for_status()
+            text = resp.text
+
+        except httpx.TimeoutException as e:
+            print("❌ SISCORE TIMEOUT:", repr(e), flush=True)
+            raise
+
+        except httpx.HTTPStatusError as e:
+            r = e.response
+            print("❌ SISCORE HTTPStatusError:", repr(e), flush=True)
+            print("❌ STATUS:", r.status_code, flush=True)
+            print("❌ BODY_PREVIEW:", (r.text or "")[:800], flush=True)
+            raise
+
+        except httpx.RequestError as e:
+            # DNS/SSL/conexión/etc.
+            print("❌ SISCORE RequestError:", repr(e), flush=True)
+            raise
+
+        except Exception as e:
+            print("❌ SISCORE UnknownError:", repr(e), flush=True)
+            raise
 
     # 1) Parseamos el SOAP
     soap_root = ET.fromstring(text)
