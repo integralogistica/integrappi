@@ -868,7 +868,15 @@ async def webhook(request: Request):
                 await enviar_texto(numero, "❗ No pude consultar la guía ahora (timeout o error del servicio).\n\n" + texto_menu_cliente())
                 return JSONResponse({"status": "ok"})
 
-            texto_respuesta = formatear_respuesta_guia(payload)
+            if payload.get("ok") and payload.get("not_found"):
+                texto_respuesta = (
+                    f"❌ La guía *{guia}* no existe.\n\n"
+                    "¿Qué deseas hacer ahora?\n"
+                    "1️⃣ Consultar otra guía\n"
+                    "2️⃣ Volver al menú principal"
+                )
+            else:
+                texto_respuesta = formatear_respuesta_guia(payload)
 
             ctx_post = _ctx_only_processed_ids(ctx)
             ctx_post.update({"guia": guia})
