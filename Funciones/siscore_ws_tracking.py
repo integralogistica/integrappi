@@ -1,9 +1,13 @@
 # Funciones/siscore_ws_tracking.py
 import os
 import html
+import asyncio
+import socket
+from typing import Dict, Any, List, Optional, Tuple
+
 import httpx
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional
+
 
 SISCORE_SOAP_ENDPOINT = os.getenv(
     "SISCORE_SOAP_ENDPOINT",
@@ -47,10 +51,7 @@ def _safe_text(v: Any) -> str:
 def _tracking_url(guia: str) -> str:
     # Permite usar {guia} o {num_guia}
     tpl = SISCORE_TRACKING_URL_TEMPLATE or ""
-    return (
-        tpl.replace("{guia}", guia).replace("{num_guia}", guia)
-        if tpl else ""
-    )
+    return tpl.replace("{guia}", guia).replace("{num_guia}", guia) if tpl else ""
 
 
 def _parse_inner_result_xml(inner_xml: str) -> Dict[str, Any]:
@@ -97,7 +98,34 @@ def _es_guia_no_existente(parsed: Dict[str, Any]) -> bool:
     return (len(movimientos) == 0) and cliente_vacio and estado_vacio and envio_vacio
 
 
-async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dict[str, Any]:
+def _extract_host_port(url: str) -> Tuple[Optional[str], Optional[int]]:
+    try:
+        u = httpx.URL(url)
+        host = u.host
+        port = u.port or (443 if u.scheme == "https" else 80)
+        return host, int(port)
+    except Exception:
+        return None, None
+
+
+def _resolve_host_ips(host: str) -> List[str]:
+    """
+    Resuelve DNS a IPs (mejor para soporte/redes).
+    Nota: puede bloquear un poco, pero se ejecuta 1 vez por request y ayuda a debug.
+    """
+    ips: List[str] = []
+    try:
+        info = socket.getaddrinfo(host, None)
+        for item in info:
+            ip = item[4][0]
+            if ip and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
+async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dict[str, Any]:
     """
     Consulta SOAP Siscore y retorna:
     - ok=True/False
@@ -114,28 +142,40 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dic
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": SOAP_ACTION,
         "Accept": "*/*",
+        # opcional pero útil: evita esperar bodies comprimidos raros en algunos gateways
+        "Accept-Encoding": "identity",
     }
 
+    # Timeout explícito y consistente (sin mezcla de 15/30)
     timeout = httpx.Timeout(
-        timeout=timeout_seconds,
-        connect=30.0,
-        read=timeout_seconds,
-        write=30.0,
-        pool=timeout_seconds,
+        connect=min(10.0, float(timeout_seconds)),
+        read=float(timeout_seconds),
+        write=float(timeout_seconds),
+        pool=float(timeout_seconds),
     )
+
+    # Límites para evitar demasiadas conexiones simultáneas
+    limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
+    host, port = _extract_host_port(SISCORE_SOAP_ENDPOINT)
+    ips = _resolve_host_ips(host) if host else []
 
     print("➡️ SOAP request guia:", num_guia, flush=True)
     print("➡️ ENDPOINT:", SISCORE_SOAP_ENDPOINT, flush=True)
     print("➡️ SOAP_ACTION:", SOAP_ACTION, flush=True)
     print("➡️ TOKEN_LEN:", len(SISCORE_SOAP_TOKEN or ""), flush=True)
+    if host:
+        print(f"➡️ DEST_HOST: {host}:{port}", flush=True)
+    if ips:
+        print(f"➡️ DEST_IPS: {', '.join(ips)}", flush=True)
 
-    max_intentos = 2
+    max_intentos = 3
     last_err: Optional[str] = None
     text: Optional[str] = None
 
     for intento in range(1, max_intentos + 1):
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, limits=limits, http2=False) as client:
                 resp = await client.post(
                     SISCORE_SOAP_ENDPOINT,
                     content=envelope.encode("utf-8"),
@@ -146,23 +186,27 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 15.0) -> Dic
                 text = resp.text
             break
 
-        except httpx.TimeoutException as e:
-            last_err = f"TimeoutException intento {intento}/{max_intentos}: {repr(e)}"
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+            last_err = f"{type(e).__name__} intento {intento}/{max_intentos}: {repr(e)}"
             print("❌ SISCORE TIMEOUT:", last_err, flush=True)
             if intento == max_intentos:
                 raise
+            await asyncio.sleep(1.2 * intento)
 
         except httpx.RequestError as e:
             last_err = f"RequestError intento {intento}/{max_intentos}: {repr(e)}"
             print("❌ SISCORE REQUEST ERROR:", last_err, flush=True)
             if intento == max_intentos:
                 raise
+            await asyncio.sleep(1.2 * intento)
 
         except httpx.HTTPStatusError as e:
             last_err = f"HTTPStatusError intento {intento}/{max_intentos}: {repr(e)}"
             print("❌ SISCORE HTTP ERROR:", last_err, flush=True)
             if intento == max_intentos:
                 raise
+            # si es 5xx podría valer reintentar
+            await asyncio.sleep(1.2 * intento)
 
     if not text:
         return {"ok": False, "error": last_err or "Sin respuesta del servicio Siscore."}
