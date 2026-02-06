@@ -17,7 +17,6 @@ SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 WS_NS = "https://ws.appsiscore.com/alasdecolombia/"
 
 # URL de redirección/seguimiento que ya usaban antes (ajústala si aplica)
-# Ejemplo: https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA={guia}
 SISCORE_TRACKING_URL_TEMPLATE = os.getenv(
     "SISCORE_TRACKING_URL_TEMPLATE",
     "https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA={guia}",
