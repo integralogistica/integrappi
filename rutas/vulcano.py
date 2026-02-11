@@ -23,17 +23,26 @@ def _build_url(host: str, base_path: str, path: str) -> str:
     return f"{host.rstrip('/')}{base_path}{path}"
 
 
-# ✅ NUEVO: arma proxies solo si hay env var
 def _get_proxies() -> Optional[Dict[str, str]]:
     """
     Retorna proxies para requests si VULCANO_PROXY_URL está configurada.
-    Ej: http://129.212.166.228:8888
-    Ej con auth: http://user:pass@129.212.166.228:8888
+    Ej: http://ip:3128
+    Ej con auth: http://user:pass@ip:3128
     """
     proxy_url = os.getenv("VULCANO_PROXY_URL", "").strip()
     if not proxy_url:
         return None
     return {"http": proxy_url, "https": proxy_url}
+
+
+def _get_session(session: Optional[requests.Session] = None) -> requests.Session:
+    """
+    Retorna una Session con trust_env=False para evitar que requests use HTTP_PROXY/HTTPS_PROXY
+    del entorno (Render/infra), y así SOLO usar VULCANO_PROXY_URL cuando aplique.
+    """
+    s = session or requests.Session()
+    s.trust_env = False
+    return s
 
 
 # ==============================================================================
@@ -91,7 +100,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
     if not VULCANO_IDNAME:
         raise VulcanoAuthError("Login: VULCANO_IDNAME no está configurado (env var vacía o ausente).")
 
-    s = session or requests.Session()
+    s = _get_session(session)
 
     url = _build_url(VULCANO_HOST, VULCANO_BASE_PATH, VULCANO_LOGIN_PATH)
     payload = {
@@ -102,7 +111,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
         "isGroup": VULCANO_IS_GROUP,
     }
 
-    proxies = _get_proxies()  # ✅ NUEVO
+    proxies = _get_proxies()
 
     t0 = time.time()
     try:
@@ -112,7 +121,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
             verify=VULCANO_VERIFY_SSL,
-            proxies=proxies,  # ✅ CAMBIO (agregado)
+            proxies=proxies,
         )
         r.raise_for_status()
 
@@ -123,16 +132,13 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
 
     except requests.Timeout as e:
         raise VulcanoAuthError(f"Login: TIMEOUT ({time.time() - t0:.1f}s) url={url}") from e
-
     except requests.HTTPError as e:
         resp = getattr(e, "response", None)
         if resp is not None:
             raise VulcanoAuthError(f"Login: HTTPError. {_resp_debug(resp)}") from e
         raise VulcanoAuthError(f"Login: HTTPError sin response. err={e}") from e
-
     except requests.ConnectionError as e:
         raise VulcanoAuthError(f"Login: ConnectionError url={url} err={e}") from e
-
     except requests.RequestException as e:
         raise VulcanoAuthError(f"Login: RequestException url={url} err={e}") from e
 
@@ -165,7 +171,7 @@ def consultar_por_tenedor(
     if not cedula_tenedor:
         raise ValueError("cedula_tenedor es requerida")
 
-    s = session or requests.Session()
+    s = _get_session(session)
     token = vulcano_login(session=s, timeout=timeout)
 
     url = _build_url(VULCANO_HOST, VULCANO_BASE_PATH, VULCANO_CUSTOMER_INDEX_PATH)
@@ -187,7 +193,7 @@ def consultar_por_tenedor(
         "Authorization": f"Bearer {token}",
     }
 
-    proxies = _get_proxies()  # ✅ NUEVO
+    proxies = _get_proxies()
 
     t0 = time.time()
     try:
@@ -197,7 +203,7 @@ def consultar_por_tenedor(
             headers=headers,
             timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
             verify=VULCANO_VERIFY_SSL,
-            proxies=proxies,  # ✅ CAMBIO (agregado)
+            proxies=proxies,
         )
         r.raise_for_status()
 
@@ -208,16 +214,13 @@ def consultar_por_tenedor(
 
     except requests.Timeout as e:
         raise VulcanoRequestError(f"Consulta: TIMEOUT ({time.time() - t0:.1f}s) url={url}") from e
-
     except requests.HTTPError as e:
         resp = getattr(e, "response", None)
         if resp is not None:
             raise VulcanoRequestError(f"Consulta: HTTPError. {_resp_debug(resp)}") from e
         raise VulcanoRequestError(f"Consulta: HTTPError sin response. err={e}") from e
-
     except requests.ConnectionError as e:
         raise VulcanoRequestError(f"Consulta: ConnectionError url={url} err={e}") from e
-
     except requests.RequestException as e:
         raise VulcanoRequestError(f"Consulta: RequestException url={url} err={e}") from e
 
@@ -228,7 +231,6 @@ def consultar_por_tenedor(
     if not isinstance(filas, list):
         raise VulcanoRequestError(f"Consulta: 'data.data' no es lista. type={type(filas).__name__} data={data}")
 
-    # Normaliza a dicts (por si llega algo raro)
     out: List[Dict[str, Any]] = []
     for row in filas:
         if isinstance(row, dict):
@@ -253,7 +255,6 @@ def extraer_manifiestos(filas: List[Dict[str, Any]]) -> List[str]:
 # ✅ PRUEBA RÁPIDA
 # ==============================================================================
 if __name__ == "__main__":
-
     cedula = "11200427"  # cambia por la real
     filas = consultar_por_tenedor(
         cedula_tenedor=cedula,
