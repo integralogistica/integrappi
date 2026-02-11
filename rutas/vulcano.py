@@ -112,6 +112,11 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
     }
 
     proxies = _get_proxies()
+    print("VULCANO consulta proxy_enabled:", bool(proxies))
+    if proxies:
+        safe = proxies["https"].split("@")[-1]
+        print("VULCANO consulta proxy:", safe)
+
 
     t0 = time.time()
     try:
@@ -194,6 +199,8 @@ def consultar_por_tenedor(
     }
 
     proxies = _get_proxies()
+    print("VULCANO login proxy_enabled:", bool(proxies))
+
 
     t0 = time.time()
     try:
