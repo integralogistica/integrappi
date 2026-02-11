@@ -20,7 +20,7 @@ from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
 from rutas.whatsapp_integra import ruta_whatsapp_integra
 from rutas.whatsapp_report_integra import ruta_whatsapp_report
-
+from rutas.vulcano import ruta_vulcano
 
 app = FastAPI()
 app.title = "integra"
@@ -59,6 +59,8 @@ app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
 app.include_router(ruta_whatsapp_integra)
 app.include_router(ruta_whatsapp_report)
+app.include_router(ruta_vulcano)
+
 
 @app.get("/", tags=['Home'])
 async def root():

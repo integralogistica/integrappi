@@ -23,6 +23,7 @@ VULCANO_CUSTOMER_INDEX_PATH = os.getenv(
 # Credenciales
 VULCANO_USERNAME = os.getenv("VULCANO_USERNAME", "134APIINTEGRA")
 VULCANO_IDNAME = os.getenv("VULCANO_IDNAME")
+print("VULCANO_IDNAME usado:", repr(VULCANO_IDNAME))
 VULCANO_AGENCY = os.getenv("VULCANO_AGENCY", "001")
 VULCANO_PROJECT = os.getenv("VULCANO_PROJECT", "1")
 VULCANO_IS_GROUP = int(os.getenv("VULCANO_IS_GROUP", "0"))
@@ -182,4 +183,4 @@ if __name__ == "__main__":
     for x in filas[:5]:
         print(x)
 
-    print("MANIFIESTOS:", extraer_manifiestos(filas)[:10])
+    print("MANIFIESTOS:", extraer_manifiestos(filas)[:5])
