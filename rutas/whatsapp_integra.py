@@ -11,7 +11,9 @@ from Funciones.chat_state_integra import get_state, set_state, reset_state
 from Funciones.whatsapp_utils_integra import enviar_texto
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
-
+import logging
+logger = logging.getLogger("integra")
+logging.basicConfig(level=logging.INFO) 
 
 # ✅ Vulcano (consulta por cédula del tenedor)
 # Ajusta el import si tu ruta es diferente (por ejemplo: from rutas.vulcano import consultar_por_tenedor)
@@ -539,6 +541,8 @@ async def webhook(request: Request):
                 )
             except Exception as e:
                 tb = traceback.format_exc()
+                logger.error("Vulcano ERROR (transportador): %s", str(e))
+                logger.error("Traceback Vulcano:\n%s", tb)
                 log_whatsapp_event(
                     phone=numero,
                     direction="SYSTEM",
@@ -967,6 +971,8 @@ async def webhook(request: Request):
         return JSONResponse({"status": "ok"})
 
     except Exception as e:
-        print(f"❌ ERROR webhook general: {e}")
-        # Importante: responder 200 para que Meta NO reintente
+        tb = traceback.format_exc()
+        logger.error("❌ ERROR webhook general: %s", str(e))
+        logger.error("Traceback webhook:\n%s", tb)
         return JSONResponse({"status": "ok"})
+
