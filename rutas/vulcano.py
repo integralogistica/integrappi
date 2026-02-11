@@ -1,4 +1,7 @@
 # vulcano.py
+from dotenv import load_dotenv
+
+load_dotenv()
 from __future__ import annotations
 
 import os
@@ -21,11 +24,7 @@ VULCANO_CUSTOMER_INDEX_PATH = os.getenv(
 
 # Credenciales
 VULCANO_USERNAME = os.getenv("VULCANO_USERNAME", "134APIINTEGRA")
-VULCANO_IDNAME = os.getenv(
-    "VULCANO_IDNAME",
-    # Usa el idname válido (el que te funcionó en Thunder)
-    "eyJpdiI6IlZSdVpoaHBhYk02b3ZFRTdMQlhuZnc9PSIsInZhbHVlIjoiTGs4KzM2OGhxWGo4ekVLUkVGMG1yS1EwUDEwNkZxdVl5VzNWcDNCQ0drMD0iLCJtYWMiOiJjMzEzMDEzYTk3OWJhNTM2MTYyYjlmZDRkNDE4ZDFlMzc2OGQ5MTg0ZWYwYzFkMmJkNjY5ZDZhNDI2N2I5ZDBmIiwidGFnIjoiIn0=",
-)
+VULCANO_IDNAME = os.getenv("VULCANO_IDNAME")
 VULCANO_AGENCY = os.getenv("VULCANO_AGENCY", "001")
 VULCANO_PROJECT = os.getenv("VULCANO_PROJECT", "1")
 VULCANO_IS_GROUP = int(os.getenv("VULCANO_IS_GROUP", "0"))
@@ -101,7 +100,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
 # ==============================================================================
 def consultar_por_tenedor(
     cedula_tenedor: str,
-    year: str = "2024",
+    year: str = "2025",
     pago_saldo: str = "No Aplicado",
     rpt_id: int = VULCANO_RPT_ID_PAGOS,
     page_size: int = 1000,
@@ -176,13 +175,13 @@ if __name__ == "__main__":
     cedula = "11200427"  # cambia por la real
     filas = consultar_por_tenedor(
         cedula_tenedor=cedula,
-        year="2024",
+        year="2025",
         pago_saldo="No Aplicado",
     )
 
     print("TOTAL FILAS:", len(filas))
-    print("PRIMERAS 3 FILAS:")
-    for x in filas[:20]:
+    print("PRIMERAS 5 FILAS:")
+    for x in filas[:5]:
         print(x)
 
     print("MANIFIESTOS:", extraer_manifiestos(filas)[:10])
