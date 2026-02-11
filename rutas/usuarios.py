@@ -18,7 +18,13 @@ ruta_usuario = APIRouter(
     responses={status.HTTP_404_NOT_FOUND: {"message": "No encontrado"}}  # Respuesta por defecto
 )
 
-# ----------------------------------------
+
+
+
+
+# -----
+# 
+# -----------------------------------
 # 🚀 GET /usuarios/
 # 📌 Obtiene todos los usuarios registrados
 # ----------------------------------------
@@ -28,6 +34,20 @@ async def getUsuarios():
     Retorna una lista con todos los usuarios en la base de datos.
     """
     return modelo_usuarios(bd_cliente.usuarios.find())
+
+
+@ruta_usuario.get("/debug/ip", tags=["Debug"])
+def debug_ip():
+    """
+    Devuelve la IP de salida del servidor.
+    Si VULCANO_PROXY_URL está configurado, hace la request usando el proxy.
+    """
+    proxy = os.getenv("VULCANO_PROXY_URL", "").strip()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    r = requests.get("https://api.ipify.org", proxies=proxies, timeout=20)
+    return {"proxy_configured": bool(proxy), "proxy_url": proxy or None, "out_ip": r.text.strip()}
+
 
 # ----------------------------------------
 # 🚀 GET /usuarios/{id}
@@ -127,15 +147,3 @@ def buscarUsuario(criterio: str, key):
         return {"error": "No se encontró usuario"}
 
 
-
-@ruta_usuario.get("/debug/ip", tags=["Debug"])
-def debug_ip():
-    """
-    Devuelve la IP de salida del servidor.
-    Si VULCANO_PROXY_URL está configurado, hace la request usando el proxy.
-    """
-    proxy = os.getenv("VULCANO_PROXY_URL", "").strip()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-
-    r = requests.get("https://api.ipify.org", proxies=proxies, timeout=20)
-    return {"proxy_configured": bool(proxy), "proxy_url": proxy or None, "out_ip": r.text.strip()}
