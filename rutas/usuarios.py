@@ -35,20 +35,6 @@ async def getUsuarios():
     """
     return modelo_usuarios(bd_cliente.usuarios.find())
 
-
-@ruta_usuario.get("/debug/ip", tags=["Debug"])
-def debug_ip():
-    """
-    Devuelve la IP de salida del servidor.
-    Si VULCANO_PROXY_URL está configurado, hace la request usando el proxy.
-    """
-    proxy = os.getenv("VULCANO_PROXY_URL", "").strip()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-
-    r = requests.get("https://api.ipify.org", proxies=proxies, timeout=20)
-    return {"proxy_configured": bool(proxy), "proxy_url": proxy or None, "out_ip": r.text.strip()}
-
-
 # ----------------------------------------
 # 🚀 GET /usuarios/{id}
 # 📌 Obtiene un usuario por su ID
