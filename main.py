@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from rutas.aut2 import ruta_usuario
@@ -17,7 +20,6 @@ from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
 from rutas.whatsapp_integra import ruta_whatsapp_integra
 from rutas.whatsapp_report_integra import ruta_whatsapp_report
-
 
 
 app = FastAPI()
