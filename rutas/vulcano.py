@@ -23,6 +23,19 @@ def _build_url(host: str, base_path: str, path: str) -> str:
     return f"{host.rstrip('/')}{base_path}{path}"
 
 
+# ✅ NUEVO: arma proxies solo si hay env var
+def _get_proxies() -> Optional[Dict[str, str]]:
+    """
+    Retorna proxies para requests si VULCANO_PROXY_URL está configurada.
+    Ej: http://129.212.166.228:8888
+    Ej con auth: http://user:pass@129.212.166.228:8888
+    """
+    proxy_url = os.getenv("VULCANO_PROXY_URL", "").strip()
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
 # ==============================================================================
 # 🔗 CONFIG (variables de entorno)
 # ==============================================================================
@@ -89,6 +102,8 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
         "isGroup": VULCANO_IS_GROUP,
     }
 
+    proxies = _get_proxies()  # ✅ NUEVO
+
     t0 = time.time()
     try:
         r = s.post(
@@ -97,6 +112,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
             verify=VULCANO_VERIFY_SSL,
+            proxies=proxies,  # ✅ CAMBIO (agregado)
         )
         r.raise_for_status()
 
@@ -171,6 +187,8 @@ def consultar_por_tenedor(
         "Authorization": f"Bearer {token}",
     }
 
+    proxies = _get_proxies()  # ✅ NUEVO
+
     t0 = time.time()
     try:
         r = s.post(
@@ -179,6 +197,7 @@ def consultar_por_tenedor(
             headers=headers,
             timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
             verify=VULCANO_VERIFY_SSL,
+            proxies=proxies,  # ✅ CAMBIO (agregado)
         )
         r.raise_for_status()
 
@@ -234,6 +253,10 @@ def extraer_manifiestos(filas: List[Dict[str, Any]]) -> List[str]:
 # ✅ PRUEBA RÁPIDA
 # ==============================================================================
 if __name__ == "__main__":
+    # ✅ Si vas a probar localmente, exporta antes:
+    # export VULCANO_PROXY_URL="http://129.212.166.228:8888"
+    # o con auth: "http://user:pass@129.212.166.228:8888"
+
     cedula = "11200427"  # cambia por la real
     filas = consultar_por_tenedor(
         cedula_tenedor=cedula,

@@ -6,8 +6,9 @@ from bd.schemas.usuario import Usuario  # Esquema Pydantic para validar usuarios
 from bd.bd_cliente import bd_cliente    # Conexión a la base de datos MongoDB
 from bd.models.usuario import modelo_usuario, modelo_usuarios  # Funciones para formatear usuarios
 from bson import ObjectId
-from typing import List, Optional
-
+from typing import List
+import requests
+import os
 # ----------------------------------------
 # 🔗 Configuración del Router de Usuarios
 # ----------------------------------------
@@ -124,3 +125,17 @@ def buscarUsuario(criterio: str, key):
         return Usuario(**modelo_usuario(usuario))
     except:
         return {"error": "No se encontró usuario"}
+
+
+
+@ruta_usuario.get("/debug/ip", tags=["Debug"])
+def debug_ip():
+    """
+    Devuelve la IP de salida del servidor.
+    Si VULCANO_PROXY_URL está configurado, hace la request usando el proxy.
+    """
+    proxy = os.getenv("VULCANO_PROXY_URL", "").strip()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    r = requests.get("https://api.ipify.org", proxies=proxies, timeout=20)
+    return {"proxy_configured": bool(proxy), "proxy_url": proxy or None, "out_ip": r.text.strip()}
