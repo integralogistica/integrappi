@@ -1,6 +1,7 @@
 # rutas/whatsapp_integra.py
 import os
 import re
+import traceback
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request
@@ -537,16 +538,40 @@ async def webhook(request: Request):
                     page=page,
                 )
             except Exception as e:
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="TRANSPORTADOR_PROCESSING", context=ctxp, meta={"error": str(e)})
+                tb = traceback.format_exc()
+                log_whatsapp_event(
+                    phone=numero,
+                    direction="SYSTEM",
+                    event="ERROR",
+                    state="TRANSPORTADOR_PROCESSING",
+                    context=ctxp,
+                    meta={
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "traceback": tb[:3000],
+                        "cedula_tenedor": cedula,
+                        "year": year,
+                        "pago_saldo": pago_saldo,
+                        "page_size": page_size,
+                        "page": page,
+                    },
+                )
+
                 ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
-                await enviar_texto(
-                    numero,
-                    "❗ No pude consultar en este momento (timeout o error del servicio).\n"
-                    "Intenta de nuevo en unos minutos.\n\n"
-                    + texto_menu_transportador()
-                )
+
+                # Mensaje al usuario (sin exponer detalles internos)
+                msg_user = "❗ No pude consultar en este momento."
+                err_txt = str(e).lower()
+                if "timeout" in err_txt:
+                    msg_user += " El servicio tardó demasiado en responder (timeout)."
+                elif "401" in err_txt or "403" in err_txt or "unauthorized" in err_txt:
+                    msg_user += " Hubo un problema de autenticación con Vulcano."
+                msg_user += "\nIntenta de nuevo en unos minutos.\n\n" + texto_menu_transportador()
+
+                await enviar_texto(numero, msg_user)
                 return JSONResponse({"status": "ok"})
+
 
             resumen = _resumen_transportador(cedula, year, pago_saldo, filas, page=page, page_size=page_size)
 
@@ -615,10 +640,32 @@ async def webhook(request: Request):
                         page=page,
                     )
                 except Exception as e:
-                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="ERROR", state="TRANSPORTADOR_PROCESSING", context=context, meta={"error": str(e)})
+                    tb = traceback.format_exc()
+                    log_whatsapp_event(
+                        phone=numero,
+                        direction="SYSTEM",
+                        event="ERROR",
+                        state="TRANSPORTADOR_PROCESSING",
+                        context=context,
+                        meta={
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                            "traceback": tb[:3000],
+                            "page": page,
+                            "page_size": page_size,
+                        },
+                    )
                     set_state_with_ts(numero, "TRANSPORTADOR_POST", context)
-                    await enviar_texto(numero, "❗ No pude traer más resultados ahora.\n\nResponde 2️⃣, 3️⃣ o 4️⃣ (o escribe *menu*).")
+
+                    msg_user = "❗ No pude traer más resultados ahora."
+                    err_txt = str(e).lower()
+                    if "timeout" in err_txt:
+                        msg_user += " El servicio tardó demasiado (timeout)."
+                    msg_user += "\n\nResponde 2️⃣, 3️⃣ o 4️⃣ (o escribe *menu*)."
+
+                    await enviar_texto(numero, msg_user)
                     return JSONResponse({"status": "ok"})
+
 
                 if not filas:
                     set_state_with_ts(numero, "TRANSPORTADOR_POST", {**(context or {}), "page": page})
