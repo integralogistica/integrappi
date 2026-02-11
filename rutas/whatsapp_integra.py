@@ -3,7 +3,6 @@ import os
 import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-import traceback
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 
@@ -11,8 +10,7 @@ from Funciones.chat_state_integra import get_state, set_state, reset_state
 from Funciones.whatsapp_utils_integra import enviar_texto
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
-from Funciones.siscore_ws_tracking import consultar_guia_ws
-from Funciones.siscore_ws_format import formatear_respuesta_guia
+
 
 # ✅ Vulcano (consulta por cédula del tenedor)
 # Ajusta el import si tu ruta es diferente (por ejemplo: from rutas.vulcano import consultar_por_tenedor)
@@ -790,16 +788,6 @@ async def webhook(request: Request):
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
             return JSONResponse({"status": "ok"})
         
-
-        # -------------------------
-        # CLIENTE_PROCESSING
-        # -------------------------
-        if state == "CLIENTE_PROCESSING":
-            await enviar_texto(numero, "⏳ Estoy consultando tu guía. En un momento te envío el resultado…")
-            ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
-            set_state_with_ts(numero, "CLIENTE_PROCESSING", ctx)
-            return JSONResponse({"status": "ok"})
-
         # -------------------------
         # CLIENTE_MENU
         # -------------------------
@@ -835,56 +823,51 @@ async def webhook(request: Request):
 
             if not GUIA_REGEX.match(guia):
                 await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="guia invalida", state="CLIENTE_GUIA_ASK")
+                log_whatsapp_event(
+                    phone=numero,
+                    direction="OUT",
+                    event="MESSAGE_SENT",
+                    text="guia invalida",
+                    state="CLIENTE_GUIA_ASK",
+                )
                 ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "CLIENTE_GUIA_ASK", ctx)
                 return JSONResponse({"status": "ok"})
 
-            # (Opcional) estado intermedio para UX
+            # Guarda guía en contexto (sin estado intermedio, porque ya no consultamos SOAP)
             ctx = _ctx_only_processed_ids(context)
             ctx.update({"guia": guia})
             ctx = _ctx_add_processed_id(ctx, msg_id)
-            set_state_with_ts(numero, "CLIENTE_PROCESSING", ctx)
 
-            await enviar_texto(numero, "🔎 Consultando tu guía, un momento…")
+            # Construye URL pública de Siscore
+            url = f"https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA={guia}"
 
-            try:
-                payload = await consultar_guia_ws(guia)
-            except Exception as e:
-                err_txt = traceback.format_exc()
-                print("❌ ERROR consultar_guia_ws:", repr(e), flush=True)
-                print(err_txt, flush=True)
-                log_whatsapp_event(
-                    phone=numero,
-                    direction="SYSTEM",
-                    event="ERROR",
-                    state="CLIENTE_PROCESSING",
-                    context={"guia": guia},
-                    meta={"error": str(e)},
-                )
-                # vuelve a menú cliente
-                ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                set_state_with_ts(numero, "CLIENTE_MENU", ctx_back)
-                await enviar_texto(numero, "❗ No pude consultar la guía ahora (timeout o error del servicio).\n\n" + texto_menu_cliente())
-                return JSONResponse({"status": "ok"})
+            texto_respuesta = (
+                "🔎 *Consulta de guía (Siscore)*\n\n"
+                f"📦 Guía: *{guia}*\n"
+                f"🔗 Abre este enlace para ver la trazabilidad:\n{url}\n\n"
+                "⚠️ *Importante:* Si al abrir el enlace la página aparece vacía o sin información, "
+                "es porque la guía no existe.\n\n"
+                "¿Qué deseas hacer ahora?\n"
+                "1️⃣ Consultar otra guía\n"
+                "2️⃣ Volver al menú principal"
+            )
 
-            if payload.get("ok") and payload.get("not_found"):
-                texto_respuesta = (
-                    f"❌ La guía *{guia}* no existe.\n\n"
-                    "¿Qué deseas hacer ahora?\n"
-                    "1️⃣ Consultar otra guía\n"
-                    "2️⃣ Volver al menú principal"
-                )
-            else:
-                texto_respuesta = formatear_respuesta_guia(payload)
-
+            # Pasa a CLIENTE_POST para manejar 1/2 como ya lo tienes
             ctx_post = _ctx_only_processed_ids(ctx)
-            ctx_post.update({"guia": guia})
+            ctx_post.update({"guia": guia, "tracking_url": url})
             ctx_post = _ctx_add_processed_id(ctx_post, msg_id)
             set_state_with_ts(numero, "CLIENTE_POST", ctx_post)
 
             await enviar_texto(numero, texto_respuesta)
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="respuesta trazabilidad ws", state="CLIENTE_POST", context={"guia": guia})
+            log_whatsapp_event(
+                phone=numero,
+                direction="OUT",
+                event="MESSAGE_SENT",
+                text="link siscore enviado",
+                state="CLIENTE_POST",
+                context={"guia": guia, "tracking_url": url},
+            )
             return JSONResponse({"status": "ok"})
 
         # -------------------------
