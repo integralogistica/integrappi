@@ -253,9 +253,6 @@ def extraer_manifiestos(filas: List[Dict[str, Any]]) -> List[str]:
 # ✅ PRUEBA RÁPIDA
 # ==============================================================================
 if __name__ == "__main__":
-    # ✅ Si vas a probar localmente, exporta antes:
-    # export VULCANO_PROXY_URL="http://129.212.166.228:8888"
-    # o con auth: "http://user:pass@129.212.166.228:8888"
 
     cedula = "11200427"  # cambia por la real
     filas = consultar_por_tenedor(
