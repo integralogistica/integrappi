@@ -885,29 +885,67 @@ async def webhook(request: Request):
                 set_state_with_ts(numero, "CLIENTE_GUIA_ASK", ctx)
                 return JSONResponse({"status": "ok"})
 
-            # Guarda guía en contexto (sin estado intermedio, porque ya no consultamos SOAP)
-            ctx = _ctx_only_processed_ids(context)
-            ctx.update({"guia": guia})
-            ctx = _ctx_add_processed_id(ctx, msg_id)
+            # Conserva dedup + guarda guía
+            ctxp = _ctx_only_processed_ids(context)
+            ctxp.update({"guia": guia})
+            ctxp = _ctx_add_processed_id(ctxp, msg_id)
 
-            # Construye URL pública de Siscore
-            url = f"https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA={guia}"
-
-            texto_respuesta = (
-                "🔎 *Consulta de guía (Siscore)*\n\n"
-                f"📦 Guía: *{guia}*\n"
-                f"🔗 Abre este enlace para ver la trazabilidad:\n{url}\n\n"
-                "⚠️ *Importante:* Si al abrir el enlace la página aparece vacía o sin información, "
-                "es porque la guía no existe.\n\n"
-                "¿Qué deseas hacer ahora?\n"
-                "1️⃣ Consultar otra guía\n"
-                "2️⃣ Volver al menú principal"
+            # Estado processing (opcional pero recomendado)
+            set_state_with_ts(numero, "CLIENTE_PROCESSING", ctxp)
+            await enviar_texto(numero, "🔎 Consultando Siscore, un momento…")
+            log_whatsapp_event(
+                phone=numero,
+                direction="OUT",
+                event="MESSAGE_SENT",
+                text="consultando siscore soap",
+                state="CLIENTE_PROCESSING",
+                context={"guia": guia},
             )
 
+            # ✅ Import local para evitar imports globales si no siempre se usa
+            from Funciones.siscore_ws_tracking import consultar_guia_ws
+            from Funciones.siscore_ws_format import formatear_respuesta_guia
+
+            try:
+                payload = await consultar_guia_ws(guia, timeout_seconds=25.0)
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error("Siscore SOAP ERROR: %s", str(e))
+                logger.error("Traceback Siscore:\n%s", tb)
+
+                log_whatsapp_event(
+                    phone=numero,
+                    direction="SYSTEM",
+                    event="ERROR",
+                    state="CLIENTE_PROCESSING",
+                    context={"guia": guia},
+                    meta={
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "traceback": tb[:3000],
+                    },
+                )
+
+                # Vuelve a menú cliente (sin exponer detalles)
+                ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "CLIENTE_MENU", ctx_back)
+                await enviar_texto(
+                    numero,
+                    "❗ No pude consultar Siscore en este momento. Intenta de nuevo en unos minutos.\n\n"
+                    + texto_menu_cliente()
+                )
+                return JSONResponse({"status": "ok"})
+
+            # Formatea respuesta para WhatsApp
+            texto_respuesta = formatear_respuesta_guia(payload)
+
             # Pasa a CLIENTE_POST para manejar 1/2 como ya lo tienes
-            ctx_post = _ctx_only_processed_ids(ctx)
-            ctx_post.update({"guia": guia, "tracking_url": url})
+            ctx_post = _ctx_only_processed_ids(ctxp)
+            ctx_post.update({"guia": guia, "last_payload_ok": bool(payload.get("ok"))})
+            if isinstance(payload, dict) and payload.get("tracking_url"):
+                ctx_post["tracking_url"] = payload["tracking_url"]
             ctx_post = _ctx_add_processed_id(ctx_post, msg_id)
+
             set_state_with_ts(numero, "CLIENTE_POST", ctx_post)
 
             await enviar_texto(numero, texto_respuesta)
@@ -915,11 +953,12 @@ async def webhook(request: Request):
                 phone=numero,
                 direction="OUT",
                 event="MESSAGE_SENT",
-                text="link siscore enviado",
+                text="respuesta siscore soap enviada",
                 state="CLIENTE_POST",
-                context={"guia": guia, "tracking_url": url},
+                context={"guia": guia, "ok": bool(payload.get("ok")), "exists": payload.get("exists")},
             )
             return JSONResponse({"status": "ok"})
+
 
         # -------------------------
         # CLIENTE_POST
