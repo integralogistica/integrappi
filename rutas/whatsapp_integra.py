@@ -6,12 +6,13 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
-
 from Funciones.chat_state_integra import get_state, set_state, reset_state
 from Funciones.whatsapp_utils_integra import enviar_texto
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
 import logging
+from fastapi import BackgroundTasks
+
 logger = logging.getLogger("integra")
 logging.basicConfig(level=logging.INFO) 
 
@@ -330,6 +331,44 @@ def _resumen_transportador(
         f"🗓️ *Fechas (primeras {len(top_f)}):*\n{bloque_f}"
     )
 
+async def _procesar_siscore_y_responder(numero: str, guia: str):
+    from Funciones.siscore_ws_tracking import consultar_guia_ws
+    from Funciones.siscore_ws_format import formatear_respuesta_guia
+
+    try:
+        payload = await consultar_guia_ws(guia, timeout_seconds=60.0)
+        texto_respuesta = formatear_respuesta_guia(payload)
+        await enviar_texto(numero, texto_respuesta)
+
+        log_whatsapp_event(
+            phone=numero,
+            direction="OUT",
+            event="MESSAGE_SENT",
+            text="respuesta siscore soap enviada (bg)",
+            state="CLIENTE_POST",
+            context={"guia": guia, "ok": bool(payload.get("ok")), "exists": payload.get("exists")},
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error("Siscore SOAP ERROR (bg): %s", str(e))
+        logger.error("Traceback Siscore (bg):\n%s", tb)
+
+        log_whatsapp_event(
+            phone=numero,
+            direction="SYSTEM",
+            event="ERROR",
+            state="CLIENTE_PROCESSING",
+            context={"guia": guia},
+            meta={"error_type": type(e).__name__, "error": str(e), "traceback": tb[:3000]},
+        )
+
+        await enviar_texto(
+            numero,
+            "❗ No pude consultar Siscore en este momento. Intenta de nuevo en unos minutos.\n\n"
+            "Responde:\n1️⃣ Consultar otra guía\n2️⃣ Volver al menú principal"
+        )
+
+
 
 # -------------------------
 # GET verificación (sin slash y con slash) para evitar 307
@@ -353,12 +392,12 @@ async def verify_webhook(request: Request):
 # POST mensajes (sin slash y con slash) para evitar 307
 # -------------------------
 @ruta_whatsapp_integra.post("")
-async def webhook_no_slash(request: Request):
-    return await webhook(request)
+async def webhook_no_slash(request: Request, background_tasks: BackgroundTasks):
+    return await webhook(request, background_tasks)
 
 
 @ruta_whatsapp_integra.post("/")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     # 1) Lee JSON (si falla, responde 200 para que Meta NO reintente)
     try:
         data = await request.json()
@@ -866,6 +905,7 @@ async def webhook(request: Request):
             set_state_with_ts(numero, "CLIENTE_MENU", ctx)
             return JSONResponse({"status": "ok"})
 
+                
         # -------------------------
         # CLIENTE_GUIA_ASK
         # -------------------------
@@ -890,73 +930,29 @@ async def webhook(request: Request):
             ctxp.update({"guia": guia})
             ctxp = _ctx_add_processed_id(ctxp, msg_id)
 
-            # Estado processing (opcional pero recomendado)
+            # Estado processing (útil para logs/seguimiento)
             set_state_with_ts(numero, "CLIENTE_PROCESSING", ctxp)
+
+            # Respuesta inmediata (NO bloquea webhook)
             await enviar_texto(numero, "🔎 Consultando Siscore, un momento…")
             log_whatsapp_event(
                 phone=numero,
                 direction="OUT",
                 event="MESSAGE_SENT",
-                text="consultando siscore soap",
+                text="consultando siscore soap (bg)",
                 state="CLIENTE_PROCESSING",
                 context={"guia": guia},
             )
 
-            # ✅ Import local para evitar imports globales si no siempre se usa
-            from Funciones.siscore_ws_tracking import consultar_guia_ws
-            from Funciones.siscore_ws_format import formatear_respuesta_guia
-
-            try:
-                payload = await consultar_guia_ws(guia, timeout_seconds=25.0)
-            except Exception as e:
-                tb = traceback.format_exc()
-                logger.error("Siscore SOAP ERROR: %s", str(e))
-                logger.error("Traceback Siscore:\n%s", tb)
-
-                log_whatsapp_event(
-                    phone=numero,
-                    direction="SYSTEM",
-                    event="ERROR",
-                    state="CLIENTE_PROCESSING",
-                    context={"guia": guia},
-                    meta={
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                        "traceback": tb[:3000],
-                    },
-                )
-
-                # Vuelve a menú cliente (sin exponer detalles)
-                ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                set_state_with_ts(numero, "CLIENTE_MENU", ctx_back)
-                await enviar_texto(
-                    numero,
-                    "❗ No pude consultar Siscore en este momento. Intenta de nuevo en unos minutos.\n\n"
-                    + texto_menu_cliente()
-                )
-                return JSONResponse({"status": "ok"})
-
-            # Formatea respuesta para WhatsApp
-            texto_respuesta = formatear_respuesta_guia(payload)
-
-            # Pasa a CLIENTE_POST para manejar 1/2 como ya lo tienes
+            # Deja el flujo listo para manejar 1/2 después
             ctx_post = _ctx_only_processed_ids(ctxp)
-            ctx_post.update({"guia": guia, "last_payload_ok": bool(payload.get("ok"))})
-            if isinstance(payload, dict) and payload.get("tracking_url"):
-                ctx_post["tracking_url"] = payload["tracking_url"]
+            ctx_post.update({"guia": guia, "last_payload_ok": None})
             ctx_post = _ctx_add_processed_id(ctx_post, msg_id)
-
             set_state_with_ts(numero, "CLIENTE_POST", ctx_post)
 
-            await enviar_texto(numero, texto_respuesta)
-            log_whatsapp_event(
-                phone=numero,
-                direction="OUT",
-                event="MESSAGE_SENT",
-                text="respuesta siscore soap enviada",
-                state="CLIENTE_POST",
-                context={"guia": guia, "ok": bool(payload.get("ok")), "exists": payload.get("exists")},
-            )
+            # ✅ Ejecuta SOAP en background (evita timeouts/restarts en Render)
+            background_tasks.add_task(_procesar_siscore_y_responder, numero, guia)
+
             return JSONResponse({"status": "ok"})
 
 
