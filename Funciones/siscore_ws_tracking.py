@@ -25,19 +25,24 @@ SISCORE_TRACKING_URL_TEMPLATE = os.getenv(
     "https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA={guia}",
 )
 
-
 # ==============================================================================
 # ✅ PROXY (mismo que Vulcano)
 # ==============================================================================
 def _get_proxy_url() -> Optional[str]:
     """
     Usa el mismo proxy que Vulcano.
-    Formato esperado:
-      http://ip:3128
-      http://user:pass@ip:3128
+    Acepta estos formatos en env:
+      - http://ip:3128
+      - http://user:pass@ip:3128
+      - ip:3128              (se normaliza a http://ip:3128)
+      - user:pass@ip:3128    (se normaliza a http://user:pass@ip:3128)
     """
     proxy_url = os.getenv("VULCANO_PROXY_URL", "").strip()
-    return proxy_url or None
+    if not proxy_url:
+        return None
+    if "://" not in proxy_url:
+        proxy_url = "http://" + proxy_url
+    return proxy_url
 
 
 def _proxy_safe_preview(proxy_url: Optional[str]) -> str:
@@ -85,7 +90,7 @@ def _parse_inner_result_xml(inner_xml: str) -> Dict[str, Any]:
         if tag == "Mov":
             for inf in child.findall(".//*"):
                 if _strip_namespace(inf.tag) == "InformacionMov":
-                    mov = {}
+                    mov: Dict[str, str] = {}
                     for f in list(inf):
                         mov[_strip_namespace(f.tag)] = _safe_text(f.text)
                     if mov:
@@ -133,6 +138,21 @@ def _resolve_host_ips(host: str) -> List[str]:
     return ips
 
 
+async def _probar_proxy_si_aplica(proxy_url: Optional[str]) -> None:
+    """
+    Test liviano para confirmar si el proxy responde (no garantiza acceso a Siscore).
+    Si falla, deja log claro. No rompe el flujo principal.
+    """
+    if not proxy_url:
+        return
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=20.0, trust_env=False) as c:
+            r = await c.get("https://api.ipify.org?format=json")
+            print("➡️ PROXY_TEST ipify STATUS:", r.status_code, "BODY_PREVIEW:", (r.text or "")[:120], flush=True)
+    except Exception as e:
+        print("❌ PROXY_TEST ERROR:", repr(e), flush=True)
+
+
 async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dict[str, Any]:
     if not SISCORE_SOAP_TOKEN:
         raise RuntimeError("Falta SISCORE_SOAP_TOKEN en variables de entorno.")
@@ -171,6 +191,9 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dic
     if ips:
         print(f"➡️ DEST_IPS: {', '.join(ips)}", flush=True)
 
+    # ✅ Test rápido del proxy (para diagnóstico). Si no lo quieres, bórralo.
+    await _probar_proxy_si_aplica(proxy_url)
+
     max_intentos = 3
     last_err: Optional[str] = None
     text: Optional[str] = None
@@ -181,8 +204,8 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dic
                 timeout=timeout,
                 limits=limits,
                 http2=False,
-                proxy=proxy_url,     # ✅ SALE POR EL PROXY
-                trust_env=False,     # ✅ IGNORA HTTP_PROXY/HTTPS_PROXY DEL ENTORNO
+                proxy=proxy_url,  # ✅ SALE POR EL PROXY (si existe)
+                trust_env=False,  # ✅ IGNORA HTTP_PROXY/HTTPS_PROXY DEL ENTORNO
             ) as client:
                 resp = await client.post(
                     SISCORE_SOAP_ENDPOINT,
@@ -194,6 +217,13 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dic
                 text = resp.text
             break
 
+        except httpx.ProxyError as e:
+            last_err = f"ProxyError intento {intento}/{max_intentos}: {repr(e)}"
+            print("❌ SISCORE PROXY ERROR:", last_err, flush=True)
+            if intento == max_intentos:
+                raise
+            await asyncio.sleep(1.2 * intento)
+
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
             last_err = f"{type(e).__name__} intento {intento}/{max_intentos}: {repr(e)}"
             print("❌ SISCORE TIMEOUT:", last_err, flush=True)
@@ -201,16 +231,17 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dic
                 raise
             await asyncio.sleep(1.2 * intento)
 
-        except httpx.RequestError as e:
-            last_err = f"RequestError intento {intento}/{max_intentos}: {repr(e)}"
-            print("❌ SISCORE REQUEST ERROR:", last_err, flush=True)
+        except httpx.HTTPStatusError as e:
+            last_err = f"HTTPStatusError intento {intento}/{max_intentos}: {repr(e)}"
+            print("❌ SISCORE HTTP ERROR:", last_err, flush=True)
             if intento == max_intentos:
                 raise
             await asyncio.sleep(1.2 * intento)
 
-        except httpx.HTTPStatusError as e:
-            last_err = f"HTTPStatusError intento {intento}/{max_intentos}: {repr(e)}"
-            print("❌ SISCORE HTTP ERROR:", last_err, flush=True)
+        except httpx.RequestError as e:
+            # otros errores de red (DNS, conexión, etc.)
+            last_err = f"RequestError intento {intento}/{max_intentos}: {repr(e)}"
+            print("❌ SISCORE REQUEST ERROR:", last_err, flush=True)
             if intento == max_intentos:
                 raise
             await asyncio.sleep(1.2 * intento)
