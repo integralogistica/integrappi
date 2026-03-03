@@ -103,9 +103,9 @@ def _parse_inner_result_xml(inner_xml: str) -> Dict[str, Any]:
 
 
 def _es_guia_no_existente(parsed: Dict[str, Any]) -> bool:
-    cliente = _safe_text(parsed.get("Cliente")).lower()
+    cliente = _safe_text(parsed.get("Nombre_cliente")).lower()
     estado = _safe_text(parsed.get("Estado")).lower()
-    envio = _safe_text(parsed.get("Envio"))
+    envio = _safe_text(parsed.get("FecEnv"))
     movimientos = parsed.get("Movimientos") or []
 
     cliente_vacio = (not cliente) or cliente in {"(sin cliente)", "sin cliente", "-", "null", "none"}
