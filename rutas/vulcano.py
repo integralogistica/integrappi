@@ -248,6 +248,83 @@ def consultar_por_tenedor(
     return out
 
 
+def consultar_manifiestos_detallado(
+    cedula_tenedor: str,
+    year: str = "2024",
+    page_size: int = 500,
+    page: int = 1,
+    session: Optional[requests.Session] = None,
+    timeout: int = 120,
+) -> List[Dict[str, Any]]:
+    """
+    Consulta rpt_id=26 (datos completos por manifiesto):
+    estado, ruta, placa, montos, fechas de pago.
+    No usa filtro 'Pago saldo' (no existe en esa vista).
+    Excluye automáticamente los ANULADOS.
+    """
+    if not cedula_tenedor:
+        raise ValueError("cedula_tenedor es requerida")
+
+    s = _get_session(session)
+    token = vulcano_login(session=s, timeout=timeout)
+
+    url = _build_url(VULCANO_HOST, VULCANO_BASE_PATH, VULCANO_CUSTOMER_INDEX_PATH)
+    payload = {
+        "pageSize": page_size,
+        "page": page,
+        "rptId": 26,
+        "filter": [
+            {"campo": "Fecha", "operador": "YEAR>", "valor": str(year)},
+            {"campo": "Tenedor", "operador": "=", "valor": str(cedula_tenedor)},
+        ],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+
+    proxies = _get_proxies()
+    t0 = time.time()
+    try:
+        r = s.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
+            verify=VULCANO_VERIFY_SSL,
+            proxies=proxies,
+        )
+        r.raise_for_status()
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise VulcanoRequestError(f"Detallado: respuesta NO es JSON. {_resp_debug(r)}") from e
+    except requests.Timeout as e:
+        raise VulcanoRequestError(f"Detallado: TIMEOUT ({time.time() - t0:.1f}s)") from e
+    except requests.HTTPError as e:
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            raise VulcanoRequestError(f"Detallado: HTTPError. {_resp_debug(resp)}") from e
+        raise VulcanoRequestError(f"Detallado: HTTPError sin response. err={e}") from e
+    except requests.ConnectionError as e:
+        raise VulcanoRequestError(f"Detallado: ConnectionError err={e}") from e
+    except requests.RequestException as e:
+        raise VulcanoRequestError(f"Detallado: RequestException err={e}") from e
+
+    filas = (data or {}).get("data", {}).get("data")
+    if filas is None:
+        raise VulcanoRequestError(f"Detallado: estructura inesperada: {data}")
+    if not isinstance(filas, list):
+        raise VulcanoRequestError(f"Detallado: 'data.data' no es lista.")
+
+    # Excluir ANULADOS
+    return [
+        row for row in filas
+        if isinstance(row, dict) and str(row.get("Estado_mft") or "").upper() != "ANULADO"
+    ]
+
+
 def extraer_manifiestos(filas: List[Dict[str, Any]]) -> List[str]:
     out: List[str] = []
     for f in filas or []:

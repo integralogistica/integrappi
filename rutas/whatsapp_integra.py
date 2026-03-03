@@ -1,8 +1,9 @@
 # rutas/whatsapp_integra.py
 import os
 import re
+import asyncio
 import traceback
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -10,34 +11,41 @@ from Funciones.chat_state_integra import get_state, set_state, reset_state
 from Funciones.whatsapp_utils_integra import enviar_texto
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
+from Funciones.vulcano_whatsapp_format import (
+    agrupar_por_estado,
+    formatear_resumen_tenedor,
+    formatear_pagos_saldo,
+    formatear_manifiestos_estado,
+    PAGE_SIZE_DETALLE,
+)
+import httpx
 import logging
 from fastapi import BackgroundTasks
 
 logger = logging.getLogger("integra")
-logging.basicConfig(level=logging.INFO) 
+logging.basicConfig(level=logging.INFO)
 
-# ✅ Vulcano (consulta por cédula del tenedor)
-# Ajusta el import si tu ruta es diferente (por ejemplo: from rutas.vulcano import consultar_por_tenedor)
-from rutas.vulcano import consultar_por_tenedor
+from rutas.vulcano import consultar_manifiestos_detallado
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "integra_verify_2026")
+PAGOS_ENDPOINT = os.getenv(
+    "PAGOS_TENEDOR_URL",
+    "https://integrappi-dvmh.onrender.com/manifiestos/tenedor/{cedula}",
+)
 
 # Regex
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
-GUIA_REGEX = re.compile(r"^\d{5,20}$")  # ajusta si tus guías son más largas
+GUIA_REGEX = re.compile(r"^\d{5,20}$")
 YEAR_REGEX = re.compile(r"^(19|20)\d{2}$")
 
 # TTL estado
 STATE_TTL_MINUTES = 60
 
-# Dedup: cuántos msg_id guardamos por usuario
+# Dedup
 PROCESSED_IDS_MAX = 30
 
-# Defaults Transportador (para no pedir 1000 de una)
+# Defaults Transportador
 TRANSP_DEFAULT_YEAR = "2024"
-TRANSP_DEFAULT_PAGO_SALDO = "No Aplicado"
-TRANSP_DEFAULT_PAGE_SIZE = 200  # recomendado
-TRANSP_DEFAULT_PAGE = 1
 
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",
@@ -109,29 +117,79 @@ def texto_menu_transportador() -> str:
 
 def texto_pedir_cedula_tenedor() -> str:
     return (
-        "🔎 *Consultar manifiestos (Vulcano)*\n\n"
+        "🔎 *Consultar manifiestos*\n\n"
         "Escribe la *cédula del tenedor* (solo números).\n"
         "Ejemplo: 1012455147"
     )
 
 
-def texto_post_transportador(resumen: str) -> str:
-    return (
-        f"{resumen}\n\n"
-        "¿Qué deseas hacer ahora?\n"
-        "1️⃣ Ver más resultados\n"
-        "2️⃣ Cambiar año\n"
-        "3️⃣ Consultar otra cédula\n"
-        "4️⃣ Volver al menú principal"
-    )
+# -------------------------
+# Transportador — helpers async
+# -------------------------
+async def _obtener_pagos_mongodb(cedula: str, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    """Consulta el endpoint de pagos de saldo programados para un tenedor."""
+    url = PAGOS_ENDPOINT.replace("{cedula}", cedula)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning("Pagos MongoDB error cedula=%s: %s", cedula, str(e))
+        return []
 
 
-def _texto_pedir_year_transportador() -> str:
-    return (
-        "📅 Escribe el *año* (4 dígitos).\n"
-        "Ejemplo: 2024\n\n"
-        "Para volver escribe *menu*."
+async def _consultar_datos_tenedor(
+    cedula: str, year: str
+) -> Tuple[Dict[str, List], List[Dict], Dict[str, Dict]]:
+    """
+    Consulta en paralelo:
+      - Vulcano rpt_id=26 (manifiestos detallados, sin ANULADOS)
+      - MongoDB endpoint (pagos de saldo programados)
+    Retorna (grupos, pagos_enriquecidos, dict_pagos).
+    """
+    filas_task = asyncio.to_thread(
+        consultar_manifiestos_detallado,
+        cedula_tenedor=cedula,
+        year=year,
+        page_size=500,
+        page=1,
     )
+    pagos_task = _obtener_pagos_mongodb(cedula)
+
+    filas, pagos_raw = await asyncio.gather(filas_task, pagos_task)
+
+    grupos = agrupar_por_estado(filas)
+
+    # Índice Vulcano por Manif_numero para enriquecer los pagos
+    dict_vulcano: Dict[str, Dict] = {
+        str(f.get("Manif_numero", "")): f
+        for f in filas
+        if f.get("Manif_numero")
+    }
+
+    # Enriquecer pagos con Origen/Destino de Vulcano
+    pagos_enriquecidos: List[Dict] = []
+    for p in pagos_raw:
+        mft = str(p.get("Manifiesto") or "")
+        if not mft:
+            continue
+        pago = dict(p)
+        if mft in dict_vulcano:
+            v = dict_vulcano[mft]
+            pago["Origen"] = v.get("Origen", "-")
+            pago["Destino"] = v.get("Destino", "-")
+        pagos_enriquecidos.append(pago)
+
+    # dict_pagos para cruce en formateo
+    dict_pagos: Dict[str, Dict] = {
+        str(p.get("Manifiesto", "")): p
+        for p in pagos_raw
+        if p.get("Manifiesto")
+    }
+
+    return grupos, pagos_enriquecidos, dict_pagos
 
 
 # -------------------------
@@ -274,62 +332,6 @@ def _safe_int(v: Any, default: int) -> int:
     except Exception:
         return default
 
-
-def _vulcano_consultar_compat(
-    cedula_tenedor: str,
-    year: str,
-    pago_saldo: str,
-    page_size: int,
-    page: int,
-) -> List[Dict[str, Any]]:
-    """
-    Compatibilidad: si tu consultar_por_tenedor NO acepta page/page_size, lo llama sin ellos.
-    """
-    try:
-        return consultar_por_tenedor(
-            cedula_tenedor=cedula_tenedor,
-            year=year,
-            pago_saldo=pago_saldo,
-            page_size=page_size,
-            page=page,
-        )
-    except TypeError:
-        # versión antigua sin paginación
-        return consultar_por_tenedor(
-            cedula_tenedor=cedula_tenedor,
-            year=year,
-            pago_saldo=pago_saldo,
-        )
-
-
-def _resumen_transportador(
-    cedula: str,
-    year: str,
-    pago_saldo: str,
-    filas: List[Dict[str, Any]],
-    page: int,
-    page_size: int,
-) -> str:
-    total = len(filas)
-    manifiestos = [f.get("Manifiesto") for f in filas if isinstance(f, dict) and f.get("Manifiesto")]
-    fechas = [f.get("Fecha") for f in filas if isinstance(f, dict) and f.get("Fecha")]
-
-    top_m = manifiestos[:10]
-    top_f = fechas[:10]
-
-    bloque_m = "\n".join([f"• {m}" for m in top_m]) if top_m else "• (sin manifiestos)"
-    bloque_f = "\n".join([f"• {x}" for x in top_f]) if top_f else "• (sin fechas)"
-
-    return (
-        "✅ *Consulta Vulcano*\n\n"
-        f"👤 Tenedor: *{cedula}*\n"
-        f"📅 Año: *{year}*\n"
-        f"💳 Pago saldo: *{pago_saldo}*\n"
-        f"📄 Página: *{page}* (tamaño {page_size})\n"
-        f"🔢 Registros en esta página: *{total}*\n\n"
-        f"📦 *Manifiestos (primeros {len(top_m)}):*\n{bloque_m}\n\n"
-        f"🗓️ *Fechas (primeras {len(top_f)}):*\n{bloque_f}"
-    )
 
 async def _procesar_siscore_y_responder(numero: str, guia: str):
     from Funciones.siscore_ws_tracking import consultar_guia_ws
@@ -517,16 +519,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
                 log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_ASK_CEDULA", context={})
                 await enviar_texto(numero, texto_pedir_cedula_tenedor())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula tenedor", state="TRANSPORTADOR_ASK_CEDULA")
                 return JSONResponse({"status": "ok"})
 
             if texto_lower == "2":
                 reset_state(numero)
                 ctx = _ctx_add_processed_id({}, msg_id)
                 set_state_with_ts(numero, "START", ctx)
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="START", context={})
                 await enviar_texto(numero, texto_inicio())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="volver menu inicio", state="START")
                 return JSONResponse({"status": "ok"})
 
             await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_transportador())
@@ -542,212 +541,208 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
             if not CEDULA_REGEX.match(cedula):
                 await enviar_texto(numero, "La cédula debe contener solo números.\n\n" + texto_pedir_cedula_tenedor())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cedula tenedor invalida", state="TRANSPORTADOR_ASK_CEDULA")
                 ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
                 return JSONResponse({"status": "ok"})
 
             year = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
-            pago_saldo = str((context or {}).get("pago_saldo") or TRANSP_DEFAULT_PAGO_SALDO)
-            page_size = _safe_int((context or {}).get("page_size"), TRANSP_DEFAULT_PAGE_SIZE)
-            page = TRANSP_DEFAULT_PAGE
 
             ctxp = _ctx_only_processed_ids(context)
-            ctxp.update(
-                {
-                    "cedula_tenedor": cedula,
-                    "year": year,
-                    "pago_saldo": pago_saldo,
-                    "page_size": page_size,
-                    "page": page,
-                }
-            )
+            ctxp.update({"cedula_tenedor": cedula, "year": year})
             ctxp = _ctx_add_processed_id(ctxp, msg_id)
-
             set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", ctxp)
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_PROCESSING", context=ctxp)
 
-            await enviar_texto(numero, "🔎 Consultando Vulcano, un momento…")
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultando vulcano", state="TRANSPORTADOR_PROCESSING")
+            await enviar_texto(numero, "🔎 Consultando manifiestos y pagos, un momento…")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="consultando vulcano+pagos", state="TRANSPORTADOR_PROCESSING")
 
             try:
-                filas = _vulcano_consultar_compat(
-                    cedula_tenedor=cedula,
-                    year=year,
-                    pago_saldo=pago_saldo,
-                    page_size=page_size,
-                    page=page,
-                )
+                grupos, pagos, dict_pagos = await _consultar_datos_tenedor(cedula, year)
             except Exception as e:
                 tb = traceback.format_exc()
-                logger.error("Vulcano ERROR (transportador): %s", str(e))
-                logger.error("Traceback Vulcano:\n%s", tb)
+                logger.error("Vulcano detallado ERROR: %s\n%s", str(e), tb)
                 log_whatsapp_event(
-                    phone=numero,
-                    direction="SYSTEM",
-                    event="ERROR",
-                    state="TRANSPORTADOR_PROCESSING",
-                    context=ctxp,
-                    meta={
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                        "traceback": tb[:3000],
-                        "cedula_tenedor": cedula,
-                        "year": year,
-                        "pago_saldo": pago_saldo,
-                        "page_size": page_size,
-                        "page": page,
-                    },
+                    phone=numero, direction="SYSTEM", event="ERROR",
+                    state="TRANSPORTADOR_PROCESSING", context=ctxp,
+                    meta={"error_type": type(e).__name__, "error": str(e), "traceback": tb[:3000]},
                 )
-
                 ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
-
-                # Mensaje al usuario (sin exponer detalles internos)
-                msg_user = "❗ No pude consultar en este momento."
                 err_txt = str(e).lower()
+                msg_user = "❗ No pude consultar en este momento."
                 if "timeout" in err_txt:
-                    msg_user += " El servicio tardó demasiado en responder (timeout)."
+                    msg_user += " El servicio tardó demasiado (timeout)."
                 elif "401" in err_txt or "403" in err_txt or "unauthorized" in err_txt:
-                    msg_user += " Hubo un problema de autenticación con Vulcano."
+                    msg_user += " Problema de autenticación con Vulcano."
                 msg_user += "\nIntenta de nuevo en unos minutos.\n\n" + texto_menu_transportador()
-
                 await enviar_texto(numero, msg_user)
                 return JSONResponse({"status": "ok"})
 
+            texto_resumen, opcion_map = formatear_resumen_tenedor(cedula, year, grupos, pagos)
 
-            resumen = _resumen_transportador(cedula, year, pago_saldo, filas, page=page, page_size=page_size)
+            ctx_res = _ctx_only_processed_ids(ctxp)
+            ctx_res.update({
+                "cedula_tenedor": cedula,
+                "year": year,
+                "grupos": grupos,
+                "pagos": pagos,
+                "dict_pagos": dict_pagos,
+                "opcion_map": opcion_map,
+            })
+            ctx_res = _ctx_add_processed_id(ctx_res, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx_res)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_RESUMEN", context={"cedula_tenedor": cedula})
 
-            ctx_post = dict(ctxp)
-            ctx_post.update(
-                {
-                    "last_count": len(filas),
-                }
-            )
-            set_state_with_ts(numero, "TRANSPORTADOR_POST", ctx_post)
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_POST", context={"cedula_tenedor": cedula, "year": year})
-
-            await enviar_texto(numero, texto_post_transportador(resumen))
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="respuesta vulcano", state="TRANSPORTADOR_POST")
+            await enviar_texto(numero, texto_resumen)
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="resumen transportador", state="TRANSPORTADOR_RESUMEN")
             return JSONResponse({"status": "ok"})
 
         # -------------------------
-        # TRANSPORTADOR_ASK_YEAR
+        # TRANSPORTADOR_RESUMEN
         # -------------------------
-        if state == "TRANSPORTADOR_ASK_YEAR":
-            year = _limpiar_numero(texto)
+        if state == "TRANSPORTADOR_RESUMEN":
+            opcion_map = (context or {}).get("opcion_map") or {}
+            accion = opcion_map.get(texto_lower, "")
 
-            if not YEAR_REGEX.match(year):
-                await enviar_texto(numero, "Año inválido.\n\n" + _texto_pedir_year_transportador())
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="year invalido", state="TRANSPORTADOR_ASK_YEAR")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_ASK_YEAR", ctx)
+            cedula = str((context or {}).get("cedula_tenedor") or "")
+            year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+            grupos = (context or {}).get("grupos") or {}
+            pagos  = (context or {}).get("pagos") or []
+            dict_pagos = (context or {}).get("dict_pagos") or {}
+
+            if accion == "pagos":
+                ctx = dict(context or {})
+                ctx["page_pagos"] = 1
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
+                await enviar_texto(numero, formatear_pagos_saldo(pagos, page=1))
                 return JSONResponse({"status": "ok"})
 
-            # Conserva dedup y vuelve a pedir cédula (más claro para el usuario)
-            ctx = _ctx_only_processed_ids(context)
-            ctx.update({"year": year})
-            ctx = _ctx_add_processed_id(ctx, msg_id)
-            set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
-
-            await enviar_texto(numero, f"Listo ✅ Año configurado en *{year}*.\n\n" + texto_pedir_cedula_tenedor())
-            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="year actualizado", state="TRANSPORTADOR_ASK_CEDULA")
-            return JSONResponse({"status": "ok"})
-
-        # -------------------------
-        # TRANSPORTADOR_POST
-        # -------------------------
-        if state == "TRANSPORTADOR_POST":
-            if texto_lower == "1":
-                cedula = str((context or {}).get("cedula_tenedor") or "")
-                year = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
-                pago_saldo = str((context or {}).get("pago_saldo") or TRANSP_DEFAULT_PAGO_SALDO)
-                page_size = _safe_int((context or {}).get("page_size"), TRANSP_DEFAULT_PAGE_SIZE)
-                page = _safe_int((context or {}).get("page"), TRANSP_DEFAULT_PAGE) + 1
-
-                if not cedula:
-                    ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
-                    await enviar_texto(numero, "No tengo la cédula en memoria.\n\n" + texto_menu_transportador())
-                    return JSONResponse({"status": "ok"})
-
-                set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", {**(context or {}), "page": page})
-                await enviar_texto(numero, f"🔎 Consultando página {page}…")
-
-                try:
-                    filas = _vulcano_consultar_compat(
-                        cedula_tenedor=cedula,
-                        year=year,
-                        pago_saldo=pago_saldo,
-                        page_size=page_size,
-                        page=page,
-                    )
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    log_whatsapp_event(
-                        phone=numero,
-                        direction="SYSTEM",
-                        event="ERROR",
-                        state="TRANSPORTADOR_PROCESSING",
-                        context=context,
-                        meta={
-                            "error_type": type(e).__name__,
-                            "error": str(e),
-                            "traceback": tb[:3000],
-                            "page": page,
-                            "page_size": page_size,
-                        },
-                    )
-                    set_state_with_ts(numero, "TRANSPORTADOR_POST", context)
-
-                    msg_user = "❗ No pude traer más resultados ahora."
-                    err_txt = str(e).lower()
-                    if "timeout" in err_txt:
-                        msg_user += " El servicio tardó demasiado (timeout)."
-                    msg_user += "\n\nResponde 2️⃣, 3️⃣ o 4️⃣ (o escribe *menu*)."
-
-                    await enviar_texto(numero, msg_user)
-                    return JSONResponse({"status": "ok"})
-
-
-                if not filas:
-                    set_state_with_ts(numero, "TRANSPORTADOR_POST", {**(context or {}), "page": page})
-                    await enviar_texto(
-                        numero,
-                        "No hay más resultados.\n\n"
-                        "2️⃣ Cambiar año\n"
-                        "3️⃣ Consultar otra cédula\n"
-                        "4️⃣ Volver al menú principal"
-                    )
-                    return JSONResponse({"status": "ok"})
-
-                resumen = _resumen_transportador(cedula, year, pago_saldo, filas, page=page, page_size=page_size)
-                set_state_with_ts(numero, "TRANSPORTADOR_POST", {**(context or {}), "page": page})
-                await enviar_texto(numero, texto_post_transportador(resumen))
+            if accion.startswith("estado_"):
+                estado = accion[len("estado_"):]
+                ctx = dict(context or {})
+                ctx["estado_actual"] = estado
+                ctx["page_estado"] = 1
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ESTADO_DETALLE", ctx)
+                filas_e = grupos.get(estado, [])
+                await enviar_texto(numero, formatear_manifiestos_estado(filas_e, estado, page=1, dict_pagos=dict_pagos))
                 return JSONResponse({"status": "ok"})
 
-            if texto_lower == "2":
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_ASK_YEAR", ctx)
-                await enviar_texto(numero, _texto_pedir_year_transportador())
-                return JSONResponse({"status": "ok"})
-
-            if texto_lower == "3":
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+            if accion == "otra_cedula":
+                ctx = _ctx_only_processed_ids(context or {})
+                ctx["year"] = year
+                ctx = _ctx_add_processed_id(ctx, msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
                 await enviar_texto(numero, texto_pedir_cedula_tenedor())
                 return JSONResponse({"status": "ok"})
 
-            if texto_lower == "4":
+            if accion == "menu_principal":
                 reset_state(numero)
                 ctx = _ctx_add_processed_id({}, msg_id)
                 set_state_with_ts(numero, "START", ctx)
                 await enviar_texto(numero, texto_inicio())
                 return JSONResponse({"status": "ok"})
 
-            await enviar_texto(numero, "Opción no válida.\n\nResponde 1️⃣, 2️⃣, 3️⃣ o 4️⃣. (o escribe *menu*)")
+            # Opción no válida: re-muestra el resumen
+            texto_resumen, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
+            ctx = dict(context or {})
+            ctx["opcion_map"] = opcion_map_nuevo
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+            await enviar_texto(numero, "Opción no válida.\n\n" + texto_resumen)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_PAGOS
+        # -------------------------
+        if state == "TRANSPORTADOR_PAGOS":
+            pagos     = (context or {}).get("pagos") or []
+            page      = _safe_int((context or {}).get("page_pagos"), 1)
+            hay_mas   = page * PAGE_SIZE_DETALLE < len(pagos)
+            op_mas    = "1" if hay_mas else None
+            op_resume = "2" if hay_mas else "1"
+            op_menu   = "3" if hay_mas else "2"
+
+            if op_mas and texto_lower == op_mas:
+                nueva_page = page + 1
+                ctx = dict(context or {})
+                ctx["page_pagos"] = nueva_page
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
+                await enviar_texto(numero, formatear_pagos_saldo(pagos, page=nueva_page))
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == op_resume:
+                cedula = str((context or {}).get("cedula_tenedor") or "")
+                year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+                grupos = (context or {}).get("grupos") or {}
+                texto_res, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
+                ctx = dict(context or {})
+                ctx["opcion_map"] = opcion_map_nuevo
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                await enviar_texto(numero, texto_res)
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == op_menu:
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+
+            ops = "/".join(filter(None, [op_mas, op_resume, op_menu]))
+            await enviar_texto(numero, f"Opción no válida. Responde {ops} (o escribe *menu*).")
             ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
-            set_state_with_ts(numero, "TRANSPORTADOR_POST", ctx)
+            set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_ESTADO_DETALLE
+        # -------------------------
+        if state == "TRANSPORTADOR_ESTADO_DETALLE":
+            estado     = str((context or {}).get("estado_actual") or "LIQUIDADO")
+            grupos     = (context or {}).get("grupos") or {}
+            dict_pagos = (context or {}).get("dict_pagos") or {}
+            filas_e    = grupos.get(estado, [])
+            page       = _safe_int((context or {}).get("page_estado"), 1)
+            hay_mas    = page * PAGE_SIZE_DETALLE < len(filas_e)
+            op_mas     = "1" if hay_mas else None
+            op_resume  = "2" if hay_mas else "1"
+            op_menu    = "3" if hay_mas else "2"
+
+            if op_mas and texto_lower == op_mas:
+                nueva_page = page + 1
+                ctx = dict(context or {})
+                ctx["page_estado"] = nueva_page
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ESTADO_DETALLE", ctx)
+                await enviar_texto(numero, formatear_manifiestos_estado(filas_e, estado, page=nueva_page, dict_pagos=dict_pagos))
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == op_resume:
+                cedula = str((context or {}).get("cedula_tenedor") or "")
+                year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+                pagos  = (context or {}).get("pagos") or []
+                texto_res, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
+                ctx = dict(context or {})
+                ctx["opcion_map"] = opcion_map_nuevo
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                await enviar_texto(numero, texto_res)
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == op_menu:
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+
+            ops = "/".join(filter(None, [op_mas, op_resume, op_menu]))
+            await enviar_texto(numero, f"Opción no válida. Responde {ops} (o escribe *menu*).")
+            ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_ESTADO_DETALLE", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
