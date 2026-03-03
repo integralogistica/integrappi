@@ -45,7 +45,7 @@ STATE_TTL_MINUTES = 60
 PROCESSED_IDS_MAX = 30
 
 # Defaults Transportador
-TRANSP_DEFAULT_YEAR = "2024"
+TRANSP_DEFAULT_YEAR = "2025"
 
 ruta_whatsapp_integra = APIRouter(
     prefix="/whatsapp",

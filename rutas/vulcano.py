@@ -250,7 +250,7 @@ def consultar_por_tenedor(
 
 def consultar_manifiestos_detallado(
     cedula_tenedor: str,
-    year: str = "2024",
+    year: str = "2025",
     page_size: int = 500,
     page: int = 1,
     session: Optional[requests.Session] = None,
