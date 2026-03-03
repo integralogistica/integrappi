@@ -171,11 +171,18 @@ async def _consultar_datos_tenedor(
         if f.get("Manif_numero")
     }
 
-    # Enriquecer pagos con Origen/Destino de Vulcano
+    # Solo pagos cuyo manifiesto esté en estado LIQUIDADO en Vulcano
+    mfts_liquidados = {
+        str(f.get("Manif_numero", ""))
+        for f in filas
+        if str(f.get("Estado_mft") or "").upper() == "LIQUIDADO" and f.get("Manif_numero")
+    }
+
+    # Enriquecer pagos con Origen/Destino de Vulcano (solo LIQUIDADOS)
     pagos_enriquecidos: List[Dict] = []
     for p in pagos_raw:
         mft = str(p.get("Manifiesto") or "")
-        if not mft:
+        if not mft or mft not in mfts_liquidados:
             continue
         pago = dict(p)
         if mft in dict_vulcano:
@@ -185,10 +192,10 @@ async def _consultar_datos_tenedor(
             pago["Fecha"] = v.get("Fecha", "")   # fecha de despacho
         pagos_enriquecidos.append(pago)
 
-    # dict_pagos para cruce en formateo
+    # dict_pagos para cruce en formateo (solo LIQUIDADOS)
     dict_pagos: Dict[str, Dict] = {
         str(p.get("Manifiesto", "")): p
-        for p in pagos_raw
+        for p in pagos_enriquecidos
         if p.get("Manifiesto")
     }
 
