@@ -16,6 +16,7 @@ from Funciones.vulcano_whatsapp_format import (
     formatear_resumen_tenedor,
     formatear_pagos_saldo,
     formatear_manifiestos_estado,
+    formatear_detalle_manifiesto,
     PAGE_SIZE_DETALLE,
 )
 import httpx
@@ -37,6 +38,7 @@ PAGOS_ENDPOINT = os.getenv(
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
 GUIA_REGEX = re.compile(r"^\d{5,20}$")
 YEAR_REGEX = re.compile(r"^(19|20)\d{2}$")
+MANIFIESTO_REGEX = re.compile(r"^[A-Za-z0-9]{5,20}$")
 
 # TTL estado
 STATE_TTL_MINUTES = 60
@@ -180,6 +182,7 @@ async def _consultar_datos_tenedor(
             v = dict_vulcano[mft]
             pago["Origen"] = v.get("Origen", "-")
             pago["Destino"] = v.get("Destino", "-")
+            pago["Fecha"] = v.get("Fecha", "")   # fecha de despacho
         pagos_enriquecidos.append(pago)
 
     # dict_pagos para cruce en formateo
@@ -611,10 +614,22 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
             if accion == "pagos":
                 ctx = dict(context or {})
-                ctx["page_pagos"] = 1
                 ctx = _ctx_add_processed_id(ctx, msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
-                await enviar_texto(numero, formatear_pagos_saldo(pagos, page=1))
+                await enviar_texto(numero, formatear_pagos_saldo(pagos))
+                return JSONResponse({"status": "ok"})
+
+            if accion == "consultar_manifiesto":
+                ctx = dict(context or {})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_MANIFIESTO", ctx)
+                await enviar_texto(
+                    numero,
+                    "🔍 *Consultar manifiesto*\n\n"
+                    "Escribe el código del manifiesto.\n"
+                    "Ejemplo: 00134165 o U000006314\n\n"
+                    "Para volver escribe *menu*."
+                )
                 return JSONResponse({"status": "ok"})
 
             if accion.startswith("estado_"):
@@ -653,29 +668,15 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             return JSONResponse({"status": "ok"})
 
         # -------------------------
-        # TRANSPORTADOR_PAGOS
+        # TRANSPORTADOR_PAGOS (sin paginación)
         # -------------------------
         if state == "TRANSPORTADOR_PAGOS":
-            pagos     = (context or {}).get("pagos") or []
-            page      = _safe_int((context or {}).get("page_pagos"), 1)
-            hay_mas   = page * PAGE_SIZE_DETALLE < len(pagos)
-            op_mas    = "1" if hay_mas else None
-            op_resume = "2" if hay_mas else "1"
-            op_menu   = "3" if hay_mas else "2"
+            pagos  = (context or {}).get("pagos") or []
+            grupos = (context or {}).get("grupos") or {}
 
-            if op_mas and texto_lower == op_mas:
-                nueva_page = page + 1
-                ctx = dict(context or {})
-                ctx["page_pagos"] = nueva_page
-                ctx = _ctx_add_processed_id(ctx, msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
-                await enviar_texto(numero, formatear_pagos_saldo(pagos, page=nueva_page))
-                return JSONResponse({"status": "ok"})
-
-            if texto_lower == op_resume:
+            if texto_lower == "1":
                 cedula = str((context or {}).get("cedula_tenedor") or "")
                 year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
-                grupos = (context or {}).get("grupos") or {}
                 texto_res, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
                 ctx = dict(context or {})
                 ctx["opcion_map"] = opcion_map_nuevo
@@ -684,17 +685,96 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 await enviar_texto(numero, texto_res)
                 return JSONResponse({"status": "ok"})
 
-            if texto_lower == op_menu:
+            if texto_lower == "2":
                 reset_state(numero)
                 ctx = _ctx_add_processed_id({}, msg_id)
                 set_state_with_ts(numero, "START", ctx)
                 await enviar_texto(numero, texto_inicio())
                 return JSONResponse({"status": "ok"})
 
-            ops = "/".join(filter(None, [op_mas, op_resume, op_menu]))
-            await enviar_texto(numero, f"Opción no válida. Responde {ops} (o escribe *menu*).")
+            await enviar_texto(numero, "Opción no válida. Responde 1️⃣ o 2️⃣ (o escribe *menu*).")
             ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_PAGOS", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_ASK_MANIFIESTO
+        # -------------------------
+        if state == "TRANSPORTADOR_ASK_MANIFIESTO":
+            cod = texto.strip().upper()
+
+            if not MANIFIESTO_REGEX.match(cod):
+                await enviar_texto(
+                    numero,
+                    "Código no válido. Debe tener entre 5 y 20 caracteres alfanuméricos.\n\n"
+                    "Escribe el código del manifiesto o *menu* para salir."
+                )
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_MANIFIESTO", ctx)
+                return JSONResponse({"status": "ok"})
+
+            # Buscar en todos los grupos
+            grupos    = (context or {}).get("grupos") or {}
+            dict_pagos = (context or {}).get("dict_pagos") or {}
+            fila_encontrada = None
+            for filas_e in grupos.values():
+                for f in filas_e:
+                    if str(f.get("Manif_numero") or "").upper() == cod:
+                        fila_encontrada = f
+                        break
+                if fila_encontrada:
+                    break
+
+            pago_info = dict_pagos.get(cod) or dict_pagos.get(cod.lower())
+            texto_det = formatear_detalle_manifiesto(cod, fila_encontrada, pago_info)
+
+            ctx = dict(context or {})
+            ctx["ultimo_manifiesto"] = cod
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_MANIFIESTO_DETALLE", ctx)
+            await enviar_texto(numero, texto_det)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_MANIFIESTO_DETALLE
+        # -------------------------
+        if state == "TRANSPORTADOR_MANIFIESTO_DETALLE":
+            if texto_lower == "1":
+                ctx = dict(context or {})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_MANIFIESTO", ctx)
+                await enviar_texto(
+                    numero,
+                    "🔍 *Consultar manifiesto*\n\n"
+                    "Escribe el código del manifiesto.\n"
+                    "Ejemplo: 00134165 o U000006314\n\n"
+                    "Para volver escribe *menu*."
+                )
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                cedula = str((context or {}).get("cedula_tenedor") or "")
+                year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+                grupos = (context or {}).get("grupos") or {}
+                pagos  = (context or {}).get("pagos") or []
+                texto_res, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
+                ctx = dict(context or {})
+                ctx["opcion_map"] = opcion_map_nuevo
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                await enviar_texto(numero, texto_res)
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "3":
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida. Responde 1️⃣, 2️⃣ o 3️⃣ (o escribe *menu*).")
+            ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_MANIFIESTO_DETALLE", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------

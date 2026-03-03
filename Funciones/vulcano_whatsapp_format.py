@@ -32,7 +32,6 @@ ESTADO_EMOJI = {
 def _fmt_moneda(v: Any) -> str:
     try:
         n = float(str(v or "0").replace(",", "."))
-        # Formato colombiano: $1.234.567
         return "${:,.0f}".format(int(n)).replace(",", ".")
     except Exception:
         return str(v or "-")
@@ -74,7 +73,6 @@ def _label_estado(estado: str) -> str:
 
 
 def _numeral_emoji(n: int) -> str:
-    """Devuelve el emoji de número para el menú (1️⃣ ... 5️⃣)."""
     emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣"}
     return emojis.get(n, f"{n}.")
 
@@ -113,27 +111,25 @@ def formatear_resumen_tenedor(
     for estado in ORDEN_ESTADOS:
         filas_e = grupos.get(estado, [])
         if filas_e:
-            emoji = _emoji_estado(estado)
-            label = _label_estado(estado)
-            lineas_estado.append(f"{emoji} {label}: {len(filas_e)}")
-    # Otros estados no previstos (excepto ANULADO que ya se filtró)
+            lineas_estado.append(f"{_emoji_estado(estado)} {_label_estado(estado)}: {len(filas_e)}")
     for estado, filas_e in grupos.items():
         if estado not in ORDEN_ESTADOS and filas_e:
             lineas_estado.append(f"📋 {estado}: {len(filas_e)}")
 
     bloque_estados = "\n".join(lineas_estado) if lineas_estado else "Sin manifiestos registrados"
 
-    # --- Bloque de pagos próximos ---
+    # --- Bloque de pagos próximos con total ---
     bloque_pagos = ""
     if pagos_mongodb:
         n_pagos = len(pagos_mongodb)
+        total_saldo = sum(float(p.get("Saldo") or 0) for p in pagos_mongodb)
         pagos_ord = sorted(pagos_mongodb, key=lambda p: str(p.get("Fecha_saldo") or "")[:10])
         proximo = pagos_ord[0]
         fecha_prox = _fmt_fecha(proximo.get("Fecha_saldo"))
         mft_prox = _txt(proximo.get("Manifiesto"))
         bloque_pagos = (
-            f"\n\n💳 *Pagos de saldo programados:*\n"
-            f"{n_pagos} manifiesto(s) con saldo pendiente.\n"
+            f"\n\n💳 *Saldos pendientes de pago:*\n"
+            f"{n_pagos} manifiesto(s) | 💰 Total: {_fmt_moneda(total_saldo)}\n"
             f"El más próximo: 📅 {fecha_prox} — Mft {mft_prox}"
         )
 
@@ -144,7 +140,7 @@ def formatear_resumen_tenedor(
 
     if pagos_mongodb:
         opcion_map[str(n)] = "pagos"
-        opciones.append(f"{_numeral_emoji(n)} 💳 Ver pagos de saldo pendientes")
+        opciones.append(f"{_numeral_emoji(n)} 💳 Ver saldos pendientes")
         n += 1
 
     for estado in ORDEN_ESTADOS:
@@ -152,6 +148,10 @@ def formatear_resumen_tenedor(
             opcion_map[str(n)] = f"estado_{estado}"
             opciones.append(f"{_numeral_emoji(n)} {_emoji_estado(estado)} Ver {_label_estado(estado)}")
             n += 1
+
+    opcion_map[str(n)] = "consultar_manifiesto"
+    opciones.append(f"{_numeral_emoji(n)} 🔍 Consultar un manifiesto")
+    n += 1
 
     opcion_map[str(n)] = "otra_cedula"
     opciones.append(f"{_numeral_emoji(n)} 🔄 Consultar otra cédula")
@@ -174,44 +174,47 @@ def formatear_resumen_tenedor(
 
 
 # ==============================================================================
-# Detalle pagos de saldo (MongoDB)
+# Detalle pagos de saldo (MongoDB) — sin paginación
 # ==============================================================================
 
-def formatear_pagos_saldo(
-    pagos: List[Dict[str, Any]],
-    page: int,
-    page_size: int = PAGE_SIZE_DETALLE,
-) -> str:
-    """Muestra pagos paginados con info de Origen/Destino enriquecida desde Vulcano."""
-    # Ordenar por fecha más próxima
+def formatear_pagos_saldo(pagos: List[Dict[str, Any]]) -> str:
+    """
+    Muestra todos los saldos de una vez (sin paginar).
+    Incluye fecha de despacho desde Vulcano y total al inicio.
+    """
+    if not pagos:
+        return "No hay saldos pendientes de pago.\n\n1️⃣ Volver al resumen\n2️⃣ Menú principal"
+
     pagos_ord = sorted(pagos, key=lambda p: str(p.get("Fecha_saldo") or "")[:10])
-    total = len(pagos_ord)
-    inicio = (page - 1) * page_size
-    fin = min(inicio + page_size, total)
-    pagina = pagos_ord[inicio:fin]
+    total_saldo = sum(float(p.get("Saldo") or 0) for p in pagos_ord)
 
-    if not pagina:
-        return "No hay más pagos para mostrar.\n\n1️⃣ Volver al resumen\n2️⃣ Menú principal"
+    lineas = [
+        f"💳 *Saldos pendientes de pago*\n"
+        f"{len(pagos_ord)} manifiesto(s) | 💰 Total: {_fmt_moneda(total_saldo)}\n"
+    ]
 
-    lineas = [f"💳 *Pagos de saldo pendientes*\nMostrando {inicio+1}–{fin} de {total}\n"]
+    for p in pagos_ord:
+        mft            = _txt(p.get("Manifiesto"))
+        saldo          = _fmt_moneda(p.get("Saldo"))
+        fecha_pago     = _fmt_fecha(p.get("Fecha_saldo"))
+        fecha_despacho = _fmt_fecha(p.get("Fecha"))        # fecha de despacho de Vulcano
+        origen         = _txt(p.get("Origen"))
+        destino        = _txt(p.get("Destino"))
 
-    for p in pagina:
-        mft = _txt(p.get("Manifiesto"))
-        saldo = _fmt_moneda(p.get("Saldo"))
-        fecha = _fmt_fecha(p.get("Fecha_saldo"))
-        origen = _txt(p.get("Origen"))
-        destino = _txt(p.get("Destino"))
+        partes = [f"📌 *Mft {mft}*"]
+        if fecha_despacho != "-":
+            partes.append(f"   📦 Despacho: {fecha_despacho}")
+        if origen != "-" or destino != "-":
+            partes.append(f"   🗺️ {origen} → {destino}")
+        partes.append(f"   💰 Saldo: {saldo}")
+        partes.append(f"   📅 Fecha pago: {fecha_pago}")
+        lineas.append("\n".join(partes))
 
-        ruta = f"🗺️ {origen} → {destino}\n   " if origen != "-" or destino != "-" else ""
-        lineas.append(f"📌 *Mft {mft}*\n   {ruta}💰 Saldo: {saldo}\n   📅 Fecha pago: {fecha}")
-
-    hay_mas = fin < total
-    opciones = _opciones_navegacion(hay_mas, fin, min(fin + page_size, total))
-    return "\n\n".join(lineas) + "\n\n" + opciones
+    return "\n\n".join(lineas) + "\n\n1️⃣ Volver al resumen\n2️⃣ Menú principal"
 
 
 # ==============================================================================
-# Detalle manifiestos por estado (Vulcano)
+# Detalle manifiestos por estado (Vulcano) — con paginación
 # ==============================================================================
 
 def formatear_manifiestos_estado(
@@ -222,45 +225,42 @@ def formatear_manifiestos_estado(
     page_size: int = PAGE_SIZE_DETALLE,
 ) -> str:
     """Muestra manifiestos de un estado con info financiera y saldo cruzado con MongoDB."""
-    # Ordenar por fecha descendente (más reciente primero)
-    filas_ord = sorted(
-        filas,
-        key=lambda f: str(f.get("Fecha") or ""),
-        reverse=True,
-    )
+    filas_ord = sorted(filas, key=lambda f: str(f.get("Fecha") or ""), reverse=True)
     total = len(filas_ord)
     inicio = (page - 1) * page_size
     fin = min(inicio + page_size, total)
     pagina = filas_ord[inicio:fin]
 
     if not pagina:
-        return f"No hay más manifiestos.\n\n1️⃣ Volver al resumen\n2️⃣ Menú principal"
+        return "No hay más manifiestos.\n\n1️⃣ Volver al resumen\n2️⃣ Menú principal"
 
     emoji = _emoji_estado(estado)
     label = _label_estado(estado)
     lineas = [f"{emoji} *Manifiestos {label}*\nMostrando {inicio+1}–{fin} de {total}\n"]
 
     for f in pagina:
-        mft_num = _txt(f.get("Manif_numero"))
-        fecha = _fmt_fecha(f.get("Fecha"))
-        origen = _txt(f.get("Origen"))
-        destino = _txt(f.get("Destino"))
-        placa = _txt(f.get("Placa"))
-        total_flete = _fmt_moneda(f.get("MontoTotal"))
-        anticipo = _fmt_moneda(f.get("ValorAnticipado"))
+        mft_num      = _txt(f.get("Manif_numero"))
+        fecha        = _fmt_fecha(f.get("Fecha"))
+        fecha_cumpl  = _fmt_fecha(f.get("Fecha cumpl."))
+        origen       = _txt(f.get("Origen"))
+        destino      = _txt(f.get("Destino"))
+        placa        = _txt(f.get("Placa"))
+        total_flete  = _fmt_moneda(f.get("MontoTotal"))
+        anticipo     = _fmt_moneda(f.get("ValorAnticipado"))
 
-        # Saldo: prioriza MongoDB (más preciso), si no calcula de Vulcano
         pago_info = dict_pagos.get(mft_num)
         if pago_info:
-            saldo_txt = _fmt_moneda(pago_info.get("Saldo"))
+            saldo_txt  = _fmt_moneda(pago_info.get("Saldo"))
             fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
             saldo_line = f"💳 Saldo: {saldo_txt} (📅 pago: {fecha_pago})"
         else:
             saldo_calc = _calcular_saldo_vulcano(f)
             saldo_line = f"💳 Saldo: {_fmt_moneda(saldo_calc)}" if saldo_calc > 0.5 else "💳 Saldo: pagado"
 
+        cumpl_line = f"\n   ✅ Cumplido: {fecha_cumpl}" if estado.upper() == "CUMPLIDO" and fecha_cumpl != "-" else ""
+
         lineas.append(
-            f"📌 *Mft {mft_num}* | {fecha}\n"
+            f"📌 *Mft {mft_num}* | {fecha}{cumpl_line}\n"
             f"   🗺️ {origen} → {destino}  🚗 {placa}\n"
             f"   💵 Total: {total_flete}  ➕ Anticipo: {anticipo}\n"
             f"   {saldo_line}"
@@ -272,11 +272,63 @@ def formatear_manifiestos_estado(
 
 
 # ==============================================================================
+# Detalle de un manifiesto puntual
+# ==============================================================================
+
+def formatear_detalle_manifiesto(
+    mft_num: str,
+    fila: Optional[Dict[str, Any]],
+    pago_info: Optional[Dict[str, Any]],
+) -> str:
+    """Detalle completo de un manifiesto consultado por código."""
+    if not fila:
+        return (
+            f"❌ El manifiesto *{mft_num}* no se encontró en el período consultado.\n\n"
+            "1️⃣ Consultar otro manifiesto\n"
+            "2️⃣ Volver al resumen\n"
+            "3️⃣ Menú principal"
+        )
+
+    estado       = _txt(fila.get("Estado_mft"))
+    fecha        = _fmt_fecha(fila.get("Fecha"))
+    fecha_cumpl  = _fmt_fecha(fila.get("Fecha cumpl."))
+    origen       = _txt(fila.get("Origen"))
+    destino      = _txt(fila.get("Destino"))
+    placa        = _txt(fila.get("Placa"))
+    total_flete  = _fmt_moneda(fila.get("MontoTotal"))
+    anticipo     = _fmt_moneda(fila.get("ValorAnticipado"))
+    emoji        = _emoji_estado(estado)
+
+    if pago_info:
+        saldo_txt  = _fmt_moneda(pago_info.get("Saldo"))
+        fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
+        saldo_line = f"💳 *Saldo:* {saldo_txt}\n📅 *Fecha pago:* {fecha_pago}"
+    else:
+        saldo_calc = _calcular_saldo_vulcano(fila)
+        saldo_line = f"💳 *Saldo:* {_fmt_moneda(saldo_calc)}" if saldo_calc > 0.5 else "💳 *Saldo:* pagado"
+
+    lineas = [f"📋 *Manifiesto {mft_num}*\n"]
+    lineas.append(f"{emoji} *Estado:* {estado}")
+    if fecha != "-":
+        lineas.append(f"📦 *Despacho:* {fecha}")
+    if fecha_cumpl != "-":
+        lineas.append(f"✅ *Cumplido:* {fecha_cumpl}")
+    if origen != "-" or destino != "-":
+        lineas.append(f"🗺️ *Ruta:* {origen} → {destino}")
+    if placa != "-":
+        lineas.append(f"🚗 *Placa:* {placa}")
+    lineas.append(f"💵 *Total flete:* {total_flete}")
+    lineas.append(f"➕ *Anticipo:* {anticipo}")
+    lineas.append(saldo_line)
+
+    return "\n".join(lineas) + "\n\n1️⃣ Consultar otro manifiesto\n2️⃣ Volver al resumen\n3️⃣ Menú principal"
+
+
+# ==============================================================================
 # Helper opciones de navegación
 # ==============================================================================
 
 def _opciones_navegacion(hay_mas: bool, fin: int, prox_fin: int) -> str:
-    """Genera las opciones 1/2/3 según si hay más páginas."""
     if hay_mas:
         return (
             f"1️⃣ Ver más ({fin+1}–{prox_fin})\n"
