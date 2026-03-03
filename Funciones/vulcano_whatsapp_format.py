@@ -239,31 +239,31 @@ def formatear_manifiestos_estado(
     lineas = [f"{emoji} *Manifiestos {label}*\nMostrando {inicio+1}–{fin} de {total}\n"]
 
     for f in pagina:
-        mft_num      = _txt(f.get("Manif_numero"))
-        fecha        = _fmt_fecha(f.get("Fecha"))
-        fecha_cumpl  = _fmt_fecha(f.get("Fecha cumpl."))
-        origen       = _txt(f.get("Origen"))
-        destino      = _txt(f.get("Destino"))
-        placa        = _txt(f.get("Placa"))
-        total_flete  = _fmt_moneda(f.get("MontoTotal"))
-        anticipo     = _fmt_moneda(f.get("ValorAnticipado"))
+        mft_num     = _txt(f.get("Manif_numero"))
+        fecha       = _fmt_fecha(f.get("Fecha"))
+        fecha_cumpl = _fmt_fecha(f.get("Fecha cumpl."))
+        origen      = _txt(f.get("Origen"))
+        destino     = _txt(f.get("Destino"))
+        placa       = _txt(f.get("Placa"))
+        total_flete = _fmt_moneda(f.get("MontoTotal"))
+        retefuente  = _fmt_moneda(f.get("ReteFuente"))
+        reteica     = _fmt_moneda(f.get("ReteICA"))
+        anticipo    = _fmt_moneda(f.get("ValorAnticipado"))
 
         pago_info = dict_pagos.get(mft_num)
+        saldo_line = ""
         if pago_info:
             saldo_txt  = _fmt_moneda(pago_info.get("Saldo"))
             fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
-            saldo_line = f"💳 Saldo: {saldo_txt} (📅 pago: {fecha_pago})"
-        else:
-            saldo_calc = _calcular_saldo_vulcano(f)
-            saldo_line = f"💳 Saldo: {_fmt_moneda(saldo_calc)}" if saldo_calc > 0.5 else "💳 Saldo: pagado"
+            saldo_line = f"\n   💳 Saldo: {saldo_txt} (📅 pago: {fecha_pago})"
 
         cumpl_line = f"\n   ✅ Cumplido: {fecha_cumpl}" if estado.upper() == "CUMPLIDO" and fecha_cumpl != "-" else ""
 
         lineas.append(
             f"📌 *Mft {mft_num}* | {fecha}{cumpl_line}\n"
             f"   🗺️ {origen} → {destino}  🚗 {placa}\n"
-            f"   💵 Total: {total_flete}  ➕ Anticipo: {anticipo}\n"
-            f"   {saldo_line}"
+            f"   💵 Total: {total_flete}  🔻 ReteFte: {retefuente}  🔻 ReteICA: {reteica}  ➕ Anticipo: {anticipo}"
+            f"{saldo_line}"
         )
 
     hay_mas = fin < total
@@ -289,23 +289,17 @@ def formatear_detalle_manifiesto(
             "3️⃣ Menú principal"
         )
 
-    estado       = _txt(fila.get("Estado_mft"))
-    fecha        = _fmt_fecha(fila.get("Fecha"))
-    fecha_cumpl  = _fmt_fecha(fila.get("Fecha cumpl."))
-    origen       = _txt(fila.get("Origen"))
-    destino      = _txt(fila.get("Destino"))
-    placa        = _txt(fila.get("Placa"))
-    total_flete  = _fmt_moneda(fila.get("MontoTotal"))
-    anticipo     = _fmt_moneda(fila.get("ValorAnticipado"))
-    emoji        = _emoji_estado(estado)
-
-    if pago_info:
-        saldo_txt  = _fmt_moneda(pago_info.get("Saldo"))
-        fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
-        saldo_line = f"💳 *Saldo:* {saldo_txt}\n📅 *Fecha pago:* {fecha_pago}"
-    else:
-        saldo_calc = _calcular_saldo_vulcano(fila)
-        saldo_line = f"💳 *Saldo:* {_fmt_moneda(saldo_calc)}" if saldo_calc > 0.5 else "💳 *Saldo:* pagado"
+    estado      = _txt(fila.get("Estado_mft"))
+    fecha       = _fmt_fecha(fila.get("Fecha"))
+    fecha_cumpl = _fmt_fecha(fila.get("Fecha cumpl."))
+    origen      = _txt(fila.get("Origen"))
+    destino     = _txt(fila.get("Destino"))
+    placa       = _txt(fila.get("Placa"))
+    total_flete = _fmt_moneda(fila.get("MontoTotal"))
+    retefuente  = _fmt_moneda(fila.get("ReteFuente"))
+    reteica     = _fmt_moneda(fila.get("ReteICA"))
+    anticipo    = _fmt_moneda(fila.get("ValorAnticipado"))
+    emoji       = _emoji_estado(estado)
 
     lineas = [f"📋 *Manifiesto {mft_num}*\n"]
     lineas.append(f"{emoji} *Estado:* {estado}")
@@ -318,8 +312,14 @@ def formatear_detalle_manifiesto(
     if placa != "-":
         lineas.append(f"🚗 *Placa:* {placa}")
     lineas.append(f"💵 *Total flete:* {total_flete}")
+    lineas.append(f"🔻 *ReteFuente:* {retefuente}")
+    lineas.append(f"🔻 *ReteICA:* {reteica}")
     lineas.append(f"➕ *Anticipo:* {anticipo}")
-    lineas.append(saldo_line)
+    if pago_info:
+        saldo_txt  = _fmt_moneda(pago_info.get("Saldo"))
+        fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
+        lineas.append(f"💳 *Saldo:* {saldo_txt}")
+        lineas.append(f"📅 *Fecha pago:* {fecha_pago}")
 
     return "\n".join(lineas) + "\n\n1️⃣ Consultar otro manifiesto\n2️⃣ Volver al resumen\n3️⃣ Menú principal"
 
