@@ -257,7 +257,7 @@ def formatear_manifiestos_estado(
             fecha_pago = _fmt_fecha(pago_info.get("Fecha_saldo"))
             saldo_line = f"\n   💳 Saldo: {saldo_txt} (📅 pago: {fecha_pago})"
 
-        cumpl_line = f"\n   ✅ Cumplido: {fecha_cumpl}" if estado.upper() == "CUMPLIDO" and fecha_cumpl != "-" else ""
+        cumpl_line = f"\n   ✅ Cumplido: {fecha_cumpl}" if estado.upper() in {"CUMPLIDO", "LIQUIDADO"} and fecha_cumpl != "-" else ""
 
         lineas.append(
             f"📌 *Mft {mft_num}* | {fecha}{cumpl_line}\n"
