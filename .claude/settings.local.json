@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "WebFetch(domain:integrappi-dvmh.onrender.com)"
+    ]
+  }
+}

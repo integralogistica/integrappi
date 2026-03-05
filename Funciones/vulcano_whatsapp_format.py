@@ -153,6 +153,10 @@ def formatear_resumen_tenedor(
     opciones.append(f"{_numeral_emoji(n)} 🔍 Consultar un manifiesto")
     n += 1
 
+    opcion_map[str(n)] = "ver_historico_web"
+    opciones.append(f"{_numeral_emoji(n)} 🌐 Ver el historico desde web")
+    n += 1
+
     opcion_map[str(n)] = "otra_cedula"
     opciones.append(f"{_numeral_emoji(n)} 🔄 Consultar otra cédula")
     n += 1

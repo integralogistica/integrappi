@@ -36,7 +36,7 @@ PAGOS_ENDPOINT = os.getenv(
 
 # Regex
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
-GUIA_REGEX = re.compile(r"^\d{5,20}$")
+GUIA_REGEX = re.compile(r"^[A-Za-z0-9\-]+$")
 YEAR_REGEX = re.compile(r"^(19|20)\d{2}$")
 MANIFIESTO_REGEX = re.compile(r"^[A-Za-z0-9]{5,20}$")
 
@@ -639,6 +639,22 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 )
                 return JSONResponse({"status": "ok"})
 
+            if accion == "ver_historico_web":
+                await enviar_texto(
+                    numero,
+                    "🌐 *Historial en web*\n\n"
+                    "Puedes ver tu historial completo en:\n\n"
+                    "https://integralogistica.com/integrapp/loginpropietarios\n\n"
+                    "Responde:\n"
+                    "1️⃣ Volver al resumen\n"
+                    "2️⃣ Menú principal\n\n"
+                    "O escribe *menu*."
+                )
+                ctx = dict(context or {})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                return JSONResponse({"status": "ok"})
+
             if accion.startswith("estado_"):
                 estado = accion[len("estado_"):]
                 ctx = dict(context or {})
@@ -992,10 +1008,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         # CLIENTE_GUIA_ASK
         # -------------------------
         if state == "CLIENTE_GUIA_ASK":
-            guia = _limpiar_numero(texto)
+            guia = texto.strip().upper() = _limpiar_numero(texto)
 
             if not GUIA_REGEX.match(guia):
-                await enviar_texto(numero, "La guía debe contener solo números.\n\n" + texto_pedir_guia())
+                await enviar_texto(numero, "La guía solo puede contener letras, números o guiones.\n\n" + texto_pedir_guia())
                 log_whatsapp_event(
                     phone=numero,
                     direction="OUT",
