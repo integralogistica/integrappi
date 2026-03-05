@@ -1008,7 +1008,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         # CLIENTE_GUIA_ASK
         # -------------------------
         if state == "CLIENTE_GUIA_ASK":
-            guia = texto.strip().upper() = _limpiar_numero(texto)
+            guia = _limpiar_numero(texto).upper()
 
             if not GUIA_REGEX.match(guia):
                 await enviar_texto(numero, "La guía solo puede contener letras, números o guiones.\n\n" + texto_pedir_guia())
