@@ -99,7 +99,7 @@ def texto_menu_cliente() -> str:
 def texto_pedir_guia() -> str:
     return (
         "🔎 *Consultar guía*\n\n"
-        "Escribe el número de la *guía* (solo números).\n"
+        "Escribe el número de la *guía*\n"
         "Ejemplo: 801203424"
     )
 
@@ -652,7 +652,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 )
                 ctx = dict(context or {})
                 ctx = _ctx_add_processed_id(ctx, msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                set_state_with_ts(numero, "TRANSPORTADOR_HISTORICO_WEB", ctx)
                 return JSONResponse({"status": "ok"})
 
             if accion.startswith("estado_"):
@@ -688,6 +688,36 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
             await enviar_texto(numero, "Opción no válida.\n\n" + texto_resumen)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_HISTORICO_WEB
+        # -------------------------
+        if state == "TRANSPORTADOR_HISTORICO_WEB":
+            cedula = str((context or {}).get("cedula_tenedor") or "")
+            year   = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
+            grupos = (context or {}).get("grupos") or {}
+            pagos  = (context or {}).get("pagos") or []
+
+            if texto_lower == "1":
+                texto_res, opcion_map_nuevo = formatear_resumen_tenedor(cedula, year, grupos, pagos)
+                ctx = dict(context or {})
+                ctx["opcion_map"] = opcion_map_nuevo
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx)
+                await enviar_texto(numero, texto_res)
+                return JSONResponse({"status": "ok"})
+
+            if texto_lower == "2":
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+
+            await enviar_texto(numero, "Opción no válida. Responde 1️⃣ o 2️⃣ (o escribe *menu*).")
+            ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_HISTORICO_WEB", ctx)
             return JSONResponse({"status": "ok"})
 
         # -------------------------
