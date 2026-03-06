@@ -721,7 +721,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if state == "TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO":
             if texto_lower == "1":
                 # Usuario quiere registrarse
-                ctx = _ctx_only_processed_ids(context)
+                ctx = dict(context or {})
                 ctx = _ctx_add_processed_id(ctx, msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_NOMBRE", ctx)
                 await enviar_texto(numero, 
