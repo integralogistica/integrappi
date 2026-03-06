@@ -631,12 +631,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 # Guardar sesión autenticada
                 set_auth_session(numero, cedula)
                 
-                # Ir al menú de transportador
+                # Ir directamente a consultar manifiestos (como si eligiera opción 1)
                 ctx = _ctx_only_processed_ids(context)
+                ctx.update({"cedula_tenedor": cedula, "year": TRANSP_DEFAULT_YEAR})
                 ctx = _ctx_add_processed_id(ctx, msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="AUTH_SUCCESS", state="TRANSPORTADOR_MENU", context={"cedula": cedula})
-                await enviar_texto(numero, "✅ ¡Autenticación exitosa!\n\n" + texto_menu_transportador())
+                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="AUTH_SUCCESS", state="TRANSPORTADOR_ASK_CEDULA", context={"cedula": cedula})
+                
+                # Consultar directamente sin mostrar menú
+                await enviar_texto(numero, "✅ ¡Autenticación exitosa!\n\n" + "🔎 Consultando manifiestos y pagos, un momento…")
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="autenticado + consultando", state="TRANSPORTADOR_ASK_CEDULA")
                 return JSONResponse({"status": "ok"})
             else:
                 # Credenciales incorrectas
@@ -716,7 +720,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             ctx = _ctx_only_processed_ids(context)
             ctx.update({"registro_nombre": nombre})
             ctx = _ctx_add_processed_id(ctx, msg_id)
-            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CEDULA", ctx)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EMAIL", ctx)
             await enviar_texto(numero, 
                 f"✅ Nombre: {nombre}\n\n"
                 f"Tu cédula: {cedula}\n\n"
