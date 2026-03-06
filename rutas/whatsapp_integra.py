@@ -631,16 +631,57 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 # Guardar sesión autenticada
                 set_auth_session(numero, cedula)
                 
-                # Ir directamente a consultar manifiestos (como si eligiera opción 1)
+                # Ir a PROCESSING para ejecutar la consulta automáticamente
                 ctx = _ctx_only_processed_ids(context)
                 ctx.update({"cedula_tenedor": cedula, "year": TRANSP_DEFAULT_YEAR})
                 ctx = _ctx_add_processed_id(ctx, msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="AUTH_SUCCESS", state="TRANSPORTADOR_ASK_CEDULA", context={"cedula": cedula})
+                set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="AUTH_SUCCESS", state="TRANSPORTADOR_PROCESSING", context={"cedula": cedula})
                 
                 # Consultar directamente sin mostrar menú
                 await enviar_texto(numero, "✅ ¡Autenticación exitosa!\n\n" + "🔎 Consultando manifiestos y pagos, un momento…")
-                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="autenticado + consultando", state="TRANSPORTADOR_ASK_CEDULA")
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="autenticado + consultando", state="TRANSPORTADOR_PROCESSING")
+                
+                # Ejecutar consulta automáticamente
+                try:
+                    grupos, pagos, dict_pagos = await _consultar_datos_tenedor(cedula, TRANSP_DEFAULT_YEAR)
+                    texto_resumen, opcion_map = formatear_resumen_tenedor(cedula, TRANSP_DEFAULT_YEAR, grupos, pagos)
+                    
+                    ctx_res = _ctx_only_processed_ids(ctx)
+                    ctx_res.update({
+                        "cedula_tenedor": cedula,
+                        "year": TRANSP_DEFAULT_YEAR,
+                        "grupos": grupos,
+                        "pagos": pagos,
+                        "dict_pagos": dict_pagos,
+                        "opcion_map": opcion_map,
+                    })
+                    ctx_res = _ctx_add_processed_id(ctx_res, msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx_res)
+                    
+                    await enviar_texto(numero, texto_resumen)
+                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="resumen transportador", state="TRANSPORTADOR_RESUMEN")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    logger.error("Vulcano detallado ERROR en auth: %s\n%s", str(e), tb)
+                    log_whatsapp_event(
+                        phone=numero, direction="SYSTEM", event="ERROR",
+                        state="TRANSPORTADOR_PROCESSING", context=ctx,
+                        meta={"error_type": type(e).__name__, "error": str(e), "traceback": tb[:3000]},
+                    )
+                    
+                    # Volver al menú de transportador
+                    ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
+                    err_txt = str(e).lower()
+                    msg_user = "❗ No pude consultar en este momento."
+                    if "timeout" in err_txt:
+                        msg_user += " El servicio tardó demasiado (timeout)."
+                    elif "401" in err_txt or "403" in err_txt or "unauthorized" in err_txt:
+                        msg_user += " Problema de autenticación con Vulcano."
+                    msg_user += "\nIntenta de nuevo en unos minutos.\n\n" + texto_menu_transportador()
+                    await enviar_texto(numero, msg_user)
+                
                 return JSONResponse({"status": "ok"})
             else:
                 # Credenciales incorrectas
@@ -740,11 +781,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             
             if not es_valido:
                 await enviar_texto(numero, f"{mensaje}\n\n" + "Por favor escribe tu *correo electrónico*.")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EMAIL", ctx)
                 return JSONResponse({"status": "ok"})
             
-            ctx = _ctx_only_processed_ids(context)
+            ctx = dict(context or {})
             ctx.update({"registro_email": email})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_TELEFONO", ctx)
@@ -766,11 +807,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             
             if not es_valido:
                 await enviar_texto(numero, "El teléfono debe tener 10 dígitos.\n\n" + "Por favor escribe tu *teléfono* (10 dígitos).")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_TELEFONO", ctx)
                 return JSONResponse({"status": "ok"})
             
-            ctx = _ctx_only_processed_ids(context)
+            ctx = dict(context or {})
             ctx.update({"registro_telefono": telefono})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CLAVE", ctx)
@@ -792,11 +833,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             
             if not es_valido:
                 await enviar_texto(numero, f"{mensaje}\n\n" + "Por favor escribe tu *clave* (mínimo 6 caracteres).")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CLAVE", ctx)
                 return JSONResponse({"status": "ok"})
             
-            ctx = _ctx_only_processed_ids(context)
+            ctx = dict(context or {})
             ctx.update({"registro_clave": clave})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", ctx)
@@ -819,7 +860,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     "❌ Las claves no coinciden.\n\n"
                     "Por favor confirma tu *clave* (escribe la misma clave nuevamente)."
                 )
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", ctx)
                 return JSONResponse({"status": "ok"})
             
@@ -868,7 +909,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             
             if not codigo or len(codigo) != 6:
                 await enviar_texto(numero, "El código debe tener 6 dígitos.\n\n" + "Por favor escribe el código de 6 dígitos que recibiste en tu correo.")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_VERIFICAR", ctx)
                 return JSONResponse({"status": "ok"})
             
