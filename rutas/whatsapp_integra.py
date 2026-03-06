@@ -7,8 +7,15 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
-from Funciones.chat_state_integra import get_state, set_state, reset_state
-from Funciones.whatsapp_utils_integra import enviar_texto
+from Funciones.chat_state_integra import (
+    get_state, set_state, reset_state,
+    set_auth_session, get_auth_session, is_authenticated, invalidate_auth_session
+)
+from Funciones.whatsapp_utils_integra import (
+    enviar_texto,
+    verificar_credenciales_transportador,
+    solicitar_recuperacion_clave
+)
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
 from Funciones.vulcano_whatsapp_format import (
@@ -492,10 +499,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 base_ctx = _ctx_add_processed_id(base_ctx, msg_id)
 
                 if texto_lower == "1":
-                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", base_ctx)
-                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={})
-                    await enviar_texto(numero, texto_menu_transportador())
-                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu transportador", state="TRANSPORTADOR_MENU")
+                    # Verificar si ya está autenticado
+                    if is_authenticated(numero):
+                        auth_session = get_auth_session(numero)
+                        cedula = auth_session.get("cedula", "")
+                        set_state_with_ts(numero, "TRANSPORTADOR_MENU", base_ctx)
+                        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_MENU", context={"cedula": cedula})
+                        await enviar_texto(numero, texto_menu_transportador())
+                        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu transportador (autenticado)", state="TRANSPORTADOR_MENU")
+                    else:
+                        set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CEDULA", base_ctx)
+                        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_AUTH_CEDULA", context={})
+                        await enviar_texto(numero, "🔐 *Autenticación Transportador*\n\n" + "Por favor escribe tu *cédula* (solo números).\n" + "Ejemplo: 1012455147")
+                        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir cedula autenticacion", state="TRANSPORTADOR_AUTH_CEDULA")
                     return JSONResponse({"status": "ok"})
 
                 if texto_lower == "2":
@@ -525,9 +541,15 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         # -------------------------
         if state == "TRANSPORTADOR_MENU":
             if texto_lower == "1":
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                # Si está autenticado, usa su cédula de sesión
+                auth_session = get_auth_session(numero)
+                cedula = auth_session.get("cedula", "") if auth_session else ""
+                
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"cedula_tenedor": cedula, "year": TRANSP_DEFAULT_YEAR})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
-                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_ASK_CEDULA", context={})
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_ASK_CEDULA", context={"cedula": cedula})
                 await enviar_texto(numero, texto_pedir_cedula_tenedor())
                 return JSONResponse({"status": "ok"})
 
@@ -541,6 +563,106 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             await enviar_texto(numero, "Opción no válida.\n\n" + texto_menu_transportador())
             ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_AUTH_CEDULA
+        # -------------------------
+        if state == "TRANSPORTADOR_AUTH_CEDULA":
+            cedula = _limpiar_numero(texto)
+
+            if not CEDULA_REGEX.match(cedula):
+                await enviar_texto(numero, "La cédula debe contener solo números (5-15 dígitos).\n\n" + "Por favor escribe tu *cédula* (solo números).\n" + "Ejemplo: 1012455147")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CEDULA", ctx)
+                return JSONResponse({"status": "ok"})
+
+            # Verificar que el usuario existe
+            from Funciones.whatsapp_utils_integra import buscar_usuario_por_cedula
+            usuario = buscar_usuario_por_cedula(cedula)
+            
+            if not usuario:
+                await enviar_texto(numero, f"No se encontró un transportador registrado con la cédula {cedula}.\n\n" + "Si crees que esto es un error, contacta a soporte.\n\n" + "Escribe *menu* para volver al inicio.")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                return JSONResponse({"status": "ok"})
+
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"auth_cedula": cedula})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CLAVE", ctx)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_AUTH_CLAVE", context={"cedula": cedula})
+            await enviar_texto(numero, "🔐 *Autenticación Transportador*\n\n" + "Por favor escribe tu *clave*.")
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_AUTH_CLAVE
+        # -------------------------
+        if state == "TRANSPORTADOR_AUTH_CLAVE":
+            cedula = (context or {}).get("auth_cedula", "")
+            clave = texto
+
+            if not clave or len(clave) < 1:
+                await enviar_texto(numero, "Por favor escribe tu clave.\n\n" + "O escribe *RECUPERAR* si olvidaste tu clave.")
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CLAVE", ctx)
+                return JSONResponse({"status": "ok"})
+
+            # Verificar credenciales
+            es_valido, usuario = verificar_credenciales_transportador(cedula, clave)
+
+            if es_valido:
+                # Guardar sesión autenticada
+                set_auth_session(numero, cedula)
+                
+                # Ir al menú de transportador
+                ctx = _ctx_only_processed_ids(context)
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="AUTH_SUCCESS", state="TRANSPORTADOR_MENU", context={"cedula": cedula})
+                await enviar_texto(numero, "✅ ¡Autenticación exitosa!\n\n" + texto_menu_transportador())
+                return JSONResponse({"status": "ok"})
+            else:
+                # Credenciales incorrectas
+                if texto_lower == "recuperar":
+                    # Flujo de recuperación
+                    ctx = _ctx_only_processed_ids(context)
+                    ctx = _ctx_add_processed_id(ctx, msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_AUTH_RECUPERAR", ctx)
+                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_AUTH_RECUPERAR", context={"cedula": cedula})
+                    
+                    # Solicitar recuperación
+                    exito, mensaje, email = solicitar_recuperacion_clave(cedula)
+                    await enviar_texto(numero, mensaje)
+                    log_whatsapp_event(phone=numero, direction="OUT", event="AUTH_RECOVERY_REQUEST", state="TRANSPORTADOR_AUTH_RECUPERAR", context={"cedula": cedula, "email": email})
+                    
+                    # Volver a pedir cédula
+                    ctx = _ctx_only_processed_ids(context)
+                    ctx = _ctx_add_processed_id(ctx, msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CEDULA", ctx)
+                    return JSONResponse({"status": "ok"})
+                
+                await enviar_texto(
+                    numero,
+                    "❌ Clave incorrecta.\n\n"
+                    "1️⃣ Intentar de nuevo\n"
+                    "2️⃣ Recuperar clave (escribe RECUPERAR)\n"
+                    "3️⃣ Volver al inicio (escribe menu)\n\n"
+                    "O escribe tu clave nuevamente."
+                )
+                ctx = _ctx_add_processed_id(dict(context or {}), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CLAVE", ctx)
+                return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_AUTH_RECUPERAR
+        # -------------------------
+        if state == "TRANSPORTADOR_AUTH_RECUPERAR":
+            # Este estado es solo informativo, la recuperación ya se envió
+            ctx = _ctx_only_processed_ids(context)
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CEDULA", ctx)
+            await enviar_texto(numero, "🔐 *Autenticación Transportador*\n\n" + "Por favor escribe tu *cédula* (solo números).\n" + "Ejemplo: 1012455147")
             return JSONResponse({"status": "ok"})
 
         # -------------------------

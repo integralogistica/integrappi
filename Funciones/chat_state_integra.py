@@ -1,8 +1,15 @@
 # Funciones/chat_state_integra.py
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _STATE: Dict[str, Dict[str, Any]] = {}
+
+# Almacenamiento de sesiones autenticadas para transportadores
+# {phone: {authenticated: True, cedula: "xxx", expires_at: "ISODate"}}
+_AUTH_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+# TTL para sesiones autenticadas (30 días)
+AUTH_SESSION_DAYS = 30
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -36,3 +43,54 @@ def touch_state(phone: str):
 
 def reset_state(phone: str):
     _STATE.pop(phone, None)
+    # Nota: NO borramos la sesión autenticada aquí, ya que persiste 30 días
+
+# =========================
+# Gestión de sesiones autenticadas
+# =========================
+
+def set_auth_session(phone: str, cedula: str):
+    """Guarda una sesión autenticada para transportador."""
+    expires_at = datetime.now(timezone.utc) + timedelta(days=AUTH_SESSION_DAYS)
+    _AUTH_SESSIONS[phone] = {
+        "authenticated": True,
+        "cedula": cedula,
+        "expires_at": expires_at.isoformat(),
+    }
+
+def get_auth_session(phone: str) -> Optional[Dict[str, Any]]:
+    """Retorna la sesión autenticada si existe y no ha expirado."""
+    session = _AUTH_SESSIONS.get(phone)
+    if not session:
+        return None
+    
+    # Verificar expiración
+    expires_at = _parse_dt_iso(session.get("expires_at", ""))
+    if not expires_at or datetime.now(timezone.utc) > expires_at:
+        # Sesión expirada, eliminarla
+        _AUTH_SESSIONS.pop(phone, None)
+        return None
+    
+    return session
+
+def is_authenticated(phone: str) -> bool:
+    """Verifica si el teléfono tiene una sesión activa."""
+    return get_auth_session(phone) is not None
+
+def invalidate_auth_session(phone: str):
+    """Invalida manualmente una sesión autenticada."""
+    _AUTH_SESSIONS.pop(phone, None)
+
+def _parse_dt_iso(dt_str: str) -> Optional[datetime]:
+    """Parsea datetime ISO string con timezone."""
+    if not dt_str:
+        return None
+    try:
+        if dt_str.endswith("Z"):
+            dt_str = dt_str.replace("Z", "+00:00")
+        d = datetime.fromisoformat(dt_str)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+    except Exception:
+        return None
