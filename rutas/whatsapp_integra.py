@@ -14,7 +14,9 @@ from Funciones.chat_state_integra import (
 from Funciones.whatsapp_utils_integra import (
     enviar_texto,
     verificar_credenciales_transportador,
-    solicitar_recuperacion_clave
+    solicitar_recuperacion_clave,
+    crear_usuario_transportador,
+    verificar_codigo_confirmacion,
 )
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
@@ -582,9 +584,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             usuario = buscar_usuario_por_cedula(cedula)
             
             if not usuario:
-                await enviar_texto(numero, f"No se encontró un transportador registrado con la cédula {cedula}.\n\n" + "Si crees que esto es un error, contacta a soporte.\n\n" + "Escribe *menu* para volver al inicio.")
-                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
-                set_state_with_ts(numero, "START", ctx)
+                # Usuario no encontrado, preguntar si quiere registrarse
+                ctx = _ctx_only_processed_ids(context)
+                ctx.update({"registro_cedula": cedula})
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO", ctx)
+                await enviar_texto(numero, 
+                    f"No se encontró un transportador registrado con la cédula {cedula}.\n\n"
+                    "¿Quieres registrarte como nuevo usuario?\n\n"
+                    "1️⃣ Sí, quiero registrarme\n"
+                    "2️⃣ No, volver al inicio"
+                )
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO", context={"cedula": cedula})
                 return JSONResponse({"status": "ok"})
 
             ctx = _ctx_only_processed_ids(context)
@@ -624,7 +635,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 return JSONResponse({"status": "ok"})
             else:
                 # Credenciales incorrectas
-                if texto_lower == "recuperar":
+                if texto_lower in ["recuperar", "2"]:
                     # Flujo de recuperación
                     ctx = _ctx_only_processed_ids(context)
                     ctx = _ctx_add_processed_id(ctx, msg_id)
@@ -655,6 +666,242 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 return JSONResponse({"status": "ok"})
 
         # -------------------------
+        # TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO
+        # -------------------------
+        if state == "TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO":
+            if texto_lower == "1":
+                # Usuario quiere registrarse
+                ctx = _ctx_only_processed_ids(context)
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_NOMBRE", ctx)
+                await enviar_texto(numero, 
+                    "📝 *Registro de Transportador*\n\n"
+                    "Vamos a crear tu cuenta. Por favor proporciona la siguiente información:\n\n"
+                    "1️⃣ Escribe tu *nombre completo*"
+                )
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_NOMBRE", context={})
+                return JSONResponse({"status": "ok"})
+            
+            if texto_lower == "2":
+                # Usuario no quiere registrarse, volver al inicio
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                await enviar_texto(numero, texto_inicio())
+                return JSONResponse({"status": "ok"})
+            
+            await enviar_texto(numero, "Opción no válida. Responde 1️⃣ o 2️⃣ (o escribe *menu*).")
+            ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO", ctx)
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_NOMBRE
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_NOMBRE":
+            nombre = texto.strip()
+            
+            if len(nombre) < 3:
+                await enviar_texto(numero, "El nombre debe tener al menos 3 caracteres.\n\n" + "Por favor escribe tu *nombre completo*.")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_NOMBRE", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            cedula = (context or {}).get("registro_cedula", "")
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"registro_nombre": nombre})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CEDULA", ctx)
+            await enviar_texto(numero, 
+                f"✅ Nombre: {nombre}\n\n"
+                f"Tu cédula: {cedula}\n\n"
+                "2️⃣ Escribe tu *correo electrónico*"
+            )
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_EMAIL", context={"nombre": nombre})
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_EMAIL
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_EMAIL":
+            email = texto.strip().lower()
+            
+            from Funciones.whatsapp_utils_integra import _validar_email
+            es_valido, mensaje = _validar_email(email)
+            
+            if not es_valido:
+                await enviar_texto(numero, f"{mensaje}\n\n" + "Por favor escribe tu *correo electrónico*.")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EMAIL", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"registro_email": email})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_TELEFONO", ctx)
+            await enviar_texto(numero, 
+                "✅ Correo: " + email + "\n\n"
+                "3️⃣ Escribe tu *teléfono* (10 dígitos)"
+            )
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_TELEFONO", context={"email": email})
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_TELEFONO
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_TELEFONO":
+            telefono = texto.strip().replace(" ", "").replace("-", "")
+            
+            from Funciones.whatsapp_utils_integra import _validar_telefono
+            es_valido = _validar_telefono(telefono)
+            
+            if not es_valido:
+                await enviar_texto(numero, "El teléfono debe tener 10 dígitos.\n\n" + "Por favor escribe tu *teléfono* (10 dígitos).")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_TELEFONO", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"registro_telefono": telefono})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CLAVE", ctx)
+            await enviar_texto(numero, 
+                "✅ Teléfono: " + telefono + "\n\n"
+                "4️⃣ Escribe tu *clave* (mínimo 6 caracteres)"
+            )
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_CLAVE", context={"telefono": telefono})
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_CLAVE
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_CLAVE":
+            clave = texto.strip()
+            
+            from Funciones.whatsapp_utils_integra import _validar_clave
+            es_valido, mensaje = _validar_clave(clave)
+            
+            if not es_valido:
+                await enviar_texto(numero, f"{mensaje}\n\n" + "Por favor escribe tu *clave* (mínimo 6 caracteres).")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CLAVE", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"registro_clave": clave})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", ctx)
+            await enviar_texto(numero, 
+                "✅ Clave guardada\n\n"
+                "5️⃣ Confirma tu *clave* (escribe la misma clave nuevamente)"
+            )
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", context={})
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE":
+            clave_confirmar = texto.strip()
+            clave_original = (context or {}).get("registro_clave", "")
+            
+            if clave_confirmar != clave_original:
+                await enviar_texto(numero, 
+                    "❌ Las claves no coinciden.\n\n"
+                    "Por favor confirma tu *clave* (escribe la misma clave nuevamente)."
+                )
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            # Crear usuario
+            nombre = (context or {}).get("registro_nombre", "")
+            cedula = (context or {}).get("registro_cedula", "")
+            email = (context or {}).get("registro_email", "")
+            telefono = (context or {}).get("registro_telefono", "")
+            
+            from Funciones.whatsapp_utils_integra import crear_usuario_transportador, _guardar_codigo_confirmacion, _generar_codigo_confirmacion, _enviar_correo_confirmacion
+            
+            exito, mensaje, usuario_id = crear_usuario_transportador(cedula, nombre, email, telefono, clave_confirmar)
+            
+            if not exito:
+                await enviar_texto(numero, f"❌ {mensaje}\n\n" + "Escribe *menu* para volver al inicio.")
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            # Generar y enviar código de confirmación
+            codigo = _generar_codigo_confirmacion()
+            _guardar_codigo_confirmacion(usuario_id, email, codigo)
+            _enviar_correo_confirmacion(email, codigo)
+            
+            ctx = _ctx_only_processed_ids(context)
+            ctx.update({"registro_usuario_id": usuario_id})
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_VERIFICAR", ctx)
+            
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_VERIFICAR", context={"usuario_id": usuario_id})
+            
+            await enviar_texto(numero, 
+                "📧 Hemos enviado un código de confirmación a tu correo: *" + email + "*\n\n"
+                "El código expira en 1 hora.\n\n"
+                "6️⃣ Escribe el código de 6 dígitos que recibiste"
+            )
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_VERIFICAR
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_VERIFICAR":
+            codigo = texto.strip().upper()
+            usuario_id = (context or {}).get("registro_usuario_id", "")
+            
+            if not codigo or len(codigo) != 6:
+                await enviar_texto(numero, "El código debe tener 6 dígitos.\n\n" + "Por favor escribe el código de 6 dígitos que recibiste en tu correo.")
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_VERIFICAR", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            from Funciones.whatsapp_utils_integra import verificar_codigo_confirmacion
+            exito, mensaje, usuario = verificar_codigo_confirmacion(usuario_id, codigo)
+            
+            if not exito:
+                await enviar_texto(numero, f"❌ {mensaje}\n\n" + "Escribe *menu* para volver al inicio.")
+                reset_state(numero)
+                ctx = _ctx_add_processed_id({}, msg_id)
+                set_state_with_ts(numero, "START", ctx)
+                return JSONResponse({"status": "ok"})
+            
+            # Usuario confirmado, autenticar automáticamente
+            cedula = usuario.get("tenedor", "")
+            set_auth_session(numero, cedula)
+            
+            ctx = _ctx_only_processed_ids(context)
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EXITO", ctx)
+            
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="REGISTRATION_COMPLETE", state="TRANSPORTADOR_REGISTRO_EXITO", context={"cedula": cedula})
+            
+            await enviar_texto(numero, 
+                "🎉 ¡Cuenta creada y confirmada exitosamente!\n\n"
+                "Ya estás autenticado y puedes consultar tu información.\n\n" 
+                + texto_menu_transportador()
+            )
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
+        # TRANSPORTADOR_REGISTRO_EXITO
+        # -------------------------
+        if state == "TRANSPORTADOR_REGISTRO_EXITO":
+            # Ir al menú de transportador
+            ctx = _ctx_only_processed_ids(context)
+            ctx = _ctx_add_processed_id(ctx, msg_id)
+            set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+            await enviar_texto(numero, texto_menu_transportador())
+            return JSONResponse({"status": "ok"})
+
+        # -------------------------
         # TRANSPORTADOR_AUTH_RECUPERAR
         # -------------------------
         if state == "TRANSPORTADOR_AUTH_RECUPERAR":
@@ -676,6 +923,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
                 return JSONResponse({"status": "ok"})
+
+            # Verificar si el usuario está autenticado y si la cédula coincide
+            if is_authenticated(numero):
+                auth_session = get_auth_session(numero)
+                cedula_autenticada = auth_session.get("cedula", "")
+                
+                if cedula != cedula_autenticada:
+                    await enviar_texto(numero,
+                        "⚠️ Solo puedes consultar información de tu cuenta autenticada.\n\n"
+                        f"Tu cédula registrada: *{cedula_autenticada}*\n\n"
+                        "Si quieres consultar otra cédula, primero cierra sesión escribiendo *menu*."
+                    )
+                    ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                    set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
+                    return JSONResponse({"status": "ok"})
 
             year = str((context or {}).get("year") or TRANSP_DEFAULT_YEAR)
 

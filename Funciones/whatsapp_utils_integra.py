@@ -141,7 +141,7 @@ def _enviar_correo_resend_reset(email_destino: str, enlace: str):
             "<p>Recibimos una solicitud para restablecer tu contraseña desde WhatsApp.</p>"
             f"<p>Puedes hacerlo ingresando al siguiente enlace (válido por {EXPIRE_MINUTOS_RECUPERACION} minutos):</p>"
             f'<p><a href="{enlace}" target="_blank">{enlace}</a></p>'
-            "<p>Una vez restablezcas tu contraseña, vuelve a WhatsApp e ingresa tu cédula y nueva clave.</p>"
+            "<p>Una vez restablezcas tu contraseña, vuelve a WhatsApp e ingresa tu cédula.</p>"
             "<p>Si no solicitaste este cambio, ignora este mensaje.</p>"
             "<p>Saludos,<br>Equipo Integra Soluciones Logísticas</p>"
         ),
@@ -205,9 +205,176 @@ def solicitar_recuperacion_clave(cedula: str) -> Tuple[bool, str, Optional[str]]
         
         return (
             True,
-            f"Hemos enviado un enlace de recuperación a tu correo electrónico ({email}). Sigue las instrucciones para cambiar tu contraseña. Cuando termines, vuelve aquí e ingresa tu cédula y nueva clave.",
+            f"Hemos enviado un enlace de recuperación a tu correo electrónico ({email}). Sigue las instrucciones para cambiar tu contraseña. Cuando termines, vuelve aquí e ingresa tu cédula.",
             email
         )
     except Exception as e:
         print(f"[AUTH] Error en recuperación de clave: {e}")
         return (False, "Ocurrió un error al enviar el correo de recuperación. Inténtalo más tarde.", None)
+
+
+# =========================
+# Funciones de Registro de Usuarios
+# =========================
+
+def _validar_email(email: str) -> Tuple[bool, str]:
+    """Valida formato de email con regex."""
+    import re
+    email_regex = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+    if not email_regex.match(email):
+        return (False, "El formato del correo electrónico no es válido.")
+    return (True, "")
+
+
+def _validar_telefono(telefono: str) -> Tuple[bool, str]:
+    """Valida formato de teléfono (10 dígitos)."""
+    import re
+    tel_regex = re.compile(r"^\d{10}$")
+    return bool(tel_regex.match(telefono.replace(" ", "").replace("-", "")))
+
+
+def _validar_clave(clave: str) -> Tuple[bool, str]:
+    """Valida que la clave cumpla requisitos mínimos."""
+    if len(clave) < 6:
+        return (False, "La clave debe tener mínimo 6 caracteres.")
+    return (True, "")
+
+
+def _generar_codigo_confirmacion() -> str:
+    """Genera un código de 6 dígitos para confirmación de email."""
+    return secrets.token_hex(3).upper()
+
+
+def _guardar_codigo_confirmacion(usuario_id: str, email: str, codigo: str) -> datetime:
+    """Guarda código de confirmación en BD con expiración de 1 hora."""
+    from bson import ObjectId
+    base_datos = bd_cliente.integra
+    exp = _utc_now() + timedelta(hours=1)
+    
+    base_datos.usuarios.update_one(
+        {"_id": ObjectId(usuario_id)},
+        {"$set": {
+            "email_confirmacion_codigo": codigo,
+            "email_confirmacion_exp": exp,
+            "email_temporal": email  # Guardar email temporal hasta confirmar
+        }}
+    )
+    return exp
+
+
+def _enviar_correo_confirmacion(email: str, codigo: str):
+    """Envía correo de confirmación de registro usando Resend."""
+    if not RESEND_API_KEY:
+        print(f"[RESEND] RESEND_API_KEY no configurada. No se envió correo a {email}.")
+        return
+
+    payload = {
+        "from": MAIL_FROM,
+        "to": [email],
+        "subject": "Confirma tu registro - Integra Soluciones Logísticas",
+        "html": (
+            "<p>Bienvenido a Integra Soluciones Logísticas.</p>"
+            "<p>Tu código de confirmación es:</p>"
+            f'<p style="font-size: 24px; font-weight: bold; color: #0066cc;">{codigo}</p>'
+            "<p>Este código expira en 1 hora.</p>"
+            "<p>Vuelve a WhatsApp e ingresa este código para completar tu registro.</p>"
+        ),
+    }
+    
+    try:
+        resend.Emails.send(payload)
+        print(f"[RESEND] Correo de confirmación enviado a {email}")
+    except Exception as e:
+        print(f"[RESEND] Error enviando correo a {email}: {e}")
+
+
+def crear_usuario_transportador(
+    cedula: str,
+    nombre: str,
+    email: str,
+    telefono: str,
+    clave: str
+) -> Tuple[bool, str, Optional[str]]:
+    """
+    Crea un nuevo usuario transportador en la base de datos.
+    Retorna (exito, mensaje, usuario_id).
+    """
+    try:
+        from bson import ObjectId
+        base_datos = bd_cliente.integra
+        
+        # Verificar si ya existe
+        if base_datos.usuarios.find_one({"tenedor": cedula}):
+            return (False, "Ya existe un usuario registrado con esa cédula.", None)
+        
+        # Verificar si el email ya está en uso
+        if base_datos.usuarios.find_one({"email": email}):
+            return (False, "El correo electrónico ya está registrado.", None)
+        
+        # Crear usuario
+        clave_hash = _crear_hash(clave)
+        nuevo_usuario = {
+            "tenedor": cedula,
+            "nombre": nombre,
+            "email": email,
+            "telefono": telefono,
+            "clave": clave_hash,
+            "rol": "transportador",
+            "estado": "pendiente",  # Pendiente de confirmación de email
+            "fecha_registro": _utc_now(),
+        }
+        
+        resultado = base_datos.usuarios.insert_one(nuevo_usuario)
+        usuario_id = str(resultado.inserted_id)
+        
+        return (True, "Usuario creado exitosamente.", usuario_id)
+    
+    except Exception as e:
+        print(f"[AUTH] Error creando usuario: {e}")
+        return (False, "Ocurrió un error al crear el usuario. Inténtalo más tarde.", None)
+
+
+def verificar_codigo_confirmacion(usuario_id: str, codigo: str) -> Tuple[bool, str, Optional[dict]]:
+    """
+    Verifica el código de confirmación de email.
+    Retorna (exito, mensaje, usuario_doc).
+    """
+    try:
+        from bson import ObjectId
+        base_datos = bd_cliente.integra
+        
+        usuario = base_datos.usuarios.find_one({"_id": ObjectId(usuario_id)})
+        
+        if not usuario:
+            return (False, "Usuario no encontrado.", None)
+        
+        codigo_guardado = usuario.get("email_confirmacion_codigo")
+        codigo_exp = usuario.get("email_confirmacion_exp")
+        
+        if not codigo_guardado:
+            return (False, "No hay un código de confirmación pendiente.", None)
+        
+        if _utc_now() > _to_utc_aware(codigo_exp):
+            return (False, "El código de confirmación ha expirado. Solicita un nuevo código.", None)
+        
+        if codigo_guardado != codigo.upper():
+            return (False, "Código incorrecto.", None)
+        
+        # Activar usuario
+        email_temporal = usuario.get("email_temporal", usuario.get("email"))
+        base_datos.usuarios.update_one(
+            {"_id": ObjectId(usuario_id)},
+            {"$set": {
+                "estado": "activo",
+                "email": email_temporal,
+                "email_confirmacion_codigo": None,
+                "email_confirmacion_exp": None,
+                "email_temporal": None
+            }}
+        )
+        
+        return (True, "Cuenta confirmada exitosamente.", usuario)
+    
+    except Exception as e:
+        print(f"[AUTH] Error verificando código: {e}")
+        return (False, "Ocurrió un error al verificar el código. Inténtalo más tarde.", None)
