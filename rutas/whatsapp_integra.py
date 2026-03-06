@@ -758,15 +758,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 return JSONResponse({"status": "ok"})
             
             cedula = (context or {}).get("registro_cedula", "")
-            ctx = _ctx_only_processed_ids(context)
+            ctx = dict(context or {})
             ctx.update({"registro_nombre": nombre})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EMAIL", ctx)
-            await enviar_texto(numero, 
-                f"✅ Nombre: {nombre}\n\n"
-                f"Tu cédula: {cedula}\n\n"
-                "2️⃣ Escribe tu *correo electrónico*"
-            )
+            await enviar_texto(numero, "2️⃣ Escribe tu *correo electrónico*")
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_EMAIL", context={"nombre": nombre})
             return JSONResponse({"status": "ok"})
 
@@ -789,10 +785,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             ctx.update({"registro_email": email})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_TELEFONO", ctx)
-            await enviar_texto(numero, 
-                "✅ Correo: " + email + "\n\n"
-                "3️⃣ Escribe tu *teléfono* (10 dígitos)"
-            )
+            await enviar_texto(numero, "3️⃣ Escribe tu *teléfono* (10 dígitos)")
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_TELEFONO", context={"email": email})
             return JSONResponse({"status": "ok"})
 
@@ -815,10 +808,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             ctx.update({"registro_telefono": telefono})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CLAVE", ctx)
-            await enviar_texto(numero, 
-                "✅ Teléfono: " + telefono + "\n\n"
-                "4️⃣ Escribe tu *clave* (mínimo 6 caracteres)"
-            )
+            await enviar_texto(numero, "4️⃣ Escribe tu *clave* (mínimo 6 caracteres)")
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_CLAVE", context={"telefono": telefono})
             return JSONResponse({"status": "ok"})
 
@@ -841,10 +831,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             ctx.update({"registro_clave": clave})
             ctx = _ctx_add_processed_id(ctx, msg_id)
             set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", ctx)
-            await enviar_texto(numero, 
-                "✅ Clave guardada\n\n"
-                "5️⃣ Confirma tu *clave* (escribe la misma clave nuevamente)"
-            )
+            await enviar_texto(numero, "5️⃣ Confirma tu *clave* (escribe la misma clave nuevamente)")
             log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="TRANSPORTADOR_REGISTRO_CONFIRMAR_CLAVE", context={})
             return JSONResponse({"status": "ok"})
 
@@ -927,28 +914,56 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             cedula = usuario.get("tenedor", "")
             set_auth_session(numero, cedula)
             
+            # Ir a PROCESSING para ejecutar la consulta automáticamente
             ctx = _ctx_only_processed_ids(context)
+            ctx.update({"cedula_tenedor": cedula, "year": TRANSP_DEFAULT_YEAR})
             ctx = _ctx_add_processed_id(ctx, msg_id)
-            set_state_with_ts(numero, "TRANSPORTADOR_REGISTRO_EXITO", ctx)
+            set_state_with_ts(numero, "TRANSPORTADOR_PROCESSING", ctx)
+            log_whatsapp_event(phone=numero, direction="SYSTEM", event="REGISTRATION_COMPLETE", state="TRANSPORTADOR_PROCESSING", context={"cedula": cedula})
             
-            log_whatsapp_event(phone=numero, direction="SYSTEM", event="REGISTRATION_COMPLETE", state="TRANSPORTADOR_REGISTRO_EXITO", context={"cedula": cedula})
+            await enviar_texto(numero, "🎉 ¡Cuenta creada y confirmada exitosamente!\n\n" + "🔎 Consultando manifiestos y pagos, un momento…")
+            log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="registro completado + consultando", state="TRANSPORTADOR_PROCESSING")
             
-            await enviar_texto(numero, 
-                "🎉 ¡Cuenta creada y confirmada exitosamente!\n\n"
-                "Ya estás autenticado y puedes consultar tu información.\n\n" 
-                + texto_menu_transportador()
-            )
-            return JSONResponse({"status": "ok"})
-
-        # -------------------------
-        # TRANSPORTADOR_REGISTRO_EXITO
-        # -------------------------
-        if state == "TRANSPORTADOR_REGISTRO_EXITO":
-            # Ir al menú de transportador
-            ctx = _ctx_only_processed_ids(context)
-            ctx = _ctx_add_processed_id(ctx, msg_id)
-            set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx)
-            await enviar_texto(numero, texto_menu_transportador())
+            # Ejecutar consulta automáticamente
+            try:
+                grupos, pagos, dict_pagos = await _consultar_datos_tenedor(cedula, TRANSP_DEFAULT_YEAR)
+                texto_resumen, opcion_map = formatear_resumen_tenedor(cedula, TRANSP_DEFAULT_YEAR, grupos, pagos)
+                
+                ctx_res = _ctx_only_processed_ids(ctx)
+                ctx_res.update({
+                    "cedula_tenedor": cedula,
+                    "year": TRANSP_DEFAULT_YEAR,
+                    "grupos": grupos,
+                    "pagos": pagos,
+                    "dict_pagos": dict_pagos,
+                    "opcion_map": opcion_map,
+                })
+                ctx_res = _ctx_add_processed_id(ctx_res, msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_RESUMEN", ctx_res)
+                
+                await enviar_texto(numero, texto_resumen)
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="resumen transportador (registro)", state="TRANSPORTADOR_RESUMEN")
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error("Vulcano detallado ERROR en registro: %s\n%s", str(e), tb)
+                log_whatsapp_event(
+                    phone=numero, direction="SYSTEM", event="ERROR",
+                    state="TRANSPORTADOR_PROCESSING", context=ctx,
+                    meta={"error_type": type(e).__name__, "error": str(e), "traceback": tb[:3000]},
+                )
+                
+                # Volver al menú de transportador
+                ctx_back = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
+                err_txt = str(e).lower()
+                msg_user = "❗ No pude consultar en este momento."
+                if "timeout" in err_txt:
+                    msg_user += " El servicio tardó demasiado (timeout)."
+                elif "401" in err_txt or "403" in err_txt or "unauthorized" in err_txt:
+                    msg_user += " Problema de autenticación con Vulcano."
+                msg_user += "\nIntenta de nuevo en unos minutos.\n\n" + texto_menu_transportador()
+                await enviar_texto(numero, msg_user)
+            
             return JSONResponse({"status": "ok"})
 
         # -------------------------
@@ -1098,14 +1113,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 set_state_with_ts(numero, "TRANSPORTADOR_ESTADO_DETALLE", ctx)
                 filas_e = grupos.get(estado, [])
                 await enviar_texto(numero, formatear_manifiestos_estado(filas_e, estado, page=1, dict_pagos=dict_pagos))
-                return JSONResponse({"status": "ok"})
-
-            if accion == "otra_cedula":
-                ctx = _ctx_only_processed_ids(context or {})
-                ctx["year"] = year
-                ctx = _ctx_add_processed_id(ctx, msg_id)
-                set_state_with_ts(numero, "TRANSPORTADOR_ASK_CEDULA", ctx)
-                await enviar_texto(numero, texto_pedir_cedula_tenedor())
                 return JSONResponse({"status": "ok"})
 
             if accion == "menu_principal":
