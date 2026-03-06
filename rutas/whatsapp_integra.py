@@ -484,6 +484,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         # Atajo menú
         if _es_menu(texto_lower):
+            # Invalidar sesión autenticada si existe
+            if is_authenticated(numero):
+                invalidate_auth_session(numero)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="SESSION_INVALIDATED", state="START", context={})
+            
             reset_state(numero)
             ctx = _ctx_add_processed_id({}, msg_id)
             set_state_with_ts(numero, "START", ctx)

@@ -4,12 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 _STATE: Dict[str, Dict[str, Any]] = {}
 
-# Almacenamiento de sesiones autenticadas para transportadores
-# {phone: {authenticated: True, cedula: "xxx", expires_at: "ISODate"}}
-_AUTH_SESSIONS: Dict[str, Dict[str, Any]] = {}
-
 # TTL para sesiones autenticadas (30 días)
 AUTH_SESSION_DAYS = 30
+
+# Nombre de colección para sesiones de WhatsApp
+SESSIONS_COLLECTION = "whatsapp_sessions"
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -46,51 +45,84 @@ def reset_state(phone: str):
     # Nota: NO borramos la sesión autenticada aquí, ya que persiste 30 días
 
 # =========================
-# Gestión de sesiones autenticadas
+# Gestión de sesiones autenticadas (MongoDB)
 # =========================
 
 def set_auth_session(phone: str, cedula: str):
-    """Guarda una sesión autenticada para transportador."""
-    expires_at = datetime.now(timezone.utc) + timedelta(days=AUTH_SESSION_DAYS)
-    _AUTH_SESSIONS[phone] = {
-        "authenticated": True,
-        "cedula": cedula,
-        "expires_at": expires_at.isoformat(),
-    }
+    """Guarda una sesión autenticada en MongoDB (upsert)."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+        
+        expires_at = datetime.now(timezone.utc) + timedelta(days=AUTH_SESSION_DAYS)
+        
+        # Upsert: crea o actualiza la sesión
+        base_datos[SESSIONS_COLLECTION].update_one(
+            {"phone": phone},
+            {"$set": {
+                "cedula": cedula,
+                "expires_at": expires_at,
+                "updated_at": datetime.now(timezone.utc)
+            }},
+            upsert=True
+        )
+        print(f"[AUTH] Sesión guardada en MongoDB: phone={phone}, cedula={cedula}")
+    except Exception as e:
+        print(f"[AUTH] Error guardando sesión en MongoDB: {e}")
+
 
 def get_auth_session(phone: str) -> Optional[Dict[str, Any]]:
-    """Retorna la sesión autenticada si existe y no ha expirado."""
-    session = _AUTH_SESSIONS.get(phone)
-    if not session:
+    """Retorna la sesión autenticada si existe en MongoDB y no ha expirado."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+        
+        session = base_datos[SESSIONS_COLLECTION].find_one({
+            "phone": phone,
+            "expires_at": {"$gt": datetime.now(timezone.utc)}
+        })
+        
+        if not session:
+            return None
+        
+        return {
+            "authenticated": True,
+            "cedula": session.get("cedula"),
+            "expires_at": session.get("expires_at").isoformat(),
+        }
+    except Exception as e:
+        print(f"[AUTH] Error consultando sesión en MongoDB: {e}")
         return None
-    
-    # Verificar expiración
-    expires_at = _parse_dt_iso(session.get("expires_at", ""))
-    if not expires_at or datetime.now(timezone.utc) > expires_at:
-        # Sesión expirada, eliminarla
-        _AUTH_SESSIONS.pop(phone, None)
-        return None
-    
-    return session
+
 
 def is_authenticated(phone: str) -> bool:
-    """Verifica si el teléfono tiene una sesión activa."""
+    """Verifica si el teléfono tiene una sesión activa en MongoDB."""
     return get_auth_session(phone) is not None
 
-def invalidate_auth_session(phone: str):
-    """Invalida manualmente una sesión autenticada."""
-    _AUTH_SESSIONS.pop(phone, None)
 
-def _parse_dt_iso(dt_str: str) -> Optional[datetime]:
-    """Parsea datetime ISO string con timezone."""
-    if not dt_str:
-        return None
+def invalidate_auth_session(phone: str):
+    """Invalida manualmente una sesión autenticada de MongoDB."""
     try:
-        if dt_str.endswith("Z"):
-            dt_str = dt_str.replace("Z", "+00:00")
-        d = datetime.fromisoformat(dt_str)
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d
-    except Exception:
-        return None
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+        
+        resultado = base_datos[SESSIONS_COLLECTION].delete_one({"phone": phone})
+        print(f"[AUTH] Sesión invalidada: phone={phone}, borrados={resultado.deleted_count}")
+    except Exception as e:
+        print(f"[AUTH] Error invalidando sesión: {e}")
+
+
+def create_session_index():
+    """Crea índice único en el campo phone para la colección de sesiones."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+        
+        base_datos[SESSIONS_COLLECTION].create_index(
+            [("phone", 1)],
+            unique=True,
+            background=True
+        )
+        print(f"[AUTH] Índice creado exitosamente en {SESSIONS_COLLECTION}.phone")
+    except Exception as e:
+        print(f"[AUTH] Error creando índice: {e}")
