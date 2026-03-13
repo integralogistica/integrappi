@@ -9,7 +9,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 from Funciones.chat_state_integra import (
     get_state, set_state, reset_state,
-    set_auth_session, get_auth_session, is_authenticated, invalidate_auth_session
+    set_auth_session, get_auth_session, is_authenticated, invalidate_auth_session,
+    set_cliente_auth_session, is_cliente_authenticated,
 )
 from Funciones.whatsapp_utils_integra import (
     enviar_texto,
@@ -17,6 +18,7 @@ from Funciones.whatsapp_utils_integra import (
     solicitar_recuperacion_clave,
     crear_usuario_transportador,
     verificar_codigo_confirmacion,
+    verificar_clave_cliente,
 )
 from Funciones.whatsapp_logs_integra import log_whatsapp_event
 from Funciones.whatsapp_certificado_integra import generar_y_enviar_certificado_por_cedula
@@ -529,10 +531,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     return JSONResponse({"status": "ok"})
 
                 if texto_lower == "3":
-                    set_state_with_ts(numero, "CLIENTE_MENU", base_ctx)
-                    log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={})
-                    await enviar_texto(numero, texto_menu_cliente())
-                    log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente", state="CLIENTE_MENU")
+                    if is_cliente_authenticated(numero):
+                        set_state_with_ts(numero, "CLIENTE_MENU", base_ctx)
+                        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_MENU", context={"autenticado": True})
+                        await enviar_texto(numero, texto_menu_cliente())
+                        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="menu cliente (sesión activa)", state="CLIENTE_MENU")
+                    else:
+                        set_state_with_ts(numero, "CLIENTE_AUTH_CLAVE", base_ctx)
+                        log_whatsapp_event(phone=numero, direction="SYSTEM", event="STATE_CHANGED", state="CLIENTE_AUTH_CLAVE", context={})
+                        await enviar_texto(
+                            numero,
+                            "🔐 *Acceso Clientes*\n\n"
+                            "Para consultar guías escribe la *clave de acceso*.\n\n"
+                            "Si no la tienes, comunícate con Integra Soluciones Logísticas."
+                        )
+                        log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="pedir clave cliente", state="CLIENTE_AUTH_CLAVE")
                     return JSONResponse({"status": "ok"})
 
             await enviar_texto(numero, texto_inicio())
@@ -1447,6 +1460,30 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text=f"cert enviado a {correo}", state="EMPLOYEE_MENU", context={"cedula": cedula, "correo": correo})
             return JSONResponse({"status": "ok"})
         
+        # -------------------------
+        # CLIENTE_AUTH_CLAVE
+        # -------------------------
+        if state == "CLIENTE_AUTH_CLAVE":
+            if verificar_clave_cliente(texto):
+                set_cliente_auth_session(numero)
+                ctx = _ctx_only_processed_ids(context)
+                ctx = _ctx_add_processed_id(ctx, msg_id)
+                set_state_with_ts(numero, "CLIENTE_MENU", ctx)
+                log_whatsapp_event(phone=numero, direction="SYSTEM", event="CLIENT_AUTH_SUCCESS", state="CLIENTE_MENU", context={})
+                await enviar_texto(numero, "✅ ¡Acceso autorizado!\n\n" + texto_menu_cliente())
+                log_whatsapp_event(phone=numero, direction="OUT", event="MESSAGE_SENT", text="cliente autenticado -> menu cliente", state="CLIENTE_MENU")
+            else:
+                ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
+                set_state_with_ts(numero, "CLIENTE_AUTH_CLAVE", ctx)
+                log_whatsapp_event(phone=numero, direction="OUT", event="CLIENT_AUTH_FAIL", state="CLIENTE_AUTH_CLAVE", context={})
+                await enviar_texto(
+                    numero,
+                    "❌ Clave incorrecta.\n\n"
+                    "Por favor escribe la *clave de acceso* de clientes.\n\n"
+                    "O escribe *menu* para volver al inicio."
+                )
+            return JSONResponse({"status": "ok"})
+
         # -------------------------
         # CLIENTE_MENU
         # -------------------------

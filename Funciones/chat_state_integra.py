@@ -117,7 +117,7 @@ def create_session_index():
     try:
         from bd.bd_cliente import bd_cliente
         base_datos = bd_cliente.integra
-        
+
         base_datos[SESSIONS_COLLECTION].create_index(
             [("phone", 1)],
             unique=True,
@@ -126,3 +126,68 @@ def create_session_index():
         print(f"[AUTH] Índice creado exitosamente en {SESSIONS_COLLECTION}.phone")
     except Exception as e:
         print(f"[AUTH] Error creando índice: {e}")
+
+
+# =========================
+# Gestión de sesiones de clientes (clave genérica, 30 días)
+# =========================
+
+CLIENT_SESSIONS_COLLECTION = "whatsapp_client_sessions"
+
+
+def set_cliente_auth_session(phone: str):
+    """Guarda una sesión autenticada de cliente en MongoDB (upsert, 30 días)."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+
+        expires_at = datetime.now(timezone.utc) + timedelta(days=AUTH_SESSION_DAYS)
+        base_datos[CLIENT_SESSIONS_COLLECTION].update_one(
+            {"phone": phone},
+            {"$set": {
+                "expires_at": expires_at,
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        print(f"[CLIENT_AUTH] Sesión guardada: phone={phone}")
+    except Exception as e:
+        print(f"[CLIENT_AUTH] Error guardando sesión: {e}")
+
+
+def get_cliente_auth_session(phone: str) -> Optional[Dict[str, Any]]:
+    """Retorna sesión de cliente si existe en MongoDB y no ha expirado."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+
+        session = base_datos[CLIENT_SESSIONS_COLLECTION].find_one({
+            "phone": phone,
+            "expires_at": {"$gt": datetime.now(timezone.utc)},
+        })
+        if not session:
+            return None
+        return {
+            "authenticated": True,
+            "expires_at": session.get("expires_at").isoformat(),
+        }
+    except Exception as e:
+        print(f"[CLIENT_AUTH] Error consultando sesión: {e}")
+        return None
+
+
+def is_cliente_authenticated(phone: str) -> bool:
+    """Verifica si el teléfono de cliente tiene sesión activa."""
+    return get_cliente_auth_session(phone) is not None
+
+
+def invalidate_cliente_auth_session(phone: str):
+    """Invalida manualmente la sesión de cliente."""
+    try:
+        from bd.bd_cliente import bd_cliente
+        base_datos = bd_cliente.integra
+
+        resultado = base_datos[CLIENT_SESSIONS_COLLECTION].delete_one({"phone": phone})
+        print(f"[CLIENT_AUTH] Sesión invalidada: phone={phone}, borrados={resultado.deleted_count}")
+    except Exception as e:
+        print(f"[CLIENT_AUTH] Error invalidando sesión: {e}")

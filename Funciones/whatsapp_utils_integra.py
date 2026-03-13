@@ -11,6 +11,32 @@ import resend
 PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN")
 
+# Clave genérica de clientes (valor por defecto; se guarda en MongoDB para poder cambiarla)
+_CLIENTE_PASSWORD_DEFAULT = "C0nSultasb0t"
+
+
+def verificar_clave_cliente(clave: str) -> bool:
+    """
+    Verifica si la clave proporcionada coincide con la clave genérica de clientes.
+    La clave se almacena en la colección 'whatsapp_config' con key='cliente_password'.
+    Si el documento no existe todavía, lo crea con el valor por defecto.
+    """
+    try:
+        base_datos = bd_cliente.integra
+        # Crea el documento con el valor por defecto solo si no existe ($setOnInsert)
+        base_datos["whatsapp_config"].update_one(
+            {"key": "cliente_password"},
+            {"$setOnInsert": {"key": "cliente_password", "value": _CLIENTE_PASSWORD_DEFAULT}},
+            upsert=True,
+        )
+        doc = base_datos["whatsapp_config"].find_one({"key": "cliente_password"})
+        if not doc:
+            return clave == _CLIENTE_PASSWORD_DEFAULT
+        return clave == doc.get("value", "")
+    except Exception as e:
+        print(f"[CLIENTE_AUTH] Error verificando clave: {e}")
+        return False
+
 GRAPH_URL = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
 
 
