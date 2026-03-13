@@ -245,6 +245,109 @@ def numeros_por_estado(
     })
 
 
+def _pipeline_numeros_por_estado(match: Dict[str, Any]):
+    return [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": {
+                    "year":  {"$year": "$created_at"},
+                    "month": {"$month": "$created_at"},
+                    "day":   {"$dayOfMonth": "$created_at"},
+                    "state": "$state",
+                },
+                "numeros_unicos": {"$addToSet": "$phone"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "fecha": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": {
+                            "$dateFromParts": {
+                                "year":  "$_id.year",
+                                "month": "$_id.month",
+                                "day":   "$_id.day",
+                            }
+                        },
+                    }
+                },
+                "estado": "$_id.state",
+                "cantidad": {"$size": "$numeros_unicos"},
+            }
+        },
+        {"$sort": {"fecha": 1, "estado": 1}},
+    ]
+
+
+@ruta_whatsapp_report.get("/numeros-por-estado/descargar-excel")
+def descargar_excel_numeros_por_estado(
+    desde: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    hasta: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    """
+    Descarga un Excel con: Fecha | Transportadores | Empleados | Clientes
+    """
+    dt_desde = _parse_date_yyyy_mm_dd(desde)
+    dt_hasta = _parse_date_yyyy_mm_dd(hasta)
+
+    match: Dict[str, Any] = {
+        "event": "STATE_CHANGED",
+        "state": {"$in": ["TRANSPORTADOR_MENU", "EMPLOYEE_MENU", "CLIENTE_MENU"]},
+    }
+    if dt_desde or dt_hasta:
+        match["created_at"] = {}
+        if dt_desde:
+            match["created_at"]["$gte"] = dt_desde
+        if dt_hasta:
+            match["created_at"]["$lte"] = datetime(
+                dt_hasta.year, dt_hasta.month, dt_hasta.day, 23, 59, 59
+            )
+
+    rows: List[Dict[str, Any]] = list(coleccion_uso.aggregate(_pipeline_numeros_por_estado(match)))
+
+    MAPA_ESTADO = {
+        "TRANSPORTADOR_MENU": "transportador",
+        "EMPLOYEE_MENU":      "empleado",
+        "CLIENTE_MENU":       "cliente",
+    }
+
+    # Agrupar por fecha
+    por_dia: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        fecha  = row["fecha"]
+        estado = MAPA_ESTADO.get(row["estado"], row["estado"])
+        if fecha not in por_dia:
+            por_dia[fecha] = {"transportador": 0, "empleado": 0, "cliente": 0}
+        por_dia[fecha][estado] = row["cantidad"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Números por Estado"
+
+    ws.append(["Fecha", "Transportadores", "Empleados", "Clientes"])
+    for fecha in sorted(por_dia.keys()):
+        d = por_dia[fecha]
+        ws.append([fecha, d["transportador"], d["empleado"], d["cliente"]])
+
+    for col in range(1, ws.max_column + 1):
+        col_letter = get_column_letter(col)
+        max_len = max((len(str(cell.value or "")) for cell in ws[col_letter]), default=10)
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 30)
+
+    file_stream = BytesIO()
+    wb.save(file_stream)
+    file_stream.seek(0)
+
+    return StreamingResponse(
+        file_stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="numeros_por_estado.xlsx"'},
+    )
+
+
 @ruta_whatsapp_report.get("/descargar-excel")
 def descargar_excel(
     desde: Optional[str] = Query(None, description="YYYY-MM-DD"),
