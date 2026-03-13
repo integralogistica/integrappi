@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pymongo import MongoClient
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
@@ -27,6 +27,138 @@ def _parse_date_yyyy_mm_dd(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     return datetime.fromisoformat(s)  # "2026-01-26"
+
+@ruta_whatsapp_report.get("/resumen")
+def resumen_uso(
+    desde: Optional[str] = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: Optional[str] = Query(None, description="Fecha fin YYYY-MM-DD"),
+):
+    """
+    Retorna un resumen JSON del uso del bot en el rango de fechas dado:
+    - Total de números únicos
+    - Desglose por rol (transportador / empleado / cliente)
+    - Actividad diaria (mensajes entrantes por día)
+    """
+    dt_desde = _parse_date_yyyy_mm_dd(desde)
+    dt_hasta = _parse_date_yyyy_mm_dd(hasta)
+
+    date_filter: Dict[str, Any] = {}
+    if dt_desde or dt_hasta:
+        date_filter["created_at"] = {}
+        if dt_desde:
+            date_filter["created_at"]["$gte"] = dt_desde
+        if dt_hasta:
+            date_filter["created_at"]["$lte"] = datetime(
+                dt_hasta.year, dt_hasta.month, dt_hasta.day, 23, 59, 59
+            )
+
+    # ── Pipeline: resumen por teléfono ──────────────────────────────────
+    pipeline_phones = [
+        {"$match": date_filter if date_filter else {}},
+        {
+            "$addFields": {
+                "initial_choice": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$eq": ["$event", "STATE_CHANGED"]},
+                                {"$in": ["$state", ["TRANSPORTADOR_MENU", "EMPLOYEE_MENU", "CLIENTE_MENU"]]},
+                            ]
+                        },
+                        "$state",
+                        None,
+                    ]
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": "$phone",
+                "cnt_transportador": {
+                    "$sum": {"$cond": [{"$eq": ["$initial_choice", "TRANSPORTADOR_MENU"]}, 1, 0]}
+                },
+                "cnt_empleado": {
+                    "$sum": {"$cond": [{"$eq": ["$initial_choice", "EMPLOYEE_MENU"]}, 1, 0]}
+                },
+                "cnt_cliente": {
+                    "$sum": {"$cond": [{"$eq": ["$initial_choice", "CLIENTE_MENU"]}, 1, 0]}
+                },
+            }
+        },
+    ]
+
+    phones_data: List[Dict[str, Any]] = list(coleccion_uso.aggregate(pipeline_phones))
+
+    total_numeros = len(phones_data)
+
+    # Un número se clasifica en el rol que más usó; si usó varios, se cuenta en todos
+    numeros_transportador = sum(1 for p in phones_data if p["cnt_transportador"] > 0)
+    numeros_empleado      = sum(1 for p in phones_data if p["cnt_empleado"] > 0)
+    numeros_cliente       = sum(1 for p in phones_data if p["cnt_cliente"] > 0)
+    numeros_sin_rol       = sum(
+        1 for p in phones_data
+        if p["cnt_transportador"] == 0 and p["cnt_empleado"] == 0 and p["cnt_cliente"] == 0
+    )
+
+    # ── Pipeline: actividad diaria (mensajes IN por día) ─────────────────
+    pipeline_diario = [
+        {
+            "$match": {
+                **( date_filter if date_filter else {}),
+                "direction": "IN",
+                "event": "MESSAGE_RECEIVED",
+            }
+        },
+        {
+            "$group": {
+                "_id": {
+                    "year":  {"$year": "$created_at"},
+                    "month": {"$month": "$created_at"},
+                    "day":   {"$dayOfMonth": "$created_at"},
+                },
+                "mensajes": {"$sum": 1},
+                "numeros_unicos": {"$addToSet": "$phone"},
+            }
+        },
+        {"$sort": {"_id.year": 1, "_id.month": 1, "_id.day": 1}},
+        {
+            "$project": {
+                "_id": 0,
+                "fecha": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": {
+                            "$dateFromParts": {
+                                "year": "$_id.year",
+                                "month": "$_id.month",
+                                "day": "$_id.day",
+                            }
+                        },
+                    }
+                },
+                "mensajes": 1,
+                "numeros_unicos": {"$size": "$numeros_unicos"},
+            }
+        },
+    ]
+
+    actividad_diaria: List[Dict[str, Any]] = list(coleccion_uso.aggregate(pipeline_diario))
+
+    return JSONResponse({
+        "rango": {
+            "desde": desde or "sin límite",
+            "hasta": hasta or "sin límite",
+        },
+        "totales": {
+            "numeros_unicos": total_numeros,
+            "como_transportador": numeros_transportador,
+            "como_empleado": numeros_empleado,
+            "como_cliente": numeros_cliente,
+            "sin_rol_definido": numeros_sin_rol,
+        },
+        "actividad_diaria": actividad_diaria,
+    })
+
 
 @ruta_whatsapp_report.get("/descargar-excel")
 def descargar_excel(
