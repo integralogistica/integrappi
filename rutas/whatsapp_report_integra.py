@@ -160,6 +160,91 @@ def resumen_uso(
     })
 
 
+@ruta_whatsapp_report.get("/numeros-por-estado")
+def numeros_por_estado(
+    desde: Optional[str] = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: Optional[str] = Query(None, description="Fecha fin YYYY-MM-DD"),
+):
+    """
+    Retorna, por día, cuántos números únicos consultaron cada estado (transportador / empleado / cliente).
+    Ejemplo: { "2026-03-13": { "transportador": 3, "empleado": 2, "cliente": 3 } }
+    """
+    dt_desde = _parse_date_yyyy_mm_dd(desde)
+    dt_hasta = _parse_date_yyyy_mm_dd(hasta)
+
+    match: Dict[str, Any] = {
+        "event": "STATE_CHANGED",
+        "state": {"$in": ["TRANSPORTADOR_MENU", "EMPLOYEE_MENU", "CLIENTE_MENU"]},
+    }
+    if dt_desde or dt_hasta:
+        match["created_at"] = {}
+        if dt_desde:
+            match["created_at"]["$gte"] = dt_desde
+        if dt_hasta:
+            match["created_at"]["$lte"] = datetime(
+                dt_hasta.year, dt_hasta.month, dt_hasta.day, 23, 59, 59
+            )
+
+    pipeline = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": {
+                    "year":  {"$year": "$created_at"},
+                    "month": {"$month": "$created_at"},
+                    "day":   {"$dayOfMonth": "$created_at"},
+                    "state": "$state",
+                },
+                "numeros_unicos": {"$addToSet": "$phone"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "fecha": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": {
+                            "$dateFromParts": {
+                                "year":  "$_id.year",
+                                "month": "$_id.month",
+                                "day":   "$_id.day",
+                            }
+                        },
+                    }
+                },
+                "estado": "$_id.state",
+                "cantidad": {"$size": "$numeros_unicos"},
+            }
+        },
+        {"$sort": {"fecha": 1, "estado": 1}},
+    ]
+
+    rows: List[Dict[str, Any]] = list(coleccion_uso.aggregate(pipeline))
+
+    MAPA_ESTADO = {
+        "TRANSPORTADOR_MENU": "transportador",
+        "EMPLOYEE_MENU":      "empleado",
+        "CLIENTE_MENU":       "cliente",
+    }
+
+    resultado: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        fecha  = row["fecha"]
+        estado = MAPA_ESTADO.get(row["estado"], row["estado"])
+        if fecha not in resultado:
+            resultado[fecha] = {"transportador": 0, "empleado": 0, "cliente": 0}
+        resultado[fecha][estado] = row["cantidad"]
+
+    return JSONResponse({
+        "rango": {
+            "desde": desde or "sin límite",
+            "hasta": hasta or "sin límite",
+        },
+        "por_dia": resultado,
+    })
+
+
 @ruta_whatsapp_report.get("/descargar-excel")
 def descargar_excel(
     desde: Optional[str] = Query(None, description="YYYY-MM-DD"),
