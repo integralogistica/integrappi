@@ -592,7 +592,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             cedula = _limpiar_numero(texto)
 
             if not CEDULA_REGEX.match(cedula):
-                await enviar_texto(numero, "La cédula debe contener solo números (5-15 dígitos).\n\n" + "Por favor escribe tu *cédula* (solo números).\n" + "Ejemplo: 1012455147")
+                await enviar_texto(numero, "La cédula debe contener solo números (5-15 dígitos).\n\n" + "Por favor escribe tu *cédula* (solo números).\n" + "Ejemplo: 1012455147 \n\n Escribe la palabra *menu* si deseas devolverte al principio")
                 ctx = _ctx_add_processed_id(_ctx_only_processed_ids(context), msg_id)
                 set_state_with_ts(numero, "TRANSPORTADOR_AUTH_CEDULA", ctx)
                 return JSONResponse({"status": "ok"})
