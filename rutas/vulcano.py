@@ -151,8 +151,15 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
 
     # Vulcano detectó sesión activa previa → cerrarla y reintentar
     if (data or {}).get("data", {}).get("session_choice_required"):
-        print("VULCANO: sesión previa detectada, cerrando y reintentando login...")
-        data = _do_post({**base_payload, "session_choice": "close_previous"})
+        print("VULCANO: sesión previa detectada, intentando cerrar con 'choice'...")
+        data = _do_post({**base_payload, "choice": "close_previous"})
+        print("VULCANO: respuesta tras choice:", data)
+
+        # Si todavía no hay token, intentar con 'session_choice'
+        if not (data or {}).get("data", {}).get("access_token"):
+            print("VULCANO: reintentando con 'session_choice'...")
+            data = _do_post({**base_payload, "session_choice": "close_previous"})
+            print("VULCANO: respuesta tras session_choice:", data)
 
     token = (data or {}).get("data", {}).get("access_token")
     if not token:
