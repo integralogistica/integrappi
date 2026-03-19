@@ -96,6 +96,8 @@ class VulcanoRequestError(VulcanoError):
 def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120) -> str:
     """
     Inicia sesión y devuelve access_token.
+    Si Vulcano responde con session_choice_required, cierra la sesión anterior
+    automáticamente y reintenta el login.
     """
     if not VULCANO_IDNAME:
         raise VulcanoAuthError("Login: VULCANO_IDNAME no está configurado (env var vacía o ausente).")
@@ -103,11 +105,11 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
     s = _get_session(session)
 
     url = _build_url(VULCANO_HOST, VULCANO_BASE_PATH, VULCANO_LOGIN_PATH)
-    payload = {
+    base_payload = {
         "username": VULCANO_USERNAME,
         "idname": VULCANO_IDNAME,
         "agency": VULCANO_AGENCY,
-        "proyect": VULCANO_PROJECT,  # mantener "proyect" si así lo exige Vulcano
+        "proyect": VULCANO_PROJECT,
         "isGroup": VULCANO_IS_GROUP,
     }
 
@@ -117,35 +119,40 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
         safe = proxies["https"].split("@")[-1]
         print("VULCANO consulta proxy:", safe)
 
-
-    t0 = time.time()
-    try:
-        r = s.post(
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
-            verify=VULCANO_VERIFY_SSL,
-            proxies=proxies,
-        )
-        r.raise_for_status()
-
+    def _do_post(payload: dict) -> dict:
+        t0 = time.time()
         try:
-            data = r.json()
-        except ValueError as e:
-            raise VulcanoAuthError(f"Login: respuesta NO es JSON. {_resp_debug(r)}") from e
+            r = s.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=(VULCANO_CONNECT_TIMEOUT, timeout),
+                verify=VULCANO_VERIFY_SSL,
+                proxies=proxies,
+            )
+            r.raise_for_status()
+            try:
+                return r.json()
+            except ValueError as e:
+                raise VulcanoAuthError(f"Login: respuesta NO es JSON. {_resp_debug(r)}") from e
+        except requests.Timeout as e:
+            raise VulcanoAuthError(f"Login: TIMEOUT ({time.time() - t0:.1f}s) url={url}") from e
+        except requests.HTTPError as e:
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                raise VulcanoAuthError(f"Login: HTTPError. {_resp_debug(resp)}") from e
+            raise VulcanoAuthError(f"Login: HTTPError sin response. err={e}") from e
+        except requests.ConnectionError as e:
+            raise VulcanoAuthError(f"Login: ConnectionError url={url} err={e}") from e
+        except requests.RequestException as e:
+            raise VulcanoAuthError(f"Login: RequestException url={url} err={e}") from e
 
-    except requests.Timeout as e:
-        raise VulcanoAuthError(f"Login: TIMEOUT ({time.time() - t0:.1f}s) url={url}") from e
-    except requests.HTTPError as e:
-        resp = getattr(e, "response", None)
-        if resp is not None:
-            raise VulcanoAuthError(f"Login: HTTPError. {_resp_debug(resp)}") from e
-        raise VulcanoAuthError(f"Login: HTTPError sin response. err={e}") from e
-    except requests.ConnectionError as e:
-        raise VulcanoAuthError(f"Login: ConnectionError url={url} err={e}") from e
-    except requests.RequestException as e:
-        raise VulcanoAuthError(f"Login: RequestException url={url} err={e}") from e
+    data = _do_post(base_payload)
+
+    # Vulcano detectó sesión activa previa → cerrarla y reintentar
+    if (data or {}).get("data", {}).get("session_choice_required"):
+        print("VULCANO: sesión previa detectada, cerrando y reintentando login...")
+        data = _do_post({**base_payload, "session_choice": "close_previous"})
 
     token = (data or {}).get("data", {}).get("access_token")
     if not token:

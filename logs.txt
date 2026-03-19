@@ -1,0 +1,37 @@
+NFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+Menu
+INFO:     173.252.107.1:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.29:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.6:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.4:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.95.113:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+[AUTH] Sesión guardada en MongoDB: phone=573125443396, cedula=93436916
+VULCANO consulta proxy_enabled: True
+VULCANO consulta proxy: 138.68.36.69:3128
+INFO:     74.220.48.6:0 - "GET /manifiestos/tenedor/93436916 HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: GET https://integrappi-dvmh.onrender.com/manifiestos/tenedor/93436916 "HTTP/1.1 200 OK"
+INFO:     173.252.79.19:0 - "POST /whatsapp HTTP/1.1" 200 OK
+ERROR:integra:Vulcano detallado ERROR en auth: Login: no access_token. data={'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
+Traceback (most recent call last):
+  File "/opt/render/project/src/rutas/whatsapp_integra.py", line 660, in webhook
+    grupos, pagos, dict_pagos = await _consultar_datos_tenedor(cedula, TRANSP_DEFAULT_YEAR)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/rutas/whatsapp_integra.py", line 174, in _consultar_datos_tenedor
+    filas, pagos_raw = await asyncio.gather(filas_task, pagos_task)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/python/Python-3.11.11/lib/python3.11/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/python/Python-3.11.11/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/rutas/vulcano.py", line 269, in consultar_manifiestos_detallado
+    token = vulcano_login(session=s, timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/rutas/vulcano.py", line 152, in vulcano_login
+    raise VulcanoAuthError(f"Login: no access_token. data={data}")
+rutas.vulcano.VulcanoAuthError: Login: no access_token. data={'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
+INFO:     173.252.95.5:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.95.9:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
