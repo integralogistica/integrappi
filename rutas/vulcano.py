@@ -149,17 +149,31 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
 
     data = _do_post(base_payload)
 
-    # Vulcano detectó sesión activa previa → cerrarla y reintentar
+    # Vulcano detectó sesión activa previa → intentar todas las variantes conocidas
     if (data or {}).get("data", {}).get("session_choice_required"):
-        print("VULCANO: sesión previa detectada, intentando cerrar con 'choice'...")
-        data = _do_post({**base_payload, "choice": "close_previous"})
-        print("VULCANO: respuesta tras choice:", data)
+        prev = (data.get("data") or {}).get("previous_session", {})
+        session_id = prev.get("session_id")
+        print(f"VULCANO: sesión previa detectada (id={session_id}), intentando cerrarla...")
 
-        # Si todavía no hay token, intentar con 'session_choice'
-        if not (data or {}).get("data", {}).get("access_token"):
-            print("VULCANO: reintentando con 'session_choice'...")
-            data = _do_post({**base_payload, "session_choice": "close_previous"})
-            print("VULCANO: respuesta tras session_choice:", data)
+        for attempt_payload in [
+            {**base_payload, "choice": "close_previous"},
+            {**base_payload, "session_choice": "close_previous"},
+            {**base_payload, "session_choice": "close_previous", "session_id": session_id},
+            {**base_payload, "option": "close_previous"},
+        ]:
+            data = _do_post(attempt_payload)
+            token = (data or {}).get("data", {}).get("access_token")
+            if token:
+                print("VULCANO: sesión previa cerrada exitosamente.")
+                return token
+            if not (data or {}).get("data", {}).get("session_choice_required"):
+                break  # respuesta diferente, salir del loop
+
+        # Ninguna variante funcionó
+        raise VulcanoAuthError(
+            f"VULCANO_SESSION_BLOCKED: sesión previa activa (id={session_id}) bloquea el login. "
+            f"Cierra la sesión en el portal web de Vulcano para restablecer el acceso."
+        )
 
     token = (data or {}).get("data", {}).get("access_token")
     if not token:

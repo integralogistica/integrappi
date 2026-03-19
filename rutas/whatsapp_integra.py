@@ -688,7 +688,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     set_state_with_ts(numero, "TRANSPORTADOR_MENU", ctx_back)
                     err_txt = str(e).lower()
                     msg_user = "❗ No pude consultar en este momento."
-                    if "timeout" in err_txt:
+                    if "vulcano_session_blocked" in err_txt:
+                        msg_user += " El sistema de manifiestos está temporalmente bloqueado por una sesión activa. El equipo de Integra ya fue notificado."
+                    elif "timeout" in err_txt:
                         msg_user += " El servicio tardó demasiado (timeout)."
                     elif "401" in err_txt or "403" in err_txt or "unauthorized" in err_txt:
                         msg_user += " Problema de autenticación con Vulcano."
