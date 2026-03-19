@@ -3,7 +3,13 @@
     "allow": [
       "Bash(python:*)",
       "Bash(pip install:*)",
-      "WebFetch(domain:integrappi-dvmh.onrender.com)"
+      "WebFetch(domain:integrappi-dvmh.onrender.com)",
+      "Bash(cd:*)",
+      "Bash(mv \"rutas/coor.py\" \"scripts/coor.py\")",
+      "Bash(mv \"bd/subirEmpleados.py\" \"scripts/subirEmpleados.py\")",
+      "Bash(mv \"bd/subirEmpleados.spec\" \"scripts/subirEmpleados.spec\")",
+      "Bash(mv \"bd/empleados.xlsx\" \"scripts/empleados.xlsx\")",
+      "Bash(mv \"MANUAL WS TRACKING INTEGRA.docx\" \"docs/MANUAL WS TRACKING INTEGRA.docx\")"
     ]
   }
 }

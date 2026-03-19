@@ -33,6 +33,7 @@ class Flete(BaseModel):
     destino: str
     ruta: str
     tipo: str
+    pago_cargue_desc: str
     equivalencia_centro_costo: str
     tarifas: Dict[str, float]
 
@@ -45,7 +46,8 @@ def modelo_flete(f: dict) -> dict:
         "destino": f["destino"],
         "ruta": f["ruta"],
         "tipo": f["tipo"],
-        "equivalencia_centro_costo": f["equivalencia_centro_costo"],        
+        "pago_cargue_desc": f.get("pago_cargue_desc", ""),
+        "equivalencia_centro_costo": f["equivalencia_centro_costo"],
         "tarifas": f["tarifas"],
     }
 
@@ -64,8 +66,8 @@ async def crear_flete(data: Flete):
         "destino": destino,
         "ruta": data.ruta.upper().strip(),
         "tipo": data.tipo.upper().strip(),
-        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),    
-        "pago_cargue_desc": data.tipo.upper().strip(),
+        "pago_cargue_desc": data.pago_cargue_desc.upper().strip(),
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
     }
     coleccion_fletes.insert_one(nuevo)
@@ -153,7 +155,8 @@ async def actualizar_flete(origen: str, destino: str, data: Flete):
         "destino": d,
         "ruta": data.ruta.upper().strip(),
         "tipo": data.tipo.upper().strip(),
-        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),        
+        "pago_cargue_desc": data.pago_cargue_desc.upper().strip(),
+        "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
     }
     result = coleccion_fletes.update_one({"origen": o, "destino": d}, {"$set": actualiza})

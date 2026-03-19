@@ -1163,10 +1163,10 @@ async def confirmar_preautorizados_por_consecutivo_vehiculo(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
     perfil = (user.get("perfil") or "").upper()
-    if perfil not in {"ADMIN", "DESPACHADOR", "ANALISTA", "OPERADOR"}:
+    if perfil not in {"ADMIN", "COORDINADOR", "CONTROL"}:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            detail="Solo ADMIN, DESPACHADOR u OPERADOR pueden confirmar PREAUTORIZADOS"
+            detail="Solo ADMIN, COORDINADOR o CONTROL pueden confirmar PREAUTORIZADOS"
         )
 
     regional_usuario = (user.get("regional") or "").upper()

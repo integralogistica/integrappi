@@ -52,6 +52,10 @@ class BaseUsuario(BaseModel):
     perfil: str
     usuario: str
     clave: str
+    clientes: Optional[List[str]] = None
+
+class ActualizarClientesInput(BaseModel):
+    clientes: List[str]
 
 class UsuarioLite(BaseModel):
     id: str
@@ -87,6 +91,7 @@ def modelo_usuario(u) -> dict:
         "celular": u.get("celular"),
         "perfil": u["perfil"],
         "usuario": u["usuario"],
+        "clientes": u.get("clientes") or ["KABI"],
     }
 
 def enviar_correo_codigo(destinatario: str, codigo: str):
@@ -306,14 +311,37 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
     return {
-        "mensaje": "Login exitoso", 
+        "mensaje": "Login exitoso",
         "usuario": {
-            "id": str(encontrado["_id"]), 
-            "usuario": encontrado["usuario"], 
-            "perfil": encontrado["perfil"], 
-            "regional": encontrado["regional"]
+            "id": str(encontrado["_id"]),
+            "usuario": encontrado["usuario"],
+            "perfil": encontrado["perfil"],
+            "regional": encontrado["regional"],
+            "clientes": encontrado.get("clientes") or ["KABI"],
         }
     }
+
+
+@ruta_baseusuarios.patch("/{id}/clientes", response_model=dict)
+async def actualizar_clientes_usuario(id: str, data: ActualizarClientesInput):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    clientes_validos = {"KABI", "MEDICAL_CARE"}
+    for c in data.clientes:
+        if c not in clientes_validos:
+            raise HTTPException(status_code=400, detail=f"Cliente no reconocido: {c}")
+
+    result = coleccion_usuarios.update_one(
+        {"_id": oid},
+        {"$set": {"clientes": data.clientes}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    return {"mensaje": "Clientes actualizados", "clientes": data.clientes}
 
 
 @ruta_baseusuarios.post("/loginseguridad", response_model=dict)
