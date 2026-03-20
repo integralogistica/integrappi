@@ -111,6 +111,7 @@ def vulcano_login(session: Optional[requests.Session] = None, timeout: int = 120
         "agency": VULCANO_AGENCY,
         "proyect": VULCANO_PROJECT,
         "isGroup": VULCANO_IS_GROUP,
+        "close_previous_session": 1,
     }
 
     proxies = _get_proxies()

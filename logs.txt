@@ -1,17 +1,65 @@
-NFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
-Menu
-INFO:     173.252.107.1:0 - "POST /whatsapp HTTP/1.1" 200 OK
-INFO:     173.252.107.29:0 - "POST /whatsapp HTTP/1.1" 200 OK
-INFO:     173.252.127.6:0 - "POST /whatsapp HTTP/1.1" 200 OK
-INFO:     173.252.127.4:0 - "POST /whatsapp HTTP/1.1" 200 OK
-INFO:     173.252.95.113:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.112:0 - "POST /whatsapp HTTP/1.1" 200 OK
+==> Deploying...
+==> Running 'uvicorn main:app --host 0.0.0.0 --port 10000'
+INFO:     Started server process [55]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:10000 (Press CTRL+C to quit)
+✅ Conexión exitosa a MongoDB
+INFO:     127.0.0.1:48318 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+==> Your service is live 🎉
+==> 
+==> ///////////////////////////////////////////////////////////
+==> 
+==> Available at your primary URL https://integrappi-dvmh.onrender.com
+==> 
+==> ///////////////////////////////////////////////////////////
+INFO:     34.83.16.143:0 - "GET / HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+[AUTH] Sesión invalidada: phone=573125443396, borrados=1
+INFO:     173.252.127.12:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.2:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.95.3:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [59]
+INFO:     173.252.127.53:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+INFO:     173.252.107.115:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.126:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.25:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.112:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+INFO:     173.252.95.41:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.8:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.113:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.95.7:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.9:0 - "POST /whatsapp HTTP/1.1" 200 OK
+WARNING:passlib.handlers.bcrypt:(trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/passlib/handlers/bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+INFO:     173.252.127.2:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.116:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.32:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.10:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.32:0 - "POST /whatsapp HTTP/1.1" 200 OK
 INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
 [AUTH] Sesión guardada en MongoDB: phone=573125443396, cedula=93436916
 VULCANO consulta proxy_enabled: True
 VULCANO consulta proxy: 138.68.36.69:3128
 INFO:     74.220.48.6:0 - "GET /manifiestos/tenedor/93436916 HTTP/1.1" 200 OK
 INFO:httpx:HTTP Request: GET https://integrappi-dvmh.onrender.com/manifiestos/tenedor/93436916 "HTTP/1.1 200 OK"
-INFO:     173.252.79.19:0 - "POST /whatsapp HTTP/1.1" 200 OK
+VULCANO: sesión previa detectada, intentando cerrar con 'choice'...
+INFO:     173.252.79.113:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.29:0 - "POST /whatsapp HTTP/1.1" 200 OK
+VULCANO: respuesta tras choice: {'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
+VULCANO: reintentando con 'session_choice'...
+INFO:     173.252.127.8:0 - "POST /whatsapp HTTP/1.1" 200 OK
 ERROR:integra:Vulcano detallado ERROR en auth: Login: no access_token. data={'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
 Traceback (most recent call last):
   File "/opt/render/project/src/rutas/whatsapp_integra.py", line 660, in webhook
@@ -26,12 +74,16 @@ Traceback (most recent call last):
   File "/opt/render/project/python/Python-3.11.11/lib/python3.11/concurrent/futures/thread.py", line 58, in run
     result = self.fn(*self.args, **self.kwargs)
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/render/project/src/rutas/vulcano.py", line 269, in consultar_manifiestos_detallado
+  File "/opt/render/project/src/rutas/vulcano.py", line 283, in consultar_manifiestos_detallado
     token = vulcano_login(session=s, timeout=timeout)
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/render/project/src/rutas/vulcano.py", line 152, in vulcano_login
+  File "/opt/render/project/src/rutas/vulcano.py", line 166, in vulcano_login
     raise VulcanoAuthError(f"Login: no access_token. data={data}")
 rutas.vulcano.VulcanoAuthError: Login: no access_token. data={'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
-INFO:     173.252.95.5:0 - "POST /whatsapp HTTP/1.1" 200 OK
-INFO:     173.252.95.9:0 - "POST /whatsapp HTTP/1.1" 200 OK
+VULCANO: respuesta tras session_choice: {'event': True, 'code': 200, 'status': 'OK', 'message': 'Debe elegir si cerrar la sesión anterior o continuar.', 'data': {'session_choice_required': True, 'message': 'Ya tienes una sesión abierta en esta agencia. ¿Deseas cerrarla para continuar aquí?', 'options': [{'value': 'close_previous', 'label': 'Cerrar sesión anterior e iniciar aquí'}, {'value': 'continue', 'label': 'Continuar con la sesión actual (cancelar este inicio de sesión)'}], 'previous_session': {'session_id': 6263, 'login_date': '2026-03-19T05:00:00.000000Z', 'login_time': '2026-03-19T12:06:04.410000Z', 'ip': '190.13.18.185', 'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537', 'navigator': 'Chrome', 'operating_system': 'Linux'}}}
+INFO:     173.252.79.7:0 - "POST /whatsapp HTTP/1.1" 200 OK
 INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+INFO:     173.252.107.32:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.15:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.107.112:0 - "POST /whatsapp HTTP/1.1" 200 OK
+INFO:     173.252.127.12:0 - "POST /whatsapp HTTP/1.1" 200 OK
