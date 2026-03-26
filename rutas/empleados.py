@@ -1,8 +1,5 @@
 import os
-import io
 import base64
-from io import BytesIO
-from urllib.request import urlopen
 from datetime import datetime
 from typing import Optional, List
 import math
@@ -10,14 +7,9 @@ from fastapi import FastAPI, APIRouter, HTTPException, status, Query, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from pymongo import MongoClient
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import ImageReader
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, Frame, Spacer
-from reportlab.lib.enums import TA_JUSTIFY
 from dotenv import load_dotenv
 import resend
+from Funciones.whatsapp_certificado_integra import generar_pdf_certificado
 
 load_dotenv()
 
@@ -230,181 +222,7 @@ async def enviar_certificado(
         }
     )
 
-    show_salary = req.incluirSalario
-
-    # — Generación de PDF — #
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    # Fondo de página
-    try:
-        bg_url = "https://storage.googleapis.com/integrapp/Imagenes/FONDO%20INTEGRA%20CORPORATIVO.png"
-        bg_data = urlopen(bg_url).read()
-        img = ImageReader(BytesIO(bg_data))
-        c.saveState()
-        c.setFillAlpha(0.6)
-        c.drawImage(img, 0, 0, width=width, height=height, mask="auto")
-        c.restoreState()
-    except Exception:
-        pass
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "Title",
-        parent=styles["Heading1"],
-        alignment=1,
-        fontName="Times-Bold",
-        fontSize=16,
-        leading=18,
-    )
-    subtitle_style = ParagraphStyle(
-        "Subtitle",
-        parent=styles["Heading3"],
-        alignment=1,
-        fontName="Times-Bold",
-        fontSize=14,
-        leading=14,
-    )
-    body_style = ParagraphStyle(
-        "Body",
-        parent=styles["Normal"],
-        fontName="Times-Roman",
-        fontSize=14,
-        leading=16,
-        alignment=TA_JUSTIFY,
-    )
-    info_style = ParagraphStyle(
-        "Info",
-        parent=styles["Normal"],
-        fontName="Times-Roman",
-        fontSize=14,
-        leading=14,
-        alignment=TA_JUSTIFY,
-    )
-
-    header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
-    subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
-
-    meses_esp = [
-        "enero",
-        "febrero",
-        "marzo",
-        "abril",
-        "mayo",
-        "junio",
-        "julio",
-        "agosto",
-        "septiembre",
-        "octubre",
-        "noviembre",
-        "diciembre",
-    ]
-
-    try:
-        dt_ing = datetime.fromisoformat(emp.fechaIngreso)
-        fecha_humana = (
-            f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
-        )
-    except Exception:
-        fecha_humana = emp.fechaIngreso or ""
-
-    ced = (
-        f"{int(emp.identificacion):,}".replace(",", ".")
-        if emp.identificacion.isdigit()
-        else emp.identificacion
-    )
-
-    texto = (
-        f"El señor/a <b>{emp.nombre}</b>, identificado/a con cédula número <b>{ced}</b>, "
-        f"labora en nuestra empresa desde <b>{fecha_humana}</b>, desempeñando el cargo de <b>{emp.cargo}</b> "
-        f"con contrato a término <b>{emp.tipoContrato}</b>,"
-    )
-
-    if show_salary and emp.basico and emp.basico > 0:
-        texto += f" con un salario fijo mensual por valor de $<b>{int(emp.basico):,}</b> pesos"
-
-    body = Paragraph(texto, body_style)
-
-    now = datetime.now()
-    fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
-
-    story = [Spacer(1, 75), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
-
-    aux_items = [
-        ("Auxilio Vivienda", emp.auxilioVivienda),
-        ("Auxilio Alimentación", emp.auxilioAlimentacion),
-        ("Auxilio Movilidad", emp.auxilioMovilidad),
-        ("Auxilio Rodamiento", emp.auxilioRodamiento),
-        ("Auxilio Productividad", emp.auxilioProductividad),
-        ("Auxilio Comunic", emp.auxilioComunic),
-    ]
-
-    if show_salary and any(v and v > 0 for _, v in aux_items):
-        story.append(Spacer(1, 6))
-        story.append(
-            Paragraph(
-                "Más un auxilio no salarial de mera liberalidad por concepto de:",
-                body_style,
-            )
-        )
-        for label, v in aux_items:
-            if v and v > 0:
-                story.append(Spacer(1, 6))
-                story.append(
-                    Paragraph(
-                        f"<b>{label}:</b> ${int(v):,}".replace(",", "."),
-                        body_style,
-                    )
-                )
-
-    story.append(Spacer(1, 10))
-    story.append(
-        Paragraph(
-            "Para mayor información de ser necesario: PBX 7006232 o celular 3183385709.",
-            info_style,
-        )
-    )
-    story.append(Spacer(1, 6))
-    story.append(
-        Paragraph(
-            f"La presente certificación se expide a solicitud del interesado el {fecha_cert} en la ciudad de Bogotá.",
-            info_style,
-        )
-    )
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("Cordialmente,", info_style))
-
-    frame = Frame(85, 340, width - 85 * 2, height - 380, showBoundary=0)
-    frame.addFromList(story, c)
-
-    # Firma
-    y_base = 300
-    c.setFont("Times-Bold", 12)
-    c.drawCentredString(width / 2, y_base + 5, "PATRICIA LEAL AROCA")
-    c.drawCentredString(width / 2, y_base - 10, "Certificado laboral")
-    c.drawCentredString(width / 2, y_base - 22, "Gerente de gestión humana")
-    c.drawCentredString(width / 2, y_base - 34, "Integra cadena de servicios")
-
-    try:
-        sig_url = "https://storage.googleapis.com/integrapp/Imagenes/firma%20patricia.png"
-        sig_data = urlopen(sig_url).read()
-        c.drawImage(
-            ImageReader(BytesIO(sig_data)),
-            x=width / 2 - 75,
-            y=y_base - 10,
-            width=150,
-            height=50,
-            mask="auto",
-        )
-    except Exception:
-        pass
-
-    c.showPage()
-    c.save()
-
-    pdf_data = buffer.getvalue()
-    buffer.close()
+    pdf_data = generar_pdf_certificado(emp.model_dump(), incluir_salario=req.incluirSalario)
 
     payload = {
         "from": "no-reply@integralogistica.com",

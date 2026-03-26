@@ -8,14 +8,364 @@ Backend del sistema de gestión logística de **Integra Cadena de Servicios S.A.
 
 ## Qué hace este sistema
 
-- Registro y gestión de vehículos con carga de documentos y biometría
-- Gestión de usuarios por roles (transportador, despachador, seguridad, admin)
-- Gestión de clientes, destinos y tarifas de flete
-- Manejo de pedidos: creación masiva, asignación de vehículos, división y fusión
-- Chatbot de WhatsApp multi-rol para consultas de manifiestos, certificados y rastreo
-- Generación de certificados laborales en PDF enviados por correo
-- Integración con Vulcano (manifiestos) y Siscore (rastreo SOAP)
-- Reportes de uso de WhatsApp descargables en Excel
+Sistema integral de gestión logística que centraliza toda la operación de Integra Cadena de Servicios S.A.S.:
+
+### Gestión de Usuarios y Autenticación
+- **Transportadores**: Registro, login, recuperación de clave, gestión de perfil
+- **Despachadores**: Acceso a torre de control, gestión de pedidos
+- **Seguridad**: Inspección de vehículos, aprobación de documentos
+- **Admin**: Gestión completa de usuarios, asignación de clientes y permisos
+- **Conductores**: Panel de conductor con documentos y firma digital
+- Autenticación JWT con expiración de 20 minutos
+- Recuperación de contraseña por correo con tokens de un solo uso (expiran en 30 minutos)
+- Verificación de códigos de seguridad para recuperación de clave de conductores
+
+### Gestión de Vehículos y Documentación
+- Registro de vehículos con placa, marca, modelo, capacidad
+- Carga de documentos: SOAT, tecnomecánica, tarjeta de propiedad, seguro, licencia de conducción
+- Carga de fotos del vehículo (exterior, interior, documentación)
+- Firma digital del propietario
+- Biometría: captura y verificación de huellas dactilares (5 dedos por mano)
+- Estados del vehículo: pendiente, en_revisión, aprobado, rechazado
+- Flujo de aprobación: Registro → Revisión por seguridad → Aprobado/Rechazado
+- Notificaciones por correo al cambiar estado del vehículo
+- Eliminación de documentos y fotos con limpieza en Google Cloud Storage
+
+### Gestión de Pedidos y Operaciones
+- Creación de pedidos individuales con: cliente, destinatario, dirección, municipio, departamento, región, kilos, costo real, costo teórico, observaciones
+- **Carga masiva de pedidos desde Excel**: soporta formatos con múltiples plantillas
+- Agrupación de pedidos por `consecutivo_vehiculo` (ej: FUNZA-20250711-FUN123)
+- Cálculo automático de totales por vehículo: kilos totales, costo real, costo teórico
+- Estados de pedidos: AUTORIZADO, PREAUTORIZADO, PENDIENTE, NO AUTORIZADO
+- Autorización de vehículos según perfil:
+  - ADMIN: puede autorizar cualquier estado
+  - OPERATIVO: puede autorizar AUTORIZADO y PREAUTORIZADO
+  - SEGURIDAD: no puede autorizar
+- Ajustes de totales por vehículo: kilos, tarifas, overrides manuales
+- **Fusión de vehículos**: combina dos o más vehículos en uno solo
+- **División de vehículos**: divide un vehículo en hasta 3 vehículos según criterios (destinatarios o consecutivos)
+- Carga de números de pedido desde Vulcano (integración masiva)
+- Exportación de pedidos autorizados a Excel con cálculo de tarifas y tipos de vehículo
+- Lista de pedidos completados con filtros por usuario, estados y regionales
+- API Power BI para estadísticas completadas por rango de fechas
+
+### Gestión de Clientes y Tarifas
+- **Clientes estándar**: NIT, nombre, contacto
+- **Clientes Siscore**: Entidad, NIT para integración con rastreo
+- **Clientes generales**: Base de datos de destinatarios con cliente_destinatario, dirección, municipio, departamento, coordenadas (lat, lon)
+- **Carga masiva** de clientes desde Excel (clientes, clientes_siscore, clientes_general)
+- **Tarifas de flete**: Origen, destino, tipos de vehículo (CAMIONETA, CARRY, 4X2, 6X2, 6X4, 8X2, 8X4) con costos asociados
+- Búsqueda de tarifa específica por origen, destino y tipo de vehículo
+- Carga masiva de tarifas desde Excel
+
+### Gestión de Municipios y Geolocalización
+- Base de datos de municipios colombianos con: municipio, departamento, latitud, longitud
+- Búsqueda de ubicación por nombre de municipio
+- Carga masiva de municipios desde Excel
+- Geocodificación automática usando Nominatim (OpenStreetMap)
+
+### Gestión de Manifiestos y Pagos
+- **Manifiestos activos** (ExtraePagosNoAplicados): Guías sin liquidar, con información de flete, saldos, fechas
+- **Manifiestos pagados** (ExtraePagosAplicados): Guías liquidadas con detalles de pago
+- **Novedades**: Registro de incidentes en manifiestos con fecha, descripción, estado
+- Consulta de manifiestos por tenedor (propietario de vehículo)
+
+### Chatbot WhatsApp Multi-rol
+Sistema de mensajería automatizado con máquina de estados para tres tipos de usuarios:
+
+**Transportador:**
+- Consulta de manifiestos activos y pagados
+- Verificación de saldos pendientes
+- Recuperación de clave de acceso
+- Consulta de manifiestos por año específico
+- Navegación intuitiva con menú numérico
+
+**Empleado:**
+- Solicitud de certificado laboral
+- Validación de identidad con cédula
+- Envío de certificado en PDF por correo electrónico
+- Opción de incluir o no información salarial
+
+**Cliente:**
+- Rastreo de guías de envío
+- Consulta de estado de guías (integración Siscore)
+- Visualización de imágenes de trazabilidad
+- Recepción de resultados por WhatsApp
+
+**Características técnicas:**
+- Máquina de estados con expiración automática de sesiones
+- Detección y prevención de mensajes duplicados
+- Registro detallado de todas las interacciones en MongoDB
+- Consultas asíncronas a Vulcano y Siscore
+- Soporte para proxies en redes restringidas
+
+### Integración con Sistemas Externos
+
+**Vulcano (Sistema de Manifiestos):**
+- Consulta de manifiestos por cédula de tenedor
+- Extracción de número de manifiesto, fecha, origen, destino, destinatario, estado
+- Consulta de manifiestos detallados con pagos y saldos
+- Autenticación JWT propia de Vulcano
+- Soporte para proxies y configuración de timeout
+- Manejo de errores y reintentos automáticos
+
+**Siscore (Rastreo de Guías - SOAP/XML):**
+- Consulta de trazabilidad de guías vía SOAP
+- Obtención de imágenes de trazabilidad (fotos de entrega)
+- Formateo de respuestas XML a JSON
+- Soporte para proxy en redes restringidas
+- Validación de existencia de guía antes de consultar
+
+**Google Cloud Storage:**
+- Almacenamiento de documentos de vehículos (SOAT, tecnomecánica, tarjeta, etc.)
+- Almacenamiento de fotos de vehículos
+- Almacenamiento de firmas digitales
+- Almacenamiento de imágenes de huellas dactilares
+- Optimización automática de imágenes (WebP, redimensionamiento)
+- Eliminación segura de archivos
+
+**Resend (Correo Electrónico):**
+- Envío de certificados laborales (PDF adjunto)
+- Envío de enlaces de recuperación de contraseña
+- Envío de códigos de verificación
+- Notificaciones de cambio de estado de vehículos
+- Envío de correos silenciosos (sin bloqueo de la API)
+
+### Gestión de Pacientes - Fresenius Medical Care
+Sistema completo de gestión de pacientes con importación masiva, normalización de datos, validación de duplicados y operaciones CRUD individuales.
+
+**Importación Masiva con Streaming SSE:**
+- **Endpoint `/cargar-masivo-stream`**: Carga de pacientes desde Excel (.xlsx, .xls, .xlsm) con progreso en tiempo real via Server-Sent Events (SSE)
+- **Progreso en tiempo real**: El backend envía eventos SSE con el estado actual de la carga:
+  - `stage: 'reading'` - Leyendo archivo Excel
+  - `stage: 'processing'` - Procesando registros (muestra progreso % y registros procesados/total)
+  - `stage: 'saving'` - Guardando en base de datos
+  - `stage: 'complete'` - Carga completada con estadísticas finales
+- **Solución a error "I/O operation on closed file"**: El contenido del archivo se lee ANTES de iniciar el StreamingResponse para evitar que el archivo se cierre antes de poder procesarlo
+- **Validación temprana**: Valida tipo de archivo y contenido vacío antes de iniciar el generador de SSE
+- **Métricas de respuesta**: Tiempo de procesamiento, registros exitosos, registros con errores, lista detallada de errores (primeros 50)
+- **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
+
+**Normalización Automática de Datos:**
+- Implementada en `Funciones/normalizacion_medical_care.py` con funciones específicas:
+  - `fx_normalizar_paciente()`: Primeras 4 palabras, sin signos de puntuación, mayúsculas, **reordenamiento alfabético**
+    - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
+  - `fx_normalizar_cedula()`: Solo dígitos, elimina caracteres no numéricos
+  - `fx_normalizar_direccion()`: Normalización completa con corrección de errores comunes (ej: "CRA 1" → "CARRERA 1"), **reordenamiento alfabético**
+    - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
+    - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
+    - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
+  - `fx_normalizar_celular()`: Solo últimos 10 dígitos, elimina prefijos de país
+  - `fx_normalizar_municipio()`: Mayúsculas, trim, compactar espacios (sin caracteres especiales)
+  - `fx_normalizar_base()`: Normalización básica para campos de ubicación (sede, departamento, CEDI, ruta)
+    - Elimina caracteres especiales
+    - Mayúsculas y compactar espacios
+    - **Corrige caracteres mal codificados (UTF-8 leído como Latin-1)**: `Ã³` → `O`, `Ãº` → `U`, `Ã¡` → `A`, `Ã©` → `E`, `Ã­` → `I`, `Ã‘` → `N`, etc.
+    - Sin reordenamiento alfabético
+- **Corrección de errores comunes**: Transformación de abreviaturas y errores tipográficos en direcciones
+- **Reordenamiento alfabético**: Aplicado a pacientes y direcciones para consistencia en búsquedas
+- **Corrección de caracteres mal codificados**: Transformación de caracteres UTF-8 leídos incorrectamente como Latin-1 (ej: `Ã³` → `O`, `Ãº` → `U`, `Ã¡` → `A`, `Ã©` → `E`, `Ã­` → `I`, `Ã‘` → `N`)
+
+**Validación de Duplicados:**
+- **Duplicados en el archivo**: Valida que no haya cédulas repetidas dentro del mismo archivo de carga
+- **Duplicados en base de datos**: Consulta MongoDB antes de insertar para evitar cédulas ya existentes
+- **Registra errores detallados**: Cada duplicado se registra con el número de fila y el valor de la cédula duplicada
+
+**Almacenamiento de Campos Originales y Normalizados:**
+- **Campos con prefijo `_original`**: Guardan el valor exacto del Excel para trazabilidad y auditoría
+- **Campos sin prefijo**: Contienen el valor normalizado usado para búsquedas y operaciones
+- **Ejemplo**: 
+  - `cedula_original: "57 310 123 4567"` → `cedula: "573101234567"`
+  - `paciente_original: "MARÍA GONZÁLEZ, PEREZ"` → `paciente: "MARÍA GONZÁLEZ PEREZ"`
+
+**Validación de Columnas:**
+- **Columnas requeridas**: `paciente`, `cedula` (son obligatorios)
+- **Columnas opcionales**: `sede`, `direccion`, `departamento`, `municipio`, `ruta`, `cedi`, `celular`
+- **Validación case-insensitive**: Las columnas pueden estar en mayúsculas, minúsculas o mezcladas
+- **Mensaje de error claro**: Indica qué columnas faltan si el archivo no cumple con el formato
+
+**Registro de Auditoría:**
+- **Usuario de carga**: Guarda el nombre del usuario que realizó la carga (`usuario_carga`)
+- **Fecha de carga**: Guarda fecha y hora exacta de la carga (`fecha_carga`)
+- **Usuario de actualización**: Guarda el usuario que actualizó un registro (`usuario_actualizacion`)
+- **Fecha de actualización**: Guarda fecha y hora de actualización (`fecha_actualizacion`)
+
+**CRUD Completo de Pacientes:**
+- **Crear paciente individual**: `POST /pacientes-medical-care/`
+  - Valida campos obligatorios (paciente, cedula)
+  - Normaliza todos los campos automáticamente
+  - Valida duplicados en base de datos
+  - Retorna el paciente creado con ID
+- **Actualizar paciente existente**: `PUT /pacientes-medical-care/{paciente_id}`
+  - Permite editar todos los campos
+  - Si la cédula cambia, valida que no exista en otro paciente
+  - Registra usuario y fecha de actualización
+  - Retorna el paciente actualizado
+- **Eliminar paciente individual**: `DELETE /pacientes-medical-care/{paciente_id}`
+  - Valida que el paciente existe
+  - Elimina el registro de MongoDB
+  - Retorna confirmación con ID del paciente eliminado
+- **Obtener paciente por ID**: `GET /pacientes-medical-care/{paciente_id}`
+  - Retorna todos los campos del paciente (originales y normalizados)
+  - Convierte ObjectId a string
+
+**Búsqueda y Listado:**
+- **Listado con paginación**: `GET /pacientes-medical-care/?skip=0&limit=100`
+  - Retorna lista de pacientes con paginación
+  - Convierte ObjectId a string en cada documento
+  - Total de registros en la respuesta
+- **Búsqueda por cédula**: `GET /pacientes-medical-care/buscar?cedula=123456789`
+  - Normaliza la cédula antes de buscar
+  - Búsqueda exacta en campo normalizado
+- **Búsqueda por nombre**: `GET /pacientes-medical-care/buscar?paciente=Juan`
+  - Búsqueda parcial con regex case-insensitive
+  - Busca en campo normalizado de paciente
+
+**Eliminación Masiva:**
+- **Endpoint**: `DELETE /pacientes-medical-care/eliminar-todos?usuario=USUARIO`
+- **Restricción**: Solo perfil ADMIN
+- **Retorna**: Número de registros eliminados y usuario que realizó la eliminación
+
+**Base de Datos:**
+- **Base de datos**: `integra` (MongoDB)
+- **Colección**: `pacientes_medical_care`
+- **Índices**: Índice único en campo `cedula` para prevenir duplicados
+- **Conexión**: Usa `bd.bd_cliente` desde `bd/bd_cliente.py`
+
+**Manejo de Errores:**
+- **Errores por fila**: Registra errores sin detener la carga completa
+- **Primeros 50 errores**: La respuesta incluye hasta 50 errores para no saturar la respuesta
+- **Mensajes descriptivos**: Cada error indica la fila y el motivo específico
+- **Códigos de estado HTTP**:
+  - 200 OK - Carga completada (con o sin errores)
+  - 400 Bad Request - Archivo inválido, columnas faltantes, campos obligatorios
+  - 409 Conflict - Duplicado encontrado
+  - 500 Internal Server Error - Error inesperado en el servidor
+
+**Endpoints Completos:**
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE (streaming) |
+| POST | `/pacientes-medical-care/cargar-masivo` | Carga masiva versión clásica (sin streaming) |
+| GET | `/pacientes-medical-care/?skip=0&limit=100` | Listar pacientes con paginación |
+| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX` | Buscar por cédula o nombre |
+| POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
+| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente |
+| DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |
+| GET | `/pacientes-medical-care/{id}` | Obtener paciente por ID |
+| DELETE | `/pacientes-medical-care/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+**Documentación:**
+- **Archivo de documentación**: `docs/MEDICAL_CARE_EXCEL_IMPORT.md` con detalles completos del sistema
+- **Plantilla de Excel**: `plantilla_pacientes.xlsx` en la raíz del proyecto
+
+### Gestión de Pedidos V3 - Fresenius Medical Care
+Sistema de gestión de pedidos específico para Medical Care con carga masiva desde Excel, normalización de datos y operaciones CRUD.
+
+**Importación Masiva con Streaming SSE:**
+- **Endpoint `/cargar-masivo-stream`**: Carga de pedidos desde Excel (.xlsx, .xls, .xlsm) con progreso en tiempo real via Server-Sent Events (SSE)
+- **Progreso en tiempo real**: El backend envía eventos SSE con el estado actual de la carga:
+  - `stage: 'reading'` - Leyendo archivo Excel
+  - `stage: 'processing'` - Procesando registros (muestra progreso % y registros procesados/total)
+  - `stage: 'saving'` - Guardando en base de datos
+  - `stage: 'complete'` - Carga completada con estadísticas finales
+- **Validación temprana**: Valida tipo de archivo y contenido vacío antes de iniciar el generador de SSE
+- **Métricas de respuesta**: Tiempo de procesamiento, registros exitosos, registros con errores, lista detallada de errores (primeros 50)
+- **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
+
+**Normalización Automática de Datos:**
+- **Solo se normalizan dos campos específicos**:
+  - `cliente_destino`: Usa `fx_normalizar_paciente()` - Primeras 4 palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético
+    - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
+  - `direccion_destino`: Usa `fx_normalizar_direccion()` - Normalización completa con corrección de errores comunes, reordenamiento alfabético
+    - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
+    - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
+    - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
+- **Los demás campos se guardan tal cual vienen del Excel**: Sin normalización
+  - `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `telefono`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
+- Funciones de normalización importadas desde `Funciones/normalizacion_medical_care.py`:
+  - `fx_normalizar_paciente()`: Normaliza nombres de clientes
+  - `fx_normalizar_direccion()`: Normaliza direcciones con corrección de errores
+
+**Validación de Duplicados:**
+- **Duplicados en el archivo**: Valida que no haya identificadores repetidos dentro del mismo archivo de carga
+- **Duplicados en base de datos**: Consulta MongoDB antes de insertar para evitar registros ya existentes
+- **Registra errores detallados**: Cada duplicado se registra con información del registro
+
+**CRUD Completo de Pedidos:**
+- **Listar pedidos**: `GET /pedidos-v3/?skip=0&limit=100`
+  - Retorna lista de pedidos con paginación
+  - Convierte ObjectId a string en cada documento
+  - Total de registros en la respuesta
+- **Crear pedido individual**: `POST /pedidos-v3/?usuario=USUARIO`
+  - Valida campos obligatorios
+  - Normaliza todos los campos automáticamente
+  - Valida duplicados en base de datos
+  - Retorna el pedido creado con ID
+- **Actualizar pedido existente**: `PUT /pedidos-v3/{pedido_id}?usuario=USUARIO`
+  - Permite editar todos los campos
+  - Valida que no exista en otro pedido si cambia el identificador
+  - Registra usuario y fecha de actualización
+  - Retorna el pedido actualizado
+- **Eliminar pedido individual**: `DELETE /pedidos-v3/{pedido_id}?usuario=USUARIO`
+  - Valida que el pedido existe
+  - Elimina el registro de MongoDB
+  - Retorna confirmación con ID del pedido eliminado
+- **Obtener pedido por ID**: `GET /pedidos-v3/{pedido_id}`
+  - Retorna todos los campos del pedido
+  - Convierte ObjectId a string
+
+**Eliminación Masiva:**
+- **Endpoint**: `DELETE /pedidos-v3/eliminar-todos?usuario=USUARIO`
+- **Restricción**: Solo perfil ADMIN
+- **Retorna**: Número de registros eliminados y usuario que realizó la eliminación
+
+**Base de Datos:**
+- **Base de datos**: `integra` (MongoDB)
+- **Colección**: `pedidos_v3`
+- **Conexión**: Usa `bd.bd_cliente` desde `bd/bd_cliente.py`
+
+**Manejo de Errores:**
+- **Errores por fila**: Registra errores sin detener la carga completa
+- **Primeros 50 errores**: La respuesta incluye hasta 50 errores para no saturar la respuesta
+- **Mensajes descriptivos**: Cada error indica la fila y el motivo específico
+- **Códigos de estado HTTP**:
+  - 200 OK - Carga completada (con o sin errores)
+  - 400 Bad Request - Archivo inválido, campos obligatorios faltantes
+  - 500 Internal Server Error - Error inesperado en el servidor
+
+**Endpoints Completos:**
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE (streaming) |
+| GET | `/pedidos-v3/?skip=0&limit=100` | Listar pedidos con paginación |
+| POST | `/pedidos-v3/?usuario=USUARIO` | Crear pedido individual |
+| PUT | `/pedidos-v3/{id}?usuario=USUARIO` | Actualizar pedido |
+| DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
+| GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
+| DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+### Reportes y Análisis
+- **Reporte de uso de WhatsApp**: Estadísticas generales de interacciones
+- **Números únicos por estado**: Conteo de usuarios por rol y fecha
+- **Descarga en Excel**: Exportación detallada de logs de WhatsApp
+- **Reporte de pedidos**: Exportación a Excel con filtros personalizados
+- **Reporte de pedidos completados**: Datos históricos para Power BI
+
+### Funciones de Empleados y Certificados
+- Base de datos de empleados con: identificación, nombres, apellidos, cargo, fecha ingreso, salario, estado civil, tipo de sangre, EPS, fondo de pensión, fondo de cesantías
+- Generación de certificados laborales en PDF con ReportLab
+- Opción de incluir u ocultar salario en el certificado
+- Envío automático del certificado por correo
+- Búsqueda de empleado por número de identificación
+- Carga masiva de empleados desde Excel a MongoDB
+
+### Herramientas de Debug y Diagnóstico
+- **Debug de red**: Verificación de IP pública, variables de entorno, conectividad
+- **Debug de Siscore**: Prueba de conexión SOAP, resolución de host, timeouts
+- **Endpoints de diagnóstico** para troubleshooting de integraciones
 
 ---
 
@@ -111,6 +461,7 @@ integrappi/
 | POST | `/usuarios/recuperar/solicitar` | Solicitar recuperación de clave (envía correo) |
 | POST | `/usuarios/recuperar/confirmar` | Confirmar nueva clave con token |
 | POST | `/usuarios/cambiar-clave` | Cambiar clave autenticado |
+| GET | `/usuarios/cedula-nombre` | Listar solo cédula y nombre de usuarios |
 
 ### Usuarios Torre de Control (`/baseusuarios`)
 | Método | Ruta | Descripción |
@@ -119,9 +470,13 @@ integrappi/
 | POST | `/baseusuarios/` | Crear usuario |
 | PUT | `/baseusuarios/{id}` | Actualizar usuario |
 | DELETE | `/baseusuarios/{id}` | Eliminar usuario |
+| GET | `/baseusuarios/despachadores` | Listar solo despachadores |
 | POST | `/baseusuarios/login` | Login estándar — retorna datos del usuario incluyendo `clientes` |
 | POST | `/baseusuarios/loginseguridad` | Login perfil SEGURIDAD/ADMIN |
 | POST | `/baseusuarios/loginConductor` | Login perfil CONDUCTOR |
+| POST | `/baseusuarios/verificarRecuperacion` | Verificar recuperación (envía código) |
+| POST | `/baseusuarios/validarCodigoRecuperacion` | Validar código de recuperación |
+| POST | `/baseusuarios/cambiarClaveConductor` | Cambiar clave de conductor |
 | PATCH | `/baseusuarios/{id}/clientes` | Actualizar lista de clientes permitidos para un usuario |
 
 > **Campo `clientes`**: cada usuario en `baseusuarios` puede tener un array `clientes: ["KABI", "MEDICAL_CARE"]` que controla a qué portales de cliente tiene acceso. Si el campo no existe en el documento, se toma por defecto `["KABI"]` para compatibilidad con registros anteriores. Valores válidos: `KABI`, `MEDICAL_CARE`.
@@ -131,22 +486,36 @@ integrappi/
 |---|---|---|
 | POST | `/vehiculos/crear` | Registrar vehículo |
 | GET | `/vehiculos/obtener-vehiculos` | Listar vehículos del usuario |
+| GET | `/vehiculos/obtener-vehiculo/{placa}` | Obtener vehículo por placa |
 | PUT | `/vehiculos/actualizar-estado` | Cambiar estado (notifica por correo) |
+| PUT | `/vehiculos/actualizar-informacion/{placa}` | Actualizar información del vehículo |
 | PUT | `/vehiculos/subir-documento` | Subir documento (tarjeta, SOAT, etc.) |
+| PUT | `/vehiculos/subir-estudio-seguridad` | Subir estudio de seguridad |
+| PUT | `/vehiculos/subir-foto-seguridad` | Subir foto de seguridad |
+| PUT | `/vehiculos/subir-fotos` | Subir múltiples fotos |
 | PUT | `/vehiculos/subir-firma` | Subir imagen de firma |
 | GET | `/vehiculos/obtener-firma` | Obtener firma en base64 |
+| DELETE | `/vehiculos/eliminar-documento` | Eliminar documento |
+| DELETE | `/vehiculos/eliminar-foto` | Eliminar foto |
+| GET | `/vehiculos/obtener-vehiculos-incompletos` | Vehículos con documentación incompleta |
 | GET | `/vehiculos/obtener-aprobados-paginados` | Vehículos aprobados (paginado) |
 
 ### Pedidos (`/pedidos`)
 | Método | Ruta | Descripción |
 |---|---|---|
-| POST | `/pedidos/` | Crear pedido |
-| GET | `/pedidos/` | Listar pedidos (con filtros) |
+| POST | `/pedidos/` | Listar pedidos agrupados por consecutivo_vehiculo |
+| PUT | `/pedidos/autorizar-por-consecutivo-vehiculo` | Autorizar pedidos por vehículo |
+| PUT | `/pedidos/confirmar-preautorizados` | Confirmar pedidos preautorizados |
+| DELETE | `/pedidos/eliminar-por-consecutivo-vehiculo` | Eliminar pedidos por vehículo |
 | POST | `/pedidos/cargar-masivo` | Carga masiva desde Excel |
-| GET | `/pedidos/reporte-excel` | Descargar reporte en Excel |
+| GET | `/pedidos/exportar-autorizados` | Exportar pedidos AUTORIZADOS a Excel |
+| POST | `/pedidos/cargar-numeros-pedido` | Cargar números de pedido desde Vulcano |
 | POST | `/pedidos/ajustes-vehiculos` | Ajustes por vehículo (kilos, tarifas) |
 | POST | `/pedidos/fusion-vehiculos` | Fusionar vehículos |
 | POST | `/pedidos/dividir-hasta-tres` | Dividir pedido en hasta 3 vehículos |
+| GET | `/pedidos/exportar-completados` | Exportar pedidos completados a Excel |
+| GET | `/pedidos/listar-completados` | Listar vehículos completados |
+| GET | `/pedidos/pbi-documentos` | API Power BI: documentos por rango de fechas |
 
 ### WhatsApp (`/whatsapp-integra`)
 | Método | Ruta | Descripción |
@@ -159,9 +528,109 @@ integrappi/
 |---|---|---|
 | GET | `/whatsapp-report/resumen` | Estadísticas generales de uso |
 | GET | `/whatsapp-report/numeros-por-estado` | Números únicos por rol por día |
-| GET | `/whatsapp-report/excel` | Descargar reporte en Excel |
+| GET | `/whatsapp-report/numeros-por-estado/descargar-excel` | Descargar reporte de números en Excel |
+| GET | `/whatsapp-report/excel` | Descargar reporte detallado en Excel |
 
-> Los demás módulos (empleados, clientes, fletes, biometría, ciudades, manifiestos, novedades) siguen el mismo patrón REST estándar. La documentación interactiva completa está disponible en `/docs` cuando el servidor está corriendo.
+### Biometría (`/biometria`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/biometria/capturar` | Capturar huella |
+| POST | `/biometria/guardar_completo` | Guardar huellas completas (10 dedos) |
+| POST | `/biometria/verificar` | Verificar huella |
+| POST | `/biometria/subir-imagen` | Subir imagen de huella |
+| GET | `/biometria/obtener-huellas-pdf/{cedula}` | Obtener huellas para generar PDF |
+
+### Empleados (`/empleados`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/empleados/` | Listar todos los empleados |
+| GET | `/empleados/buscar` | Buscar empleado por identificación |
+| POST | `/empleados/enviar` | Enviar certificado laboral por correo |
+
+### Clientes (`/clientes`, `/clientes-siscore`, `/clientes-general`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/clientes/` | Crear cliente estándar |
+| GET | `/clientes/` | Listar clientes estándar |
+| POST | `/clientes/cargar-masivo` | Carga masiva clientes estándar |
+| POST | `/clientes-siscore/` | Crear cliente Siscore |
+| GET | `/clientes-siscore/` | Listar clientes Siscore |
+| GET | `/clientes-siscore/nit-por-entidad/{entidad}` | Obtener NIT por entidad |
+| POST | `/clientes-siscore/cargar-masivo` | Carga masiva clientes Siscore |
+| GET | `/clientes-general/` | Listar clientes generales |
+| GET | `/clientes-general/por-destinatario/{destinatario}` | Obtener por destinatario |
+| GET | `/clientes-general/por-cliente-destinatario/{cliente_dest}` | Obtener por cliente_destinatario |
+| POST | `/clientes-general/cargar-masivo` | Carga masiva clientes generales |
+
+### Ciudades (`/ciudades-general`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/ciudades-general/` | Listar municipios |
+| GET | `/ciudades-general/ubicacion-por-municipio/{municipio}` | Obtener ubicación por municipio |
+| GET | `/ciudades-general/por-municipio/{municipio}` | Obtener por municipio |
+| POST | `/ciudades-general/cargar-masivo` | Carga masiva de municipios |
+
+### Fletes (`/fletes`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/fletes/` | Crear tarifa de flete |
+| GET | `/fletes/` | Listar todas las tarifas |
+| GET | `/fletes/{origen}/{destino}` | Obtener tarifa por ruta |
+| GET | `/fletes/buscar-tarifa` | Buscar tarifa específica por origen, destino, tipo |
+| PUT | `/fletes/{origen}/{destino}` | Actualizar tarifa |
+| DELETE | `/fletes/{origen}/{destino}` | Eliminar tarifa |
+| POST | `/fletes/cargar-masivo` | Carga masiva de tarifas |
+
+### Manifiestos y Pagos (`/pagoSaldos`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/pagoSaldos/` | Listar todos los manifiestos |
+| GET | `/pagoSaldos/{manifiesto_id}` | Obtener manifiesto por ID |
+| GET | `/pagoSaldos/tenedor/{tenedor}` | Listar manifiestos por tenedor |
+
+### Novedades (`/novedades`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/novedades/` | Listar todas las novedades |
+| GET | `/novedades/tenedor/{tenedor}` | Listar novedades por tenedor |
+
+### Revisión (`/revision`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/revision/enviar-observaciones` | Enviar observaciones de revisión |
+
+### Pacientes Medical Care (`/pacientes-medical-care`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE |
+| POST | `/pacientes-medical-care/cargar-masivo?usuario=USUARIO` | Carga masiva clásica |
+| GET | `/pacientes-medical-care/?skip=0&limit=100` | Listar pacientes con paginación |
+| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX` | Buscar por cédula o nombre |
+| POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
+| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente |
+| DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |
+| GET | `/pacientes-medical-care/{id}` | Obtener paciente por ID |
+| DELETE | `/pacientes-medical-care/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+### Pedidos V3 Medical Care (`/pedidos-v3`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE |
+| GET | `/pedidos-v3/?skip=0&limit=100` | Listar pedidos con paginación |
+| POST | `/pedidos-v3/?usuario=USUARIO` | Crear pedido individual |
+| PUT | `/pedidos-v3/{id}?usuario=USUARIO` | Actualizar pedido |
+| DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
+| GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
+| DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+### Debug (`/debug`, `/debug-siscore`)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/debug/ip` | Obtener IP pública |
+| GET | `/debug/env` | Obtener variables de entorno |
+| GET | `/debug-siscore/siscore-test` | Probar conexión Siscore |
+
+> La documentación interactiva completa está disponible en `/docs` cuando el servidor está corriendo.
 
 ---
 

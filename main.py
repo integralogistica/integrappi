@@ -22,6 +22,8 @@ from rutas.whatsapp_integra import ruta_whatsapp_integra
 from rutas.whatsapp_report_integra import ruta_whatsapp_report
 from rutas.debug import ruta_debug_network
 from rutas.debug_siscore import ruta_debug_siscore
+from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
+from rutas.pedidos_v3 import router as ruta_pedidos_v3
 
 app = FastAPI()
 app.title = "integra"
@@ -64,6 +66,8 @@ app.include_router(ruta_whatsapp_integra)
 app.include_router(ruta_whatsapp_report)
 app.include_router(ruta_debug_network)
 app.include_router(ruta_debug_siscore)
+app.include_router(ruta_pacientes_medical_care)
+app.include_router(ruta_pedidos_v3)
 
 @app.get("/", tags=['Home'])
 async def root():

@@ -5,6 +5,7 @@ import base64
 import math
 from io import BytesIO
 from urllib.request import urlopen
+
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 
@@ -85,9 +86,9 @@ def _transformar_empleado(doc: dict) -> Dict[str, Any]:
         "cargo": _get_val(clean_doc, "cargo", "cargo_laboral", "CARGO") or "",
         "tipoContrato": _get_val(clean_doc, "tipoContrato", "tipo_contrato", "TIPO_DE_CONTRATO", "TIPO DE CONTRATO") or "",
         "fechaIngreso": fecha_ing,
-        "basico": _get_float(clean_doc, "basico", "salario_mes", "BASICO"),
+        "basico": _get_float(clean_doc, "basico", "salario_mensual", "BASICO"),
         "auxilioVivienda": _get_float(clean_doc, "auxilioVivienda", "auxilio_transporte", "AUXILIO VIVIENDA"),
-        "auxilioAlimentacion": _get_float(clean_doc, "auxilioAlimentacion", "auxilio_alimentacion", "AUXILIO ALIMENTA"),
+        "auxilioAlimentacion": _get_float(clean_doc, "auxilioAlimentacion", "auxilio_alimentacion", "AUXILIO ALIMENTACION"),
         "auxilioMovilidad": _get_float(clean_doc, "auxilioMovilidad", "auxilio_transporte", "AUXILIO DE MOVILIDAD"),
         "auxilioRodamiento": _get_float(clean_doc, "auxilioRodamiento", "auxilio_rodamiento", "AUXILIO RODAMIENTO"),
         "auxilioProductividad": _get_float(clean_doc, "auxilioProductividad", "auxilio_productividad", "AUXILIO DE PRODUCTIVIDAD"),
@@ -119,7 +120,7 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
 
     # Fondo
     try:
-        bg_url = "https://storage.googleapis.com/integrapp/Imagenes/FONDO%20INTEGRA%20CORPORATIVO.png"
+        bg_url = "https://storage.googleapis.com/integraapp/Imagenes/FONDO%20INTEGRA%20CORPORATIVO.png"
         bg_data = urlopen(bg_url).read()
         img = ImageReader(BytesIO(bg_data))
         c.saveState()
@@ -128,6 +129,28 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
         c.restoreState()
     except Exception:
         pass
+
+    # Encabezado con logos en recuadro punteado
+    imagenes_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "imagenes"))
+    box_x, box_y = 40, height - 88
+    box_w, box_h = width - 80, 72
+    c.saveState()
+    c.setDash(4, 4)
+    c.setLineWidth(0.8)
+    c.setStrokeColorRGB(0.5, 0.5, 0.5)
+    c.rect(box_x, box_y, box_w, box_h)
+    c.restoreState()
+    logo_h = 52
+    slot_w = box_w / 3
+    for i, nombre in enumerate(["logo_integra.png", "basc.jpg", "iso.png"]):
+        ruta = os.path.join(imagenes_dir, nombre)
+        if os.path.exists(ruta):
+            lx = box_x + i * slot_w + (slot_w - logo_h * 1.6) / 2
+            ly = box_y + (box_h - logo_h) / 2
+            c.saveState()
+            c.setFillAlpha(0.5)
+            c.drawImage(ruta, lx, ly, width=logo_h * 1.6, height=logo_h, preserveAspectRatio=True, mask="auto")
+            c.restoreState()
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("Title", parent=styles["Heading1"], alignment=1, fontName="Times-Bold", fontSize=16, leading=18)
@@ -138,16 +161,16 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
     header = Paragraph("EL DEPARTAMENTO DE GESTIÓN HUMANA", title_style)
     subtitle = Paragraph("CERTIFICA QUE:", subtitle_style)
 
-    meses_esp = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+    meses_espanol = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
 
     try:
         dt_ing = datetime.fromisoformat(emp.get("fechaIngreso") or "")
-        fecha_humana = f"{dt_ing.day} de {meses_esp[dt_ing.month-1]} de {dt_ing.year}"
+        fecha_humana = f"{dt_ing.day} de {meses_espanol[dt_ing.month-1]} de {dt_ing.year}"
     except Exception:
         fecha_humana = emp.get("fechaIngreso") or ""
 
-    ced_raw = emp.get("identificacion") or ""
-    ced = f"{int(ced_raw):,}".replace(",", ".") if ced_raw.isdigit() else ced_raw
+    cedula_raw = emp.get("identificacion") or ""
+    ced = f"{int(cedula_raw):,}".replace(",", ".") if cedula_raw.isdigit() else cedula_raw
 
     texto = (
         f"El señor/a <b>{emp.get('nombre','')}</b>, identificado/a con cédula número <b>{ced}</b>, "
@@ -156,12 +179,12 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
     )
 
     if incluir_salario and emp.get("basico") and emp["basico"] > 0:
-        texto += f" con un salario fijo mensual por valor de $<b>{int(emp['basico']):,}</b> pesos".replace(",", ".")
+        texto += f" con un salario fijo mensual por valor de <b>${int(emp['basico']):,}</b> pesos".replace(",", ".")
 
     body = Paragraph(texto, body_style)
 
     now = datetime.now()
-    fecha_cert = f"{now.day} de {meses_esp[now.month-1]} de {now.year}"
+    fecha_cert = f"{now.day} de {meses_espanol[now.month-1]} de {now.year}"
 
     story = [Spacer(1, 75), header, Spacer(1, 16), subtitle, Spacer(1, 16), body]
 
@@ -176,7 +199,7 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
 
     if incluir_salario and any(v and v > 0 for _, v in aux_items):
         story.append(Spacer(1, 6))
-        story.append(Paragraph("Más un auxilio no salarial de mera liberalidad por concepto de:", body_style))
+        story.append(Paragraph("Más un auxilio no salarial de manera liberalidad por concepto de:", body_style))
         for label, v in aux_items:
             if v and v > 0:
                 story.append(Spacer(1, 6))
@@ -189,23 +212,26 @@ def generar_pdf_certificado(emp: Dict[str, Any], incluir_salario: bool) -> bytes
     story.append(Spacer(1, 6))
     story.append(Paragraph("Cordialmente,", info_style))
 
+    # MODIFICACIÓN IMPORTANTE: backColor=None para permitir que la marca de agua se vea.
+    # Si backColor tiene un color (blanco por defecto), tapará el watermark dibujado antes.
     frame = Frame(85, 340, width - 85 * 2, height - 380, showBoundary=0)
+
     frame.addFromList(story, c)
 
     # Firma
     y_base = 300
     c.setFont("Times-Bold", 12)
-    c.drawCentredString(width / 2, y_base + 5, "PATRICIA LEAL AROCA")
-    c.drawCentredString(width / 2, y_base - 10, "Certificado laboral")
-    c.drawCentredString(width / 2, y_base - 22, "Gerente de gestión humana")
-    c.drawCentredString(width / 2, y_base - 34, "Integra cadena de servicios")
 
-    try:
-        sig_url = "https://storage.googleapis.com/integrapp/Imagenes/firma%20patricia.png"
-        sig_data = urlopen(sig_url).read()
-        c.drawImage(ImageReader(BytesIO(sig_data)), x=width / 2 - 75, y=y_base - 10, width=150, height=50, mask="auto")
-    except Exception:
-        pass
+    # Texto primero (la firma irá encima para dificultar falsificación)
+    c.drawCentredString(width / 2, y_base + 10, "PATRICIA LEAL AROCA")
+    c.drawCentredString(width / 2, y_base - 5, "Certificado laboral")
+    c.drawCentredString(width / 2, y_base - 17, "Gerente de gestión humana")
+    c.drawCentredString(width / 2, y_base - 29, "Integra cadena de servicios")
+
+    # Imagen de firma sobre el nombre
+    firma_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "imagenes", "firmaPatricia.png"))
+    if os.path.exists(firma_path):
+        c.drawImage(firma_path, x=width / 2 - 75, y=y_base - 5, width=150, height=55, mask="auto")
 
     c.showPage()
     c.save()

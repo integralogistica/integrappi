@@ -1,0 +1,253 @@
+let
+    Source = Excel.CurrentWorkbook(){[Name="BASE"]}[Content],
+
+    #"Changed Type" = Table.TransformColumnTypes(
+        Source,
+        {
+            {"sede", type text},
+            {"paciente", type text},
+            {"cedula", type text},
+            {"direccion", type text},
+            {"departamento", type text},
+            {"municipio", type text},
+            {"ruta", type text},
+            {"cedi", type text},
+            {"celular", type text}
+        }
+    ),
+
+    fxReemplazarLista = (txt as nullable text, reemplazos as list) as nullable text =>
+        if txt = null then
+            null
+        else
+            List.Accumulate(
+                reemplazos,
+                txt,
+                (estado, par) => Text.Replace(estado, par{0}, par{1})
+            ),
+
+    fxCompactarEspacios = (txt as nullable text) as nullable text =>
+        if txt = null then
+            null
+        else
+            Text.Combine(List.Select(Text.Split(Text.Trim(txt), " "), each _ <> ""), " "),
+
+    fxPrimerasNPalabras = (txt as nullable text, n as number) as nullable text =>
+        if txt = null then
+            null
+        else
+            Text.Combine(List.FirstN(List.Select(Text.Split(txt, " "), each _ <> ""), n), " "),
+
+    fxSepararViaNumero = (txt as nullable text) as nullable text =>
+        let
+            t0 = if txt = null then null else txt,
+            t1 = if t0 = null then null else Text.Replace(t0, "CARRERA12", "CARRERA 12"),
+            t2 = if t1 = null then null else Text.Replace(t1, "CARRERA6TA", "CARRERA 6"),
+            t3 = if t2 = null then null else Text.Replace(t2, "CALLE4TA", "CALLE 4")
+        in
+            t3,
+
+    fxNormalizarBase = (txt as nullable text) as nullable text =>
+        let
+            t0 = if txt = null then null else Text.Upper(Text.Trim(Text.Clean(txt))),
+
+            reemplazosCodificacion = {
+                {Character.FromNumber(160), " "},
+                {" ", " "},
+                {"€“", "-"},
+                {"Ã‘","N"},{"Ã“N","ON"},{"Ã“","O"},{"Ã‰","E"},{"Ãš","U"},{"Ã","I"},{"Ã","A"},
+                {"Ã€","A"},{"Ãˆ","E"},{"ÃŒ","I"},{"Ã’","O"},{"Ã™","U"},
+                {"Ãœ","U"},{"Ã±","N"},{"Ã¡","A"},{"Ã©","E"},{"Ã­","I"},{"Ã³","O"},{"Ãº","U"},
+                {"FÃ","FA"},
+                {"Â",""},{"�",""},{"ª","A"},{"º","O"}
+            },
+
+            t1 = fxReemplazarLista(t0, reemplazosCodificacion),
+
+            reemplazosTildes = {
+                {"Á","A"},{"É","E"},{"Í","I"},{"Ó","O"},{"Ú","U"},{"Ü","U"},{"Ñ","N"},
+                {"À","A"},{"È","E"},{"Ì","I"},{"Ò","O"},{"Ù","U"}
+            },
+
+            t2 = fxReemplazarLista(t1, reemplazosTildes),
+            t3 = fxCompactarEspacios(t2)
+        in
+            t3,
+
+    fxNormalizarPaciente = (txt as nullable text) as nullable text =>
+        let
+            t0 = fxNormalizarBase(txt),
+
+            reemplazosPaciente = {
+                {","," "},{"."," "},{";"," "},{":"," "},{"/"," "},{"\"," "},
+                {"-"," "},{"("," "},{")"," "},{"["," "},{"]"," "},{"{"," "},{"}"," "},
+                {"'"," "},{""""," "},{"|"," "},{"_"," "},{"*"," "},{"+"," "},{"="," "}
+            },
+
+            t1 = fxReemplazarLista(t0, reemplazosPaciente),
+            t2 = fxCompactarEspacios(t1),
+            t3 = fxPrimerasNPalabras(t2, 4)
+        in
+            t3,
+
+    fxNormalizarDireccion = (txt as nullable text) as nullable text =>
+        let
+            t0 = fxNormalizarBase(txt),
+
+            reemplazosSignos = {
+                {","," "},{"."," "},{";"," "},{":"," "},{"/"," "},{"\"," "},
+                {"("," "},{")"," "},{"["," "},{"]"," "},{"{"," "},{"}"," "},
+                {"'"," "},{""""," "},{"|"," "},{"_"," "},{"*"," "},{"="," "}
+            },
+
+            t1 = fxReemplazarLista(t0, reemplazosSignos),
+            t1b = fxCompactarEspacios(t1),
+
+            reemplazosErrores = {
+                {" CAKLE "," CALLE "},
+                {" CALKE "," CALLE "},
+                {" CAKLLE "," CALLE "},
+                {" CARREA "," CARRERA "},
+                {" CARRRA "," CARRERA "},
+                {" CARRERRA "," CARRERA "},
+                {" CARRRE "," CARRERA "},
+                {" TRASVERSAL "," TRANSVERSAL "},
+                {" TRANVERSAL "," TRANSVERSAL "},
+                {" TRANV "," TRANSVERSAL "},
+                {" TRANSV "," TRANSVERSAL "},
+                {" VEREEDA "," VEREDA "},
+                {" VERENA "," VEREDA "},
+                {" RECIDENCIAL "," RESIDENCIAL "},
+                {" COJUNTO "," CONJUNTO "},
+                {" MAZANA "," MANZANA "},
+                {" BARIO "," BARRIO "},
+                {" BARIRO "," BARRIO "},
+                {" BARRRIO "," BARRIO "},
+                {" BAARRIO "," BARRIO "},
+                {" ETAPTA "," ETAPA "},
+                {" SUPERMANZA "," SUPERMANZANA "},
+                {" SERRO "," CERRO "},
+                {" KLOMETRO "," KILOMETRO "},
+                {" KILOMETROS "," KILOMETRO "},
+                {" KILOMETROO "," KILOMETRO "},
+                {" APTO "," APARTAMENTO "},
+                {" AP "," APARTAMENTO "},
+                {" INT "," INTERIOR "},
+                {" TO "," TORRE "},
+                {" NUMERO ERO "," NUMERO "}
+            },
+
+            t2 = fxReemplazarLista(" " & t1b & " ", reemplazosErrores),
+
+            reemplazosVias = {
+                {" KRA "," CARRERA "},
+                {" KR "," CARRERA "},
+                {" CRA "," CARRERA "},
+                {" CR "," CARRERA "},
+                {" CLL "," CALLE "},
+                {" CL "," CALLE "},
+                {" TV "," TRANSVERSAL "},
+                {" TRV "," TRANSVERSAL "},
+                {" DG "," DIAGONAL "},
+                {" DIAG "," DIAGONAL "},
+                {" DIG "," DIAGONAL "},
+                {" AV "," AVENIDA "},
+                {" AVDA "," AVENIDA "}
+            },
+
+            t3 = fxReemplazarLista(t2, reemplazosVias),
+
+            reemplazosNumero = {
+                {" N° "," NUMERO "},
+                {" Nº "," NUMERO "},
+                {" NO "," NUMERO "},
+                {" NRO "," NUMERO "},
+                {" NRO. "," NUMERO "},
+                {" NUM "," NUMERO "},
+                {" NUMER "," NUMERO "},
+                {" NUM ERO "," NUMERO "},
+                {" N0 "," NUMERO "},
+                {" # "," NUMERO "},
+                {"#"," NUMERO "}
+            },
+
+            t4 = fxReemplazarLista(t3, reemplazosNumero),
+
+            reemplazosUbicacion = {
+                {" BRR "," BARRIO "},
+                {" BR "," BARRIO "},
+                {" VDA "," VEREDA "},
+                {" VRDA "," VEREDA "},
+                {" SECT "," SECTOR "},
+                {" MZ "," MANZANA "},
+                {" MZA "," MANZANA "},
+                {" CS "," CASA "},
+                {" CASA LOTE "," LOTE "},
+                {" LT "," LOTE "},
+                {" ET "," ETAPA "},
+                {" URB "," URBANIZACION "},
+                {" CONJ "," CONJUNTO "},
+                {" RES "," RESIDENCIAL "},
+                {" BLOQ "," BLOQUE "},
+                {" BLQ "," BLOQUE "},
+                {" TOR "," TORRE "}
+            },
+
+            t5 = fxReemplazarLista(t4, reemplazosUbicacion),
+
+            reemplazosFinales = {
+                {" DIRECCION "," "},
+                {" DIRECION "," "},
+                {" DIREC "," "},
+                {" MUNICIPIO "," "},
+                {" NUMERO NUMERO "," NUMERO "},
+                {" NUMERO ERO "," NUMERO "},
+                {" CALLE CALLE "," CALLE "},
+                {" CARRERA CARRERA "," CARRERA "},
+                {" TRANSVERSAL TRANSVERSAL "," TRANSVERSAL "},
+                {" DIAGONAL DIAGONAL "," DIAGONAL "},
+                {" BARRIO BARRIO "," BARRIO "},
+                {" VEREDA VEREDA "," VEREDA "},
+                {" SECTOR SECTOR "," SECTOR "},
+                {" MANZANA MANZANA "," MANZANA "},
+                {" LOTE LOTE "," LOTE "}
+            },
+
+            t6 = fxReemplazarLista(t5, reemplazosFinales),
+            t7 = fxCompactarEspacios(t6),
+            t8 = fxSepararViaNumero(t7),
+            t9 = fxCompactarEspacios(t8)
+        in
+            t9,
+
+    fxNormalizarCelular = (txt as nullable text) as nullable text =>
+        let
+            t0 = if txt = null then null else Text.From(txt),
+            soloDigitos = if t0 = null then null else Text.Select(t0, {"0".."9"}),
+            ultimos10 = if soloDigitos = null then null else if Text.Length(soloDigitos) <= 10 then soloDigitos else Text.End(soloDigitos, 10)
+        in
+            ultimos10,
+
+    #"Added paciente_normalizado" = Table.AddColumn(
+        #"Changed Type",
+        "paciente_normalizado",
+        each fxNormalizarPaciente([paciente]),
+        type text
+    ),
+
+    #"Added direccion_normalizada" = Table.AddColumn(
+        #"Added paciente_normalizado",
+        "direccion_normalizada",
+        each fxNormalizarDireccion([direccion]),
+        type text
+    ),
+
+    #"Added celular_normalizado" = Table.AddColumn(
+        #"Added direccion_normalizada",
+        "celular_normalizado",
+        each fxNormalizarCelular([celular]),
+        type text
+    )
+
+in
+    #"Added celular_normalizado"
