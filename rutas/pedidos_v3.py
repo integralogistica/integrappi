@@ -12,7 +12,7 @@ from bd.bd_cliente import bd_cliente
 from Funciones.normalizacion_medical_care import (
     fx_normalizar_paciente,
     fx_normalizar_direccion,
-    fx_normalizar_base
+    fx_normalizar_celular
 )
 
 router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
@@ -161,45 +161,39 @@ async def cargar_pedidos_masivo_stream(
                     ruta_original = str(fila.get('Ruta', '')).strip() if pd.notna(fila.get('Ruta')) else ''
                     municipio_destino_original = str(fila.get('Municipio Destino', '')).strip() if pd.notna(fila.get('Municipio Destino')) else ''
                     
-                    # Normalizar SOLO cliente_destino y direccion_destino
+                    # Normalizar SOLO: cliente_destino, direccion_destino y telefono
                     cliente_destino_normalizado = fx_normalizar_paciente(cliente_destino_original)
                     direccion_destino_normalizada = fx_normalizar_direccion(direccion_destino_original)
-                    
+                    telefono_normalizado = fx_normalizar_celular(telefono_original)
+
                     # Validar campos obligatorios
                     if not codigo_pedido_original:
                         errores.append(f"Fila {idx + 2}: El campo 'Codigo Pedido' es obligatorio")
                         continue
-                    
-                    # Crear documento: cliente_destino y direccion_destino se normalizan, los demás se guardan tal cual
+
+                    cliente_final = cliente_destino_normalizado if cliente_destino_normalizado else cliente_destino_original
+                    direccion_final = direccion_destino_normalizada if direccion_destino_normalizada else direccion_destino_original
+                    llave = f"{cliente_final} {direccion_final}".strip()
+
                     documento = {
                         'codigo_pedido': codigo_pedido_original,
-                        'codigo_pedido_original': codigo_pedido_original,
                         'codigo_cliente_destino': codigo_cliente_original,
-                        'codigo_cliente_destino_original': codigo_cliente_original,
-                        'cliente_destino': cliente_destino_normalizado if cliente_destino_normalizado else cliente_destino_original,
+                        'cliente_destino': cliente_final,
                         'cliente_destino_original': cliente_destino_original,
-                        'direccion_destino': direccion_destino_normalizada if direccion_destino_normalizada else direccion_destino_original,
+                        'direccion_destino': direccion_final,
                         'direccion_destino_original': direccion_destino_original,
+                        'llave': llave,
                         'divipola': divipola_original,
-                        'divipola_original': divipola_original,
-                        'telefono': telefono_original,
+                        'telefono': telefono_normalizado if telefono_normalizado else telefono_original,
                         'telefono_original': telefono_original,
                         'fecha_pedido': fecha_pedido_original,
-                        'fecha_pedido_original': fecha_pedido_original,
                         'fecha_preferente': fecha_preferente_original,
-                        'fecha_preferente_original': fecha_preferente_original,
                         'estado_pedido': estado_pedido_original,
-                        'estado_pedido_original': estado_pedido_original,
                         'piezas': piezas_original,
-                        'piezas_original': piezas_original,
                         'peso_real': peso_real_original,
-                        'peso_real_original': peso_real_original,
                         'bodega_origen': bodega_origen_original,
-                        'bodega_origen_original': bodega_origen_original,
                         'ruta': ruta_original,
-                        'ruta_original': ruta_original,
                         'municipio_destino': municipio_destino_original,
-                        'municipio_destino_original': municipio_destino_original,
                         'usuario_carga': usuario,
                         'fecha_carga': time.strftime('%Y-%m-%d %H:%M:%S')
                     }
