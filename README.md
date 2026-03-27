@@ -147,24 +147,17 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 - **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
 
 **Normalización Automática de Datos:**
-- Implementada en `Funciones/normalizacion_medical_care.py` con funciones específicas:
-  - `fx_normalizar_paciente()`: Primeras 4 palabras, sin signos de puntuación, mayúsculas, **reordenamiento alfabético**
+- Implementada en `Funciones/normalizacion_medical_care.py`. **Solo se normalizan 4 campos**; el resto se guarda tal cual viene del Excel:
+  - `fx_normalizar_paciente()` → campo `paciente`: Primeras 4 palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético
     - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
-  - `fx_normalizar_cedula()`: Solo dígitos, elimina caracteres no numéricos
-  - `fx_normalizar_direccion()`: Normalización completa con corrección de errores comunes (ej: "CRA 1" → "CARRERA 1"), **reordenamiento alfabético**
+  - `fx_normalizar_cedula()` → campo `cedula`: Solo dígitos
+  - `fx_normalizar_direccion()` → campo `direccion`: Normalización completa con corrección de errores comunes, reordenamiento alfabético
     - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
     - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
     - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
-  - `fx_normalizar_celular()`: Solo últimos 10 dígitos, elimina prefijos de país
-  - `fx_normalizar_municipio()`: Mayúsculas, trim, compactar espacios (sin caracteres especiales)
-  - `fx_normalizar_base()`: Normalización básica para campos de ubicación (sede, departamento, CEDI, ruta)
-    - Elimina caracteres especiales
-    - Mayúsculas y compactar espacios
-    - **Corrige caracteres mal codificados (UTF-8 leído como Latin-1)**: `Ã³` → `O`, `Ãº` → `U`, `Ã¡` → `A`, `Ã©` → `E`, `Ã­` → `I`, `Ã‘` → `N`, etc.
-    - Sin reordenamiento alfabético
-- **Corrección de errores comunes**: Transformación de abreviaturas y errores tipográficos en direcciones
-- **Reordenamiento alfabético**: Aplicado a pacientes y direcciones para consistencia en búsquedas
-- **Corrección de caracteres mal codificados**: Transformación de caracteres UTF-8 leídos incorrectamente como Latin-1 (ej: `Ã³` → `O`, `Ãº` → `U`, `Ã¡` → `A`, `Ã©` → `E`, `Ã­` → `I`, `Ã‘` → `N`)
+  - `fx_normalizar_celular()` → campo `celular`: Solo últimos 10 dígitos
+- **Campos sin normalización** (se guardan como vienen): `sede`, `departamento`, `municipio`, `ruta`, `cedi`
+- **Corrección de caracteres mal codificados**: UTF-8 leído como Latin-1 (ej: `Ã³` → `O`, `Ãº` → `U`)
 
 **Validación de Duplicados:**
 - **Duplicados en el archivo**: Valida que no haya cédulas repetidas dentro del mismo archivo de carga
@@ -172,11 +165,21 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 - **Registra errores detallados**: Cada duplicado se registra con el número de fila y el valor de la cédula duplicada
 
 **Almacenamiento de Campos Originales y Normalizados:**
-- **Campos con prefijo `_original`**: Guardan el valor exacto del Excel para trazabilidad y auditoría
-- **Campos sin prefijo**: Contienen el valor normalizado usado para búsquedas y operaciones
-- **Ejemplo**: 
+- **Solo los 4 campos normalizados tienen prefijo `_original`**: `paciente_original`, `cedula_original`, `direccion_original`, `celular_original`
+- Los demás campos (`sede`, `departamento`, `municipio`, `ruta`, `cedi`) se guardan una sola vez tal cual vienen del Excel
+- **Ejemplo**:
   - `cedula_original: "57 310 123 4567"` → `cedula: "573101234567"`
-  - `paciente_original: "MARÍA GONZÁLEZ, PEREZ"` → `paciente: "MARÍA GONZÁLEZ PEREZ"`
+  - `paciente_original: "MARÍA GONZÁLEZ, PEREZ"` → `paciente: "GONZALEZ MARIA PEREZ"`
+
+**Campo `llave`:**
+- Campo calculado automáticamente al crear/actualizar/cargar un paciente
+- Fórmula: `paciente_normalizado + " " + direccion_normalizada`
+- Sirve para cruzar pacientes con pedidos V3 mediante similitud de texto (fuzzy matching)
+
+**Campo `estado`:**
+- Valores posibles: `ACTIVO`, `INACTIVO`, `FALLECIDO`
+- Default en carga masiva y creación individual: `ACTIVO`
+- Solo modificable en la edición individual de cada paciente
 
 **Validación de Columnas:**
 - **Columnas requeridas**: `paciente`, `cedula` (son obligatorios)
@@ -228,8 +231,8 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 
 **Base de Datos:**
 - **Base de datos**: `integra` (MongoDB)
-- **Colección**: `pacientes_medical_care`
-- **Índices**: Índice único en campo `cedula` para prevenir duplicados
+- **Colección principal**: `pacientes_medical_care` — índice único en campo `cedula`
+- **Colección de cache**: `cache_cruce_mc` — documento único `{ tipo: "cruce_completo" }` con los resultados del último cruce, `fecha_calculo` y `calculado_por`
 - **Conexión**: Usa `bd.bd_cliente` desde `bd/bd_cliente.py`
 
 **Manejo de Errores:**
@@ -248,13 +251,38 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 |---|---|---|
 | POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE (streaming) |
 | POST | `/pacientes-medical-care/cargar-masivo` | Carga masiva versión clásica (sin streaming) |
-| GET | `/pacientes-medical-care/?skip=0&limit=100` | Listar pacientes con paginación |
-| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX` | Buscar por cédula o nombre |
+| GET | `/pacientes-medical-care/?skip=0&limit=100&cedi=BARRANQUILLA` | Listar pacientes con paginación (filtro `cedi` opcional) |
+| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX&cedi=CALI` | Buscar por cédula o nombre (filtro `cedi` opcional) |
+| GET | `/pacientes-medical-care/ocupacion-rutas` | Lee el cruce desde cache `cache_cruce_mc` en MongoDB |
+| GET | `/pacientes-medical-care/v3-sin-paciente` | Lee V3 sin paciente desde cache `cache_cruce_mc` |
+| POST | `/pacientes-medical-care/recalcular-cruce?usuario=USUARIO` | Recalcula y guarda el cruce completo con progreso SSE |
+| GET | `/pacientes-medical-care/exportar-cruce-excel?cedi=FUNZA` | Exporta el cruce a Excel con 2 hojas (filtro `cedi` opcional) |
 | POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
-| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente |
+| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente (incluye campo `estado`) |
 | DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |
 | GET | `/pacientes-medical-care/{id}` | Obtener paciente por ID |
 | DELETE | `/pacientes-medical-care/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+**Cruce Pacientes ↔ V3 con Cache:**
+
+El cruce es una operación O(n×m) costosa (SequenceMatcher sobre todas las combinaciones). Para evitar recalcularlo en cada petición:
+
+- **Cache en MongoDB**: los resultados se guardan en la colección `cache_cruce_mc` con un único documento `{ tipo: "cruce_completo" }` (upsert). Los endpoints GET leen desde ahí instantáneamente
+- **Recalcular bajo demanda**: `POST /recalcular-cruce` es el único punto que dispara el cálculo real. Devuelve un stream SSE con progreso real:
+  - `stage: 'loading'` (0-8%) — Cargando pacientes y pedidos V3 desde MongoDB
+  - `stage: 'comparing_patients'` (10-60%) — Comparando cada paciente contra todos los V3 (reporta cada 5%)
+  - `stage: 'comparing_v3'` (62-90%) — Identificando V3 sin paciente coincidente
+  - `stage: 'saving'` (95%) — Guardando resultado en `cache_cruce_mc`
+  - `stage: 'complete'` (100%) — Datos completos embebidos en el evento final
+- **Filtro por CEDI**: `GET /` y `GET /buscar` aceptan el param `cedi` (regex case-insensitive) para restringir resultados. Usado para control de acceso regional desde el frontend
+
+**Endpoint `exportar-cruce-excel`:**
+- Lee el cruce desde `cache_cruce_mc`
+- Aplica filtro `cedi` si se indica
+- Genera un `.xlsx` con openpyxl con dos hojas:
+  - **Hoja 1 "Ocupación por Rutas"**: una fila por paciente con CEDI, ruta, nombre, cédula, estado, en_v3, similitud, llave_v3. Filas coloreadas: verde (en_v3=True), amarillo (sim≥50%), rojo (sim<50%)
+  - **Hoja 2 "V3 sin Paciente"**: una fila por pedido V3 sin cruce con CEDI, ruta, código_pedido, cliente, dirección, similitud, paciente_cercano. Filas rojas
+  - Headers en negrita, freeze panes en fila 1, anchos de columna auto-ajustados
 
 **Documentación:**
 - **Archivo de documentación**: `docs/MEDICAL_CARE_EXCEL_IMPORT.md` con detalles completos del sistema
@@ -275,18 +303,16 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
 - **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
 
 **Normalización Automática de Datos:**
-- **Solo se normalizan dos campos específicos**:
-  - `cliente_destino`: Usa `fx_normalizar_paciente()` - Primeras 4 palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético
-    - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
-  - `direccion_destino`: Usa `fx_normalizar_direccion()` - Normalización completa con corrección de errores comunes, reordenamiento alfabético
-    - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
-    - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
-    - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
-- **Los demás campos se guardan tal cual vienen del Excel**: Sin normalización
-  - `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `telefono`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
-- Funciones de normalización importadas desde `Funciones/normalizacion_medical_care.py`:
-  - `fx_normalizar_paciente()`: Normaliza nombres de clientes
-  - `fx_normalizar_direccion()`: Normaliza direcciones con corrección de errores
+- **Solo se normalizan 3 campos**; el resto se guarda tal cual viene del Excel:
+  - `cliente_destino`: `fx_normalizar_paciente()` — primeras 4 palabras, mayúsculas, reordenamiento alfabético. Guarda también `cliente_destino_original`
+  - `direccion_destino`: `fx_normalizar_direccion()` — corrección de errores, abreviaturas, reordenamiento. Guarda también `direccion_destino_original`
+  - `telefono`: `fx_normalizar_celular()` — solo últimos 10 dígitos. Guarda también `telefono_original`
+- **Campos sin normalización** (sin `_original`): `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
+
+**Campo `llave`:**
+- Campo calculado automáticamente al cargar cada pedido
+- Fórmula: `cliente_destino_normalizado + " " + direccion_destino_normalizada`
+- Sirve para cruzar pedidos V3 con pacientes mediante similitud de texto
 
 **Validación de Duplicados:**
 - **Duplicados en el archivo**: Valida que no haya identificadores repetidos dentro del mismo archivo de carga
@@ -423,6 +449,8 @@ integrappi/
 │   ├── whatsapp_integra.py  # Chatbot WhatsApp (webhook principal)
 │   ├── whatsapp_report_integra.py # Reportes de uso de WhatsApp
 │   ├── vulcano.py           # Cliente Vulcano (manifiestos)
+│   ├── pacientes_medical_care.py  # Pacientes FMC: CRUD, carga SSE, cruce cache, exportar Excel
+│   ├── pedidos_v3.py        # Pedidos V3 FMC: CRUD, carga masiva SSE
 │   ├── debug.py             # Diagnóstico de red y variables de entorno
 │   └── debug_siscore.py     # Diagnóstico de conexión Siscore
 │
@@ -604,8 +632,12 @@ integrappi/
 |---|---|---|
 | POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE |
 | POST | `/pacientes-medical-care/cargar-masivo?usuario=USUARIO` | Carga masiva clásica |
-| GET | `/pacientes-medical-care/?skip=0&limit=100` | Listar pacientes con paginación |
-| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX` | Buscar por cédula o nombre |
+| GET | `/pacientes-medical-care/?skip=0&limit=100&cedi=BARRANQUILLA` | Listar pacientes (filtro `cedi` opcional) |
+| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX&cedi=CALI` | Buscar (filtro `cedi` opcional) |
+| GET | `/pacientes-medical-care/ocupacion-rutas` | Leer cruce desde cache |
+| GET | `/pacientes-medical-care/v3-sin-paciente` | Leer V3 sin paciente desde cache |
+| POST | `/pacientes-medical-care/recalcular-cruce?usuario=USUARIO` | Recalcular cruce completo (SSE streaming) |
+| GET | `/pacientes-medical-care/exportar-cruce-excel?cedi=FUNZA` | Exportar cruce a Excel (filtro `cedi` opcional) |
 | POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
 | PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente |
 | DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |

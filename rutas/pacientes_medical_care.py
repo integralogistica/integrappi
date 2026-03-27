@@ -18,6 +18,18 @@ router = APIRouter(prefix="/pacientes-medical-care", tags=["Medical Care"])
 # Obtener base de datos y colección
 bd = bd_cliente['integra']
 coleccion = bd['pacientes_medical_care']
+coleccion_cache = bd['cache_cruce_mc']
+
+# Mapeo código regional → nombre CEDI
+_CEDI_MAPA = {
+    'CO04': 'BARRANQUILLA', 'CO05': 'CALI', 'CO06': 'BUCARAMANGA',
+    'CO07': 'FUNZA', 'CO09': 'MEDELLIN',
+}
+
+def _normalizar_cel(valor: str) -> str:
+    """Devuelve solo dígitos (últimos 10) de un número de celular."""
+    digits = ''.join(filter(str.isdigit, valor or ''))
+    return digits[-10:] if len(digits) >= 10 else digits
 
 # Columnas requeridas
 COLUMNAS_REQUERIDAS = [
@@ -452,27 +464,24 @@ async def cargar_pacientes_masivo(usuario: str, archivo: UploadFile = File(...))
 @router.get("/")
 async def obtener_pacientes(
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    cedi: str = None
 ):
     """
-    Obtiene la lista de pacientes de Medical Care con paginación
-    
-    Args:
-        skip: Número de registros a saltar (paginación)
-        limit: Número máximo de registros a retornar
-    
-    Returns:
-        JSON con lista de pacientes
+    Obtiene la lista de pacientes de Medical Care con paginación.
+    Si se pasa cedi, filtra solo los pacientes de ese CEDI (case-insensitive).
     """
     try:
-        cursor = coleccion.find().skip(skip).limit(limit)
+        filtro = {}
+        if cedi:
+            filtro['cedi'] = {'$regex': f'^{cedi}$', '$options': 'i'}
+
+        cursor = coleccion.find(filtro).skip(skip).limit(limit)
         pacientes = []
-        
         for doc in cursor:
-            # Convertir ObjectId a string y eliminar _id
             doc['_id'] = str(doc['_id'])
             pacientes.append(doc)
-        
+
         return {
             'pacientes': pacientes,
             'total': len(pacientes),
@@ -487,33 +496,29 @@ async def obtener_pacientes(
 
 
 @router.get("/buscar")
-async def buscar_paciente(cedula: str = None, paciente: str = None):
+async def buscar_paciente(cedula: str = None, paciente: str = None, cedi: str = None):
     """
-    Busca pacientes por cédula o nombre de paciente
-    
-    Args:
-        cedula: Número de cédula (opcional)
-        paciente: Nombre del paciente (opcional)
-    
-    Returns:
-        JSON con lista de pacientes coincidentes
+    Busca pacientes por cédula o nombre de paciente.
+    Si se pasa cedi, restringe la búsqueda a ese CEDI (case-insensitive).
     """
     try:
         filtro = {}
-        
+
         if cedula:
             filtro['cedula'] = fx_normalizar_cedula(cedula)
-        
+
         if paciente:
             filtro['paciente'] = {'$regex': paciente, '$options': 'i'}
-        
+
+        if cedi:
+            filtro['cedi'] = {'$regex': f'^{cedi}$', '$options': 'i'}
+
         cursor = coleccion.find(filtro).limit(100)
         pacientes = []
-        
         for doc in cursor:
             doc['_id'] = str(doc['_id'])
             pacientes.append(doc)
-        
+
         return {
             'pacientes': pacientes,
             'total': len(pacientes)
@@ -525,33 +530,30 @@ async def buscar_paciente(cedula: str = None, paciente: str = None):
         )
 
 
-@router.get("/ocupacion-rutas")
-async def ocupacion_rutas():
+def _calcular_cruce():
     """
-    Agrupa pacientes por ruta y calcula similitud de llave con la colección v3
+    Ejecuta el cruce completo pacientes <-> V3 y retorna ambos resultados.
+    Función interna reutilizada por el endpoint de recálculo.
     """
     from difflib import SequenceMatcher
 
-    # Traer todos los pacientes con sus llaves
+    # ── Ocupación por rutas ──────────────────────────────────────────────────
     pacientes = list(coleccion.find(
         {},
         {'llave': 1, 'paciente_original': 1, 'ruta': 1, 'estado': 1, 'cedula_original': 1}
     ))
 
-    # Traer todas las llaves de v3
     coleccion_v3 = bd['v3']
     llaves_v3 = [
         doc['llave'] for doc in coleccion_v3.find({'llave': {'$exists': True}}, {'llave': 1})
         if doc.get('llave')
     ]
 
-    # Para cada paciente, encontrar la mejor similitud con v3
     resultado_pacientes = []
     for p in pacientes:
         llave_paciente = p.get('llave', '')
         if not llave_paciente:
             continue
-
         mejor_similitud = 0.0
         mejor_llave_v3 = ''
         for llave_v3 in llaves_v3:
@@ -559,7 +561,6 @@ async def ocupacion_rutas():
             if sim > mejor_similitud:
                 mejor_similitud = sim
                 mejor_llave_v3 = llave_v3
-
         resultado_pacientes.append({
             'paciente': p.get('paciente_original', ''),
             'cedula': p.get('cedula_original', ''),
@@ -567,26 +568,24 @@ async def ocupacion_rutas():
             'llave': llave_paciente,
             'similitud': round(mejor_similitud * 100, 1),
             'llave_v3': mejor_llave_v3,
-            'en_v3': mejor_similitud >= 0.8,
+            'en_v3': mejor_similitud >= 0.75,
             'estado': p.get('estado', 'ACTIVO')
         })
 
-    # Agrupar por ruta
-    rutas: dict = {}
+    rutas_ocupacion: dict = {}
     for p in resultado_pacientes:
         ruta = p['ruta']
-        if ruta not in rutas:
-            rutas[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0}
-        rutas[ruta]['pacientes'].append(p)
-        rutas[ruta]['total'] += 1
+        if ruta not in rutas_ocupacion:
+            rutas_ocupacion[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0}
+        rutas_ocupacion[ruta]['pacientes'].append(p)
+        rutas_ocupacion[ruta]['total'] += 1
         if p['en_v3']:
-            rutas[ruta]['en_v3'] += 1
+            rutas_ocupacion[ruta]['en_v3'] += 1
 
-    # Construir respuesta ordenada por ruta
-    resultado = []
-    for ruta, datos in sorted(rutas.items()):
+    ocupacion_resultado = []
+    for ruta, datos in sorted(rutas_ocupacion.items()):
         ocupacion = round(datos['en_v3'] / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
-        resultado.append({
+        ocupacion_resultado.append({
             'ruta': ruta,
             'total_pacientes': datos['total'],
             'pacientes_en_v3': datos['en_v3'],
@@ -594,24 +593,9 @@ async def ocupacion_rutas():
             'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True)
         })
 
-    return {'rutas': resultado}
+    # ── V3 sin paciente ──────────────────────────────────────────────────────
+    llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
 
-
-@router.get("/v3-sin-paciente")
-async def v3_sin_paciente():
-    """
-    Retorna registros de v3 que no tienen un paciente coincidente (similitud < 80%)
-    """
-    from difflib import SequenceMatcher
-
-    # Traer todas las llaves de pacientes
-    llaves_pacientes = [
-        doc['llave'] for doc in coleccion.find({'llave': {'$exists': True}}, {'llave': 1})
-        if doc.get('llave')
-    ]
-
-    # Traer todos los registros de v3 con sus datos relevantes
-    coleccion_v3 = bd['v3']
     registros_v3 = list(coleccion_v3.find(
         {'llave': {'$exists': True}},
         {'llave': 1, 'cliente_destino_original': 1, 'direccion_destino_original': 1,
@@ -623,7 +607,6 @@ async def v3_sin_paciente():
         llave_v3 = reg.get('llave', '')
         if not llave_v3:
             continue
-
         mejor_similitud = 0.0
         mejor_llave_paciente = ''
         for llave_p in llaves_pacientes:
@@ -631,8 +614,7 @@ async def v3_sin_paciente():
             if sim > mejor_similitud:
                 mejor_similitud = sim
                 mejor_llave_paciente = llave_p
-
-        if mejor_similitud < 0.8:
+        if mejor_similitud < 0.75:
             sin_paciente.append({
                 'codigo_pedido': reg.get('codigo_pedido', ''),
                 'cliente_destino': reg.get('cliente_destino_original', ''),
@@ -645,24 +627,408 @@ async def v3_sin_paciente():
                 'llave_paciente_cercana': mejor_llave_paciente
             })
 
-    # Agrupar por ruta
-    rutas: dict = {}
+    rutas_v3: dict = {}
     for reg in sin_paciente:
         ruta = reg['ruta']
-        if ruta not in rutas:
-            rutas[ruta] = []
-        rutas[ruta].append(reg)
+        if ruta not in rutas_v3:
+            rutas_v3[ruta] = []
+        rutas_v3[ruta].append(reg)
 
-    resultado = [
+    v3_resultado = [
         {
             'ruta': ruta,
             'total': len(regs),
             'registros': sorted(regs, key=lambda x: x['similitud'], reverse=True)
         }
-        for ruta, regs in sorted(rutas.items())
+        for ruta, regs in sorted(rutas_v3.items())
     ]
 
-    return {'total_sin_paciente': len(sin_paciente), 'rutas': resultado}
+    return ocupacion_resultado, v3_resultado, len(sin_paciente)
+
+
+@router.post("/recalcular-cruce")
+async def recalcular_cruce(usuario: str):
+    """
+    Ejecuta el cruce pacientes <-> V3 con progreso en tiempo real via SSE.
+    Guarda el resultado en cache (cache_cruce_mc) al terminar.
+    """
+    from difflib import SequenceMatcher
+
+    def generar_eventos():
+        try:
+            # ── Etapa 1: cargar datos ────────────────────────────────────────
+            yield f"data: {json.dumps({'stage': 'loading', 'progress': 0, 'message': 'Cargando pacientes y pedidos V3...'})}\n\n"
+
+            pacientes = list(coleccion.find(
+                {},
+                {'llave': 1, 'paciente_original': 1, 'direccion_original': 1,
+                 'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1, 'celular': 1}
+            ))
+
+            coleccion_v3 = bd['v3']
+            # Cargamos los registros V3 completos de una sola vez (se usan en etapas 2 y 3)
+            registros_v3 = list(coleccion_v3.find(
+                {'llave': {'$exists': True}},
+                {'llave': 1, 'telefono_original': 1, 'cliente_destino_original': 1,
+                 'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
+                 'codigo_pedido': 1, 'bodega_origen': 1}
+            ))
+
+            llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
+            total_pacientes = len(pacientes)
+            total_v3 = len(registros_v3)
+
+            # Dict teléfono → llave para cruce rápido por celular
+            dict_telefonos_v3 = {}
+            for doc in registros_v3:
+                tel = _normalizar_cel(doc.get('telefono_original', ''))
+                if len(tel) >= 7 and doc.get('llave'):
+                    dict_telefonos_v3[tel] = doc['llave']
+
+            set_celulares_pacientes = set()
+            for p in pacientes:
+                cel = _normalizar_cel(p.get('celular', ''))
+                if len(cel) >= 7:
+                    set_celulares_pacientes.add(cel)
+
+            yield f"data: {json.dumps({'stage': 'loading', 'progress': 8, 'message': f'{total_pacientes} pacientes y {total_v3} pedidos V3 cargados'})}\n\n"
+
+            # ── Etapa 2: comparar pacientes contra V3 ───────────────────────
+            resultado_pacientes = []
+            paso_reporte = max(1, total_pacientes // 20)
+
+            for idx, p in enumerate(pacientes):
+                llave_paciente = p.get('llave', '')
+                if not llave_paciente:
+                    continue
+
+                cedi_raw = p.get('cedi', '') or ''
+                cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
+
+                # Criterio 1: cruce por celular (más certero)
+                celular_p = _normalizar_cel(p.get('celular', ''))
+                if celular_p and len(celular_p) >= 7 and celular_p in dict_telefonos_v3:
+                    en_v3 = True
+                    similitud = 100.0
+                    llave_v3_match = dict_telefonos_v3[celular_p]
+                else:
+                    # Criterio 2: similitud de llave (fuzzy)
+                    mejor_similitud = 0.0
+                    mejor_llave_v3 = ''
+                    for lv3 in llaves_v3:
+                        sim = SequenceMatcher(None, llave_paciente, lv3).ratio()
+                        if sim > mejor_similitud:
+                            mejor_similitud = sim
+                            mejor_llave_v3 = lv3
+                    en_v3 = mejor_similitud >= 0.75
+                    similitud = round(mejor_similitud * 100, 1)
+                    llave_v3_match = mejor_llave_v3
+
+                resultado_pacientes.append({
+                    'paciente': p.get('paciente_original', ''),
+                    'cedula': p.get('cedula_original', ''),
+                    'direccion_original': p.get('direccion_original', ''),
+                    'ruta': p.get('ruta', '') or 'SIN RUTA',
+                    'cedi': cedi,
+                    'llave': llave_paciente,
+                    'similitud': similitud,
+                    'llave_v3': llave_v3_match,
+                    'en_v3': en_v3,
+                    'estado': p.get('estado', 'ACTIVO')
+                })
+
+                if (idx + 1) % paso_reporte == 0 or (idx + 1) == total_pacientes:
+                    pct = round(10 + ((idx + 1) / total_pacientes) * 50)
+                    yield f"data: {json.dumps({'stage': 'comparing_patients', 'progress': pct, 'processed': idx + 1, 'total': total_pacientes, 'message': f'Paciente {idx + 1} de {total_pacientes}'})}\n\n"
+
+            # Agrupar ocupación por ruta
+            rutas_ocupacion: dict = {}
+            for p in resultado_pacientes:
+                ruta = p['ruta']
+                if ruta not in rutas_ocupacion:
+                    rutas_ocupacion[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0, 'cedi': p['cedi']}
+                rutas_ocupacion[ruta]['pacientes'].append(p)
+                rutas_ocupacion[ruta]['total'] += 1
+                if p['en_v3']:
+                    rutas_ocupacion[ruta]['en_v3'] += 1
+
+            ocupacion_resultado = []
+            for ruta, datos in sorted(rutas_ocupacion.items()):
+                ocupacion = round(datos['en_v3'] / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
+                ocupacion_resultado.append({
+                    'ruta': ruta,
+                    'cedi': datos['cedi'],
+                    'total_pacientes': datos['total'],
+                    'pacientes_en_v3': datos['en_v3'],
+                    'ocupacion_pct': ocupacion,
+                    'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True)
+                })
+
+            # ── Etapa 3: V3 sin paciente ─────────────────────────────────────
+            llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
+
+            yield f"data: {json.dumps({'stage': 'comparing_v3', 'progress': 62, 'message': f'Verificando {total_v3} pedidos V3...'})}\n\n"
+
+            sin_paciente = []
+            paso_reporte_v3 = max(1, total_v3 // 20)
+
+            for idx, reg in enumerate(registros_v3):
+                llave_v3 = reg.get('llave', '')
+                if not llave_v3:
+                    continue
+
+                bodega = reg.get('bodega_origen', '') or ''
+                cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
+
+                # Criterio 1: cruce por celular — si hay match no es "sin paciente"
+                tel_v3 = _normalizar_cel(reg.get('telefono_original', ''))
+                if tel_v3 and len(tel_v3) >= 7 and tel_v3 in set_celulares_pacientes:
+                    if (idx + 1) % paso_reporte_v3 == 0 or (idx + 1) == total_v3:
+                        pct = round(62 + ((idx + 1) / total_v3) * 28)
+                        yield f"data: {json.dumps({'stage': 'comparing_v3', 'progress': pct, 'processed': idx + 1, 'total': total_v3, 'message': f'V3 {idx + 1} de {total_v3}'})}\n\n"
+                    continue
+
+                # Criterio 2: similitud de llave
+                mejor_similitud = 0.0
+                mejor_llave_paciente = ''
+                for llave_p in llaves_pacientes:
+                    sim = SequenceMatcher(None, llave_v3, llave_p).ratio()
+                    if sim > mejor_similitud:
+                        mejor_similitud = sim
+                        mejor_llave_paciente = llave_p
+
+                if mejor_similitud < 0.75:
+                    sin_paciente.append({
+                        'codigo_pedido': reg.get('codigo_pedido', ''),
+                        'cliente_destino': reg.get('cliente_destino_original', ''),
+                        'direccion_destino': reg.get('direccion_destino_original', ''),
+                        'ruta': reg.get('ruta', '') or 'SIN RUTA',
+                        'cedi': cedi_v3,
+                        'estado_pedido': reg.get('estado_pedido', ''),
+                        'telefono': reg.get('telefono_original', ''),
+                        'llave': llave_v3,
+                        'similitud': round(mejor_similitud * 100, 1),
+                        'llave_paciente_cercana': mejor_llave_paciente
+                    })
+
+                if (idx + 1) % paso_reporte_v3 == 0 or (idx + 1) == total_v3:
+                    pct = round(62 + ((idx + 1) / total_v3) * 28)
+                    yield f"data: {json.dumps({'stage': 'comparing_v3', 'progress': pct, 'processed': idx + 1, 'total': total_v3, 'message': f'V3 {idx + 1} de {total_v3}'})}\n\n"
+
+            rutas_v3: dict = {}
+            for reg in sin_paciente:
+                ruta = reg['ruta']
+                if ruta not in rutas_v3:
+                    rutas_v3[ruta] = {'registros': [], 'cedi': reg['cedi']}
+                rutas_v3[ruta]['registros'].append(reg)
+
+            v3_resultado = [
+                {'ruta': ruta, 'cedi': datos['cedi'], 'total': len(datos['registros']),
+                 'registros': sorted(datos['registros'], key=lambda x: x['similitud'], reverse=True)}
+                for ruta, datos in sorted(rutas_v3.items())
+            ]
+
+            # ── Etapa 4: guardar en cache ────────────────────────────────────
+            yield f"data: {json.dumps({'stage': 'saving', 'progress': 95, 'message': 'Guardando resultados...'})}\n\n"
+
+            fecha_calculo = time.strftime('%Y-%m-%d %H:%M:%S')
+            coleccion_cache.update_one(
+                {'tipo': 'cruce_completo'},
+                {'$set': {
+                    'tipo': 'cruce_completo',
+                    'ocupacion_rutas': ocupacion_resultado,
+                    'v3_sin_paciente': v3_resultado,
+                    'total_sin_paciente': len(sin_paciente),
+                    'calculado_por': usuario,
+                    'fecha_calculo': fecha_calculo,
+                }},
+                upsert=True
+            )
+
+            yield f"data: {json.dumps({'stage': 'complete', 'progress': 100, 'message': 'Cruce completado', 'rutas': ocupacion_resultado, 'v3_sin_paciente': v3_resultado, 'total_sin_paciente': len(sin_paciente), 'fecha_calculo': fecha_calculo, 'calculado_por': usuario})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(generar_eventos(), media_type="text/event-stream")
+
+
+@router.get("/ocupacion-rutas")
+async def ocupacion_rutas():
+    """
+    Retorna el último resultado de ocupación por rutas guardado en cache.
+    Para recalcular usar POST /recalcular-cruce.
+    """
+    cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
+    if not cache:
+        return {'rutas': [], 'fecha_calculo': None, 'calculado_por': None}
+    return {
+        'rutas': cache.get('ocupacion_rutas', []),
+        'fecha_calculo': cache.get('fecha_calculo'),
+        'calculado_por': cache.get('calculado_por'),
+    }
+
+
+@router.get("/v3-sin-paciente")
+async def v3_sin_paciente():
+    """
+    Retorna el último resultado de V3 sin paciente guardado en cache.
+    Para recalcular usar POST /recalcular-cruce.
+    """
+    cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
+    if not cache:
+        return {'total_sin_paciente': 0, 'rutas': [], 'fecha_calculo': None, 'calculado_por': None}
+    return {
+        'total_sin_paciente': cache.get('total_sin_paciente', 0),
+        'rutas': cache.get('v3_sin_paciente', []),
+        'fecha_calculo': cache.get('fecha_calculo'),
+        'calculado_por': cache.get('calculado_por'),
+    }
+
+
+@router.get("/exportar-cruce-excel")
+async def exportar_cruce_excel(cedi: str = None):
+    """
+    Genera y descarga un Excel con los resultados del último cruce.
+    Dos hojas: 'Ocupacion Rutas' y 'V3 Sin Paciente'.
+    Si se pasa cedi, filtra solo esa regional.
+    """
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from fastapi.responses import StreamingResponse as SR
+
+    cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
+    if not cache:
+        raise HTTPException(status_code=404, detail='No hay datos calculados. Ejecute el recálculo primero.')
+
+    ocupacion_rutas = cache.get('ocupacion_rutas', [])
+    v3_sin_paciente = cache.get('v3_sin_paciente', [])
+    fecha_calculo = cache.get('fecha_calculo', '')
+    calculado_por = cache.get('calculado_por', '')
+
+    # Filtrar por CEDI si se indica
+    if cedi:
+        ocupacion_rutas = [r for r in ocupacion_rutas if (r.get('cedi') or '').upper() == cedi.upper()]
+        v3_sin_paciente = [r for r in v3_sin_paciente if (r.get('cedi') or '').upper() == cedi.upper()]
+
+    wb = openpyxl.Workbook()
+
+    # ── Estilos ──────────────────────────────────────────────────────────────
+    header_fill   = PatternFill('solid', fgColor='004D40')
+    header_font   = Font(bold=True, color='FFFFFF', size=10)
+    title_font    = Font(bold=True, size=12, color='004D40')
+    ok_fill       = PatternFill('solid', fgColor='C8E6C9')
+    warn_fill     = PatternFill('solid', fgColor='FFF9C4')
+    bad_fill      = PatternFill('solid', fgColor='FFCDD2')
+    center        = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left          = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    thin_border   = Border(
+        left=Side(style='thin', color='BDBDBD'), right=Side(style='thin', color='BDBDBD'),
+        top=Side(style='thin', color='BDBDBD'), bottom=Side(style='thin', color='BDBDBD')
+    )
+
+    def set_header_row(ws, row, cols):
+        for c, title in enumerate(cols, 1):
+            cell = ws.cell(row=row, column=c, value=title)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+            cell.border = thin_border
+
+    def style_cell(cell, fill=None, align=None):
+        cell.border = thin_border
+        if fill:  cell.fill = fill
+        if align: cell.alignment = align
+        else:     cell.alignment = left
+
+    # ── Hoja 1: Ocupación por Rutas ──────────────────────────────────────────
+    ws1 = wb.active
+    ws1.title = 'Ocupacion Rutas'
+
+    ws1['A1'] = f'Cruce Pacientes ↔ V3  |  Calculado: {fecha_calculo}  |  Por: {calculado_por}'
+    ws1['A1'].font = title_font
+    ws1.merge_cells('A1:J1')
+    ws1['A1'].alignment = center
+    ws1.row_dimensions[1].height = 22
+
+    cols1 = ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado', 'En V3', 'Similitud %', 'Llave Paciente', 'Llave V3 / Método']
+    set_header_row(ws1, 2, cols1)
+
+    fila = 3
+    for r in ocupacion_rutas:
+        for p in r['pacientes']:
+            en_v3 = p.get('en_v3', False)
+            sim = p.get('similitud', 0)
+            row_fill = ok_fill if en_v3 else (warn_fill if sim >= 50 else bad_fill)
+
+            values = [
+                r.get('cedi', ''), r['ruta'],
+                p['paciente'], p['cedula'],
+                p.get('direccion_original', ''),
+                p.get('estado', ''),
+                'SÍ' if en_v3 else 'NO',
+                sim,
+                p.get('llave', ''), p.get('llave_v3', '')
+            ]
+            for c, val in enumerate(values, 1):
+                cell = ws1.cell(row=fila, column=c, value=val)
+                style_cell(cell, fill=row_fill)
+            fila += 1
+
+    col_widths1 = [14, 18, 28, 14, 32, 10, 6, 12, 36, 36]
+    for i, w in enumerate(col_widths1, 1):
+        ws1.column_dimensions[get_column_letter(i)].width = w
+
+    ws1.freeze_panes = 'A3'
+
+    # ── Hoja 2: V3 sin Paciente ───────────────────────────────────────────────
+    ws2 = wb.create_sheet('V3 Sin Paciente')
+
+    ws2['A1'] = f'V3 Sin Paciente  |  Calculado: {fecha_calculo}  |  Por: {calculado_por}'
+    ws2['A1'].font = title_font
+    ws2.merge_cells('A1:H1')
+    ws2['A1'].alignment = center
+    ws2.row_dimensions[1].height = 22
+
+    cols2 = ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino', 'Dirección', 'Teléfono', 'Estado Pedido', 'Similitud %', 'Paciente más cercano']
+    set_header_row(ws2, 2, cols2)
+
+    fila2 = 3
+    for r in v3_sin_paciente:
+        for reg in r['registros']:
+            sim = reg.get('similitud', 0)
+            row_fill = warn_fill if sim >= 50 else bad_fill
+            values = [
+                r.get('cedi', ''), r['ruta'],
+                reg.get('codigo_pedido', ''), reg.get('cliente_destino', ''),
+                reg.get('direccion_destino', ''), reg.get('telefono', ''),
+                reg.get('estado_pedido', ''), sim,
+                reg.get('llave_paciente_cercana', '')
+            ]
+            for c, val in enumerate(values, 1):
+                cell = ws2.cell(row=fila2, column=c, value=val)
+                style_cell(cell, fill=row_fill)
+            fila2 += 1
+
+    col_widths2 = [14, 18, 16, 28, 32, 13, 14, 12, 36]
+    for i, w in enumerate(col_widths2, 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+
+    ws2.freeze_panes = 'A3'
+
+    # ── Serializar y enviar ───────────────────────────────────────────────────
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    nombre = f"cruce_mc{'_' + cedi if cedi else ''}_{fecha_calculo.replace(' ', '_').replace(':', '-')}.xlsx"
+    return SR(
+        buffer,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{nombre}"'}
+    )
 
 
 @router.delete("/eliminar-todos")
