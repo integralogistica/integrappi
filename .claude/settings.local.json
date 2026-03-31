@@ -9,7 +9,8 @@
       "Bash(mv \"bd/subirEmpleados.py\" \"scripts/subirEmpleados.py\")",
       "Bash(mv \"bd/subirEmpleados.spec\" \"scripts/subirEmpleados.spec\")",
       "Bash(mv \"bd/empleados.xlsx\" \"scripts/empleados.xlsx\")",
-      "Bash(mv \"MANUAL WS TRACKING INTEGRA.docx\" \"docs/MANUAL WS TRACKING INTEGRA.docx\")"
+      "Bash(mv \"MANUAL WS TRACKING INTEGRA.docx\" \"docs/MANUAL WS TRACKING INTEGRA.docx\")",
+      "Bash(del:*)"
     ]
   }
 }
