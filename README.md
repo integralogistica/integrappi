@@ -147,7 +147,7 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 - **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
 
 **Normalización Automática de Datos:**
-- Implementada en `Funciones/normalizacion_medical_care.py`. **Solo se normalizan 4 campos**; el resto se guarda tal cual viene del Excel:
+- Implementada en `Funciones/normalizacion_medical_care.py`. **Solo se normalizan los siguientes campos**; el resto se guarda tal cual viene del Excel:
   - `fx_normalizar_paciente()` → campo `paciente`: Primeras 4 palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético
     - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
   - `fx_normalizar_cedula()` → campo `cedula`: Solo dígitos
@@ -155,7 +155,9 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
     - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
     - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
     - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
-  - `fx_normalizar_celular()` → campo `celular`: Solo últimos 10 dígitos
+  - `fx_separar_telefonos()` → campos `telefono1` y `telefono2`: Separa hasta dos números del campo celular usando separadores comunes (` - `, `/`, `,`, `;`, `|`, `y`). Limpia caracteres no numéricos al inicio/fin antes de partir. Guarda también `celular_original`
+    - Ejemplo: `"3168517637 - 3165334389"` → `telefono1: "3168517637"`, `telefono2: "3165334389"`
+    - Ejemplo: `"-3123418728"` → `telefono1: "3123418728"`, `telefono2: ""`
 - **Campos sin normalización** (se guardan como vienen): `sede`, `departamento`, `municipio`, `ruta`, `cedi`
 - **Corrección de caracteres mal codificados**: UTF-8 leído como Latin-1 (ej: `Ã³` → `O`, `Ãº` → `U`)
 
@@ -165,11 +167,13 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 - **Registra errores detallados**: Cada duplicado se registra con el número de fila y el valor de la cédula duplicada
 
 **Almacenamiento de Campos Originales y Normalizados:**
-- **Solo los 4 campos normalizados tienen prefijo `_original`**: `paciente_original`, `cedula_original`, `direccion_original`, `celular_original`
+- Los campos normalizados tienen su versión `_original`: `paciente_original`, `cedula_original`, `direccion_original`, `celular_original`
 - Los demás campos (`sede`, `departamento`, `municipio`, `ruta`, `cedi`) se guardan una sola vez tal cual vienen del Excel
+- Los teléfonos se almacenan en `telefono1`, `telefono2` (normalizados) y `celular_original` (valor crudo del Excel). El campo `celular` = `telefono1` por compatibilidad
 - **Ejemplo**:
   - `cedula_original: "57 310 123 4567"` → `cedula: "573101234567"`
   - `paciente_original: "MARÍA GONZÁLEZ, PEREZ"` → `paciente: "GONZALEZ MARIA PEREZ"`
+  - `celular_original: "3168517637 - 3165334389"` → `telefono1: "3168517637"`, `telefono2: "3165334389"`
 
 **Campo `llave`:**
 - Campo calculado automáticamente al crear/actualizar/cargar un paciente
@@ -182,8 +186,8 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 - Solo modificable en la edición individual de cada paciente
 
 **Validación de Columnas:**
-- **Columnas requeridas**: `paciente`, `cedula` (son obligatorios)
-- **Columnas opcionales**: `sede`, `direccion`, `departamento`, `municipio`, `ruta`, `cedi`, `celular`
+- **Columna requerida**: solo `cedula` es obligatoria. `paciente` es opcional: si viene vacío el registro se crea sin nombre
+- **Columnas opcionales**: `sede`, `paciente`, `direccion`, `departamento`, `municipio`, `ruta`, `cedi`, `celular`
 - **Validación case-insensitive**: Las columnas pueden estar en mayúsculas, minúsculas o mezcladas
 - **Mensaje de error claro**: Indica qué columnas faltan si el archivo no cumple con el formato
 
@@ -309,6 +313,11 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
   - `telefono`: `fx_normalizar_celular()` — solo últimos 10 dígitos. Guarda también `telefono_original`
 - **Campos sin normalización** (sin `_original`): `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
 
+**Normalización de Fechas (`_parsear_fecha`):**
+- Función `_parsear_fecha()` en `rutas/pedidos_v3.py` convierte cualquier formato de fecha a `DD/MM/YYYY`
+- Soporta: serial numérico de Excel (ej: `46076` → `23/02/2026`), `datetime`/`date` de pandas, strings `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS` y `DD/MM/YYYY`
+- Aplica a los campos `Fecha Pedido` y `Fecha Preferente` tanto en carga manual como en sync automático
+
 **Campo `llave`:**
 - Campo calculado automáticamente al cargar cada pedido
 - Fórmula: `cliente_destino_normalizado + " " + direccion_destino_normalizada`
@@ -372,6 +381,45 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
 | DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
 | GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
 | DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+---
+
+### Sincronización Automática V3 (`/sync-v3`)
+
+Sistema de sincronización periódica que simula el consumo de una API leyendo un archivo Excel local (`api_v3.xlsx`) y reemplazando la colección `v3` en MongoDB. Diseñado para cuando la API real esté disponible: solo se cambia la fuente en `Funciones/sync_api_v3.py`.
+
+**Funcionamiento:**
+- Al iniciar el servidor FastAPI, arranca una tarea de fondo (`asyncio`) que revisa cada 30 segundos si la hora actual coincide con alguno de los horarios configurados
+- Cuando coincide: borra todos los pedidos actuales de la colección `v3` e inserta los nuevos del Excel/API
+- El chequeo cada 30s es solo comparación de strings en memoria — sin costo de red ni base de datos
+- La ejecución real (Excel + MongoDB) ocurre máximo N veces al día según los horarios definidos
+
+**Configuración de horarios** en `rutas/sync_v3.py`:
+```python
+config = {
+    "horarios": ["05:00", "10:30", "19:00"],  # hora Colombia (America/Bogota)
+    "activo": True,
+}
+```
+
+**Zona horaria:** `pytz America/Bogota` — funciona correctamente en Render (que corre en UTC)
+
+**Alias de columnas:** acepta `Fecha Solicitada` como equivalente de `Fecha Preferente`
+
+**Endpoints:**
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/sync-v3/config` | Ver horarios configurados y ruta del Excel |
+| POST | `/sync-v3/config?activo=false` | Pausar o reanudar el sync |
+| POST | `/sync-v3/config` + body `{"horarios":["06:00","14:00"]}` | Cambiar horarios en caliente (sin reiniciar) |
+| POST | `/sync-v3/ejecutar` | Disparar sync manualmente ahora mismo |
+| GET | `/sync-v3/estado` | Resultado del último sync: timestamp, exitosos, errores, segundos |
+
+**Archivos:**
+- `Funciones/sync_api_v3.py` — lógica core: lectura Excel, normalización, reemplazo en MongoDB
+- `rutas/sync_v3.py` — endpoints y configuración de horarios
+- `api_v3.xlsx` — archivo Excel que simula la API (debe estar en la raíz de `integrappi/`)
 
 ### Reportes y Análisis
 - **Reporte de uso de WhatsApp**: Estadísticas generales de interacciones
@@ -450,7 +498,8 @@ integrappi/
 │   ├── whatsapp_report_integra.py # Reportes de uso de WhatsApp
 │   ├── vulcano.py           # Cliente Vulcano (manifiestos)
 │   ├── pacientes_medical_care.py  # Pacientes FMC: CRUD, carga SSE, cruce cache, exportar Excel
-│   ├── pedidos_v3.py        # Pedidos V3 FMC: CRUD, carga masiva SSE
+│   ├── pedidos_v3.py        # Pedidos V3 FMC: CRUD, carga masiva SSE, parseo de fechas
+│   ├── sync_v3.py           # Sync automático V3: config de horarios, trigger manual, estado
 │   ├── debug.py             # Diagnóstico de red y variables de entorno
 │   └── debug_siscore.py     # Diagnóstico de conexión Siscore
 │
@@ -461,7 +510,9 @@ integrappi/
 │   ├── whatsapp_certificado_integra.py # Generación de certificados por WhatsApp
 │   ├── vulcano_whatsapp_format.py     # Formateo de manifiestos Vulcano para WhatsApp
 │   ├── siscore_ws_tracking.py         # Cliente SOAP para rastreo Siscore
-│   └── siscore_ws_format.py           # Parseo de respuestas XML de Siscore
+│   ├── siscore_ws_format.py           # Parseo de respuestas XML de Siscore
+│   ├── normalizacion_medical_care.py  # Normalización pacientes/direcciones/teléfonos FMC
+│   └── sync_api_v3.py                 # Lógica core del sync V3: lee Excel, normaliza, reemplaza MongoDB
 │
 ├── scripts/                 # Scripts utilitarios (no son parte de la API)
 │   ├── crear_indice_sesiones.py  # Crea índices TTL en MongoDB para sesiones

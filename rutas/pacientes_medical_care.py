@@ -9,6 +9,7 @@ from Funciones.normalizacion_medical_care import (
     fx_normalizar_paciente,
     fx_normalizar_direccion,
     fx_normalizar_celular,
+    fx_separar_telefonos,
     fx_normalizar_municipio,
     fx_normalizar_cedula
 )
@@ -160,40 +161,32 @@ async def cargar_pacientes_masivo_stream(
                     celular_original = str(fila.get('celular', '')).strip() if pd.notna(fila.get('celular')) else ''
                     
                     # Validar campos obligatorios
-                    if not paciente_original:
-                        errores.append(f"Fila {idx + 2}: El campo 'paciente' es obligatorio")
-                        continue
-                    
                     if not cedula_original:
                         errores.append(f"Fila {idx + 2}: El campo 'cedula' es obligatorio")
                         continue
-                    
+
                     # Normalizar SOLO: paciente, dirección, cédula y celular
-                    paciente_normalizado = fx_normalizar_paciente(paciente_original)
+                    paciente_normalizado = fx_normalizar_paciente(paciente_original) if paciente_original else ''
                     cedula_normalizada = fx_normalizar_cedula(cedula_original)
                     direccion_normalizada = fx_normalizar_direccion(direccion_original)
-                    celular_normalizado = fx_normalizar_celular(celular_original)
-                    
+                    telefono1, telefono2 = fx_separar_telefonos(celular_original)
+
                     # Validar resultados de normalización
-                    if not paciente_normalizado:
-                        errores.append(f"Fila {idx + 2}: Error al normalizar 'paciente'")
-                        continue
-                    
                     if not cedula_normalizada:
                         errores.append(f"Fila {idx + 2}: Error al normalizar 'cedula'")
                         continue
-                    
+
                     # Validar duplicados por cédula en el archivo
                     if cedula_normalizada in cedulas_ya_procesadas:
                         errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en el archivo cargado")
                         continue
-                    
+
                     # Validar duplicados en la base de datos
                     existe_en_bd = coleccion.find_one({'cedula': cedula_normalizada})
                     if existe_en_bd:
                         errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en la base de datos")
                         continue
-                    
+
                     direccion_final = direccion_normalizada if direccion_normalizada else direccion_original
                     llave = f"{paciente_normalizado} {direccion_final}".strip()
 
@@ -210,8 +203,10 @@ async def cargar_pacientes_masivo_stream(
                         'municipio': municipio_original,
                         'ruta': ruta_original,
                         'cedi': cedi_original,
-                        'celular': celular_normalizado if celular_normalizado else celular_original,
+                        'celular': telefono1,
                         'celular_original': celular_original,
+                        'telefono1': telefono1,
+                        'telefono2': telefono2,
                         'llave': llave,
                         'estado': 'ACTIVO',
                         'usuario_carga': usuario,
@@ -354,40 +349,32 @@ async def cargar_pacientes_masivo(usuario: str, archivo: UploadFile = File(...))
                 celular_original = str(fila.get('celular', '')).strip() if pd.notna(fila.get('celular')) else ''
                 
                 # Validar campos obligatorios
-                if not paciente_original:
-                    errores.append(f"Fila {idx + 2}: El campo 'paciente' es obligatorio")
-                    continue
-                
                 if not cedula_original:
                     errores.append(f"Fila {idx + 2}: El campo 'cedula' es obligatorio")
                     continue
-                
+
                 # Normalizar SOLO: paciente, dirección, cédula y celular
-                paciente_normalizado = fx_normalizar_paciente(paciente_original)
+                paciente_normalizado = fx_normalizar_paciente(paciente_original) if paciente_original else ''
                 cedula_normalizada = fx_normalizar_cedula(cedula_original)
                 direccion_normalizada = fx_normalizar_direccion(direccion_original)
-                celular_normalizado = fx_normalizar_celular(celular_original)
-                
+                telefono1, telefono2 = fx_separar_telefonos(celular_original)
+
                 # Validar resultados de normalización
-                if not paciente_normalizado:
-                    errores.append(f"Fila {idx + 2}: Error al normalizar 'paciente'")
-                    continue
-                
                 if not cedula_normalizada:
                     errores.append(f"Fila {idx + 2}: Error al normalizar 'cedula'")
                     continue
-                
+
                 # Validar duplicados por cédula en el archivo
                 if cedula_normalizada in cedulas_ya_procesadas:
                     errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en el archivo cargado")
                     continue
-                
+
                 # Validar duplicados en la base de datos
                 existe_en_bd = coleccion.find_one({'cedula': cedula_normalizada})
                 if existe_en_bd:
                     errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en la base de datos")
                     continue
-                
+
                 direccion_final = direccion_normalizada if direccion_normalizada else direccion_original
                 llave = f"{paciente_normalizado} {direccion_final}".strip()
 
@@ -404,8 +391,10 @@ async def cargar_pacientes_masivo(usuario: str, archivo: UploadFile = File(...))
                     'municipio': municipio_original,
                     'ruta': ruta_original,
                     'cedi': cedi_original,
-                    'celular': celular_normalizado if celular_normalizado else celular_original,
+                    'celular': telefono1,
                     'celular_original': celular_original,
+                    'telefono1': telefono1,
+                    'telefono2': telefono2,
                     'llave': llave,
                     'estado': 'ACTIVO',
                     'usuario_carga': usuario,
@@ -662,7 +651,8 @@ async def recalcular_cruce(usuario: str):
             pacientes = list(coleccion.find(
                 {},
                 {'llave': 1, 'paciente_original': 1, 'direccion_original': 1,
-                 'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1, 'celular': 1}
+                 'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
+                 'telefono1': 1, 'telefono2': 1}
             ))
 
             coleccion_v3 = bd['v3']
@@ -687,9 +677,10 @@ async def recalcular_cruce(usuario: str):
 
             set_celulares_pacientes = set()
             for p in pacientes:
-                cel = _normalizar_cel(p.get('celular', ''))
-                if len(cel) >= 7:
-                    set_celulares_pacientes.add(cel)
+                for campo in ('telefono1', 'telefono2'):
+                    cel = _normalizar_cel(p.get(campo, '') or '')
+                    if len(cel) >= 7:
+                        set_celulares_pacientes.add(cel)
 
             yield f"data: {json.dumps({'stage': 'loading', 'progress': 8, 'message': f'{total_pacientes} pacientes y {total_v3} pedidos V3 cargados'})}\n\n"
 
@@ -705,9 +696,11 @@ async def recalcular_cruce(usuario: str):
                 cedi_raw = p.get('cedi', '') or ''
                 cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
 
-                # Criterio 1: cruce por celular (más certero)
-                celular_p = _normalizar_cel(p.get('celular', ''))
-                if celular_p and len(celular_p) >= 7 and celular_p in dict_telefonos_v3:
+                # Criterio 1: cruce por teléfono (más certero) — revisa telefono1 y telefono2
+                tel1 = _normalizar_cel(p.get('telefono1', '') or '')
+                tel2 = _normalizar_cel(p.get('telefono2', '') or '')
+                celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
+                if celular_p:
                     en_v3 = True
                     similitud = 100.0
                     llave_v3_match = dict_telefonos_v3[celular_p]
@@ -1082,24 +1075,24 @@ async def crear_paciente(usuario: str, paciente_data: dict):
         estado = paciente_data.get('estado', 'ACTIVO').strip().upper()
         
         # Validar campos obligatorios
-        if not paciente_original or not cedula_original:
+        if not cedula_original:
             raise HTTPException(
                 status_code=400,
-                detail="Los campos 'paciente' y 'cedula' son obligatorios"
+                detail="El campo 'cedula' es obligatorio"
             )
-        
+
         # Normalizar SOLO: paciente, dirección, cédula y celular
-        paciente_normalizado = fx_normalizar_paciente(paciente_original)
+        paciente_normalizado = fx_normalizar_paciente(paciente_original) if paciente_original else ''
         cedula_normalizada = fx_normalizar_cedula(cedula_original)
         direccion_normalizada = fx_normalizar_direccion(direccion_original)
-        celular_normalizado = fx_normalizar_celular(celular_original)
-        
-        if not paciente_normalizado or not cedula_normalizada:
+        telefono1, telefono2 = fx_separar_telefonos(celular_original)
+
+        if not cedula_normalizada:
             raise HTTPException(
                 status_code=400,
-                detail="Error al normalizar los campos obligatorios"
+                detail="Error al normalizar el campo 'cedula'"
             )
-        
+
         # Validar duplicados
         existe_en_bd = coleccion.find_one({'cedula': cedula_normalizada})
         if existe_en_bd:
@@ -1107,7 +1100,7 @@ async def crear_paciente(usuario: str, paciente_data: dict):
                 status_code=409,
                 detail=f"Ya existe un paciente con la cédula {cedula_original}"
             )
-        
+
         direccion_final = direccion_normalizada if direccion_normalizada else direccion_original
         llave = f"{paciente_normalizado} {direccion_final}".strip()
 
@@ -1124,8 +1117,10 @@ async def crear_paciente(usuario: str, paciente_data: dict):
             'municipio': municipio_original,
             'ruta': ruta_original,
             'cedi': cedi_original,
-            'celular': celular_normalizado if celular_normalizado else celular_original,
+            'celular': telefono1,
             'celular_original': celular_original,
+            'telefono1': telefono1,
+            'telefono2': telefono2,
             'llave': llave,
             'estado': estado,
             'usuario_carga': usuario,
@@ -1192,11 +1187,11 @@ async def actualizar_paciente(paciente_id: str, usuario: str, paciente_data: dic
         estado = paciente_data.get('estado', paciente_existente.get('estado', 'ACTIVO')).strip().upper()
         
         # Normalizar SOLO: paciente, dirección, cédula y celular
-        paciente_normalizado = fx_normalizar_paciente(paciente_original)
+        paciente_normalizado = fx_normalizar_paciente(paciente_original) if paciente_original else ''
         cedula_normalizada = fx_normalizar_cedula(cedula_original)
         direccion_normalizada = fx_normalizar_direccion(direccion_original)
-        celular_normalizado = fx_normalizar_celular(celular_original)
-        
+        telefono1, telefono2 = fx_separar_telefonos(celular_original)
+
         # Si la cédula cambia, validar duplicados
         cedula_actual = paciente_existente.get('cedula', '')
         if cedula_normalizada != cedula_actual:
@@ -1209,7 +1204,7 @@ async def actualizar_paciente(paciente_id: str, usuario: str, paciente_data: dic
                     status_code=409,
                     detail=f"Ya existe otro paciente con la cédula {cedula_original}"
                 )
-        
+
         direccion_final = direccion_normalizada if direccion_normalizada else direccion_original
         llave = f"{paciente_normalizado} {direccion_final}".strip()
 
@@ -1226,8 +1221,10 @@ async def actualizar_paciente(paciente_id: str, usuario: str, paciente_data: dic
             'municipio': municipio_original,
             'ruta': ruta_original,
             'cedi': cedi_original,
-            'celular': celular_normalizado if celular_normalizado else celular_original,
+            'celular': telefono1,
             'celular_original': celular_original,
+            'telefono1': telefono1,
+            'telefono2': telefono2,
             'llave': llave,
             'estado': estado,
             'usuario_actualizacion': usuario,

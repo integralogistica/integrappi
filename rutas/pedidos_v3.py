@@ -7,6 +7,8 @@ import pandas as pd
 import time
 import json
 import io
+import re
+from datetime import datetime, timedelta, date
 from typing import List, Optional
 from bd.bd_cliente import bd_cliente
 from Funciones.normalizacion_medical_care import (
@@ -16,6 +18,46 @@ from Funciones.normalizacion_medical_care import (
 )
 
 router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
+
+
+def _parsear_fecha(valor) -> str:
+    """
+    Convierte un valor de fecha a formato DD/MM/YYYY.
+    Soporta: serial de Excel (int/float como 46076), datetime/date, y strings en varios formatos.
+    """
+    if valor is None:
+        return ''
+    if isinstance(valor, float) and pd.isna(valor):
+        return ''
+
+    # Serial numérico de Excel (ej: 46076)
+    if isinstance(valor, (int, float)):
+        try:
+            fecha = datetime(1899, 12, 30) + timedelta(days=int(valor))
+            return fecha.strftime('%d/%m/%Y')
+        except Exception:
+            return str(valor)
+
+    # datetime o date de Python/pandas
+    if isinstance(valor, (datetime, date)):
+        return valor.strftime('%d/%m/%Y')
+
+    texto = str(valor).strip()
+    if not texto:
+        return ''
+
+    # Ya está en DD/MM/YYYY
+    if re.match(r'^\d{2}/\d{2}/\d{4}$', texto):
+        return texto
+
+    # Formatos que pandas suele generar al hacer str()
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(texto, fmt).strftime('%d/%m/%Y')
+        except ValueError:
+            continue
+
+    return texto  # Devolver tal cual si no se reconoce el formato
 
 # Obtener base de datos y colección
 bd = bd_cliente['integra']
@@ -152,8 +194,8 @@ async def cargar_pedidos_masivo_stream(
                     direccion_destino_original = str(fila.get('Direccion Destino', '')).strip() if pd.notna(fila.get('Direccion Destino')) else ''
                     divipola_original = str(fila.get('Divipola', '')).strip() if pd.notna(fila.get('Divipola')) else ''
                     telefono_original = str(fila.get('Telefono', '')).strip() if pd.notna(fila.get('Telefono')) else ''
-                    fecha_pedido_original = str(fila.get('Fecha Pedido', '')).strip() if pd.notna(fila.get('Fecha Pedido')) else ''
-                    fecha_preferente_original = str(fila.get('Fecha Preferente', '')).strip() if pd.notna(fila.get('Fecha Preferente')) else ''
+                    fecha_pedido_original = _parsear_fecha(fila.get('Fecha Pedido'))
+                    fecha_preferente_original = _parsear_fecha(fila.get('Fecha Preferente'))
                     estado_pedido_original = str(fila.get('Estado Pedido', '')).strip() if pd.notna(fila.get('Estado Pedido')) else ''
                     piezas_original = str(fila.get('Piezas', '')).strip() if pd.notna(fila.get('Piezas')) else ''
                     peso_real_original = str(fila.get('Peso Real', '')).strip() if pd.notna(fila.get('Peso Real')) else ''

@@ -267,6 +267,39 @@ def fx_normalizar_celular(txt: Optional[str]) -> Optional[str]:
         return solo_digitos[-10:]
 
 
+def fx_separar_telefonos(txt: Optional[str]) -> tuple:
+    """
+    Separa un campo de celular en hasta dos números normalizados.
+    Soporta separadores: ' - ', '/', ',', ';', ' y ', '|'.
+    Limpia caracteres no numéricos al inicio/fin antes de partir.
+    Retorna (telefono1, telefono2) donde telefono2 puede ser '' si no hay segundo número.
+    """
+    if not txt:
+        return ('', '')
+
+    # Limpiar caracteres no numéricos al inicio y al fin (ej: "-3123418728")
+    texto = re.sub(r'^[^\d]+', '', str(txt).strip())
+    texto = re.sub(r'[^\d]+$', '', texto)
+
+    if not texto:
+        return ('', '')
+
+    partes = re.split(r'\s*[-/,;|]\s*|\s+y\s+', texto, maxsplit=1)
+
+    def _norm(val: str) -> str:
+        digits = re.sub(r'\D', '', val)
+        if not digits:
+            return ''
+        return digits[-10:] if len(digits) > 10 else digits
+
+    # Descartar partes vacías: si tel1 queda vacío pero tel2 tiene valor, promoverlo
+    tel1 = _norm(partes[0]) if len(partes) > 0 else ''
+    tel2 = _norm(partes[1]) if len(partes) > 1 else ''
+    if not tel1 and tel2:
+        tel1, tel2 = tel2, ''
+    return (tel1, tel2)
+
+
 def fx_normalizar_municipio(txt: Optional[str]) -> Optional[str]:
     """Normalización básica de municipio"""
     if txt is None:

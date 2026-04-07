@@ -1,6 +1,10 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from rutas.aut2 import ruta_usuario
@@ -24,8 +28,55 @@ from rutas.debug import ruta_debug_network
 from rutas.debug_siscore import ruta_debug_siscore
 from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
 from rutas.pedidos_v3 import router as ruta_pedidos_v3
+from rutas.sync_v3 import router as ruta_sync_v3, config as sync_config, actualizar_ultimo_resultado
+from Funciones.sync_api_v3 import ejecutar_sync_v3
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+async def _loop_sync_v3():
+    """
+    Tarea de fondo: ejecuta sync_v3 en los horarios configurados (HH:MM).
+    Revisa cada minuto si la hora actual coincide con alguno de los horarios.
+    """
+    from datetime import datetime
+    import pytz
+    logger.info("[sync_v3] Tarea de fondo iniciada")
+    ultimo_ejecutado: str | None = None   # evita doble ejecución en el mismo minuto
+    _tz = pytz.timezone('America/Bogota')
+
+    while True:
+        await asyncio.sleep(30)  # revisa cada 30 segundos
+        if not sync_config.get("activo", True):
+            continue
+
+        ahora = datetime.now(_tz).strftime("%H:%M")
+        horarios = sync_config.get("horarios", [])
+
+        if ahora in horarios and ahora != ultimo_ejecutado:
+            ultimo_ejecutado = ahora
+            logger.info(f"[sync_v3] Ejecutando sync programado a las {ahora}")
+            try:
+                resultado = await asyncio.to_thread(ejecutar_sync_v3)
+                actualizar_ultimo_resultado(resultado)
+            except Exception as e:
+                logger.error(f"[sync_v3] Error en sync: {e}")
+        elif ahora not in horarios:
+            ultimo_ejecutado = None  # reset para que el próximo horario pueda ejecutar
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_loop_sync_v3())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
 app.title = "integra"
 app.version = "1"
 
@@ -68,6 +119,7 @@ app.include_router(ruta_debug_network)
 app.include_router(ruta_debug_siscore)
 app.include_router(ruta_pacientes_medical_care)
 app.include_router(ruta_pedidos_v3)
+app.include_router(ruta_sync_v3)
 
 @app.get("/", tags=['Home'])
 async def root():
