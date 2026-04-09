@@ -72,6 +72,52 @@ async def enviar_texto(to: str, texto: str):
     return await _post_graph(payload, "Enviar texto")
 
 
+def enviar_template_sync(
+    to: str,
+    template_name: str,
+    language_code: str,
+    body_params: list,
+):
+    """
+    Versión síncrona de envío de template. Usa httpx.Client para llamarse
+    desde contextos no-async (hilos del scheduler, funciones de sync).
+    Lee los tokens en el momento de la llamada para evitar problemas de
+    orden de inicialización del módulo.
+    """
+    token    = os.getenv("WHATSAPP_API_TOKEN") or WHATSAPP_API_TOKEN
+    phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID") or PHONE_NUMBER_ID
+    if not token or not phone_id:
+        print("⚠️ Faltan WHATSAPP_API_TOKEN o WHATSAPP_PHONE_NUMBER_ID")
+        return None
+    graph_url = f"https://graph.facebook.com/v22.0/{phone_id}/messages"
+    headers   = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": p} for p in body_params],
+                }
+            ],
+        },
+    }
+    try:
+        with httpx.Client() as client:
+            resp = client.post(graph_url, headers=headers, json=payload, timeout=20)
+        if resp.status_code != 200:
+            print(f"❌ Template {template_name}: {resp.status_code} - {resp.text}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"❌ Error enviando template WS sync: {e}")
+        return None
+
+
 async def enviar_template_con_parametros(
     to: str,
     template_name: str,

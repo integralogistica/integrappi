@@ -29,7 +29,7 @@ from rutas.debug_siscore import ruta_debug_siscore
 from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
 from rutas.pedidos_v3 import router as ruta_pedidos_v3
 from rutas.sync_v3 import router as ruta_sync_v3, config as sync_config, actualizar_ultimo_resultado
-from Funciones.sync_api_v3 import ejecutar_sync_v3
+from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +37,39 @@ logger = logging.getLogger(__name__)
 async def _loop_sync_v3():
     """
     Tarea de fondo: ejecuta sync_v3 en los horarios configurados (HH:MM).
-    Revisa cada minuto si la hora actual coincide con alguno de los horarios.
+    Revisa cada 30 segundos. Además, el último día de cada mes a las 00:00
+    ejecuta el corte mensual (archivar_mes_v3).
     """
     from datetime import datetime
+    import calendar
     import pytz
     logger.info("[sync_v3] Tarea de fondo iniciada")
-    ultimo_ejecutado: str | None = None   # evita doble ejecución en el mismo minuto
+    ultimo_ejecutado: str | None = None    # evita doble ejecución del sync en el mismo minuto
+    ultimo_archivado: str | None = None    # evita doble archivo en el mismo mes ('YYYY-MM')
     _tz = pytz.timezone('America/Bogota')
 
     while True:
         await asyncio.sleep(30)  # revisa cada 30 segundos
+
+        hoy   = datetime.now(_tz)
+        ahora = hoy.strftime("%H:%M")
+
+        # ── Corte mensual: último día del mes a las 00:00 ────────────────────
+        ultimo_dia_mes = calendar.monthrange(hoy.year, hoy.month)[1]
+        clave_mes      = hoy.strftime('%Y-%m')
+        if hoy.day == ultimo_dia_mes and ahora == "00:00" and clave_mes != ultimo_archivado:
+            ultimo_archivado = clave_mes
+            logger.info(f"[archivo_mensual] Ejecutando corte de fin de mes {clave_mes}")
+            try:
+                await asyncio.to_thread(archivar_mes_v3)
+            except Exception as e:
+                logger.error(f"[archivo_mensual] Error: {e}")
+
+        # ── Sync programado ──────────────────────────────────────────────────
         if not sync_config.get("activo", True):
             continue
 
-        ahora = datetime.now(_tz).strftime("%H:%M")
         horarios = sync_config.get("horarios", [])
-
         if ahora in horarios and ahora != ultimo_ejecutado:
             ultimo_ejecutado = ahora
             logger.info(f"[sync_v3] Ejecutando sync programado a las {ahora}")

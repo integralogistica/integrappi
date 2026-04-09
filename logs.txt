@@ -1,3 +1,23 @@
-INFO:     127.0.0.1:60111 - "GET /pedidos-v3/?skip=0&limit=100 HTTP/1.1" 200 OK
-ERROR:Funciones.sync_api_v3:Error al leer Excel: [Errno 13] Permission denied: 'C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi\\api_v3.xlsx'
-ERROR:Funciones.sync_api_v3:Error al leer Excel: [Errno 13] Permission denied: 'C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi\\api_v3.xlsx'
+
+ASUS@DESKTOP-JIQ34KO MINGW64 ~/OneDrive - Integra Logistica/Desarrollos/integra/integrappi (main)
+$ uvicorn main:app --reload
+INFO:     Will watch for changes in these directories: ['C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [5736] using WatchFiles
+✅ Conexión exitosa a MongoDB
+INFO:     Started server process [10492]
+INFO:     Waiting for application startup.
+INFO:main:[sync_v3] Tarea de fondo iniciada
+INFO:     Application startup complete.
+INFO:main:[sync_v3] Ejecutando sync programado a las 16:13
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 2: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 3: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 4: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 5: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 6: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 7: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+WARNING:Funciones.sync_api_v3:[sync_v3] Fila 8: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
+INFO:Funciones.sync_api_v3:[sync_v3] 0/7 registros — 0.11s
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 404 Not Found"
+❌ Template confirmar_actualizacion: 404 - {"error":{"message":"(#132001) Template name does not exist in the translation","type":"OAuthException","code":132001,"error_data":{"messaging_product":"whatsapp","details":"template name (confirmar_actualizacion) does not exist in es_CO"},"fbtrace_id":"AO5L5BGTkpxpuu5a4-OiWYq"}}
+WARNING:Funciones.sync_api_v3:[sync_v3] Notificación WS no enviada (tokens no configurados o error en API)

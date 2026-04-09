@@ -519,6 +519,34 @@ async def buscar_paciente(cedula: str = None, paciente: str = None, cedi: str = 
         )
 
 
+def _fmt_fecha(v) -> str:
+    """Convierte datetime/date/str a string 'YYYY-MM-DD'. Retorna '' si None o '0000-00-00'."""
+    if v is None:
+        return ''
+    if isinstance(v, str):
+        s = v[:10]
+        return '' if s.startswith('0000') or s == '' else s
+    try:
+        return v.strftime('%Y-%m-%d')
+    except Exception:
+        return ''
+
+
+_MESES_ES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+
+def _fmt_fecha_legible(v) -> str:
+    """Convierte 'YYYY-MM-DD HH:MM:SS' o datetime a '9 abr 2026'."""
+    try:
+        if isinstance(v, str):
+            from datetime import datetime as _dt
+            d = _dt.strptime(v[:10], '%Y-%m-%d')
+        else:
+            d = v
+        return f"{d.day} {_MESES_ES[d.month - 1]} {d.year}"
+    except Exception:
+        return str(v)
+
+
 def _calcular_cruce():
     """
     Ejecuta el cruce completo pacientes <-> V3 y retorna ambos resultados.
@@ -610,6 +638,7 @@ def _calcular_cruce():
                 'direccion_destino': reg.get('direccion_destino_original', ''),
                 'ruta': reg.get('ruta', '') or 'SIN RUTA',
                 'estado_pedido': reg.get('estado_pedido', ''),
+                'fecha_preferente': _fmt_fecha(reg.get('fecha_preferente')),
                 'telefono': reg.get('telefono_original', ''),
                 'llave': llave_v3,
                 'similitud': round(mejor_similitud * 100, 1),
@@ -635,8 +664,196 @@ def _calcular_cruce():
     return ocupacion_resultado, v3_resultado, len(sin_paciente)
 
 
+def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
+    """
+    Ejecuta el cruce completo pacientes <-> V3 y guarda en cache_cruce_mc.
+    Llamado automáticamente tras cada sync_v3 exitoso. No usa SSE.
+    """
+    from difflib import SequenceMatcher
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        pacientes = list(coleccion.find(
+            {},
+            {'llave': 1, 'paciente_original': 1, 'direccion_original': 1,
+             'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
+             'telefono1': 1, 'telefono2': 1}
+        ))
+        coleccion_v3 = bd['v3']
+        registros_v3 = list(coleccion_v3.find(
+            {'llave': {'$exists': True}},
+            {'llave': 1, 'telefono_original': 1, 'cliente_destino_original': 1,
+             'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
+             'codigo_pedido': 1, 'bodega_origen': 1,
+             'fecha_pedido': 1, 'fecha_preferente': 1,
+             'fecha_entrega': 1, 'planilla': 1,
+             'divipola': 1, 'municipio_destino': 1}
+        ))
+        llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
+        docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
+
+        dict_telefonos_v3 = {}
+        for doc in registros_v3:
+            tel = _normalizar_cel(doc.get('telefono_original', ''))
+            if len(tel) >= 7 and doc.get('llave'):
+                dict_telefonos_v3[tel] = doc['llave']
+
+        set_celulares_pacientes = set()
+        for p in pacientes:
+            for campo in ('telefono1', 'telefono2'):
+                cel = _normalizar_cel(p.get(campo, '') or '')
+                if len(cel) >= 7:
+                    set_celulares_pacientes.add(cel)
+
+        resultado_pacientes = []
+        for p in pacientes:
+            llave_paciente = p.get('llave', '')
+            if not llave_paciente:
+                continue
+            cedi_raw = p.get('cedi', '') or ''
+            cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
+            tel1 = _normalizar_cel(p.get('telefono1', '') or '')
+            tel2 = _normalizar_cel(p.get('telefono2', '') or '')
+            celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
+            if celular_p:
+                en_v3, similitud, llave_v3_match, match_tipo = True, 100.0, dict_telefonos_v3[celular_p], 'celular'
+            else:
+                mejor_sim, mejor_llave = 0.0, ''
+                for lv3 in llaves_v3:
+                    sim = SequenceMatcher(None, llave_paciente, lv3).ratio()
+                    if sim > mejor_sim:
+                        mejor_sim, mejor_llave = sim, lv3
+                en_v3 = mejor_sim >= 0.75
+                similitud = round(mejor_sim * 100, 1)
+                llave_v3_match = mejor_llave
+                match_tipo = 'llave'
+            doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
+            resultado_pacientes.append({
+                'paciente': p.get('paciente_original', ''),
+                'cedula': p.get('cedula_original', ''),
+                'direccion_original': p.get('direccion_original', ''),
+                'ruta': p.get('ruta', '') or 'SIN RUTA',
+                'cedi': cedi,
+                'llave': llave_paciente,
+                'similitud': similitud,
+                'match_tipo': match_tipo,
+                'llave_v3': llave_v3_match,
+                'en_v3': en_v3,
+                'estado': p.get('estado', 'ACTIVO'),
+                'estado_pedido': doc_v3.get('estado_pedido', ''),
+                'fecha_pedido': _fmt_fecha(doc_v3.get('fecha_pedido')),
+                'fecha_preferente': _fmt_fecha(doc_v3.get('fecha_preferente')),
+                'fecha_entrega': _fmt_fecha(doc_v3.get('fecha_entrega')),
+                'planilla': doc_v3.get('planilla', ''),
+                'municipio_destino': doc_v3.get('municipio_destino', ''),
+                'divipola': doc_v3.get('divipola', ''),
+            })
+
+        rutas_ocupacion: dict = {}
+        for p in resultado_pacientes:
+            ruta = p['ruta']
+            if ruta not in rutas_ocupacion:
+                rutas_ocupacion[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0, 'entregados': 0, 'cedi': p['cedi'], 'planillas': set()}
+            rutas_ocupacion[ruta]['pacientes'].append(p)
+            rutas_ocupacion[ruta]['total'] += 1
+            if p['en_v3']:
+                rutas_ocupacion[ruta]['en_v3'] += 1
+            if p['en_v3'] and p.get('estado_pedido') == 'ENTREGADO':
+                rutas_ocupacion[ruta]['entregados'] += 1
+            if p.get('planilla'):
+                rutas_ocupacion[ruta]['planillas'].add(p['planilla'])
+
+        ocupacion_resultado = []
+        for ruta, datos in sorted(rutas_ocupacion.items()):
+            ocupacion = round(datos['en_v3'] / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
+            entregados = datos['entregados']
+            pct_entregados = round(entregados / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
+            ocupacion_resultado.append({
+                'ruta': ruta,
+                'cedi': datos['cedi'],
+                'total_pacientes': datos['total'],
+                'pacientes_en_v3': datos['en_v3'],
+                'ocupacion_pct': ocupacion,
+                'pacientes_entregados': entregados,
+                'pct_entregados': pct_entregados,
+                'vehiculos': len(datos['planillas']),
+                'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True),
+            })
+
+        llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
+        sin_paciente = []
+        for reg in registros_v3:
+            llave_v3 = reg.get('llave', '')
+            if not llave_v3:
+                continue
+            bodega = reg.get('bodega_origen', '') or ''
+            cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
+            tel_v3 = _normalizar_cel(reg.get('telefono_original', ''))
+            if tel_v3 and len(tel_v3) >= 7 and tel_v3 in set_celulares_pacientes:
+                continue
+            mejor_sim, mejor_llave_p = 0.0, ''
+            for llave_p in llaves_pacientes:
+                sim = SequenceMatcher(None, llave_v3, llave_p).ratio()
+                if sim > mejor_sim:
+                    mejor_sim, mejor_llave_p = sim, llave_p
+            if mejor_sim < 0.75:
+                sin_paciente.append({
+                    'codigo_pedido': reg.get('codigo_pedido', ''),
+                    'cliente_destino': reg.get('cliente_destino_original', ''),
+                    'direccion_destino': reg.get('direccion_destino_original', ''),
+                    'ruta': reg.get('ruta', '') or 'SIN RUTA',
+                    'cedi': cedi_v3,
+                    'estado_pedido': reg.get('estado_pedido', ''),
+                    'fecha_preferente': _fmt_fecha(reg.get('fecha_preferente')),
+                    'telefono': reg.get('telefono_original', ''),
+                    'llave': llave_v3,
+                    'similitud': round(mejor_sim * 100, 1),
+                    'llave_paciente_cercana': mejor_llave_p,
+                })
+
+        rutas_v3: dict = {}
+        for reg in sin_paciente:
+            ruta = reg['ruta']
+            if ruta not in rutas_v3:
+                rutas_v3[ruta] = {'registros': [], 'cedi': reg['cedi']}
+            rutas_v3[ruta]['registros'].append(reg)
+
+        v3_resultado = [
+            {'ruta': ruta, 'cedi': datos['cedi'], 'total': len(datos['registros']),
+             'registros': sorted(datos['registros'], key=lambda x: x['similitud'], reverse=True)}
+            for ruta, datos in sorted(rutas_v3.items())
+        ]
+
+        fecha_calculo = time.strftime('%Y-%m-%d %H:%M:%S')
+        coleccion_cache.update_one(
+            {'tipo': 'cruce_completo'},
+            {'$set': {
+                'tipo': 'cruce_completo',
+                'ocupacion_rutas': ocupacion_resultado,
+                'v3_sin_paciente': v3_resultado,
+                'total_sin_paciente': len(sin_paciente),
+                'calculado_por': usuario,
+                'fecha_calculo': fecha_calculo,
+            }},
+            upsert=True
+        )
+        logger.info(f"[cruce_automatico] OK — {len(pacientes)} pacientes, {len(sin_paciente)} sin paciente")
+        import threading
+        threading.Thread(
+            target=enviar_excel_cruce_por_correo,
+            args=(usuario, fecha_calculo),
+            daemon=True
+        ).start()
+        return {'ok': True, 'total_pacientes': len(pacientes), 'total_sin_paciente': len(sin_paciente), 'fecha_calculo': fecha_calculo}
+
+    except Exception as e:
+        logger.error(f"[cruce_automatico] Error: {e}")
+        return {'ok': False, 'error': str(e)}
+
+
 @router.post("/recalcular-cruce")
-async def recalcular_cruce(usuario: str):
+async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
     """
     Ejecuta el cruce pacientes <-> V3 con progreso en tiempo real via SSE.
     Guarda el resultado en cache (cache_cruce_mc) al terminar.
@@ -661,10 +878,14 @@ async def recalcular_cruce(usuario: str):
                 {'llave': {'$exists': True}},
                 {'llave': 1, 'telefono_original': 1, 'cliente_destino_original': 1,
                  'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
-                 'codigo_pedido': 1, 'bodega_origen': 1}
+                 'codigo_pedido': 1, 'bodega_origen': 1,
+                 'fecha_pedido': 1, 'fecha_preferente': 1,
+             'fecha_entrega': 1, 'planilla': 1,
+             'divipola': 1, 'municipio_destino': 1}
             ))
 
             llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
+            docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
             total_pacientes = len(pacientes)
             total_v3 = len(registros_v3)
 
@@ -704,6 +925,7 @@ async def recalcular_cruce(usuario: str):
                     en_v3 = True
                     similitud = 100.0
                     llave_v3_match = dict_telefonos_v3[celular_p]
+                    match_tipo = 'celular'
                 else:
                     # Criterio 2: similitud de llave (fuzzy)
                     mejor_similitud = 0.0
@@ -716,7 +938,9 @@ async def recalcular_cruce(usuario: str):
                     en_v3 = mejor_similitud >= 0.75
                     similitud = round(mejor_similitud * 100, 1)
                     llave_v3_match = mejor_llave_v3
+                    match_tipo = 'llave'
 
+                doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
                 resultado_pacientes.append({
                     'paciente': p.get('paciente_original', ''),
                     'cedula': p.get('cedula_original', ''),
@@ -725,9 +949,17 @@ async def recalcular_cruce(usuario: str):
                     'cedi': cedi,
                     'llave': llave_paciente,
                     'similitud': similitud,
+                    'match_tipo': match_tipo,
                     'llave_v3': llave_v3_match,
                     'en_v3': en_v3,
-                    'estado': p.get('estado', 'ACTIVO')
+                    'estado': p.get('estado', 'ACTIVO'),
+                    'estado_pedido': doc_v3.get('estado_pedido', ''),
+                    'fecha_pedido': _fmt_fecha(doc_v3.get('fecha_pedido')),
+                    'fecha_preferente': _fmt_fecha(doc_v3.get('fecha_preferente')),
+                    'fecha_entrega': _fmt_fecha(doc_v3.get('fecha_entrega')),
+                    'planilla': doc_v3.get('planilla', ''),
+                    'municipio_destino': doc_v3.get('municipio_destino', ''),
+                    'divipola': doc_v3.get('divipola', ''),
                 })
 
                 if (idx + 1) % paso_reporte == 0 or (idx + 1) == total_pacientes:
@@ -739,21 +971,30 @@ async def recalcular_cruce(usuario: str):
             for p in resultado_pacientes:
                 ruta = p['ruta']
                 if ruta not in rutas_ocupacion:
-                    rutas_ocupacion[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0, 'cedi': p['cedi']}
+                    rutas_ocupacion[ruta] = {'pacientes': [], 'total': 0, 'en_v3': 0, 'entregados': 0, 'cedi': p['cedi'], 'planillas': set()}
                 rutas_ocupacion[ruta]['pacientes'].append(p)
                 rutas_ocupacion[ruta]['total'] += 1
                 if p['en_v3']:
                     rutas_ocupacion[ruta]['en_v3'] += 1
+                if p['en_v3'] and p.get('estado_pedido') == 'ENTREGADO':
+                    rutas_ocupacion[ruta]['entregados'] += 1
+                if p.get('planilla'):
+                    rutas_ocupacion[ruta]['planillas'].add(p['planilla'])
 
             ocupacion_resultado = []
             for ruta, datos in sorted(rutas_ocupacion.items()):
                 ocupacion = round(datos['en_v3'] / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
+                entregados = datos['entregados']
+                pct_entregados = round(entregados / datos['total'] * 100, 1) if datos['total'] > 0 else 0.0
                 ocupacion_resultado.append({
                     'ruta': ruta,
                     'cedi': datos['cedi'],
                     'total_pacientes': datos['total'],
                     'pacientes_en_v3': datos['en_v3'],
                     'ocupacion_pct': ocupacion,
+                    'pacientes_entregados': entregados,
+                    'pct_entregados': pct_entregados,
+                    'vehiculos': len(datos['planillas']),
                     'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True)
                 })
 
@@ -798,6 +1039,7 @@ async def recalcular_cruce(usuario: str):
                         'ruta': reg.get('ruta', '') or 'SIN RUTA',
                         'cedi': cedi_v3,
                         'estado_pedido': reg.get('estado_pedido', ''),
+                        'fecha_preferente': _fmt_fecha(reg.get('fecha_preferente')),
                         'telefono': reg.get('telefono_original', ''),
                         'llave': llave_v3,
                         'similitud': round(mejor_similitud * 100, 1),
@@ -837,6 +1079,14 @@ async def recalcular_cruce(usuario: str):
                 }},
                 upsert=True
             )
+
+            if enviar_correo:
+                import threading
+                threading.Thread(
+                    target=enviar_excel_cruce_por_correo,
+                    args=(usuario, fecha_calculo),
+                    daemon=True
+                ).start()
 
             yield f"data: {json.dumps({'stage': 'complete', 'progress': 100, 'message': 'Cruce completado', 'rutas': ocupacion_resultado, 'v3_sin_paciente': v3_resultado, 'total_sin_paciente': len(sin_paciente), 'fecha_calculo': fecha_calculo, 'calculado_por': usuario})}\n\n"
 
@@ -879,6 +1129,184 @@ async def v3_sin_paciente():
     }
 
 
+def _generar_excel_bytes(cache: dict, cedi: str = None) -> tuple:
+    """
+    Genera el Excel del cruce y retorna (bytes, nombre_archivo).
+    Reutilizado por el endpoint de descarga y el envío por correo.
+    """
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    ocupacion_rutas_data = cache.get('ocupacion_rutas', [])
+    v3_sin_paciente_data = cache.get('v3_sin_paciente', [])
+    fecha_calculo        = cache.get('fecha_calculo', '')
+    calculado_por        = cache.get('calculado_por', '')
+
+    if cedi:
+        ocupacion_rutas_data = [r for r in ocupacion_rutas_data if (r.get('cedi') or '').upper() == cedi.upper()]
+        v3_sin_paciente_data = [r for r in v3_sin_paciente_data if (r.get('cedi') or '').upper() == cedi.upper()]
+
+    from datetime import datetime as _dt, timedelta as _td
+    _hoy = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    _limite = _hoy + _td(days=5)
+
+    def _fecha_dt(s):
+        """Parsea 'YYYY-MM-DD' a datetime, retorna None si falla."""
+        try:
+            return _dt.strptime(s[:10], '%Y-%m-%d') if s else None
+        except Exception:
+            return None
+
+    wb = openpyxl.Workbook()
+    header_fill    = PatternFill('solid', fgColor='004D40')
+    header_font    = Font(bold=True, color='FFFFFF', size=10)
+    title_font     = Font(bold=True, size=12, color='004D40')
+    entregado_fill = PatternFill('solid', fgColor='F1F8F1')   # verde claro — en_v3 + ENTREGADO
+    urgente_fill   = PatternFill('solid', fgColor='FFF3F3')   # rojo claro  — fecha_preferente próxima/vencida
+    red_font       = Font(bold=True, color='C62828', size=10)
+    center         = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left           = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    thin_border    = Border(
+        left=Side(style='thin', color='BDBDBD'), right=Side(style='thin', color='BDBDBD'),
+        top=Side(style='thin', color='BDBDBD'),  bottom=Side(style='thin', color='BDBDBD')
+    )
+
+    def set_header_row(ws, row, cols):
+        for c, title in enumerate(cols, 1):
+            cell = ws.cell(row=row, column=c, value=title)
+            cell.fill, cell.font, cell.alignment, cell.border = header_fill, header_font, center, thin_border
+
+    def style_cell(cell, fill=None, font=None):
+        cell.border = thin_border
+        if fill:
+            cell.fill = fill
+        if font:
+            cell.font = font
+        cell.alignment = left
+
+    ws1 = wb.active
+    ws1.title = 'Ocupacion Rutas'
+    ws1['A1'] = f'Cruce Pacientes ↔ V3  |  {_fmt_fecha_legible(fecha_calculo)}'
+    ws1['A1'].font, ws1['A1'].alignment = title_font, center
+    ws1.merge_cells('A1:K1')
+    ws1.row_dimensions[1].height = 22
+    set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado',
+                             'En V3', 'Estado Pedido', 'F. Pedido', 'F. Preferente', 'Similitud %'])
+    fila = 3
+    for r in ocupacion_rutas_data:
+        for p in r['pacientes']:
+            en_v3          = p.get('en_v3', False)
+            estado_pedido  = p.get('estado_pedido', '')
+            fecha_pref_str = p.get('fecha_preferente', '')
+            fecha_pref_dt  = _fecha_dt(fecha_pref_str)
+            es_entregado = en_v3 and estado_pedido == 'ENTREGADO'
+            es_rojo      = not es_entregado and (
+                not en_v3 or
+                estado_pedido == 'POR PROGRAMAR' or
+                (fecha_pref_dt is not None and fecha_pref_dt <= _limite)
+            )
+            fill = entregado_fill if es_entregado else (urgente_fill if es_rojo else None)
+            vals = [r.get('cedi',''), r['ruta'], p['paciente'], p['cedula'],
+                    p.get('direccion_original',''), p.get('estado',''),
+                    'SÍ' if en_v3 else 'NO', estado_pedido,
+                    p.get('fecha_pedido',''), fecha_pref_str, p.get('similitud', 0)]
+            fecha_pref_urgente = not es_entregado and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+            for c, val in enumerate(vals, 1):
+                font = red_font if fecha_pref_urgente and c == 10 else None
+                style_cell(ws1.cell(row=fila, column=c, value=val), fill, font)
+            fila += 1
+    for i, w in enumerate([14,18,28,14,32,10,6,18,12,12,12], 1):
+        ws1.column_dimensions[get_column_letter(i)].width = w
+    ws1.freeze_panes = 'A3'
+
+    ws2 = wb.create_sheet('V3 Sin Paciente')
+    ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+    ws2['A1'].font, ws2['A1'].alignment = title_font, center
+    ws2.merge_cells('A1:I1')
+    ws2.row_dimensions[1].height = 22
+    set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino', 'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
+    fila2 = 3
+    for r in v3_sin_paciente_data:
+        for reg in r['registros']:
+            estado_v3      = reg.get('estado_pedido', '')
+            fecha_pref_str = reg.get('fecha_preferente', '')
+            fecha_pref_dt  = _fecha_dt(fecha_pref_str)
+            # Sin paciente = siempre rojo salvo ENTREGADO
+            es_entregado_v3 = estado_v3 == 'ENTREGADO'
+            fill = entregado_fill if es_entregado_v3 else urgente_fill
+            fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+            vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
+                    reg.get('cliente_destino',''), reg.get('direccion_destino',''),
+                    reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
+            for c, val in enumerate(vals, 1):
+                font = red_font if fecha_pref_urgente and c == 8 else None
+                style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
+            fila2 += 1
+    for i, w in enumerate([14,18,16,28,32,13,14,12,12], 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+    ws2.freeze_panes = 'A3'
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    nombre = f"cruce_mc{'_'+cedi if cedi else ''}_{fecha_calculo.replace(' ','_').replace(':','-')}.xlsx"
+    return buffer.getvalue(), nombre
+
+
+def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
+    """
+    Envía el Excel del cruce por correo a todos los usuarios con MEDICAL_CARE.
+    Se llama tras cada recálculo (automático o manual).
+    """
+    import os
+    import logging
+    import resend as _resend
+
+    logger = logging.getLogger(__name__)
+    try:
+        api_key   = os.getenv('RESEND_API_KEY', '')
+        mail_from = os.getenv('MAIL_FROM', 'no-reply@integralogistica.com')
+        if not api_key:
+            logger.warning('[cruce_email] RESEND_API_KEY no configurada')
+            return
+        _resend.api_key = api_key
+
+        # Buscar usuarios con MEDICAL_CARE y correo registrado
+        col_usuarios = bd['baseusuarios']
+        usuarios = list(col_usuarios.find(
+            {'clientes': 'MEDICAL_CARE', 'correo': {'$exists': True, '$nin': [None, '']}},
+            {'correo': 1, 'nombre': 1, '_id': 0}
+        ))
+        destinatarios = [u['correo'] for u in usuarios if u.get('correo')]
+        if not destinatarios:
+            logger.warning('[cruce_email] Sin destinatarios con MEDICAL_CARE y correo registrado')
+            return
+
+        cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
+        if not cache:
+            return
+        excel_bytes, nombre_archivo = _generar_excel_bytes(cache)
+
+        _resend.Emails.send({
+            'from':    f'IntegrApp <{mail_from}>',
+            'to':      destinatarios,
+            'subject': f'Cruce Pacientes ↔ V3 — {_fmt_fecha_legible(fecha_calculo)}',
+            'html': (
+                f'<p>Se adjunta el reporte de cruce <strong>Pacientes ↔ V3</strong> '
+                f'generado el <strong>{_fmt_fecha_legible(fecha_calculo)}</strong>'
+                + (f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else '')
+                + f'.</p>'
+                f'<p>El archivo contiene dos hojas: <em>Ocupacion Rutas</em> y <em>V3 Sin Paciente</em>.</p>'
+                f'<p>Saludos,<br>IntegrApp</p>'
+            ),
+            'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
+        })
+        logger.info(f'[cruce_email] Excel enviado a {len(destinatarios)} usuario(s): {destinatarios}')
+    except Exception as e:
+        logger.error(f'[cruce_email] Error: {e}')
+
+
 @router.get("/exportar-cruce-excel")
 async def exportar_cruce_excel(cedi: str = None):
     """
@@ -886,139 +1314,16 @@ async def exportar_cruce_excel(cedi: str = None):
     Dos hojas: 'Ocupacion Rutas' y 'V3 Sin Paciente'.
     Si se pasa cedi, filtra solo esa regional.
     """
-    import io
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
     from fastapi.responses import StreamingResponse as SR
+    import io
 
+    import io
     cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
     if not cache:
         raise HTTPException(status_code=404, detail='No hay datos calculados. Ejecute el recálculo primero.')
-
-    ocupacion_rutas = cache.get('ocupacion_rutas', [])
-    v3_sin_paciente = cache.get('v3_sin_paciente', [])
-    fecha_calculo = cache.get('fecha_calculo', '')
-    calculado_por = cache.get('calculado_por', '')
-
-    # Filtrar por CEDI si se indica
-    if cedi:
-        ocupacion_rutas = [r for r in ocupacion_rutas if (r.get('cedi') or '').upper() == cedi.upper()]
-        v3_sin_paciente = [r for r in v3_sin_paciente if (r.get('cedi') or '').upper() == cedi.upper()]
-
-    wb = openpyxl.Workbook()
-
-    # ── Estilos ──────────────────────────────────────────────────────────────
-    header_fill   = PatternFill('solid', fgColor='004D40')
-    header_font   = Font(bold=True, color='FFFFFF', size=10)
-    title_font    = Font(bold=True, size=12, color='004D40')
-    ok_fill       = PatternFill('solid', fgColor='C8E6C9')
-    warn_fill     = PatternFill('solid', fgColor='FFF9C4')
-    bad_fill      = PatternFill('solid', fgColor='FFCDD2')
-    center        = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    left          = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-    thin_border   = Border(
-        left=Side(style='thin', color='BDBDBD'), right=Side(style='thin', color='BDBDBD'),
-        top=Side(style='thin', color='BDBDBD'), bottom=Side(style='thin', color='BDBDBD')
-    )
-
-    def set_header_row(ws, row, cols):
-        for c, title in enumerate(cols, 1):
-            cell = ws.cell(row=row, column=c, value=title)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center
-            cell.border = thin_border
-
-    def style_cell(cell, fill=None, align=None):
-        cell.border = thin_border
-        if fill:  cell.fill = fill
-        if align: cell.alignment = align
-        else:     cell.alignment = left
-
-    # ── Hoja 1: Ocupación por Rutas ──────────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = 'Ocupacion Rutas'
-
-    ws1['A1'] = f'Cruce Pacientes ↔ V3  |  Calculado: {fecha_calculo}  |  Por: {calculado_por}'
-    ws1['A1'].font = title_font
-    ws1.merge_cells('A1:J1')
-    ws1['A1'].alignment = center
-    ws1.row_dimensions[1].height = 22
-
-    cols1 = ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado', 'En V3', 'Similitud %', 'Llave Paciente', 'Llave V3 / Método']
-    set_header_row(ws1, 2, cols1)
-
-    fila = 3
-    for r in ocupacion_rutas:
-        for p in r['pacientes']:
-            en_v3 = p.get('en_v3', False)
-            sim = p.get('similitud', 0)
-            row_fill = ok_fill if en_v3 else (warn_fill if sim >= 50 else bad_fill)
-
-            values = [
-                r.get('cedi', ''), r['ruta'],
-                p['paciente'], p['cedula'],
-                p.get('direccion_original', ''),
-                p.get('estado', ''),
-                'SÍ' if en_v3 else 'NO',
-                sim,
-                p.get('llave', ''), p.get('llave_v3', '')
-            ]
-            for c, val in enumerate(values, 1):
-                cell = ws1.cell(row=fila, column=c, value=val)
-                style_cell(cell, fill=row_fill)
-            fila += 1
-
-    col_widths1 = [14, 18, 28, 14, 32, 10, 6, 12, 36, 36]
-    for i, w in enumerate(col_widths1, 1):
-        ws1.column_dimensions[get_column_letter(i)].width = w
-
-    ws1.freeze_panes = 'A3'
-
-    # ── Hoja 2: V3 sin Paciente ───────────────────────────────────────────────
-    ws2 = wb.create_sheet('V3 Sin Paciente')
-
-    ws2['A1'] = f'V3 Sin Paciente  |  Calculado: {fecha_calculo}  |  Por: {calculado_por}'
-    ws2['A1'].font = title_font
-    ws2.merge_cells('A1:H1')
-    ws2['A1'].alignment = center
-    ws2.row_dimensions[1].height = 22
-
-    cols2 = ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino', 'Dirección', 'Teléfono', 'Estado Pedido', 'Similitud %', 'Paciente más cercano']
-    set_header_row(ws2, 2, cols2)
-
-    fila2 = 3
-    for r in v3_sin_paciente:
-        for reg in r['registros']:
-            sim = reg.get('similitud', 0)
-            row_fill = warn_fill if sim >= 50 else bad_fill
-            values = [
-                r.get('cedi', ''), r['ruta'],
-                reg.get('codigo_pedido', ''), reg.get('cliente_destino', ''),
-                reg.get('direccion_destino', ''), reg.get('telefono', ''),
-                reg.get('estado_pedido', ''), sim,
-                reg.get('llave_paciente_cercana', '')
-            ]
-            for c, val in enumerate(values, 1):
-                cell = ws2.cell(row=fila2, column=c, value=val)
-                style_cell(cell, fill=row_fill)
-            fila2 += 1
-
-    col_widths2 = [14, 18, 16, 28, 32, 13, 14, 12, 36]
-    for i, w in enumerate(col_widths2, 1):
-        ws2.column_dimensions[get_column_letter(i)].width = w
-
-    ws2.freeze_panes = 'A3'
-
-    # ── Serializar y enviar ───────────────────────────────────────────────────
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    nombre = f"cruce_mc{'_' + cedi if cedi else ''}_{fecha_calculo.replace(' ', '_').replace(':', '-')}.xlsx"
+    excel_bytes, nombre = _generar_excel_bytes(cache, cedi)
     return SR(
-        buffer,
+        io.BytesIO(excel_bytes),
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="{nombre}"'}
     )

@@ -27,8 +27,11 @@ def _parsear_fecha(valor) -> str:
     """
     if valor is None:
         return ''
-    if isinstance(valor, float) and pd.isna(valor):
-        return ''
+    try:
+        if pd.isna(valor):
+            return ''
+    except Exception:
+        pass
 
     # Serial numérico de Excel (ej: 46076)
     if isinstance(valor, (int, float)):
