@@ -66,6 +66,20 @@ def _parsear_fecha(valor) -> str:
 bd = bd_cliente['integra']
 coleccion = bd['v3']
 
+# Palabras que identifican clientes institucionales (no pacientes individuales).
+# Se verifican como substrings en el cliente_destino ya normalizado (mayúsculas, sin puntuación).
+# HOSP cubre tanto "HOSPITAL" como "HOSP..." en general.
+CLIENTES_EXCLUIDOS_PALABRAS = [
+    'DAVITA', 'VANTIVE', 'CLINICA', 'FARMA', 'HOSP',
+    'FUNDACION', 'RENAL', 'MEDICO', 'SOCIEDAD', 'INSTITUTO',
+]
+
+
+def _es_cliente_excluido(cliente_normalizado: str) -> bool:
+    """Retorna True si el cliente normalizado pertenece a una institución, no a un paciente."""
+    return any(palabra in cliente_normalizado for palabra in CLIENTES_EXCLUIDOS_PALABRAS)
+
+
 # Columnas requeridas en el Excel
 COLUMNAS_REQUERIDAS = [
     'Codigo Pedido',
@@ -136,6 +150,7 @@ async def cargar_pedidos_masivo_stream(
         tiempo_inicio = time.time()
         errores = []
         registros_exitosos = 0
+        registros_filtrados = 0
         total_filas = 0
         
         try:
@@ -211,6 +226,12 @@ async def cargar_pedidos_masivo_stream(
                     direccion_destino_normalizada = fx_normalizar_direccion(direccion_destino_original)
                     telefono_normalizado = fx_normalizar_celular(telefono_original)
 
+                    # Excluir clientes institucionales (no son pacientes individuales).
+                    # Se chequea el texto ORIGINAL en mayúsculas para no depender de la normalización.
+                    if _es_cliente_excluido(cliente_destino_original.upper()):
+                        registros_filtrados += 1
+                        continue
+
                     # Validar campos obligatorios
                     if not codigo_pedido_original:
                         errores.append(f"Fila {idx + 2}: El campo 'Codigo Pedido' es obligatorio")
@@ -272,6 +293,7 @@ async def cargar_pedidos_masivo_stream(
                 'mensaje': f'Carga completada en {tiempo_segundos} segundos',
                 'tiempo_segundos': tiempo_segundos,
                 'registros_exitosos': registros_exitosos,
+                'registros_filtrados': registros_filtrados,
                 'registros_con_errores': len(errores),
                 'errores': errores[:50] if errores else []
             }

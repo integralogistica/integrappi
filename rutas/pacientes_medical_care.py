@@ -552,7 +552,7 @@ def _calcular_cruce():
     Ejecuta el cruce completo pacientes <-> V3 y retorna ambos resultados.
     Función interna reutilizada por el endpoint de recálculo.
     """
-    from difflib import SequenceMatcher
+    from rapidfuzz.fuzz import ratio as fuzz_ratio
 
     # ── Ocupación por rutas ──────────────────────────────────────────────────
     pacientes = list(coleccion.find(
@@ -574,7 +574,7 @@ def _calcular_cruce():
         mejor_similitud = 0.0
         mejor_llave_v3 = ''
         for llave_v3 in llaves_v3:
-            sim = SequenceMatcher(None, llave_paciente, llave_v3).ratio()
+            sim = fuzz_ratio(llave_paciente, llave_v3) / 100.0
             if sim > mejor_similitud:
                 mejor_similitud = sim
                 mejor_llave_v3 = llave_v3
@@ -627,7 +627,7 @@ def _calcular_cruce():
         mejor_similitud = 0.0
         mejor_llave_paciente = ''
         for llave_p in llaves_pacientes:
-            sim = SequenceMatcher(None, llave_v3, llave_p).ratio()
+            sim = fuzz_ratio(llave_v3, llave_p) / 100.0
             if sim > mejor_similitud:
                 mejor_similitud = sim
                 mejor_llave_paciente = llave_p
@@ -669,7 +669,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
     Ejecuta el cruce completo pacientes <-> V3 y guarda en cache_cruce_mc.
     Llamado automáticamente tras cada sync_v3 exitoso. No usa SSE.
     """
-    from difflib import SequenceMatcher
+    from rapidfuzz.fuzz import ratio as fuzz_ratio
     import logging
     logger = logging.getLogger(__name__)
 
@@ -721,7 +721,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
             else:
                 mejor_sim, mejor_llave = 0.0, ''
                 for lv3 in llaves_v3:
-                    sim = SequenceMatcher(None, llave_paciente, lv3).ratio()
+                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
                     if sim > mejor_sim:
                         mejor_sim, mejor_llave = sim, lv3
                 en_v3 = mejor_sim >= 0.75
@@ -794,7 +794,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 continue
             mejor_sim, mejor_llave_p = 0.0, ''
             for llave_p in llaves_pacientes:
-                sim = SequenceMatcher(None, llave_v3, llave_p).ratio()
+                sim = fuzz_ratio(llave_v3, llave_p) / 100.0
                 if sim > mejor_sim:
                     mejor_sim, mejor_llave_p = sim, llave_p
             if mejor_sim < 0.75:
@@ -858,7 +858,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
     Ejecuta el cruce pacientes <-> V3 con progreso en tiempo real via SSE.
     Guarda el resultado en cache (cache_cruce_mc) al terminar.
     """
-    from difflib import SequenceMatcher
+    from rapidfuzz.fuzz import ratio as fuzz_ratio
 
     def generar_eventos():
         try:
@@ -931,7 +931,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     mejor_similitud = 0.0
                     mejor_llave_v3 = ''
                     for lv3 in llaves_v3:
-                        sim = SequenceMatcher(None, llave_paciente, lv3).ratio()
+                        sim = fuzz_ratio(llave_paciente, lv3) / 100.0
                         if sim > mejor_similitud:
                             mejor_similitud = sim
                             mejor_llave_v3 = lv3
@@ -1026,7 +1026,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 mejor_similitud = 0.0
                 mejor_llave_paciente = ''
                 for llave_p in llaves_pacientes:
-                    sim = SequenceMatcher(None, llave_v3, llave_p).ratio()
+                    sim = fuzz_ratio(llave_v3, llave_p) / 100.0
                     if sim > mejor_similitud:
                         mejor_similitud = sim
                         mejor_llave_paciente = llave_p

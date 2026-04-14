@@ -14,7 +14,7 @@ from Funciones.normalizacion_medical_care import (
     fx_normalizar_direccion,
     fx_normalizar_celular,
 )
-from rutas.pedidos_v3 import _parsear_fecha
+from rutas.pedidos_v3 import _parsear_fecha, _es_cliente_excluido
 from rutas.pacientes_medical_care import ejecutar_cruce_automatico
 from Funciones.whatsapp_utils_integra import enviar_template_sync
 
@@ -159,6 +159,7 @@ def _ejecutar_sync_v3_interno() -> dict:
                 'segundos': 0, 'ok': False}
 
     total = len(df)
+    filtrados = 0
     operaciones = []
 
     for idx, fila in df.iterrows():
@@ -196,6 +197,12 @@ def _ejecutar_sync_v3_interno() -> dict:
             direccion_normalizada = fx_normalizar_direccion(direccion_original) or direccion_original
             telefono_normalizado  = fx_normalizar_celular(telefono_original) or telefono_original
             llave = f"{cliente_normalizado} {direccion_normalizada}".strip()
+
+            # Excluir clientes institucionales (no son pacientes individuales).
+            # Se chequea el texto ORIGINAL en mayúsculas para no depender de la normalización.
+            if _es_cliente_excluido(cliente_original.upper()):
+                filtrados += 1
+                continue
 
             documento = {
                 'codigo_pedido':             codigo_pedido,
@@ -245,6 +252,7 @@ def _ejecutar_sync_v3_interno() -> dict:
     resultado = {
         'ok': True,
         'exitosos': exitosos,
+        'filtrados': filtrados,
         'errores': errores[:20],   # máx 20 errores en respuesta
         'total': total,
         'timestamp': timestamp,
