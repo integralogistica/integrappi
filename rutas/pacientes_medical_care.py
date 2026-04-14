@@ -28,9 +28,8 @@ _CEDI_MAPA = {
 }
 
 def _normalizar_cel(valor: str) -> str:
-    """Devuelve solo dígitos (últimos 10) de un número de celular."""
-    digits = ''.join(filter(str.isdigit, valor or ''))
-    return digits[-10:] if len(digits) >= 10 else digits
+    """Devuelve solo dígitos de un número de celular, sin truncar."""
+    return ''.join(filter(str.isdigit, valor or ''))
 
 # Columnas requeridas
 COLUMNAS_REQUERIDAS = [
@@ -756,6 +755,9 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 'planilla': doc_v3.get('planilla', ''),
                 'municipio_destino': doc_v3.get('municipio_destino', ''),
                 'divipola': doc_v3.get('divipola', ''),
+                'ruta_v3': doc_v3.get('ruta', ''),
+                'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
+                'telefono_v3': doc_v3.get('telefono_original', ''),
             })
 
         rutas_ocupacion: dict = {}
@@ -968,6 +970,9 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     'planilla': doc_v3.get('planilla', ''),
                     'municipio_destino': doc_v3.get('municipio_destino', ''),
                     'divipola': doc_v3.get('divipola', ''),
+                    'ruta_v3': doc_v3.get('ruta', ''),
+                    'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
+                    'telefono_v3': doc_v3.get('telefono_original', ''),
                 })
 
                 if (idx + 1) % paso_reporte == 0 or (idx + 1) == total_pacientes:
