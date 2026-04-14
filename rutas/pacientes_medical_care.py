@@ -1112,11 +1112,12 @@ async def ocupacion_rutas():
     """
     cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
     if not cache:
-        return {'rutas': [], 'fecha_calculo': None, 'calculado_por': None}
+        return {'rutas': [], 'fecha_calculo': None, 'calculado_por': None, 'total_sin_paciente': 0}
     return {
         'rutas': cache.get('ocupacion_rutas', []),
         'fecha_calculo': cache.get('fecha_calculo'),
         'calculado_por': cache.get('calculado_por'),
+        'total_sin_paciente': cache.get('total_sin_paciente', 0),
     }
 
 
