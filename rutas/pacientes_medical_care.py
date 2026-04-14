@@ -142,12 +142,17 @@ async def cargar_pacientes_masivo_stream(
             df = df.rename(columns=mapeo_columnas)
             
             yield f"data: {json.dumps({'stage': 'processing', 'progress': 0, 'total': total_filas, 'message': f'Procesando {total_filas} registros...'}, ensure_ascii=False)}\n\n"
-            
+
+            # Cargar todas las cédulas existentes en BD de una sola vez
+            cedulas_en_bd = set(
+                doc['cedula'] for doc in coleccion.find({}, {'cedula': 1, '_id': 0})
+            )
+
             # Procesar cada fila con validación de duplicados
             documentos_a_insertar = []
             cedulas_ya_procesadas = set()
-            
-            for idx, fila in df.iterrows():
+
+            for idx, fila in enumerate(df.to_dict('records')):
                 try:
                     # Extraer valores originales con manejo de nulos
                     sede_original = str(fila.get('sede', '')).strip() if pd.notna(fila.get('sede')) else ''
@@ -181,9 +186,8 @@ async def cargar_pacientes_masivo_stream(
                         errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en el archivo cargado")
                         continue
 
-                    # Validar duplicados en la base de datos
-                    existe_en_bd = coleccion.find_one({'cedula': cedula_normalizada})
-                    if existe_en_bd:
+                    # Validar duplicados en la base de datos (lookup O(1) contra el set precargado)
+                    if cedula_normalizada in cedulas_en_bd:
                         errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en la base de datos")
                         continue
 
@@ -331,11 +335,16 @@ async def cargar_pacientes_masivo(usuario: str, archivo: UploadFile = File(...))
         # Renombrar columnas a mayúsculas
         df = df.rename(columns=mapeo_columnas)
         
+        # Cargar todas las cédulas existentes en BD de una sola vez
+        cedulas_en_bd = set(
+            doc['cedula'] for doc in coleccion.find({}, {'cedula': 1, '_id': 0})
+        )
+
         # Procesar cada fila con validación de duplicados
         documentos_a_insertar = []
         cedulas_ya_procesadas = set()
-        
-        for idx, fila in df.iterrows():
+
+        for idx, fila in enumerate(df.to_dict('records')):
             try:
                 # Extraer valores originales con manejo de nulos
                 sede_original = str(fila.get('sede', '')).strip() if pd.notna(fila.get('sede')) else ''
@@ -369,9 +378,8 @@ async def cargar_pacientes_masivo(usuario: str, archivo: UploadFile = File(...))
                     errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en el archivo cargado")
                     continue
 
-                # Validar duplicados en la base de datos
-                existe_en_bd = coleccion.find_one({'cedula': cedula_normalizada})
-                if existe_en_bd:
+                # Validar duplicados en la base de datos (lookup O(1) contra el set precargado)
+                if cedula_normalizada in cedulas_en_bd:
                     errores.append(f"Fila {idx + 2}: La cédula {cedula_original} ya existe en la base de datos")
                     continue
 
