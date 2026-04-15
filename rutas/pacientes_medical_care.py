@@ -720,21 +720,32 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 continue
             cedi_raw = p.get('cedi', '') or ''
             cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
-            tel1 = _normalizar_cel(p.get('telefono1', '') or '')
-            tel2 = _normalizar_cel(p.get('telefono2', '') or '')
-            celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
-            if celular_p:
-                en_v3, similitud, llave_v3_match, match_tipo = True, 100.0, dict_telefonos_v3[celular_p], 'celular'
-            else:
-                mejor_sim, mejor_llave = 0.0, ''
-                for lv3 in llaves_v3:
-                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                    if sim > mejor_sim:
-                        mejor_sim, mejor_llave = sim, lv3
-                en_v3 = mejor_sim >= 0.75
+            # Criterio 1: similitud de llave (fuzzy)
+            mejor_sim, mejor_llave = 0.0, ''
+            for lv3 in llaves_v3:
+                sim = fuzz_ratio(llave_paciente, lv3) / 100.0
+                if sim > mejor_sim:
+                    mejor_sim, mejor_llave = sim, lv3
+            if mejor_sim >= 0.75:
+                en_v3 = True
                 similitud = round(mejor_sim * 100, 1)
                 llave_v3_match = mejor_llave
                 match_tipo = 'llave'
+            else:
+                # Criterio 2: cruce por teléfono como fallback
+                tel1 = _normalizar_cel(p.get('telefono1', '') or '')
+                tel2 = _normalizar_cel(p.get('telefono2', '') or '')
+                celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
+                if celular_p:
+                    en_v3 = True
+                    similitud = 100.0
+                    llave_v3_match = dict_telefonos_v3[celular_p]
+                    match_tipo = 'celular'
+                else:
+                    en_v3 = False
+                    similitud = round(mejor_sim * 100, 1)
+                    llave_v3_match = mejor_llave
+                    match_tipo = 'llave'
             doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
             resultado_pacientes.append({
                 'paciente': p.get('paciente_original', ''),
@@ -927,28 +938,34 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 cedi_raw = p.get('cedi', '') or ''
                 cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
 
-                # Criterio 1: cruce por teléfono (más certero) — revisa telefono1 y telefono2
-                tel1 = _normalizar_cel(p.get('telefono1', '') or '')
-                tel2 = _normalizar_cel(p.get('telefono2', '') or '')
-                celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
-                if celular_p:
+                # Criterio 1: similitud de llave (fuzzy)
+                mejor_similitud = 0.0
+                mejor_llave_v3 = ''
+                for lv3 in llaves_v3:
+                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
+                    if sim > mejor_similitud:
+                        mejor_similitud = sim
+                        mejor_llave_v3 = lv3
+                if mejor_similitud >= 0.75:
                     en_v3 = True
-                    similitud = 100.0
-                    llave_v3_match = dict_telefonos_v3[celular_p]
-                    match_tipo = 'celular'
-                else:
-                    # Criterio 2: similitud de llave (fuzzy)
-                    mejor_similitud = 0.0
-                    mejor_llave_v3 = ''
-                    for lv3 in llaves_v3:
-                        sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                        if sim > mejor_similitud:
-                            mejor_similitud = sim
-                            mejor_llave_v3 = lv3
-                    en_v3 = mejor_similitud >= 0.75
                     similitud = round(mejor_similitud * 100, 1)
                     llave_v3_match = mejor_llave_v3
                     match_tipo = 'llave'
+                else:
+                    # Criterio 2: cruce por teléfono como fallback
+                    tel1 = _normalizar_cel(p.get('telefono1', '') or '')
+                    tel2 = _normalizar_cel(p.get('telefono2', '') or '')
+                    celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
+                    if celular_p:
+                        en_v3 = True
+                        similitud = 100.0
+                        llave_v3_match = dict_telefonos_v3[celular_p]
+                        match_tipo = 'celular'
+                    else:
+                        en_v3 = False
+                        similitud = round(mejor_similitud * 100, 1)
+                        llave_v3_match = mejor_llave_v3
+                        match_tipo = 'llave'
 
                 doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
                 resultado_pacientes.append({

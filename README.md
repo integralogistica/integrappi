@@ -269,7 +269,7 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 
 **Cruce Pacientes ↔ V3 con Cache:**
 
-El cruce es una operación O(n×m) costosa (SequenceMatcher sobre todas las combinaciones). Para evitar recalcularlo en cada petición:
+El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Para evitar recalcularlo en cada petición:
 
 - **Cache en MongoDB**: los resultados se guardan en la colección `cache_cruce_mc` con un único documento `{ tipo: "cruce_completo" }` (upsert). Los endpoints GET leen desde ahí instantáneamente
 - **Recalcular bajo demanda**: `POST /recalcular-cruce` es el único punto que dispara el cálculo real. Devuelve un stream SSE con progreso real:
@@ -279,6 +279,20 @@ El cruce es una operación O(n×m) costosa (SequenceMatcher sobre todas las comb
   - `stage: 'saving'` (95%) — Guardando resultado en `cache_cruce_mc`
   - `stage: 'complete'` (100%) — Datos completos embebidos en el evento final
 - **Filtro por CEDI**: `GET /` y `GET /buscar` aceptan el param `cedi` (regex case-insensitive) para restringir resultados. Usado para control de acceso regional desde el frontend
+- **`/ocupacion-rutas` incluye `total_sin_paciente`**: el endpoint GET retorna también el total de V3 sin paciente para que el frontend pueda mostrar el badge desde el primer cargue, sin esperar a que el usuario abra la pestaña
+
+**Algoritmo de cruce (motor):**
+- **Motor de similitud**: `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
+- **Criterio 1 — Celular** (prioridad máxima, similitud 100%): se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`
+- **Criterio 2 — Llave** (fuzzy): si no hay match por teléfono, se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 75%, se marca como cruce con `match_tipo: 'llave'` y el porcentaje real
+- **`_normalizar_cel()`**: elimina todo carácter no numérico del número de teléfono — **no trunca a 10 dígitos** para evitar falsos positivos por coincidencia parcial de sufijos
+
+**Campos del resultado de cruce por paciente:**
+- `paciente`, `cedula`, `direccion_original`, `ruta`, `cedi`, `llave`, `similitud`, `match_tipo`, `llave_v3`, `en_v3`, `estado`
+- Datos del pedido V3 cruzado: `estado_pedido`, `fecha_pedido`, `fecha_preferente`, `fecha_entrega`, `planilla`, `municipio_destino`, `divipola`
+- `ruta_v3`: ruta del pedido V3 que cruzó (vacío si no cruzó). Útil para validar que el paciente de una ruta Medical Care está siendo entregado por la ruta V3 correspondiente
+- `celular_paciente`: `telefono1 / telefono2` del paciente (campos usados en el match por celular)
+- `telefono_v3`: `telefono_original` del pedido V3 que cruzó
 
 **Endpoint `exportar-cruce-excel`:**
 - Lee el cruce desde `cache_cruce_mc`
@@ -310,8 +324,15 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
 - **Solo se normalizan 3 campos**; el resto se guarda tal cual viene del Excel:
   - `cliente_destino`: `fx_normalizar_paciente()` — primeras 4 palabras, mayúsculas, reordenamiento alfabético. Guarda también `cliente_destino_original`
   - `direccion_destino`: `fx_normalizar_direccion()` — corrección de errores, abreviaturas, reordenamiento. Guarda también `direccion_destino_original`
-  - `telefono`: `fx_normalizar_celular()` — solo últimos 10 dígitos. Guarda también `telefono_original`
+  - `telefono`: `fx_normalizar_celular()` — elimina caracteres no numéricos (guarda todos los dígitos sin truncar). Guarda también `telefono_original`
 - **Campos sin normalización** (sin `_original`): `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
+
+**Filtro de Clientes Institucionales:**
+- Los registros cuyo `Cliente Destino` (texto ORIGINAL en mayúsculas) contenga alguna de las siguientes palabras son **excluidos automáticamente** de la carga, tanto en carga manual como en sync automático:
+  `DAVITA`, `VANTIVE`, `CLINICA`, `FARMA`, `HOSP`, `FUNDACION`, `RENAL`, `MEDICO`, `SOCIEDAD`, `INSTITUTO`
+- La verificación se hace sobre el texto original (no normalizado) para no depender de transformaciones de texto
+- Los registros filtrados se cuentan y se devuelven en `registros_filtrados` en la respuesta del SSE / sync
+- Función helper: `_es_cliente_excluido(cliente_original.upper())` en `rutas/pedidos_v3.py`, importada también en `Funciones/sync_api_v3.py`
 
 **Normalización de Fechas (`_parsear_fecha`):**
 - Función `_parsear_fecha()` en `rutas/pedidos_v3.py` convierte cualquier formato de fecha a `DD/MM/YYYY`
@@ -405,6 +426,8 @@ config = {
 **Zona horaria:** `pytz America/Bogota` — funciona correctamente en Render (que corre en UTC)
 
 **Alias de columnas:** acepta `Fecha Solicitada` como equivalente de `Fecha Preferente`
+
+**Filtro de clientes institucionales:** el sync aplica el mismo filtro que la carga manual — registros con palabras institucionales en `Cliente Destino` (DAVITA, VANTIVE, CLINICA, etc.) son excluidos antes de insertar en MongoDB. El conteo de excluidos se devuelve en `filtrados` en el resultado del sync.
 
 **Endpoints:**
 
