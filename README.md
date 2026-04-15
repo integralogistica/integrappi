@@ -283,14 +283,15 @@ El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Pa
 
 **Algoritmo de cruce (motor):**
 - **Motor de similitud**: `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
-- **Criterio 1 — Celular** (prioridad máxima, similitud 100%): se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`
-- **Criterio 2 — Llave** (fuzzy): si no hay match por teléfono, se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 75%, se marca como cruce con `match_tipo: 'llave'` y el porcentaje real
+- **Criterio 1 — Llave** (fuzzy, prioridad): se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 74%, se marca como cruce con `match_tipo: 'llave'`. El score fuzzy se guarda **siempre** en `similitud`, independientemente de cuál criterio ganó
+- **Criterio 2 — Celular** (fallback): si la similitud fuzzy no supera 74%, se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`. El campo `similitud` sigue mostrando el score fuzzy real (no 100%)
 - **`_normalizar_cel()`**: elimina todo carácter no numérico del número de teléfono — **no trunca a 10 dígitos** para evitar falsos positivos por coincidencia parcial de sufijos
+- **Ordenamiento de pacientes por ruta**: dentro de cada ruta los pacientes se ordenan primero por `en_v3` descendente (los que sí cruzaron aparecen primero) y luego por `similitud` descendente dentro de cada grupo
 
 **Campos del resultado de cruce por paciente:**
 - `paciente`, `cedula`, `direccion_original`, `ruta`, `cedi`, `llave`, `similitud`, `match_tipo`, `llave_v3`, `en_v3`, `estado`
 - Datos del pedido V3 cruzado: `estado_pedido`, `fecha_pedido`, `fecha_preferente`, `fecha_entrega`, `planilla`, `municipio_destino`, `divipola`
-- `ruta_v3`: ruta del pedido V3 que cruzó (vacío si no cruzó). Útil para validar que el paciente de una ruta Medical Care está siendo entregado por la ruta V3 correspondiente
+- `ruta_v3`: ruta del pedido V3 que cruzó (vacío si no cruzó). Se considera **cambio de ruta** cuando `ruta_v3` es diferente a la ruta del paciente en Medical Care, o cuando viene vacío. Estos casos se marcan visualmente en el frontend con fondo rojo oscuro y se cuentan en el badge ⚠️ del encabezado de cada tarjeta
 - `celular_paciente`: `telefono1 / telefono2` del paciente (campos usados en el match por celular)
 - `telefono_v3`: `telefono_original` del pedido V3 que cruzó
 
