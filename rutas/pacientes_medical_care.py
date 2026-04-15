@@ -592,7 +592,7 @@ def _calcular_cruce():
             'llave': llave_paciente,
             'similitud': round(mejor_similitud * 100, 1),
             'llave_v3': mejor_llave_v3,
-            'en_v3': mejor_similitud >= 0.75,
+            'en_v3': mejor_similitud >= 0.74,
             'estado': p.get('estado', 'ACTIVO')
         })
 
@@ -720,15 +720,15 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 continue
             cedi_raw = p.get('cedi', '') or ''
             cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
-            # Criterio 1: similitud de llave (fuzzy)
+            # Criterio 1: similitud de llave (fuzzy) — se guarda siempre
             mejor_sim, mejor_llave = 0.0, ''
             for lv3 in llaves_v3:
                 sim = fuzz_ratio(llave_paciente, lv3) / 100.0
                 if sim > mejor_sim:
                     mejor_sim, mejor_llave = sim, lv3
-            if mejor_sim >= 0.75:
+            similitud = round(mejor_sim * 100, 1)  # siempre el score fuzzy real
+            if mejor_sim >= 0.74:
                 en_v3 = True
-                similitud = round(mejor_sim * 100, 1)
                 llave_v3_match = mejor_llave
                 match_tipo = 'llave'
             else:
@@ -738,12 +738,10 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
                 if celular_p:
                     en_v3 = True
-                    similitud = 100.0
                     llave_v3_match = dict_telefonos_v3[celular_p]
                     match_tipo = 'celular'
                 else:
                     en_v3 = False
-                    similitud = round(mejor_sim * 100, 1)
                     llave_v3_match = mejor_llave
                     match_tipo = 'llave'
             doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
@@ -799,7 +797,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 'pacientes_entregados': entregados,
                 'pct_entregados': pct_entregados,
                 'vehiculos': len(datos['planillas']),
-                'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True),
+                'pacientes': sorted(datos['pacientes'], key=lambda x: (not x['en_v3'], -x['similitud'])),
             })
 
         llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
@@ -938,7 +936,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 cedi_raw = p.get('cedi', '') or ''
                 cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
 
-                # Criterio 1: similitud de llave (fuzzy)
+                # Criterio 1: similitud de llave (fuzzy) — se guarda siempre
                 mejor_similitud = 0.0
                 mejor_llave_v3 = ''
                 for lv3 in llaves_v3:
@@ -946,9 +944,9 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     if sim > mejor_similitud:
                         mejor_similitud = sim
                         mejor_llave_v3 = lv3
-                if mejor_similitud >= 0.75:
+                similitud = round(mejor_similitud * 100, 1)  # siempre el score fuzzy real
+                if mejor_similitud >= 0.74:
                     en_v3 = True
-                    similitud = round(mejor_similitud * 100, 1)
                     llave_v3_match = mejor_llave_v3
                     match_tipo = 'llave'
                 else:
@@ -958,12 +956,10 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
                     if celular_p:
                         en_v3 = True
-                        similitud = 100.0
                         llave_v3_match = dict_telefonos_v3[celular_p]
                         match_tipo = 'celular'
                     else:
                         en_v3 = False
-                        similitud = round(mejor_similitud * 100, 1)
                         llave_v3_match = mejor_llave_v3
                         match_tipo = 'llave'
 
@@ -1025,7 +1021,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     'pacientes_entregados': entregados,
                     'pct_entregados': pct_entregados,
                     'vehiculos': len(datos['planillas']),
-                    'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True)
+                    'pacientes': sorted(datos['pacientes'], key=lambda x: (not x['en_v3'], -x['similitud']))
                 })
 
             # ── Etapa 3: V3 sin paciente ─────────────────────────────────────
