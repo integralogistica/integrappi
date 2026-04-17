@@ -227,6 +227,12 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
+@ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
+async def obtener_perfiles_disponibles():
+    perfiles = coleccion_usuarios.distinct("perfil")
+    return sorted([p for p in perfiles if p])
+
+
 @ruta_baseusuarios.get("/despachadores", response_model=List[UsuarioLite])
 async def listar_despachadores():
     cursor = coleccion_usuarios.find(
@@ -342,6 +348,30 @@ async def actualizar_clientes_usuario(id: str, data: ActualizarClientesInput):
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     return {"mensaje": "Clientes actualizados", "clientes": data.clientes}
+
+
+class ActualizarPerfilInput(BaseModel):
+    perfil: str
+
+@ruta_baseusuarios.patch("/{id}/perfil", response_model=dict)
+async def actualizar_perfil_usuario(id: str, data: ActualizarPerfilInput):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    perfil_norm = data.perfil.strip().upper()
+    if not perfil_norm:
+        raise HTTPException(status_code=400, detail="El perfil no puede estar vacío")
+
+    result = coleccion_usuarios.update_one(
+        {"_id": oid},
+        {"$set": {"perfil": perfil_norm}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    return {"mensaje": "Perfil actualizado", "perfil": perfil_norm}
 
 
 @ruta_baseusuarios.post("/loginseguridad", response_model=dict)

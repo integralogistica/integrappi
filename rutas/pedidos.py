@@ -148,10 +148,11 @@ class DividirHastaTresPayload(BaseModel):
     consecutivo_origen: str
     destino_unico: str                    # obligatorio: todos quedan con este destino
     observacion_division: Optional[str] = None
-    # Grupos A/B/C. A = conserva consecutivo; B y C son opcionales
+    # Grupos A/B/C/D. A = conserva consecutivo; B, C y D son opcionales
     grupo_A: Optional[GrupoDivision] = None
     grupo_B: Optional[GrupoDivision] = None
     grupo_C: Optional[GrupoDivision] = None
+    grupo_D: Optional[GrupoDivision] = None
     # Campo que identifica al "Destinatario" en tus docs. Por defecto 'destinatario'
     campo_destinatario: Optional[str] = "destinatario"
 
@@ -2169,9 +2170,9 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
 @ruta_pedidos.post(
     "/dividir-vehiculo",
     response_model=dict,
-    summary=("Divide un consecutivo_vehiculo en hasta 3 (A conserva; B y C se crean con sufijos). "
+    summary=("Divide un consecutivo_vehiculo en hasta 4 (A conserva; B, C y D se crean con sufijos). "
              "Puedes seleccionar por destinatario, consecutivo_integrapp o ubicacion_descargue, "
-             "y también partir un único documento por KILOS (RUNT) hacia B y/o C.")
+             "y también partir un único documento por KILOS (RUNT) hacia B, C y/o D.")
 )
 async def dividir_vehiculo(payload: DividirHastaTresPayload):
     import re, unicodedata
@@ -2278,6 +2279,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
 
     docs_B = filtrar_docs(payload.grupo_B)
     docs_C = filtrar_docs(payload.grupo_C)
+    docs_D = filtrar_docs(payload.grupo_D)
 
     # Si hay split, no queremos además mover ese mismo CI completo por filtro.
     if payload.grupo_B and payload.grupo_B.split:
@@ -2286,13 +2288,18 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     if payload.grupo_C and payload.grupo_C.split:
         ci_c = (payload.grupo_C.split.consecutivo_integrapp or "").strip()
         docs_C = [d for d in docs_C if (d.get("consecutivo_integrapp") or "") != ci_c]
+    if payload.grupo_D and payload.grupo_D.split:
+        ci_d = (payload.grupo_D.split.consecutivo_integrapp or "").strip()
+        docs_D = [d for d in docs_D if (d.get("consecutivo_integrapp") or "") != ci_d]
 
     # Sufijos y nuevos consecutivos vehiculares (SIN guion)
     quiere_B = bool(docs_B) or bool(getattr(getattr(payload, "grupo_B", None), "split", None))
     quiere_C = bool(docs_C) or bool(getattr(getattr(payload, "grupo_C", None), "split", None))
+    quiere_D = bool(docs_D) or bool(getattr(getattr(payload, "grupo_D", None), "split", None))
 
     cv_B = f"{cv_origen}B" if quiere_B else None
     cv_C = f"{cv_origen}C" if quiere_C else None
+    cv_D = f"{cv_origen}D" if quiere_D else None
 
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2449,6 +2456,20 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         for d in docs_C:
             coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "C")})
 
+    if docs_D:
+        coleccion_pedidos.update_many(
+            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_D]}},
+            {"$set": {
+                "consecutivo_vehiculo": cv_D,
+                "destino": destino_unico,
+                "usuario_division": usuario,
+                "observacion_division": (payload.observacion_division or ""),
+                "fecha_division": ahora_str,
+            }}
+        )
+        for d in docs_D:
+            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "D")})
+
     # 7) SPLIT por KILOS (RUNT) hacia B/C – requiere doc_id si el CI no es único en A
     def _split_por_kilos(
         ci_objetivo: str,
@@ -2576,16 +2597,29 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             getattr(payload.grupo_C.split, "doc_id", None)
         )
 
-    # 8) Refrescar grupos A/B/C tras movimientos/splits
+    if getattr(getattr(payload, "grupo_D", None), "split", None):
+        _split_por_kilos(
+            payload.grupo_D.split.consecutivo_integrapp,
+            float(payload.grupo_D.split.kilos),
+            "D",
+            cv_D,
+            getattr(payload.grupo_D.split, "cajas", None),
+            getattr(payload.grupo_D.split, "doc_id", None)
+        )
+
+    # 8) Refrescar grupos A/B/C/D tras movimientos/splits
     docs_A  = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
     docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B})) if cv_B else []
     docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C})) if cv_C else []
+    docs_D2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_D})) if cv_D else []
 
     if not docs_A:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo A no puede quedar vacío (A conserva el consecutivo original)")
     if cv_C and not cv_B:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear C sin B")
-    if not docs_B2 and not docs_C2:
+    if cv_D and not cv_C:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear D sin C")
+    if not docs_B2 and not docs_C2 and not docs_D2:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
 
     # 9) Recalcular por carro (tipo_vehiculo_sicetac calculado por kilos del grupo)
@@ -2601,10 +2635,15 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         calc_C = _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)
         _apply(cv_C, calc_C)
 
+    if docs_D2:
+        calc_D = _calc(docs_D2, payload.grupo_D.overrides if payload.grupo_D else None)
+        _apply(cv_D, calc_D)
+
     resumen = {
         "A": {"vehiculo": cv_origen, "docs": len(docs_A)},
         "B": {"vehiculo": cv_B, "docs": len(docs_B2)} if docs_B2 else None,
         "C": {"vehiculo": cv_C, "docs": len(docs_C2)} if docs_C2 else None,
+        "D": {"vehiculo": cv_D, "docs": len(docs_D2)} if docs_D2 else None,
         "destino_unico": destino_unico
     }
     return {"mensaje": "División realizada", "resumen": resumen}
