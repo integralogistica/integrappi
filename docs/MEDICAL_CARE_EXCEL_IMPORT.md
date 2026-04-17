@@ -36,7 +36,8 @@ Funcionalidad implementada para importar pacientes de Fresenius Medical Care des
 Funciones portadas desde Power Query (logs.txt):
 
 - `fx_normalizar_base()`: Uppercase, trim, clean caracteres especiales
-- `fx_normalizar_paciente()`: Primeras 4 palabras, elimina signos de puntuación
+- `fx_normalizar_paciente()`: Primeras **6** palabras, elimina signos de puntuación, **máximo 2 ocurrencias por palabra**
+  - Ejemplo: "DUVAN DUVAN DUVAN ESPITIA F FELIPE" → "DUVAN DUVAN ESPITIA F F FELIPE" (tercera "DUVAN" eliminada)
 - `fx_normalizar_direccion()`: Normalización completa con corrección de errores comunes
 - `fx_normalizar_celular()`: Solo dígitos, últimos 10 dígitos
 - `fx_normalizar_municipio()`: Normalización básica
@@ -76,7 +77,7 @@ Funciones portadas desde Power Query (logs.txt):
 | Columna | Tipo | Descripción | Normalización |
 |----------|------|-------------|----------------|
 | sede | Texto | Mayúsculas, trim, compactar espacios |
-| paciente | Texto | Primeras 4 palabras, sin signos de puntuación |
+| paciente | Texto | Primeras 6 palabras, sin signos de puntuación, máximo 2 ocurrencias por palabra |
 | cedula | Texto/Número | Solo dígitos |
 | direccion | Texto | Normalización completa con corrección de errores |
 | departamento | Texto | Mayúsculas, trim, compactar espacios |
@@ -209,17 +210,109 @@ CARRERA 12 NUMERO 45 BARRIO SAN JOSE APARTAMENTO 201
 - Archivo se valida antes de procesar
 - Errores no exponen información sensible del sistema
 
+## Sistema de Cruce Pacientes ↔ V3
+
+### Algoritmo de Cruce
+
+**Archivo:** `rutas/pacientes_medical_care.py` (funciones `_calcular_cruce`, `ejecutar_cruce_automatico`, `recalcular_cruce`)
+
+**Motor de similitud:** `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
+
+### Criterios de Cruce (en orden de prioridad)
+
+1. **👤 Nombre (prioridad máxima)**
+   - Compara: `paciente` normalizado vs `cliente_destino` normalizado de todos los pedidos V3
+   - Umbral: similitud ≥ 95%
+   - Si hay match: `match_tipo = 'nombre'`, `en_v3 = True`
+   - Si hay match: NO se evalúan los demás criterios (prioridad máxima)
+   - Score: guarda el porcentaje de similitud en `similitud`
+
+2. **🔑 Llave (segunda prioridad)**
+   - Solo se ejecuta si NO hubo cruce por nombre
+   - Compara: `llave` del paciente (paciente+dirección) vs `llave` de todos los pedidos V3
+   - Umbral: similitud ≥ 73%
+   - Si hay match: `match_tipo = 'llave'`, `en_v3 = True`
+   - Si hay match: NO se evalúa celular (segunda prioridad)
+   - Score: guarda el porcentaje de similitud en `similitud`
+
+3. **📱 Celular (tercera prioridad, fallback)**
+   - Solo se ejecuta si NO hubo cruce por nombre ni llave
+   - Compara: `telefono1` y `telefono2` del paciente vs `telefono_original` del pedido V3
+   - Normalización: elimina caracteres no numéricos (SIN truncar a 10 dígitos)
+   - Umbral: coincidencia exacta
+   - Si hay match: `match_tipo = 'celular'`, `en_v3 = True`
+   - Score: `similitud` mantiene el valor del cálculo de llave (no 100%)
+
+4. **Sin cruce**
+   - Si no se cumple ninguno de los criterios anteriores
+   - `match_tipo = None`
+   - `en_v3 = False`
+   - `similitud` = mejor score encontrado (aunque sea < umbrales)
+
+### Badges Visuales (Frontend)
+
+**Archivo:** `integrapp-next/src/Paginas/CrucePacientesV3P/index.tsx`
+
+| Emoji | Tipo | Color | Condición |
+|-------|------|-------|-----------|
+| 👤 | Nombre | Verde | Similitud nombre ≥ 95% |
+| 🔑 | Llave | Morado | Similitud llave ≥ 73% |
+| 📱 | Celular | Azul | Celular exacto |
+| — | Sin badge | — | Sin cruce |
+
+### Endpoints del Cruce
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/pacientes-medical-care/ocupacion-rutas` | Lee cruce desde cache MongoDB |
+| GET | `/pacientes-medical-care/v3-sin-paciente` | Lee V3 sin paciente desde cache |
+| POST | `/pacientes-medical-care/recalcular-cruce?usuario=USUARIO` | Recalcula cruce completo (SSE streaming) |
+| GET | `/pacientes-medical-care/exportar-cruce-excel?cedi=FUNZA` | Exporta cruce a Excel (filtro regional opcional) |
+
+### Cache en MongoDB
+
+**Colección:** `cache_cruce_mc`
+**Documento único:** `{ tipo: "cruce_completo" }`
+**Campos:**
+- `ocupacion_rutas`: array con pacientes agrupados por ruta
+- `v3_sin_paciente`: array con pedidos V3 sin paciente coincidente
+- `total_sin_paciente`: total de pedidos V3 sin paciente
+- `fecha_calculo`: timestamp del último cálculo
+- `calculado_por`: usuario que realizó el recálculo
+
+### Progreso SSE (Server-Sent Events)
+
+El endpoint `POST /recalcular-cruce` envía eventos en tiempo real:
+
+| Etapa | Porcentaje | Mensaje |
+|-------|-----------|---------|
+| loading | 0-8% | Cargando pacientes y pedidos V3... |
+| comparing_patients | 10-60% | Comparando paciente X de Y... |
+| comparing_v3 | 62-90% | Verificando V3 X de Y... |
+| saving | 95% | Guardando resultados... |
+| complete | 100% | Cruce completado |
+
+### Histórico Mensual
+
+**Generación automática:** El último día de cada mes a las 00:00, se genera automáticamente un corte histórico del cruce.
+
+**Endpoint:** `GET /pacientes-medical-care/historico-meses` - Lista los meses disponibles
+**Endpoint:** `GET /pacientes-medical-care/historico-mes?anio=2026&mes=4` - Obtiene el corte de un mes específico
+
 ## Próximas Mejoras
 
-- [ ] Buscador en tabla de pacientes
-- [ ] Exportar tabla a Excel
-- [ ] Editar paciente individual
-- [ ] Eliminar paciente individual
-- [ ] Validación de cédulas duplicadas
-- [ ] Historial de cargas por usuario
-- [ ] Filtros por fecha de carga, sede, CEDI
-- [ ] Paginación mejorada con controles de página
-- [ ] Descarga de plantilla de Excel
+- [x] Buscador en tabla de pacientes
+- [x] Exportar tabla a Excel
+- [x] Editar paciente individual
+- [x] Eliminar paciente individual
+- [x] Validación de cédulas duplicadas
+- [x] Historial de cargas por usuario
+- [x] Filtros por fecha de carga, sede, CEDI
+- [x] Paginación mejorada con controles de página
+- [x] Descarga de plantilla de Excel
+- [x] Sistema de cruces con múltiples criterios
+- [x] Badges visuales con emojis
+- [x] Histórico mensual automático
 
 ## Soporte
 

@@ -71,7 +71,7 @@ coleccion = bd['v3']
 # HOSP cubre tanto "HOSPITAL" como "HOSP..." en general.
 CLIENTES_EXCLUIDOS_PALABRAS = [
     'DAVITA', 'VANTIVE', 'CLINICA', 'FARMA', 'HOSP',
-    'FUNDACION', 'RENAL', 'MEDICO', 'SOCIEDAD', 'INSTITUTO',
+    'FUNDACION', 'RENAL', 'MEDICO', 'ESPECIALIDADES','SOCIEDAD', 'INSTITUTO',
 ]
 
 

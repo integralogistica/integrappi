@@ -558,41 +558,96 @@ def _calcular_cruce():
     """
     Ejecuta el cruce completo pacientes <-> V3 y retorna ambos resultados.
     Función interna reutilizada por el endpoint de recálculo.
+    Criterio 1: nombre paciente vs cliente_destino >= 95% → match_tipo 'nombre'
+    Criterio 2: llave paciente vs llave V3 >= 73%        → match_tipo 'llave'
+    Criterio 3: celular paciente vs telefono V3 (exacto) → match_tipo 'celular'
     """
     from rapidfuzz.fuzz import ratio as fuzz_ratio
 
     # ── Ocupación por rutas ──────────────────────────────────────────────────
     pacientes = list(coleccion.find(
         {},
-        {'llave': 1, 'paciente_original': 1, 'ruta': 1, 'estado': 1, 'cedula_original': 1}
+        {'llave': 1, 'paciente': 1, 'paciente_original': 1, 'ruta': 1, 'estado': 1,
+         'cedula_original': 1, 'telefono1': 1, 'telefono2': 1}
     ))
 
     coleccion_v3 = bd['v3']
-    llaves_v3 = [
-        doc['llave'] for doc in coleccion_v3.find({'llave': {'$exists': True}}, {'llave': 1})
-        if doc.get('llave')
-    ]
+    registros_v3_simple = list(coleccion_v3.find(
+        {'llave': {'$exists': True}},
+        {'llave': 1, 'cliente_destino': 1, 'cliente_destino_original': 1,
+         'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
+         'codigo_pedido': 1, 'telefono_original': 1}
+    ))
 
+    llaves_v3 = [doc['llave'] for doc in registros_v3_simple if doc.get('llave')]
+    nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
+                  for doc in registros_v3_simple if doc.get('llave') and doc.get('cliente_destino')]
+    dict_telefonos_v3 = {
+        _normalizar_cel(doc.get('telefono_original', '')): doc['llave']
+        for doc in registros_v3_simple
+        if doc.get('llave') and len(_normalizar_cel(doc.get('telefono_original', ''))) >= 7
+    }
+
+    llaves_v3_con_paciente: set = set()
     resultado_pacientes = []
+
     for p in pacientes:
         llave_paciente = p.get('llave', '')
-        if not llave_paciente:
-            continue
-        mejor_similitud = 0.0
-        mejor_llave_v3 = ''
-        for llave_v3 in llaves_v3:
-            sim = fuzz_ratio(llave_paciente, llave_v3) / 100.0
-            if sim > mejor_similitud:
-                mejor_similitud = sim
-                mejor_llave_v3 = llave_v3
+        paciente_norm = p.get('paciente', '') or ''
+
+        en_v3 = False
+        llave_v3_match = ''
+        match_tipo = None  # Se establece solo si hay cruce
+        similitud = 0.0
+
+        # Criterio 1: nombre vs cliente_destino (≥95%)
+        if paciente_norm and nombres_v3:
+            mejor_sim_n, mejor_llave_n = 0.0, ''
+            for nombre_v3, lv3 in nombres_v3:
+                sim = fuzz_ratio(paciente_norm, nombre_v3) / 100.0
+                if sim > mejor_sim_n:
+                    mejor_sim_n, mejor_llave_n = sim, lv3
+            if mejor_sim_n >= 0.95:
+                en_v3 = True
+                llave_v3_match = mejor_llave_n
+                match_tipo = 'nombre'
+                similitud = round(mejor_sim_n * 100, 1)
+
+        # Criterio 2: llave vs llave (≥73%) — solo si no cruzó por nombre
+        if not en_v3 and llave_paciente and llaves_v3:
+            mejor_sim_l, mejor_llave_l = 0.0, ''
+            for lv3 in llaves_v3:
+                sim = fuzz_ratio(llave_paciente, lv3) / 100.0
+                if sim > mejor_sim_l:
+                    mejor_sim_l, mejor_llave_l = sim, lv3
+            similitud = round(mejor_sim_l * 100, 1)
+            llave_v3_match = mejor_llave_l
+            if mejor_sim_l >= 0.73:
+                en_v3 = True
+                match_tipo = 'llave'
+
+        # Criterio 3: celular paciente vs telefono V3 — fallback
+        if not en_v3 and dict_telefonos_v3:
+            tel1 = _normalizar_cel(p.get('telefono1', '') or '')
+            tel2 = _normalizar_cel(p.get('telefono2', '') or '')
+            celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
+            if celular_p:
+                en_v3 = True
+                llave_v3_match = dict_telefonos_v3[celular_p]
+                match_tipo = 'celular'
+
+        if en_v3 and llave_v3_match:
+            llaves_v3_con_paciente.add(llave_v3_match)
+
         resultado_pacientes.append({
             'paciente': p.get('paciente_original', ''),
             'cedula': p.get('cedula_original', ''),
             'ruta': p.get('ruta', '') or 'SIN RUTA',
             'llave': llave_paciente,
-            'similitud': round(mejor_similitud * 100, 1),
-            'llave_v3': mejor_llave_v3,
-            'en_v3': mejor_similitud >= 0.74,
+            'similitud': similitud,
+            'match_tipo': match_tipo,
+            'llave_v3': llave_v3_match,
+            'en_v3': en_v3,
             'estado': p.get('estado', 'ACTIVO')
         })
 
@@ -614,31 +669,23 @@ def _calcular_cruce():
             'total_pacientes': datos['total'],
             'pacientes_en_v3': datos['en_v3'],
             'ocupacion_pct': ocupacion,
-            'pacientes': sorted(datos['pacientes'], key=lambda x: x['similitud'], reverse=True)
+            'pacientes': sorted(datos['pacientes'], key=lambda x: (not x['en_v3'], -x['similitud']))
         })
 
     # ── V3 sin paciente ──────────────────────────────────────────────────────
     llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
 
-    registros_v3 = list(coleccion_v3.find(
-        {'llave': {'$exists': True}},
-        {'llave': 1, 'cliente_destino_original': 1, 'direccion_destino_original': 1,
-         'ruta': 1, 'estado_pedido': 1, 'telefono_original': 1, 'codigo_pedido': 1}
-    ))
-
     sin_paciente = []
-    for reg in registros_v3:
+    for reg in registros_v3_simple:
         llave_v3 = reg.get('llave', '')
-        if not llave_v3:
+        if not llave_v3 or llave_v3 in llaves_v3_con_paciente:
             continue
-        mejor_similitud = 0.0
-        mejor_llave_paciente = ''
+        mejor_sim, mejor_llave_p = 0.0, ''
         for llave_p in llaves_pacientes:
             sim = fuzz_ratio(llave_v3, llave_p) / 100.0
-            if sim > mejor_similitud:
-                mejor_similitud = sim
-                mejor_llave_paciente = llave_p
-        if mejor_similitud < 0.75:
+            if sim > mejor_sim:
+                mejor_sim, mejor_llave_p = sim, llave_p
+        if mejor_sim < 0.75:
             sin_paciente.append({
                 'codigo_pedido': reg.get('codigo_pedido', ''),
                 'cliente_destino': reg.get('cliente_destino_original', ''),
@@ -646,10 +693,9 @@ def _calcular_cruce():
                 'ruta': reg.get('ruta', '') or 'SIN RUTA',
                 'estado_pedido': reg.get('estado_pedido', ''),
                 'fecha_preferente': _fmt_fecha(reg.get('fecha_preferente')),
-                'telefono': reg.get('telefono_original', ''),
                 'llave': llave_v3,
-                'similitud': round(mejor_similitud * 100, 1),
-                'llave_paciente_cercana': mejor_llave_paciente
+                'similitud': round(mejor_sim * 100, 1),
+                'llave_paciente_cercana': mejor_llave_p
             })
 
     rutas_v3: dict = {}
@@ -683,56 +729,72 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
     try:
         pacientes = list(coleccion.find(
             {},
-            {'llave': 1, 'paciente_original': 1, 'direccion_original': 1,
+            {'llave': 1, 'paciente': 1, 'paciente_original': 1, 'direccion_original': 1,
              'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
              'telefono1': 1, 'telefono2': 1}
         ))
         coleccion_v3 = bd['v3']
         registros_v3 = list(coleccion_v3.find(
             {'llave': {'$exists': True}},
-            {'llave': 1, 'telefono_original': 1, 'cliente_destino_original': 1,
+            {'llave': 1, 'cliente_destino': 1, 'cliente_destino_original': 1,
              'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
-             'codigo_pedido': 1, 'bodega_origen': 1,
+             'codigo_pedido': 1, 'bodega_origen': 1, 'telefono_original': 1,
              'fecha_pedido': 1, 'fecha_preferente': 1,
              'fecha_entrega': 1, 'planilla': 1,
              'divipola': 1, 'municipio_destino': 1}
         ))
         llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
         docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
+        nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
+                      for doc in registros_v3 if doc.get('llave') and doc.get('cliente_destino')]
+        dict_telefonos_v3 = {
+            _normalizar_cel(doc.get('telefono_original', '')): doc['llave']
+            for doc in registros_v3
+            if doc.get('llave') and len(_normalizar_cel(doc.get('telefono_original', ''))) >= 7
+        }
 
-        dict_telefonos_v3 = {}
-        for doc in registros_v3:
-            tel = _normalizar_cel(doc.get('telefono_original', ''))
-            if len(tel) >= 7 and doc.get('llave'):
-                dict_telefonos_v3[tel] = doc['llave']
-
-        set_celulares_pacientes = set()
-        for p in pacientes:
-            for campo in ('telefono1', 'telefono2'):
-                cel = _normalizar_cel(p.get(campo, '') or '')
-                if len(cel) >= 7:
-                    set_celulares_pacientes.add(cel)
-
+        llaves_v3_con_paciente: set = set()
         resultado_pacientes = []
+
         for p in pacientes:
-            llave_paciente = p.get('llave', '')
-            if not llave_paciente:
-                continue
+            llave_paciente = p.get('llave', '') or ''
+            paciente_norm = p.get('paciente', '') or ''
             cedi_raw = p.get('cedi', '') or ''
             cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
-            # Criterio 1: similitud de llave (fuzzy) — se guarda siempre
-            mejor_sim, mejor_llave = 0.0, ''
-            for lv3 in llaves_v3:
-                sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                if sim > mejor_sim:
-                    mejor_sim, mejor_llave = sim, lv3
-            similitud = round(mejor_sim * 100, 1)  # siempre el score fuzzy real
-            if mejor_sim >= 0.74:
-                en_v3 = True
-                llave_v3_match = mejor_llave
-                match_tipo = 'llave'
-            else:
-                # Criterio 2: cruce por teléfono como fallback
+
+            en_v3 = False
+            llave_v3_match = ''
+            match_tipo = None  # Se establece solo si hay cruce
+            similitud = 0.0
+
+            # Criterio 1: nombre vs cliente_destino (≥95%)
+            if paciente_norm and nombres_v3:
+                mejor_sim_n, mejor_llave_n = 0.0, ''
+                for nombre_v3, lv3 in nombres_v3:
+                    sim = fuzz_ratio(paciente_norm, nombre_v3) / 100.0
+                    if sim > mejor_sim_n:
+                        mejor_sim_n, mejor_llave_n = sim, lv3
+                if mejor_sim_n >= 0.95:
+                    en_v3 = True
+                    llave_v3_match = mejor_llave_n
+                    match_tipo = 'nombre'
+                    similitud = round(mejor_sim_n * 100, 1)
+
+            # Criterio 2: llave vs llave (≥73%) — solo si no cruzó por nombre
+            if not en_v3 and llave_paciente and llaves_v3:
+                mejor_sim_l, mejor_llave_l = 0.0, ''
+                for lv3 in llaves_v3:
+                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
+                    if sim > mejor_sim_l:
+                        mejor_sim_l, mejor_llave_l = sim, lv3
+                similitud = round(mejor_sim_l * 100, 1)
+                llave_v3_match = mejor_llave_l
+                if mejor_sim_l >= 0.73:
+                    en_v3 = True
+                    match_tipo = 'llave'
+
+            # Criterio 3: celular paciente vs telefono V3 — fallback
+            if not en_v3 and dict_telefonos_v3:
                 tel1 = _normalizar_cel(p.get('telefono1', '') or '')
                 tel2 = _normalizar_cel(p.get('telefono2', '') or '')
                 celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
@@ -740,10 +802,10 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                     en_v3 = True
                     llave_v3_match = dict_telefonos_v3[celular_p]
                     match_tipo = 'celular'
-                else:
-                    en_v3 = False
-                    llave_v3_match = mejor_llave
-                    match_tipo = 'llave'
+
+            if en_v3 and llave_v3_match:
+                llaves_v3_con_paciente.add(llave_v3_match)
+
             doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
             resultado_pacientes.append({
                 'paciente': p.get('paciente_original', ''),
@@ -765,6 +827,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 'municipio_destino': doc_v3.get('municipio_destino', ''),
                 'divipola': doc_v3.get('divipola', ''),
                 'ruta_v3': doc_v3.get('ruta', ''),
+                'cliente_destino_v3': doc_v3.get('cliente_destino_original', ''),
                 'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
                 'telefono_v3': doc_v3.get('telefono_original', ''),
             })
@@ -804,13 +867,10 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
         sin_paciente = []
         for reg in registros_v3:
             llave_v3 = reg.get('llave', '')
-            if not llave_v3:
+            if not llave_v3 or llave_v3 in llaves_v3_con_paciente:
                 continue
             bodega = reg.get('bodega_origen', '') or ''
             cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
-            tel_v3 = _normalizar_cel(reg.get('telefono_original', ''))
-            if tel_v3 and len(tel_v3) >= 7 and tel_v3 in set_celulares_pacientes:
-                continue
             mejor_sim, mejor_llave_p = 0.0, ''
             for llave_p in llaves_pacientes:
                 sim = fuzz_ratio(llave_v3, llave_p) / 100.0
@@ -886,7 +946,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
 
             pacientes = list(coleccion.find(
                 {},
-                {'llave': 1, 'paciente_original': 1, 'direccion_original': 1,
+                {'llave': 1, 'paciente': 1, 'paciente_original': 1, 'direccion_original': 1,
                  'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
                  'telefono1': 1, 'telefono2': 1}
             ))
@@ -895,9 +955,9 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
             # Cargamos los registros V3 completos de una sola vez (se usan en etapas 2 y 3)
             registros_v3 = list(coleccion_v3.find(
                 {'llave': {'$exists': True}},
-                {'llave': 1, 'telefono_original': 1, 'cliente_destino_original': 1,
+                {'llave': 1, 'cliente_destino': 1, 'cliente_destino_original': 1,
                  'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
-                 'codigo_pedido': 1, 'bodega_origen': 1,
+                 'codigo_pedido': 1, 'bodega_origen': 1, 'telefono_original': 1,
                  'fecha_pedido': 1, 'fecha_preferente': 1,
              'fecha_entrega': 1, 'planilla': 1,
              'divipola': 1, 'municipio_destino': 1}
@@ -905,27 +965,21 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
 
             llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
             docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
+            nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
+                          for doc in registros_v3 if doc.get('llave') and doc.get('cliente_destino')]
+            dict_telefonos_v3 = {
+                _normalizar_cel(doc.get('telefono_original', '')): doc['llave']
+                for doc in registros_v3
+                if doc.get('llave') and len(_normalizar_cel(doc.get('telefono_original', ''))) >= 7
+            }
             total_pacientes = len(pacientes)
             total_v3 = len(registros_v3)
-
-            # Dict teléfono → llave para cruce rápido por celular
-            dict_telefonos_v3 = {}
-            for doc in registros_v3:
-                tel = _normalizar_cel(doc.get('telefono_original', ''))
-                if len(tel) >= 7 and doc.get('llave'):
-                    dict_telefonos_v3[tel] = doc['llave']
-
-            set_celulares_pacientes = set()
-            for p in pacientes:
-                for campo in ('telefono1', 'telefono2'):
-                    cel = _normalizar_cel(p.get(campo, '') or '')
-                    if len(cel) >= 7:
-                        set_celulares_pacientes.add(cel)
 
             yield f"data: {json.dumps({'stage': 'loading', 'progress': 8, 'message': f'{total_pacientes} pacientes y {total_v3} pedidos V3 cargados'})}\n\n"
 
             # ── Etapa 2: comparar pacientes contra V3 ───────────────────────
             resultado_pacientes = []
+            llaves_v3_con_paciente: set = set()
             paso_reporte = max(1, total_pacientes // 20)
 
             for idx, p in enumerate(pacientes):
@@ -936,21 +990,40 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 cedi_raw = p.get('cedi', '') or ''
                 cedi = _CEDI_MAPA.get(cedi_raw.upper(), cedi_raw.upper())
 
-                # Criterio 1: similitud de llave (fuzzy) — se guarda siempre
-                mejor_similitud = 0.0
-                mejor_llave_v3 = ''
-                for lv3 in llaves_v3:
-                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                    if sim > mejor_similitud:
-                        mejor_similitud = sim
-                        mejor_llave_v3 = lv3
-                similitud = round(mejor_similitud * 100, 1)  # siempre el score fuzzy real
-                if mejor_similitud >= 0.74:
-                    en_v3 = True
-                    llave_v3_match = mejor_llave_v3
-                    match_tipo = 'llave'
-                else:
-                    # Criterio 2: cruce por teléfono como fallback
+                paciente_norm = p.get('paciente', '') or ''
+                en_v3 = False
+                llave_v3_match = ''
+                match_tipo = None  # Se establece solo si hay cruce
+                similitud = 0.0
+
+                # Criterio 1: nombre vs cliente_destino (≥95%)
+                if paciente_norm and nombres_v3:
+                    mejor_sim_n, mejor_llave_n = 0.0, ''
+                    for nombre_v3, lv3 in nombres_v3:
+                        sim = fuzz_ratio(paciente_norm, nombre_v3) / 100.0
+                        if sim > mejor_sim_n:
+                            mejor_sim_n, mejor_llave_n = sim, lv3
+                    if mejor_sim_n >= 0.95:
+                        en_v3 = True
+                        llave_v3_match = mejor_llave_n
+                        match_tipo = 'nombre'
+                        similitud = round(mejor_sim_n * 100, 1)
+
+                # Criterio 2: llave vs llave (≥73%) — solo si no cruzó por nombre
+                if not en_v3 and llave_paciente and llaves_v3:
+                    mejor_sim_l, mejor_llave_l = 0.0, ''
+                    for lv3 in llaves_v3:
+                        sim = fuzz_ratio(llave_paciente, lv3) / 100.0
+                        if sim > mejor_sim_l:
+                            mejor_sim_l, mejor_llave_l = sim, lv3
+                    similitud = round(mejor_sim_l * 100, 1)
+                    llave_v3_match = mejor_llave_l
+                    if mejor_sim_l >= 0.73:
+                        en_v3 = True
+                        match_tipo = 'llave'
+
+                # Criterio 3: celular paciente vs telefono V3 — fallback
+                if not en_v3 and dict_telefonos_v3:
                     tel1 = _normalizar_cel(p.get('telefono1', '') or '')
                     tel2 = _normalizar_cel(p.get('telefono2', '') or '')
                     celular_p = next((t for t in (tel1, tel2) if len(t) >= 7 and t in dict_telefonos_v3), '')
@@ -958,10 +1031,9 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                         en_v3 = True
                         llave_v3_match = dict_telefonos_v3[celular_p]
                         match_tipo = 'celular'
-                    else:
-                        en_v3 = False
-                        llave_v3_match = mejor_llave_v3
-                        match_tipo = 'llave'
+
+                if en_v3 and llave_v3_match:
+                    llaves_v3_con_paciente.add(llave_v3_match)
 
                 doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
                 resultado_pacientes.append({
@@ -984,6 +1056,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     'municipio_destino': doc_v3.get('municipio_destino', ''),
                     'divipola': doc_v3.get('divipola', ''),
                     'ruta_v3': doc_v3.get('ruta', ''),
+                    'cliente_destino_v3': doc_v3.get('cliente_destino_original', ''),
                     'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
                     'telefono_v3': doc_v3.get('telefono_original', ''),
                 })
@@ -1037,18 +1110,15 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 if not llave_v3:
                     continue
 
-                bodega = reg.get('bodega_origen', '') or ''
-                cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
-
-                # Criterio 1: cruce por celular — si hay match no es "sin paciente"
-                tel_v3 = _normalizar_cel(reg.get('telefono_original', ''))
-                if tel_v3 and len(tel_v3) >= 7 and tel_v3 in set_celulares_pacientes:
+                if llave_v3 in llaves_v3_con_paciente:
                     if (idx + 1) % paso_reporte_v3 == 0 or (idx + 1) == total_v3:
                         pct = round(62 + ((idx + 1) / total_v3) * 28)
                         yield f"data: {json.dumps({'stage': 'comparing_v3', 'progress': pct, 'processed': idx + 1, 'total': total_v3, 'message': f'V3 {idx + 1} de {total_v3}'})}\n\n"
                     continue
 
-                # Criterio 2: similitud de llave
+                bodega = reg.get('bodega_origen', '') or ''
+                cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
+
                 mejor_similitud = 0.0
                 mejor_llave_paciente = ''
                 for llave_p in llaves_pacientes:

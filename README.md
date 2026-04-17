@@ -148,7 +148,8 @@ Sistema completo de gestión de pacientes con importación masiva, normalizació
 
 **Normalización Automática de Datos:**
 - Implementada en `Funciones/normalizacion_medical_care.py`. **Solo se normalizan los siguientes campos**; el resto se guarda tal cual viene del Excel:
-  - `fx_normalizar_paciente()` → campo `paciente`: Primeras 4 palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético
+  - `fx_normalizar_paciente()` → campo `paciente`: Primeras **6** palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético, **máximo 2 ocurrencias por palabra**
+    - Ejemplo: "DUVAN DUVAN DUVAN ESPITIA F FELIPE" → "DUVAN DUVAN ESPITIA F FELIPE" (tercera "DUVAN" eliminada)
     - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
   - `fx_normalizar_cedula()` → campo `cedula`: Solo dígitos
   - `fx_normalizar_direccion()` → campo `direccion`: Normalización completa con corrección de errores comunes, reordenamiento alfabético
@@ -283,10 +284,19 @@ El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Pa
 
 **Algoritmo de cruce (motor):**
 - **Motor de similitud**: `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
-- **Criterio 1 — Llave** (fuzzy, prioridad): se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 74%, se marca como cruce con `match_tipo: 'llave'`. El score fuzzy se guarda **siempre** en `similitud`, independientemente de cuál criterio ganó
-- **Criterio 2 — Celular** (fallback): si la similitud fuzzy no supera 74%, se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`. El campo `similitud` sigue mostrando el score fuzzy real (no 100%)
+- **Criterio 1 — Nombre** (prioridad máxima): se compara el `paciente` normalizado contra el `cliente_destino` normalizado de todos los pedidos V3. Si la similitud ≥ 95%, se marca como cruce con `match_tipo: 'nombre'`
+- **Criterio 2 — Llave** (segunda prioridad): si no cruzó por nombre, se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 73%, se marca como cruce con `match_tipo: 'llave'`
+- **Criterio 3 — Celular** (tercera prioridad, fallback): si no cruzó por nombre ni llave, se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`
+- **Sin cruce**: si no se cumple ninguno de los criterios anteriores, `match_tipo` es `None` y `en_v3` es `False`
 - **`_normalizar_cel()`**: elimina todo carácter no numérico del número de teléfono — **no trunca a 10 dígitos** para evitar falsos positivos por coincidencia parcial de sufijos
+- **Score de similitud**: el campo `similitud` siempre guarda el score fuzzy de la llave (0-100), independientemente de cuál criterio ganó el cruce
 - **Ordenamiento de pacientes por ruta**: dentro de cada ruta los pacientes se ordenan primero por `en_v3` descendente (los que sí cruzaron aparecen primero) y luego por `similitud` descendente dentro de cada grupo
+
+**Indicadores visuales del tipo de cruce (frontend):**
+- **👤 (persona)**: cruce por nombre ≥ 95% — badge verde
+- **🔑 (llave)**: cruce por llave (nombre+dirección) ≥ 73% — badge morado
+- **📱 (celular)**: cruce por número de celular exacto — badge azul
+- **Sin badge**: cuando no hay cruce (similitud < umbrales o sin coincidencias)
 
 **Campos del resultado de cruce por paciente:**
 - `paciente`, `cedula`, `direccion_original`, `ruta`, `cedi`, `llave`, `similitud`, `match_tipo`, `llave_v3`, `en_v3`, `estado`
@@ -862,6 +872,45 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 ---
 
 ## Historial de cambios relevantes
+
+### Abril 2026 — Mejoras en normalización de nombres y visualización de cruce
+- **`normalizacion_medical_care.py`**: función `fx_normalizar_paciente()` mejorada:
+  - **Límite aumentado**: de 4 a 6 palabras para capturar nombres completos
+  - **Eliminación de repeticiones excesivas**: máximo 2 ocurrencias por palabra (ej: "DUVAN DUVAN DUVAN" → "DUVAN DUVAN")
+  - Aplica tanto a carga de pacientes como a carga de pedidos V3 (manual y sync automático)
+  - **Direcciones sin cambio**: la función `fx_normalizar_direccion()` mantiene todas las palabras (sin eliminar repeticiones)
+- **`pacientes_medical_care.py`**: nueva columna en resultados de cruce:
+  - Campo `cliente_destino_v3` agregado: muestra el nombre del cliente destino encontrado en V3
+  - Disponible en endpoints de cruce: `/ocupacion-rutas`, `/recalcular-cruce`, exportación Excel
+- **Frontend (CrucePacientesV3)**: nueva columna "Cliente Destino" en tabla principal e histórica
+  - Posicionada después de "Ruta V3" para fácil referencia
+  - Muestra el nombre original del cliente destino tal como viene del Excel V3
+- **Frontend (CrucePacientesV3)**: badges visuales con emojis para tipos de cruce:
+  - **👤 (verde)**: cruce por nombre ≥ 95%
+  - **🔑 (morado)**: cruce por llave ≥ 73%
+  - **📱 (azul)**: cruce por celular exacto
+  - **Sin badge**: sin cruce
+
+### Abril 2026 — Mejoras en algoritmo de cruce Pacientes ↔ V3
+- **`normalizacion_medical_care.py`**: función `fx_normalizar_paciente()` mejorada:
+  - **Límite aumentado**: de 4 a 6 palabras para capturar nombres completos
+  - **Eliminación de repeticiones excesivas**: máximo 2 ocurrencias por palabra (ej: "DUVAN DUVAN DUVAN" → "DUVAN DUVAN")
+  - Aplica tanto a carga de pacientes como a carga de pedidos V3 (manual y sync automático)
+  - Mejora precisión en cruces al evitar repeticiones artificiales en la llave
+
+### Abril 2026 — Mejoras en algoritmo de cruce Pacientes ↔ V3
+- **`pacientes_medical_care.py`**: reordenamiento de criterios de cruce para mayor precisión:
+  - **Criterio 1 - Nombre (prioridad máxima)**: compara paciente normalizado vs cliente_destino V3 con similitud ≥ 95%. Si hay match, `match_tipo = 'nombre'` y NO se evalúan los demás criterios.
+  - **Criterio 2 - Llave (segunda prioridad)**: solo si NO cruzó por nombre, compara llave (paciente+dirección) vs llave V3 con similitud ≥ 73%. Si hay match, `match_tipo = 'llave'` y NO se evalúa celular.
+  - **Criterio 3 - Celular (tercera prioridad)**: solo si NO cruzó por nombre ni llave, compara teléfonos normalizados (coincidencia exacta). Si hay match, `match_tipo = 'celular'`.
+  - **Sin cruce**: si no se cumple ningún criterio, `match_tipo = None` (antes quedaba como 'llave' por defecto, lo cual era incorrecto).
+- **Campo `similitud`**: siempre guarda el score fuzzy de la llave (0-100), independientemente de cuál criterio ganó el cruce.
+- **Frontend**: badges con emojis para indicar tipo de cruce:
+  - **👤 (verde)**: cruce por nombre
+  - **🔑 (morado)**: cruce por llave
+  - **📱 (azul)**: cruce por celular
+  - **Sin badge**: sin cruce
+- **Histórico**: nueva pestaña que muestra cortes mensuales automáticos generados el último día de cada mes a las 00:00.
 
 ### Marzo 2025 — Multi-cliente y panel de administración
 - **`baseusuarios.py`**: añadido campo `clientes: Optional[List[str]]` al modelo `BaseUsuario`. El endpoint `/login` ahora devuelve el array `clientes` en la respuesta. Compatibilidad hacia atrás: documentos sin el campo retornan `["KABI"]` por defecto.
