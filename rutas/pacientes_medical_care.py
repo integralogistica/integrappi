@@ -3,7 +3,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import pandas as pd
 import time
 import json
-from typing import List
+from typing import List, Optional
+from datetime import datetime, date, timedelta
 from bd.bd_cliente import bd_cliente
 from Funciones.normalizacion_medical_care import (
     fx_normalizar_paciente,
@@ -43,6 +44,255 @@ _CEDI_MAPA = {
 def _normalizar_cel(valor: str) -> str:
     """Devuelve solo dígitos de un número de celular, sin truncar."""
     return ''.join(filter(str.isdigit, valor or ''))
+
+
+# ── Funciones para calcular días hábiles y estado del cruce ─────────────────────
+def _obtener_festivos_colombia(anio: int) -> list:
+    """Retorna lista de festivos de Colombia para un año dado (formato YYYY-MM-DD)."""
+    from datetime import date, timedelta as _td
+    from datetime import datetime as _dt
+
+    festivos = []
+
+    def _format_fecha(fecha):
+        return fecha.strftime('%Y-%m-%d')
+
+    def _mover_al_lunes(fecha):
+        dia_sem = fecha.weekday()
+        if dia_sem != 0:  # Si no es lunes (0)
+            dias_hasta_lunes = (7 - dia_sem) % 7
+            if dias_hasta_lunes == 0:
+                dias_hasta_lunes = 7
+            return fecha + _td(days=dias_hasta_lunes)
+        return fecha
+
+    # Festivos fijos
+    festivos_fijos = [
+        (1, 1),   # 1 de enero
+        (1, 6),   # 6 de enero
+        (5, 1),   # 1 de mayo
+        (7, 20),  # 20 de julio
+        (8, 7),   # 7 de agosto
+        (12, 8),  # 8 de diciembre
+        (12, 25), # 25 de diciembre
+    ]
+    for mes, dia in festivos_fijos:
+        festivos.append(_format_fecha(date(anio, mes, dia)))
+
+    # Festivos con Ley Emiliani (se mueven al lunes siguiente)
+    festivos_emiliani = [
+        (3, 19),  # San José
+        (6, 29),  # San Pedro y San Pablo
+        (8, 15),  # Asunción de la Virgen
+        (10, 12), # Día de la Raza
+        (11, 1),  # Todos los Santos
+        (11, 11), # Independencia de Cartagena
+    ]
+    for mes, dia in festivos_emiliani:
+        fecha = date(anio, mes, dia)
+        festivos.append(_format_fecha(_mover_al_lunes(fecha)))
+
+    # Calcular Semana Santa (algoritmo de Meeus/Jones/Butcher)
+    a = anio % 19
+    b = anio // 100
+    c = anio % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes_pascua = (h + l - 7 * m + 114) // 31
+    dia_pascua = ((h + l - 7 * m + 114) % 31) + 1
+    pascua = date(anio, mes_pascua, dia_pascua)
+
+    # Jueves Santo (3 días antes)
+    jueves_santo = pascua - _td(days=3)
+    festivos.append(_format_fecha(jueves_santo))
+
+    # Viernes Santo (2 días antes)
+    viernes_santo = pascua - _td(days=2)
+    festivos.append(_format_fecha(viernes_santo))
+
+    # Ascensión (39 días después, lunes siguiente = día 43)
+    ascension = pascua + _td(days=43)
+    festivos.append(_format_fecha(ascension))
+
+    # Corpus Christi (60 días después, lunes siguiente = día 64)
+    corpus_christi = pascua + _td(days=64)
+    festivos.append(_format_fecha(corpus_christi))
+
+    # Sagrado Corazón (68 días después, lunes siguiente = día 72)
+    sagrado_corazon = pascua + _td(days=72)
+    festivos.append(_format_fecha(sagrado_corazon))
+
+    return sorted(festivos)
+
+
+def _parsear_fecha_texto(fecha_str: str) -> Optional[datetime]:
+    """Parsea fechas en formatos: YYYY-MM-DD, DD/MM/YYYY, DD MMM YYYY."""
+    if not fecha_str:
+        return None
+
+    original = fecha_str
+    fecha_str = fecha_str.strip()
+
+    # Formato YYYY-MM-DD (primero, es el más confiable)
+    if '/' not in fecha_str and '-' in fecha_str:
+        try:
+            return datetime.strptime(fecha_str[:10], '%Y-%m-%d')
+        except ValueError:
+            pass
+
+    # Formato DD/MM/YYYY o DD/MM/YY (formato colombiano)
+    if '/' in fecha_str:
+        partes = fecha_str.split('/')
+        if len(partes) == 3:
+            p1, p2, p3 = partes[0].strip(), partes[1].strip(), partes[2].strip()
+
+            # Validar que todos sean números
+            try:
+                v1, v2, v3 = int(p1), int(p2), int(p3)
+            except ValueError:
+                return None
+
+            # Normalizar año a 4 dígitos
+            if v3 < 100:
+                v3 += 2000
+
+            # Intentar DD/MM/YYYY primero (formato colombiano estándar)
+            # v1 = día, v2 = mes, v3 = año
+            if 1 <= v2 <= 12 and 1 <= v1 <= 31:  # mes y día válidos
+                try:
+                    return datetime(v3, v2, v1)
+                except ValueError:
+                    pass
+
+            # Intentar MM/DD/YYYY (formato estadounidense) si DD/MM falló
+            if 1 <= v1 <= 12 and 1 <= v2 <= 31:  # v1 como mes, v2 como día
+                try:
+                    return datetime(v3, v1, v2)
+                except ValueError:
+                    pass
+
+            return None
+
+    # Formato DD MMM YYYY (ej: "26 mar 2026")
+    meses_map = {
+        'ene': 1, 'feb': 2, 'mar': 3, 'abr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'ago': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dic': 12
+    }
+    partes = fecha_str.split()
+    if len(partes) == 3:
+        try:
+            dia = int(partes[0])
+            mes = meses_map.get(partes[1].lower())
+            anio = int(partes[2])
+            if mes:
+                return datetime(anio, mes, dia)
+        except (ValueError, IndexError):
+            pass
+
+    return None
+
+
+def _calcular_dias_habiles(fecha_inicio_str: str, fecha_fin_str: str) -> int:
+    """Calcula días hábiles entre dos fechas (excluye domingos y festivos de Colombia)."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not fecha_inicio_str:
+        return 0
+
+    fecha_inicio = _parsear_fecha_texto(fecha_inicio_str)
+    fecha_fin = _parsear_fecha_texto(fecha_fin_str)
+
+    if not fecha_inicio or not fecha_fin:
+        return 0
+
+    # Validar que los años sean razonables
+    if fecha_inicio.year < 2000 or fecha_inicio.year > 2100 or fecha_fin.year < 2000 or fecha_fin.year > 2100:
+        logger.warning(f"[_calcular_dias_habiles] Años inválidos: inicio={fecha_inicio.year}, fin={fecha_fin.year}")
+        # Si los años son inválidos, calcular días hábiles solo excluyendo domingos
+        dias_habiles = 0
+        fecha_actual = fecha_inicio
+        while fecha_actual <= fecha_fin:
+            if fecha_actual.weekday() != 6:  # No domingo
+                dias_habiles += 1
+            fecha_actual += timedelta(days=1)
+        return dias_habiles
+
+    # Normalizar a medianoche
+    if isinstance(fecha_inicio, datetime):
+        fecha_inicio = fecha_inicio.replace(hour=0, minute=0, second=0, microsecond=0)
+    if isinstance(fecha_fin, datetime):
+        fecha_fin = fecha_fin.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Obtener festivos para el rango de fechas
+    anio_inicio = fecha_inicio.year
+    anio_fin = fecha_fin.year
+    festivos = []
+    for anio in range(anio_inicio, anio_fin + 1):
+        festivos.extend(_obtener_festivos_colombia(anio))
+
+    dias_habiles = 0
+    fecha_actual = fecha_inicio
+
+    while fecha_actual <= fecha_fin:
+        dia_semana = fecha_actual.weekday()  # 0 = lunes, 6 = domingo
+        fecha_str = fecha_actual.strftime('%Y-%m-%d')
+
+        # Excluir domingos (6) y festivos
+        if dia_semana != 6 and fecha_str not in festivos:
+            dias_habiles += 1
+
+        fecha_actual += timedelta(days=1)
+
+    return dias_habiles
+
+
+def _determinar_estado_cruce(en_v3: bool, estado_pedido: str, f_pref_teorica: str, f_pedido: str = '') -> str:
+    """Determina el estado según las reglas del cruce."""
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
+    hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Normalizar estado_pedido para comparación robusta
+    estado_pedido_norm = (estado_pedido or '').strip().upper()
+
+    # Regla 1: Sin cruce
+    if not en_v3:
+        return 'sin cruce'
+
+    # Regla 2: Retraso FMC (diferencia < 6 días hábiles entre F. Pedido y F. Pref. Integra)
+    if en_v3 and f_pedido and f_pref_teorica:
+        try:
+            f_pedido_dt = _parsear_fecha_texto(f_pedido)
+            if f_pedido_dt:
+                dia_siguiente_pedido = (f_pedido_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+                dias_habiles_fmc = _calcular_dias_habiles(dia_siguiente_pedido, f_pref_teorica)
+                if dias_habiles_fmc < 6:
+                    return 'retraso FMC'
+        except Exception as e:
+            logger.warning(f"[_determinar_estado_cruce] Error FMC: {e}\n{traceback.format_exc()}")
+
+    # Regla 3: Retraso operación (faltan 3 días hábiles o menos desde hoy)
+    if en_v3 and estado_pedido_norm == 'POR PROGRAMAR' and f_pref_teorica:
+        try:
+            manana = (hoy + timedelta(days=1)).strftime('%Y-%m-%d')
+            dias_habiles = _calcular_dias_habiles(manana, f_pref_teorica)
+            if dias_habiles <= 3:
+                return 'retraso operación'
+        except Exception as e:
+            logger.warning(f"[_determinar_estado_cruce] Error operación: {e}\n{traceback.format_exc()}")
+
+    return '—'
+
 
 # Columnas requeridas
 COLUMNAS_REQUERIDAS = [
@@ -589,10 +839,68 @@ def _calcular_cruce():
         {'llave': {'$exists': True}},
         {'llave': 1, 'cliente_destino': 1, 'cliente_destino_original': 1,
          'direccion_destino_original': 1, 'ruta': 1, 'estado_pedido': 1,
-         'codigo_pedido': 1, 'telefono_original': 1}
+         'codigo_pedido': 1, 'telefono_original': 1, 'fecha_pedido': 1,
+         'fecha_preferente': 1, 'fecha_entrega': 1, 'planilla': 1}
     ))
 
-    llaves_v3 = [doc['llave'] for doc in registros_v3_simple if doc.get('llave')]
+    # Crear diccionario para buscar datos de V3 por llave y contar pedidos por paciente
+    dict_v3_por_llave = {}
+    contador_pedidos_por_llave = {}
+
+    for doc in registros_v3_simple:
+        llave = doc.get('llave')
+        if llave:
+            # Contar cuántos pedidos tiene este paciente
+            contador_pedidos_por_llave[llave] = contador_pedidos_por_llave.get(llave, 0) + 1
+
+            # Priorizar pedidos con fecha de entrega (especialmente ENTREGADOS)
+            # Solo guardar si:
+            # 1. No hay pedido guardado aún, O
+            # 2. El pedido actual tiene fecha de entrega y el guardado no tiene, O
+            # 3. El pedido actual está ENTREGADO y el guardado no está ENTREGADO
+            if llave not in dict_v3_por_llave:
+                dict_v3_por_llave[llave] = {
+                    'cliente_destino': doc.get('cliente_destino', ''),
+                    'ruta_v3': doc.get('ruta', ''),
+                    'estado_pedido': doc.get('estado_pedido', ''),
+                    'fecha_pedido': _fmt_fecha(doc.get('fecha_pedido')),
+                    'fecha_preferente': _fmt_fecha(doc.get('fecha_preferente')),
+                    'fecha_entrega': _fmt_fecha(doc.get('fecha_entrega')),
+                    'planilla': doc.get('planilla', ''),
+                }
+            else:
+                # Ya existe un pedido guardado, verificar si el actual es "mejor"
+                pedido_existente = dict_v3_por_llave[llave]
+                fecha_entrega_existente = pedido_existente.get('fecha_entrega', '')
+                estado_existente = pedido_existente.get('estado_pedido', '')
+                fecha_entrega_actual = _fmt_fecha(doc.get('fecha_entrega'))
+                estado_actual = doc.get('estado_pedido', '')
+
+                # Reemplazar si el actual tiene fecha de entrega y el existente no
+                # O si ambos tienen fecha, priorizar el que está ENTREGADO
+                if fecha_entrega_actual and not fecha_entrega_existente:
+                    dict_v3_por_llave[llave] = {
+                        'cliente_destino': doc.get('cliente_destino', ''),
+                        'ruta_v3': doc.get('ruta', ''),
+                        'estado_pedido': doc.get('estado_pedido', ''),
+                        'fecha_pedido': _fmt_fecha(doc.get('fecha_pedido')),
+                        'fecha_preferente': _fmt_fecha(doc.get('fecha_preferente')),
+                        'fecha_entrega': fecha_entrega_actual,
+                        'planilla': doc.get('planilla', ''),
+                    }
+                elif fecha_entrega_actual and fecha_entrega_existente:
+                    if estado_actual == 'ENTREGADO' and estado_existente != 'ENTREGADO':
+                        dict_v3_por_llave[llave] = {
+                            'cliente_destino': doc.get('cliente_destino', ''),
+                            'ruta_v3': doc.get('ruta', ''),
+                            'estado_pedido': doc.get('estado_pedido', ''),
+                            'fecha_pedido': _fmt_fecha(doc.get('fecha_pedido')),
+                            'fecha_preferente': _fmt_fecha(doc.get('fecha_preferente')),
+                            'fecha_entrega': fecha_entrega_actual,
+                            'planilla': doc.get('planilla', ''),
+                        }
+
+    llaves_v3 = list(dict_v3_por_llave.keys())
     nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
                   for doc in registros_v3_simple if doc.get('llave') and doc.get('cliente_destino')]
     dict_telefonos_v3 = {
@@ -652,16 +960,31 @@ def _calcular_cruce():
         if en_v3 and llave_v3_match:
             llaves_v3_con_paciente.add(llave_v3_match)
 
+        # Obtener datos del pedido V3 si hay cruce
+        datos_v3 = dict_v3_por_llave.get(llave_v3_match, {}) if en_v3 else {}
+
         resultado_pacientes.append({
             'paciente': p.get('paciente_original', ''),
             'cedula': p.get('cedula_original', ''),
+            'direccion_original': p.get('direccion', ''),
             'ruta': p.get('ruta', '') or 'SIN RUTA',
             'llave': llave_paciente,
             'similitud': similitud,
             'match_tipo': match_tipo,
             'llave_v3': llave_v3_match,
             'en_v3': en_v3,
-            'estado': p.get('estado', 'ACTIVO')
+            'estado': p.get('estado', 'ACTIVO'),
+            # Datos del pedido V3
+            'cliente_destino_v3': datos_v3.get('cliente_destino', ''),
+            'ruta_v3': datos_v3.get('ruta_v3', ''),
+            'estado_pedido': datos_v3.get('estado_pedido', ''),
+            'fecha_pedido': datos_v3.get('fecha_pedido', ''),
+            'fecha_preferente': datos_v3.get('fecha_preferente', ''),
+            'f_pref_teorica': datos_v3.get('fecha_preferente', ''),  # Alias para compatibilidad
+            'fecha_entrega': datos_v3.get('fecha_entrega', ''),
+            'planilla': datos_v3.get('planilla', ''),
+            # Contador de pedidos V3 del paciente
+            'cant_pedidos_v3': contador_pedidos_por_llave.get(llave_v3_match, 0) if en_v3 else 0
         })
 
     rutas_ocupacion: dict = {}
@@ -736,6 +1059,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
     Llamado automáticamente tras cada sync_v3 exitoso. No usa SSE.
     """
     from rapidfuzz.fuzz import ratio as fuzz_ratio
+    from rapidfuzz import process as _fuzz_process
     import logging
     logger = logging.getLogger(__name__)
 
@@ -758,9 +1082,35 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
              'divipola': 1, 'municipio_destino': 1}
         ))
         llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
-        docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
+
+        # Crear diccionario priorizando pedidos con fecha de entrega y estado ENTREGADO
+        docs_v3_por_llave = {}
+        contador_pedidos_por_llave = {}
+        for doc in registros_v3:
+            llave = doc.get('llave')
+            if llave:
+                contador_pedidos_por_llave[llave] = contador_pedidos_por_llave.get(llave, 0) + 1
+
+                # Seleccionar el mejor pedido para este paciente
+                if llave not in docs_v3_por_llave:
+                    docs_v3_por_llave[llave] = doc
+                else:
+                    pedido_existente = docs_v3_por_llave[llave]
+                    fecha_entrega_existente = pedido_existente.get('fecha_entrega', '')
+                    estado_existente = pedido_existente.get('estado_pedido', '')
+                    fecha_entrega_actual = doc.get('fecha_entrega', '')
+                    estado_actual = doc.get('estado_pedido', '')
+
+                    # Priorizar pedidos con fecha de entrega y estado ENTREGADO
+                    if fecha_entrega_actual and not fecha_entrega_existente:
+                        docs_v3_por_llave[llave] = doc
+                    elif fecha_entrega_actual and fecha_entrega_existente:
+                        if estado_actual == 'ENTREGADO' and estado_existente != 'ENTREGADO':
+                            docs_v3_por_llave[llave] = doc
+
         nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
                       for doc in registros_v3 if doc.get('llave') and doc.get('cliente_destino')]
+        nombres_v3_strs = [n for n, _ in nombres_v3]
         dict_telefonos_v3 = {
             _normalizar_cel(doc.get('telefono_original', '')): doc['llave']
             for doc in registros_v3
@@ -782,30 +1132,23 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
             similitud = 0.0
 
             # Criterio 1: nombre vs cliente_destino (≥95%)
-            if paciente_norm and nombres_v3:
-                mejor_sim_n, mejor_llave_n = 0.0, ''
-                for nombre_v3, lv3 in nombres_v3:
-                    sim = fuzz_ratio(paciente_norm, nombre_v3) / 100.0
-                    if sim > mejor_sim_n:
-                        mejor_sim_n, mejor_llave_n = sim, lv3
-                if mejor_sim_n >= 0.95:
+            if paciente_norm and nombres_v3_strs:
+                res_n = _fuzz_process.extractOne(paciente_norm, nombres_v3_strs, scorer=fuzz_ratio, score_cutoff=95)
+                if res_n:
                     en_v3 = True
-                    llave_v3_match = mejor_llave_n
+                    llave_v3_match = nombres_v3[res_n[2]][1]
                     match_tipo = 'nombre'
-                    similitud = round(mejor_sim_n * 100, 1)
+                    similitud = round(res_n[1], 1)
 
             # Criterio 2: llave vs llave (≥73%) — solo si no cruzó por nombre
             if not en_v3 and llave_paciente and llaves_v3:
-                mejor_sim_l, mejor_llave_l = 0.0, ''
-                for lv3 in llaves_v3:
-                    sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                    if sim > mejor_sim_l:
-                        mejor_sim_l, mejor_llave_l = sim, lv3
-                similitud = round(mejor_sim_l * 100, 1)
-                llave_v3_match = mejor_llave_l
-                if mejor_sim_l >= 0.73:
-                    en_v3 = True
-                    match_tipo = 'llave'
+                res_l = _fuzz_process.extractOne(llave_paciente, llaves_v3, scorer=fuzz_ratio)
+                if res_l:
+                    similitud = round(res_l[1], 1)
+                    llave_v3_match = res_l[0]
+                    if res_l[1] >= 73:
+                        en_v3 = True
+                        match_tipo = 'llave'
 
             # Criterio 3: celular paciente vs telefono V3 — fallback
             if not en_v3 and dict_telefonos_v3:
@@ -842,10 +1185,21 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 'divipola': doc_v3.get('divipola', ''),
                 'ruta_v3': doc_v3.get('ruta', ''),
                 'cliente_destino_v3': doc_v3.get('cliente_destino_original', ''),
-                'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
+                'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefone1', '') or ''])),
                 'telefono_v3': doc_v3.get('telefono_original', ''),
                 'f_pref_teorica': cronograma_dict.get(p.get('cedula', ''), ''),
+                'cant_pedidos_v3': contador_pedidos_por_llave.get(llave_v3_match, 0) if (en_v3 and llave_v3_match) else 0
             })
+
+            # Calcular estado del cruce para este paciente
+            paciente_dict = resultado_pacientes[-1]
+            estado_cruce = _determinar_estado_cruce(
+                en_v3=paciente_dict['en_v3'],
+                estado_pedido=paciente_dict['estado_pedido'],
+                f_pref_teorica=paciente_dict['f_pref_teorica'],
+                f_pedido=paciente_dict['fecha_pedido']
+            )
+            paciente_dict['estado_cruce'] = estado_cruce
 
         rutas_ocupacion: dict = {}
         for p in resultado_pacientes:
@@ -886,11 +1240,9 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 continue
             bodega = reg.get('bodega_origen', '') or ''
             cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
-            mejor_sim, mejor_llave_p = 0.0, ''
-            for llave_p in llaves_pacientes:
-                sim = fuzz_ratio(llave_v3, llave_p) / 100.0
-                if sim > mejor_sim:
-                    mejor_sim, mejor_llave_p = sim, llave_p
+            res_sp = _fuzz_process.extractOne(llave_v3, llaves_pacientes, scorer=fuzz_ratio) if llaves_pacientes else None
+            mejor_sim = res_sp[1] / 100.0 if res_sp else 0.0
+            mejor_llave_p = res_sp[0] if res_sp else ''
             if mejor_sim < 0.75:
                 sin_paciente.append({
                     'codigo_pedido': reg.get('codigo_pedido', ''),
@@ -952,11 +1304,19 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
     Ejecuta el cruce pacientes <-> V3 con progreso en tiempo real via SSE.
     Guarda el resultado en cache (cache_cruce_mc) al terminar.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[/recalcular-cruce] Iniciando recálculo. usuario={usuario}, enviar_correo={enviar_correo}")
+
     from rapidfuzz.fuzz import ratio as fuzz_ratio
+    from rapidfuzz import process as _fuzz_process
 
     def generar_eventos():
+        import logging
+        logger = logging.getLogger(__name__)
         try:
             # ── Etapa 1: cargar datos ────────────────────────────────────────
+            logger.info("[recalcular-cruce] Iniciando recálculo...")
             yield f"data: {json.dumps({'stage': 'loading', 'progress': 0, 'message': 'Cargando pacientes y pedidos V3...'})}\n\n"
 
             cronograma_dict = _get_cronograma_mes_actual()
@@ -980,9 +1340,35 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
             ))
 
             llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
-            docs_v3_por_llave = {doc['llave']: doc for doc in registros_v3 if doc.get('llave')}
+
+            # Crear diccionario priorizando pedidos con fecha de entrega y estado ENTREGADO
+            docs_v3_por_llave = {}
+            contador_pedidos_por_llave = {}
+            for doc in registros_v3:
+                llave = doc.get('llave')
+                if llave:
+                    contador_pedidos_por_llave[llave] = contador_pedidos_por_llave.get(llave, 0) + 1
+
+                    # Seleccionar el mejor pedido para este paciente
+                    if llave not in docs_v3_por_llave:
+                        docs_v3_por_llave[llave] = doc
+                    else:
+                        pedido_existente = docs_v3_por_llave[llave]
+                        fecha_entrega_existente = pedido_existente.get('fecha_entrega', '')
+                        estado_existente = pedido_existente.get('estado_pedido', '')
+                        fecha_entrega_actual = doc.get('fecha_entrega', '')
+                        estado_actual = doc.get('estado_pedido', '')
+
+                        # Priorizar pedidos con fecha de entrega y estado ENTREGADO
+                        if fecha_entrega_actual and not fecha_entrega_existente:
+                            docs_v3_por_llave[llave] = doc
+                        elif fecha_entrega_actual and fecha_entrega_existente:
+                            if estado_actual == 'ENTREGADO' and estado_existente != 'ENTREGADO':
+                                docs_v3_por_llave[llave] = doc
+
             nombres_v3 = [(doc.get('cliente_destino', ''), doc['llave'])
                           for doc in registros_v3 if doc.get('llave') and doc.get('cliente_destino')]
+            nombres_v3_strs = [n for n, _ in nombres_v3]
             dict_telefonos_v3 = {
                 _normalizar_cel(doc.get('telefono_original', '')): doc['llave']
                 for doc in registros_v3
@@ -1013,30 +1399,23 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 similitud = 0.0
 
                 # Criterio 1: nombre vs cliente_destino (≥95%)
-                if paciente_norm and nombres_v3:
-                    mejor_sim_n, mejor_llave_n = 0.0, ''
-                    for nombre_v3, lv3 in nombres_v3:
-                        sim = fuzz_ratio(paciente_norm, nombre_v3) / 100.0
-                        if sim > mejor_sim_n:
-                            mejor_sim_n, mejor_llave_n = sim, lv3
-                    if mejor_sim_n >= 0.95:
+                if paciente_norm and nombres_v3_strs:
+                    res_n = _fuzz_process.extractOne(paciente_norm, nombres_v3_strs, scorer=fuzz_ratio, score_cutoff=95)
+                    if res_n:
                         en_v3 = True
-                        llave_v3_match = mejor_llave_n
+                        llave_v3_match = nombres_v3[res_n[2]][1]
                         match_tipo = 'nombre'
-                        similitud = round(mejor_sim_n * 100, 1)
+                        similitud = round(res_n[1], 1)
 
                 # Criterio 2: llave vs llave (≥73%) — solo si no cruzó por nombre
                 if not en_v3 and llave_paciente and llaves_v3:
-                    mejor_sim_l, mejor_llave_l = 0.0, ''
-                    for lv3 in llaves_v3:
-                        sim = fuzz_ratio(llave_paciente, lv3) / 100.0
-                        if sim > mejor_sim_l:
-                            mejor_sim_l, mejor_llave_l = sim, lv3
-                    similitud = round(mejor_sim_l * 100, 1)
-                    llave_v3_match = mejor_llave_l
-                    if mejor_sim_l >= 0.73:
-                        en_v3 = True
-                        match_tipo = 'llave'
+                    res_l = _fuzz_process.extractOne(llave_paciente, llaves_v3, scorer=fuzz_ratio)
+                    if res_l:
+                        similitud = round(res_l[1], 1)
+                        llave_v3_match = res_l[0]
+                        if res_l[1] >= 73:
+                            en_v3 = True
+                            match_tipo = 'llave'
 
                 # Criterio 3: celular paciente vs telefono V3 — fallback
                 if not en_v3 and dict_telefonos_v3:
@@ -1076,7 +1455,22 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
                     'telefono_v3': doc_v3.get('telefono_original', ''),
                     'f_pref_teorica': cronograma_dict.get(p.get('cedula', ''), ''),
+                    'cant_pedidos_v3': contador_pedidos_por_llave.get(llave_v3_match, 0) if (en_v3 and llave_v3_match) else 0
                 })
+
+                # Calcular estado del cruce para este paciente
+                paciente_dict = resultado_pacientes[-1]
+                try:
+                    estado_cruce = _determinar_estado_cruce(
+                        en_v3=paciente_dict['en_v3'],
+                        estado_pedido=paciente_dict['estado_pedido'],
+                        f_pref_teorica=paciente_dict['f_pref_teorica'],
+                        f_pedido=paciente_dict['fecha_pedido']
+                    )
+                    paciente_dict['estado_cruce'] = estado_cruce
+                except Exception as e:
+                    logger.error(f"[recalcular-cruce] Error calculando estado_cruce: {e}")
+                    paciente_dict['estado_cruce'] = '—'
 
                 if (idx + 1) % paso_reporte == 0 or (idx + 1) == total_pacientes:
                     pct = round(10 + ((idx + 1) / total_pacientes) * 50)
@@ -1136,13 +1530,9 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                 bodega = reg.get('bodega_origen', '') or ''
                 cedi_v3 = _CEDI_MAPA.get(bodega.upper(), bodega.upper())
 
-                mejor_similitud = 0.0
-                mejor_llave_paciente = ''
-                for llave_p in llaves_pacientes:
-                    sim = fuzz_ratio(llave_v3, llave_p) / 100.0
-                    if sim > mejor_similitud:
-                        mejor_similitud = sim
-                        mejor_llave_paciente = llave_p
+                res_sp = _fuzz_process.extractOne(llave_v3, llaves_pacientes, scorer=fuzz_ratio) if llaves_pacientes else None
+                mejor_similitud = res_sp[1] / 100.0 if res_sp else 0.0
+                mejor_llave_paciente = res_sp[0] if res_sp else ''
 
                 if mejor_similitud < 0.75:
                     sin_paciente.append({
@@ -1201,6 +1591,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     daemon=True
                 ).start()
 
+            logger.info(f"[recalcular-cruce] Recálculo completado. fecha_calculo={fecha_calculo}, pacientes={len(resultado_pacientes)}, sin_paciente={len(sin_paciente)}")
             yield f"data: {json.dumps({'stage': 'complete', 'progress': 100, 'message': 'Cruce completado', 'rutas': ocupacion_resultado, 'v3_sin_paciente': v3_resultado, 'total_sin_paciente': len(sin_paciente), 'fecha_calculo': fecha_calculo, 'calculado_por': usuario})}\n\n"
 
         except Exception as e:

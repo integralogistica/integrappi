@@ -1,23 +1,50 @@
-
-ASUS@DESKTOP-JIQ34KO MINGW64 ~/OneDrive - Integra Logistica/Desarrollos/integra/integrappi (main)
-$ uvicorn main:app --reload
-INFO:     Will watch for changes in these directories: ['C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi']
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [5736] using WatchFiles
-✅ Conexión exitosa a MongoDB
-INFO:     Started server process [10492]
-INFO:     Waiting for application startup.
-INFO:main:[sync_v3] Tarea de fondo iniciada
-INFO:     Application startup complete.
-INFO:main:[sync_v3] Ejecutando sync programado a las 16:13
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 2: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 3: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 4: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 5: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 6: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 7: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-WARNING:Funciones.sync_api_v3:[sync_v3] Fila 8: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
-INFO:Funciones.sync_api_v3:[sync_v3] 0/7 registros — 0.11s
-INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 404 Not Found"
-❌ Template confirmar_actualizacion: 404 - {"error":{"message":"(#132001) Template name does not exist in the translation","type":"OAuthException","code":132001,"error_data":{"messaging_product":"whatsapp","details":"template name (confirmar_actualizacion) does not exist in es_CO"},"fbtrace_id":"AO5L5BGTkpxpuu5a4-OiWYq"}}
-WARNING:Funciones.sync_api_v3:[sync_v3] Notificación WS no enviada (tokens no configurados o error en API)
+0
+Object
+paciente
+"HUGO LEONEL SALAZAR GOMEZ HUGO,LEONEL SA"
+cedula
+"7161733"
+direccion_original
+"CARRERA 3 N 8-17 CENTRO"
+ruta
+"R101"
+cedi
+"FUNZA"
+llave
+"GOMEZ HUGO HUGO LEONEL LEONEL SA 3 8-17 CARRERA CENTRO N"
+similitud
+100
+match_tipo
+"nombre"
+llave_v3
+"GOMEZ HUGO HUGO LEONEL LEONEL SA 3 8-17 CARRERA CENTRO N"
+en_v3
+true
+estado
+"ACTIVO"
+estado_pedido
+"ENTREGADO"
+fecha_pedido
+"24/03/2026"
+fecha_preferente
+"10/04/2026"
+fecha_entrega
+""
+planilla
+""
+municipio_destino
+"SOATA"
+divipola
+"15753000.0"
+ruta_v3
+"R101"
+cliente_destino_v3
+"HUGO LEONEL SALAZAR GOMEZ HUGO,LEONEL SA"
+celular_paciente
+"3115263044"
+telefono_v3
+""
+f_pref_teorica
+"11/04/2026"
+cant_pedidos_v3
+1

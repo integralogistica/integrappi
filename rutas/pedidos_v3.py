@@ -67,6 +67,12 @@ def _parsear_fecha(valor) -> str:
 bd = bd_cliente['integra']
 coleccion = bd['v3']
 
+# Crear índice en fecha_preferente para optimizar consultas por mes
+try:
+    coleccion.create_index([('fecha_preferente', 1)], background=True)
+except Exception:
+    pass  # El índice ya existe o hubo un error, continuar normalmente
+
 # Palabras que identifican clientes institucionales (no pacientes individuales).
 # Se verifican como substrings en el cliente_destino ya normalizado (mayúsculas, sin puntuación).
 # HOSP cubre tanto "HOSPITAL" como "HOSP..." en general.
@@ -91,6 +97,7 @@ COLUMNAS_REQUERIDAS = [
     'Telefono',
     'Fecha Pedido',
     'Fecha Preferente',
+    'Fecha Entrega',
     'Estado Pedido',
     'Piezas',
     'Peso Real',
@@ -215,6 +222,7 @@ async def cargar_pedidos_masivo_stream(
                     telefono_original = str(fila.get('Telefono', '')).strip() if pd.notna(fila.get('Telefono')) else ''
                     fecha_pedido_original = _parsear_fecha(fila.get('Fecha Pedido'))
                     fecha_preferente_original = _parsear_fecha(fila.get('Fecha Preferente'))
+                    fecha_entrega_original = _parsear_fecha(fila.get('Fecha Entrega'))
                     estado_pedido_original = str(fila.get('Estado Pedido', '')).strip() if pd.notna(fila.get('Estado Pedido')) else ''
                     piezas_original = str(fila.get('Piezas', '')).strip() if pd.notna(fila.get('Piezas')) else ''
                     peso_real_original = str(fila.get('Peso Real', '')).strip() if pd.notna(fila.get('Peso Real')) else ''
@@ -222,7 +230,35 @@ async def cargar_pedidos_masivo_stream(
                     ruta_original = str(fila.get('Ruta', '')).strip() if pd.notna(fila.get('Ruta')) else ''
                     municipio_destino_original = str(fila.get('Municipio Destino', '')).strip() if pd.notna(fila.get('Municipio Destino')) else ''
 
-                    # Excluir clientes institucionales (no son pacientes individuales).
+                    # FILTRO 1 (MÁS EFICIENTE): Solo cargar registros del mes actual según fecha preferente
+                    # Este filtro elimina ~50%+ de los registros, así que va primero para no procesarlos innecesariamente
+                    hoy = datetime.now()
+                    mes_actual = hoy.month
+                    anio_actual = hoy.year
+
+                    if fecha_preferente_original:
+                        try:
+                            # Parsear fecha preferente (formato DD/MM/YYYY)
+                            partes = fecha_preferente_original.split('/')
+                            if len(partes) == 3:
+                                dia_f = int(partes[0])
+                                mes_f = int(partes[1])
+                                anio_f = int(partes[2])
+
+                                # Solo insertar si el mes y año coinciden con el actual
+                                if mes_f != mes_actual or anio_f != anio_actual:
+                                    registros_filtrados += 1
+                                    continue
+                        except Exception:
+                            # Si no se puede parsear la fecha, incluir el registro por seguridad
+                            pass
+                    else:
+                        # Si no tiene fecha preferente, excluir el registro
+                        registros_filtrados += 1
+                        continue
+
+                    # FILTRO 2: Excluir clientes institucionales (no son pacientes individuales).
+                    # Solo se procesa si pasó el filtro de fecha (ahora procesa ~50% menos registros)
                     # Se usa fx_normalizar_base (solo mayús, sin tildes/símbolos) para detectar palabras clave.
                     cliente_para_validacion = fx_normalizar_base(cliente_destino_original)
                     if cliente_para_validacion and _es_cliente_excluido(cliente_para_validacion):
@@ -256,6 +292,7 @@ async def cargar_pedidos_masivo_stream(
                         'telefono_original': telefono_original,
                         'fecha_pedido': fecha_pedido_original,
                         'fecha_preferente': fecha_preferente_original,
+                        'fecha_entrega': fecha_entrega_original,
                         'estado_pedido': estado_pedido_original,
                         'piezas': piezas_original,
                         'peso_real': peso_real_original,
@@ -322,29 +359,51 @@ async def cargar_pedidos_masivo_stream(
 async def obtener_pedidos(
     skip: int = 0,
     limit: int = 100,
-    estado: Optional[str] = None
+    estado: Optional[str] = None,
+    mes_actual: bool = True
 ):
     """
     Obtiene la lista de pedidos v3 con paginación y filtro opcional por estado
-    
+
     Args:
         skip: Número de registros a saltar (paginación)
         limit: Número máximo de registros a retornar
         estado: Filtro opcional por estado de pedido
-    
+        mes_actual: Si es True, filtra por fecha preferente del mes actual (default: True)
+
     Returns:
         JSON con lista de pedidos
     """
     try:
+        # Obtener mes y año actual
+        hoy = datetime.now()
+        mes_actual_num = hoy.month
+        anio_actual_num = hoy.year
+        mes_actual_str = f"{mes_actual_num:02d}/{anio_actual_num}"  # Formato: MM/YYYY
+
         # Construir filtro
         filtro = {}
         if estado:
             filtro['estado_pedido'] = estado
-        
+
+        # Filtrar por mes actual de fecha preferente (formato DD/MM/YYYY)
+        if mes_actual:
+            # Usamos regex para buscar fechas que coincidan con el mes/año actual
+            # Ejemplo para abril 2026: busca DD/04/2026 (cualquier día del mes 04 del año 2026)
+            filtro['fecha_preferente'] = {'$regex': f'^\\d{{2}}/{mes_actual_str}$'}
+
         cursor = coleccion.find(filtro).sort('fecha_carga', -1).skip(skip).limit(limit)
         pedidos = []
-        
+
         for doc in cursor:
+            # Verificación adicional: asegurar que la fecha preferente coincida con el mes actual
+            if mes_actual and doc.get('fecha_preferente'):
+                fecha_pref = doc['fecha_preferente']
+                # Verificar que la fecha termina con el mes/año actual
+                if not fecha_pref.endswith(f'/{mes_actual_str}'):
+                    logger.warning(f"Fecha preferente {fecha_pref} no coincide con mes actual {mes_actual_str}, omitiendo")
+                    continue
+
             # Convertir ObjectId a string y eliminar _id
             doc['_id'] = str(doc['_id'])
             pedidos.append(doc)

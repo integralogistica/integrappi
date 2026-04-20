@@ -873,6 +873,26 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 
 ## Historial de cambios relevantes
 
+### Abril 2026 — Correcciones en cálculo de estado del cruce (`_determinar_estado_cruce`)
+
+Archivo: `rutas/pacientes_medical_care.py`
+
+**Bug crítico: meses 0-indexados en `_obtener_festivos_colombia`**
+- Los festivos fijos y de Ley Emiliani usaban meses 0-indexados (estilo JavaScript), por ejemplo `(0, 1)` para el 1 de enero. Python requiere meses 1–12, por lo que `date(anio, 0, 1)` lanzaba `ValueError: month must be in 1..12`.
+- El error era capturado silenciosamente por el `try/except` de cada regla, haciendo que `_determinar_estado_cruce` siempre retornara `'—'` aunque hubiera motivo de alerta.
+- Corrección: todos los meses ahora son 1-indexados: enero=1, mayo=5, julio=7, agosto=8, diciembre=12, etc.
+
+**Regla 2 — "retraso FMC": semántica de "diferencia" y umbral estricto**
+- Antes: `_calcular_dias_habiles(f_pedido, f_pref_teorica) <= 6` (contando F. Pedido inclusive).
+- Ahora: se excluye F. Pedido del conteo (empieza desde el día siguiente) y se usa `< 6` (estrictamente menor). Esto alinea el cálculo con la semántica de "menos de 6 días hábiles de diferencia entre el pedido y la fecha preferente".
+
+**Regla 3 — "retraso operación": excluir hoy del conteo**
+- Antes: `_calcular_dias_habiles(hoy, f_pref_teorica) <= 3` (contando hoy inclusive), lo que devolvía 4 días para un rango lun→jue y nunca activaba la regla.
+- Ahora: empieza a contar desde mañana (`hoy + 1 día`), de modo que lun 20 abr → jue 23 abr = 3 días hábiles (mar, mié, jue) → activa "retraso operación".
+
+**Log al finalizar recálculo**
+- `POST /recalcular-cruce` ahora registra `logger.info` al completar, indicando `fecha_calculo`, total de pacientes procesados y total de V3 sin paciente. Antes solo se enviaba el evento SSE `'complete'` sin dejar rastro en los logs del servidor.
+
 ### Abril 2026 — Mejoras en normalización de nombres y visualización de cruce
 - **`normalizacion_medical_care.py`**: función `fx_normalizar_paciente()` mejorada:
   - **Límite aumentado**: de 4 a 6 palabras para capturar nombres completos
