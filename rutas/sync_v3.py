@@ -14,7 +14,7 @@ router = APIRouter(prefix="/sync-v3", tags=["Sync V3"])
 # ── Configuración ────────────────────────────────────────────────────────────
 # horarios: lista de strings "HH:MM" — el loop ejecuta el sync cuando la hora coincide
 config = {
-    "horarios": ["09:00", "16:08"],  # ← modifica aquí o via POST /sync-v3/config
+    "horarios": ["09:40"],  # ← modifica aquí o via POST /sync-v3/config
     "activo": True,
 }
 

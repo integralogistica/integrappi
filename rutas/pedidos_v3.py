@@ -14,7 +14,8 @@ from bd.bd_cliente import bd_cliente
 from Funciones.normalizacion_medical_care import (
     fx_normalizar_paciente,
     fx_normalizar_direccion,
-    fx_normalizar_celular
+    fx_normalizar_celular,
+    fx_normalizar_base
 )
 
 router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
@@ -70,8 +71,8 @@ coleccion = bd['v3']
 # Se verifican como substrings en el cliente_destino ya normalizado (mayúsculas, sin puntuación).
 # HOSP cubre tanto "HOSPITAL" como "HOSP..." en general.
 CLIENTES_EXCLUIDOS_PALABRAS = [
-    'DAVITA', 'VANTIVE', 'CLINICA', 'FARMA', 'HOSP',
-    'FUNDACION', 'RENAL', 'MEDICO', 'ESPECIALIDADES','SOCIEDAD', 'INSTITUTO',
+    'DAVITA', 'VANTIVE', 'CLINICA', 'FARMA', 'HOSP', '3PL', 'RTS','IPS','LABORATORIO','OINSAMED',
+    'FUNDACION', 'RENAL', 'MEDICO', 'ESPECIALIDADES','SOCIEDAD', 'INSTITUTO','FRESENIUS'
 ]
 
 
@@ -220,17 +221,18 @@ async def cargar_pedidos_masivo_stream(
                     bodega_origen_original = str(fila.get('Bodega Origen', '')).strip() if pd.notna(fila.get('Bodega Origen')) else ''
                     ruta_original = str(fila.get('Ruta', '')).strip() if pd.notna(fila.get('Ruta')) else ''
                     municipio_destino_original = str(fila.get('Municipio Destino', '')).strip() if pd.notna(fila.get('Municipio Destino')) else ''
-                    
+
+                    # Excluir clientes institucionales (no son pacientes individuales).
+                    # Se usa fx_normalizar_base (solo mayús, sin tildes/símbolos) para detectar palabras clave.
+                    cliente_para_validacion = fx_normalizar_base(cliente_destino_original)
+                    if cliente_para_validacion and _es_cliente_excluido(cliente_para_validacion):
+                        registros_filtrados += 1
+                        continue
+
                     # Normalizar SOLO: cliente_destino, direccion_destino y telefono
                     cliente_destino_normalizado = fx_normalizar_paciente(cliente_destino_original)
                     direccion_destino_normalizada = fx_normalizar_direccion(direccion_destino_original)
                     telefono_normalizado = fx_normalizar_celular(telefono_original)
-
-                    # Excluir clientes institucionales (no son pacientes individuales).
-                    # Se chequea el texto ORIGINAL en mayúsculas para no depender de la normalización.
-                    if _es_cliente_excluido(cliente_destino_original.upper()):
-                        registros_filtrados += 1
-                        continue
 
                     # Validar campos obligatorios
                     if not codigo_pedido_original:

@@ -29,6 +29,7 @@ from rutas.debug_siscore import ruta_debug_siscore
 from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
 from rutas.pedidos_v3 import router as ruta_pedidos_v3
 from rutas.sync_v3 import router as ruta_sync_v3, config as sync_config, actualizar_ultimo_resultado
+from rutas.cronograma_mc import router as ruta_cronograma_mc
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,7 @@ app.include_router(ruta_debug_siscore)
 app.include_router(ruta_pacientes_medical_care)
 app.include_router(ruta_pedidos_v3)
 app.include_router(ruta_sync_v3)
+app.include_router(ruta_cronograma_mc)
 
 @app.get("/", tags=['Home'])
 async def root():

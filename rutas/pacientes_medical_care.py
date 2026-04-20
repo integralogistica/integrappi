@@ -20,6 +20,19 @@ router = APIRouter(prefix="/pacientes-medical-care", tags=["Medical Care"])
 bd = bd_cliente['integra']
 coleccion = bd['pacientes_medical_care']
 coleccion_cache = bd['cache_cruce_mc']
+coleccion_cronograma = bd['cronograma_pacientes_mc']
+
+
+def _get_cronograma_mes_actual() -> dict:
+    """Retorna {cedula_normalizada: fecha_entrega} del mes actual (hora Colombia)."""
+    import pytz
+    from datetime import datetime as _dt
+    anio_mes = _dt.now(pytz.timezone('America/Bogota')).strftime('%Y-%m')
+    cursor = coleccion_cronograma.find(
+        {'anio_mes': anio_mes},
+        {'_id': 0, 'cedula': 1, 'fecha_entrega': 1}
+    )
+    return {doc['cedula']: doc.get('fecha_entrega', '') for doc in cursor}
 
 # Mapeo código regional → nombre CEDI
 _CEDI_MAPA = {
@@ -727,10 +740,11 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
     logger = logging.getLogger(__name__)
 
     try:
+        cronograma_dict = _get_cronograma_mes_actual()
         pacientes = list(coleccion.find(
             {},
             {'llave': 1, 'paciente': 1, 'paciente_original': 1, 'direccion_original': 1,
-             'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
+             'ruta': 1, 'estado': 1, 'cedula': 1, 'cedula_original': 1, 'cedi': 1,
              'telefono1': 1, 'telefono2': 1}
         ))
         coleccion_v3 = bd['v3']
@@ -830,6 +844,7 @@ def ejecutar_cruce_automatico(usuario: str = 'sync_automatico') -> dict:
                 'cliente_destino_v3': doc_v3.get('cliente_destino_original', ''),
                 'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
                 'telefono_v3': doc_v3.get('telefono_original', ''),
+                'f_pref_teorica': cronograma_dict.get(p.get('cedula', ''), ''),
             })
 
         rutas_ocupacion: dict = {}
@@ -944,10 +959,11 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
             # ── Etapa 1: cargar datos ────────────────────────────────────────
             yield f"data: {json.dumps({'stage': 'loading', 'progress': 0, 'message': 'Cargando pacientes y pedidos V3...'})}\n\n"
 
+            cronograma_dict = _get_cronograma_mes_actual()
             pacientes = list(coleccion.find(
                 {},
                 {'llave': 1, 'paciente': 1, 'paciente_original': 1, 'direccion_original': 1,
-                 'ruta': 1, 'estado': 1, 'cedula_original': 1, 'cedi': 1,
+                 'ruta': 1, 'estado': 1, 'cedula': 1, 'cedula_original': 1, 'cedi': 1,
                  'telefono1': 1, 'telefono2': 1}
             ))
 
@@ -1059,6 +1075,7 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                     'cliente_destino_v3': doc_v3.get('cliente_destino_original', ''),
                     'celular_paciente': ' / '.join(filter(None, [p.get('telefono1', '') or '', p.get('telefono2', '') or ''])),
                     'telefono_v3': doc_v3.get('telefono_original', ''),
+                    'f_pref_teorica': cronograma_dict.get(p.get('cedula', ''), ''),
                 })
 
                 if (idx + 1) % paso_reporte == 0 or (idx + 1) == total_pacientes:
