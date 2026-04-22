@@ -23,8 +23,9 @@ router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
 
 def _parsear_fecha(valor) -> str:
     """
-    Convierte un valor de fecha a formato DD/MM/YYYY.
+    Convierte un valor de fecha a formato DD/MM/YYYY zero-padded.
     Soporta: serial de Excel (int/float como 46076), datetime/date, y strings en varios formatos.
+    Retorna '' cuando el formato no se puede reconocer, para que el registro sea filtrado aguas arriba.
     """
     if valor is None:
         return ''
@@ -40,7 +41,7 @@ def _parsear_fecha(valor) -> str:
             fecha = datetime(1899, 12, 30) + timedelta(days=int(valor))
             return fecha.strftime('%d/%m/%Y')
         except Exception:
-            return str(valor)
+            return ''
 
     # datetime o date de Python/pandas
     if isinstance(valor, (datetime, date)):
@@ -50,18 +51,26 @@ def _parsear_fecha(valor) -> str:
     if not texto:
         return ''
 
-    # Ya está en DD/MM/YYYY
-    if re.match(r'^\d{2}/\d{2}/\d{4}$', texto):
-        return texto
+    # D/M/YYYY con o sin zero-padding — normalizar a DD/MM/YYYY
+    partes = texto.split('/')
+    if len(partes) == 3:
+        try:
+            dia = int(partes[0])
+            mes = int(partes[1])
+            anio = int(partes[2])
+            if 1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= anio <= 2100:
+                return f"{dia:02d}/{mes:02d}/{anio:04d}"
+        except ValueError:
+            pass
 
     # Formatos que pandas suele generar al hacer str()
-    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d-%m-%Y', '%Y/%m/%d'):
         try:
             return datetime.strptime(texto, fmt).strftime('%d/%m/%Y')
         except ValueError:
             continue
 
-    return texto  # Devolver tal cual si no se reconoce el formato
+    return ''  # Formato no reconocido: el registro será filtrado
 
 # Obtener base de datos y colección
 bd = bd_cliente['integra']
@@ -181,7 +190,12 @@ async def cargar_pedidos_masivo_stream(
                 logger.error(f"Error al leer Excel: {str(excel_error)}")
                 yield f"data: {json.dumps({'error': f'Error al leer archivo Excel: {str(excel_error)}'}, ensure_ascii=False)}\n\n"
                 return
-            
+
+            # Eliminar TODOS los documentos existentes antes de cargar la nueva base
+            logger.info("Eliminando base anterior...")
+            resultado_eliminar = coleccion.delete_many({})
+            logger.info(f"Eliminados {resultado_eliminar.deleted_count} documentos de la carga anterior")
+
             total_filas = len(df)
             yield f"data: {json.dumps({'stage': 'reading', 'progress': 0, 'message': 'Leyendo archivo Excel...'}, ensure_ascii=False)}\n\n"
             
@@ -250,8 +264,9 @@ async def cargar_pedidos_masivo_stream(
                                     registros_filtrados += 1
                                     continue
                         except Exception:
-                            # Si no se puede parsear la fecha, incluir el registro por seguridad
-                            pass
+                            # Si no se puede parsear la fecha, excluir el registro
+                            registros_filtrados += 1
+                            continue
                     else:
                         # Si no tiene fecha preferente, excluir el registro
                         registros_filtrados += 1

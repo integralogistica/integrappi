@@ -280,7 +280,7 @@ El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Pa
   - `stage: 'saving'` (95%) — Guardando resultado en `cache_cruce_mc`
   - `stage: 'complete'` (100%) — Datos completos embebidos en el evento final
 - **Filtro por CEDI**: `GET /` y `GET /buscar` aceptan el param `cedi` (regex case-insensitive) para restringir resultados. Usado para control de acceso regional desde el frontend
-- **`/ocupacion-rutas` incluye `total_sin_paciente`**: el endpoint GET retorna también el total de V3 sin paciente para que el frontend pueda mostrar el badge desde el primer cargue, sin esperar a que el usuario abra la pestaña
+- **`/ocupacion-rutas` incluye `total_sin_paciente` y `total_v3`**: el endpoint GET retorna también el total de V3 sin paciente para que el frontend pueda mostrar el badge desde el primer cargue, y `total_v3` (pedidos V3 reales cargados al cruce) para calcular correctamente los pedidos emparejados sin double-counting
 
 **Algoritmo de cruce (motor):**
 - **Motor de similitud**: `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
@@ -346,9 +346,11 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
 - Función helper: `_es_cliente_excluido(cliente_original.upper())` en `rutas/pedidos_v3.py`, importada también en `Funciones/sync_api_v3.py`
 
 **Normalización de Fechas (`_parsear_fecha`):**
-- Función `_parsear_fecha()` en `rutas/pedidos_v3.py` convierte cualquier formato de fecha a `DD/MM/YYYY`
-- Soporta: serial numérico de Excel (ej: `46076` → `23/02/2026`), `datetime`/`date` de pandas, strings `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS` y `DD/MM/YYYY`
-- Aplica a los campos `Fecha Pedido` y `Fecha Preferente` tanto en carga manual como en sync automático
+- Función `_parsear_fecha()` en `rutas/pedidos_v3.py` convierte cualquier formato de fecha a `DD/MM/YYYY` **siempre zero-padded**
+- Soporta: serial numérico de Excel (ej: `46076` → `23/02/2026`), `datetime`/`date` de pandas, strings `D/M/YYYY` o `DD/MM/YYYY` (con o sin padding), `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, `D-M-YYYY`, `YYYY/MM/DD`
+- **Formatos no reconocidos retornan `''`** → el registro es rechazado (no sube a Mongo)
+- Aplica a los campos `Fecha Pedido`, `Fecha Preferente` y `Fecha Entrega` tanto en carga manual como en sync automático
+- Garantiza que el regex de consulta `^\d{2}/04/2026$` en `GET /pedidos-v3/` siempre encuentre todas las fechas guardadas
 
 **Campo `llave`:**
 - Campo calculado automáticamente al cargar cada pedido
@@ -872,6 +874,33 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 ---
 
 ## Historial de cambios relevantes
+
+### Abril 2026 — Eliminación de "zona gris" en cruce Pacientes ↔ V3
+
+**`rutas/pacientes_medical_care.py` — `_motor_cruce()`, Etapa 3:**
+- Antes: V3 con llave ≥ 75% de similitud con algún paciente, pero no reclamados en Etapa 2, caían en `zona_gris` (categoría separada).
+- Ahora: cualquier V3 con similitud ≥ 75% contra cualquier paciente se agrega a `llaves_v3_con_paciente` → se trata como emparejado.
+- **Motivo**: la zona gris era un falso negativo. Los V3 con similitud suficiente deben contar como matched aunque el paciente haya sido reclamado por otro V3 con mejor score.
+- Impacto: `total_zona_gris` siempre será 0 en adelante; el badge "pedidos emparejados" del frontend incluye automáticamente estos registros (fórmula `total_v3 − sin_paciente − zona_gris − llave_vacia`).
+- Se mantienen los campos `v3_zona_gris`/`total_zona_gris` en cache y respuestas por compatibilidad, pero siempre llegan vacíos.
+
+---
+
+### Abril 2026 — Correcciones en carga V3 y conteo de pedidos en cruce
+
+**`rutas/pedidos_v3.py` — `_parsear_fecha()` siempre zero-padded:**
+- Strings como `"1/4/2026"` se normalizan a `"01/04/2026"` via split/int con validación de rango (día 1-31, mes 1-12, año 1900-2100)
+- Formatos adicionales soportados: `%d-%m-%Y`, `%Y/%m/%d`
+- Formatos no reconocidos ahora retornan `''` en vez del texto crudo → el registro se filtra automáticamente (no sube a Mongo)
+- Seriales Excel inválidos también retornan `''`
+- Corrige discrepancia de ~8 registros entre "Registros exitosos" de la carga y "Total (mes actual)" en la tabla
+
+**`rutas/pacientes_medical_care.py` — `total_v3` en cruce y cache:**
+- `_motor_cruce()` ahora incluye `total_v3` (conteo real de pedidos V3 que entraron al cruce) en el resultado
+- Se guarda en `cache_cruce_mc` y se expone en `GET /ocupacion-rutas`, `GET /v3-sin-paciente` y el evento SSE `complete` de `POST /recalcular-cruce`
+- Permite al frontend calcular `pedidos_matched = total_v3 - total_sin_paciente - total_zona_gris - total_llave_vacia`, evitando el double-counting que ocurría al sumar `cant_pedidos_v3` de pacientes que coinciden con las mismas llaves V3
+
+---
 
 ### Abril 2026 — Correcciones en cálculo de estado del cruce (`_determinar_estado_cruce`)
 

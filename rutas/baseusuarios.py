@@ -227,10 +227,11 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
+
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
-    perfiles = coleccion_usuarios.distinct("perfil")
-    return sorted([p for p in perfiles if p])
+    return PERFILES_VALIDOS
 
 
 @ruta_baseusuarios.get("/despachadores", response_model=List[UsuarioLite])

@@ -198,8 +198,21 @@ def _ejecutar_sync_v3_interno() -> dict:
             telefono_normalizado  = fx_normalizar_celular(telefono_original) or telefono_original
             llave = f"{cliente_normalizado} {direccion_normalizada}".strip()
 
-            # Excluir clientes institucionales (no son pacientes individuales).
-            # Se chequea el texto ORIGINAL en mayúsculas para no depender de la normalización.
+            # FILTRO 1: Solo registros del mes actual según fecha_preferente
+            hoy = datetime.now()
+            if fecha_preferente:
+                try:
+                    partes = fecha_preferente.split('/')
+                    if len(partes) == 3 and (int(partes[1]) != hoy.month or int(partes[2]) != hoy.year):
+                        filtrados += 1
+                        continue
+                except Exception:
+                    pass
+            else:
+                filtrados += 1
+                continue
+
+            # FILTRO 2: Excluir clientes institucionales (no son pacientes individuales).
             if _es_cliente_excluido(cliente_original.upper()):
                 filtrados += 1
                 continue
