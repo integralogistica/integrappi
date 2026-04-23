@@ -57,6 +57,13 @@ class BaseUsuario(BaseModel):
 class ActualizarClientesInput(BaseModel):
     clientes: List[str]
 
+class ActualizarDatosInput(BaseModel):
+    nombre: str
+    correo: Optional[str] = None
+    regional: str
+    celular: Optional[str] = None
+    clave: Optional[str] = None  # solo si quiere cambiarla
+
 class UsuarioLite(BaseModel):
     id: str
     nombre: str
@@ -76,6 +83,14 @@ class CambioClaveInput(BaseModel):
     nuevaClave: str
     codigo: str
     perfil: str
+
+class RecuperarBaseInput(BaseModel):
+    correo: str
+
+class ConfirmarBaseInput(BaseModel):
+    correo: str
+    codigo: str
+    nuevaClave: str
 
 
 # ==============================================================================
@@ -197,6 +212,57 @@ async def cambiar_clave_conductor(data: CambioClaveInput):
         }
     )
     return {"mensaje": "Clave actualizada correctamente"}
+
+
+# ==============================================================================
+# 🔓 RECUPERACIÓN DE CONTRASEÑA (sin perfil, para usuarios Torre de Control)
+# ==============================================================================
+
+@ruta_baseusuarios.post("/recuperar/solicitar")
+async def recuperar_base_solicitar(data: RecuperarBaseInput, background_tasks: BackgroundTasks):
+    correo_norm = data.correo.strip().lower()
+
+    doc = coleccion_usuarios.find_one({"correo": {"$regex": f"^{correo_norm}$", "$options": "i"}})
+    if not doc:
+        print(f"⚠️ Recuperación: correo NO encontrado en BD → {correo_norm}")
+        return {"mensaje": "Si el correo está registrado, se enviará un código de verificación."}
+
+    print(f"✅ Recuperación: correo encontrado → {correo_norm} | usuario: {doc.get('usuario')} | correo en BD: {doc.get('correo')}")
+    print(f"🔑 Código generado: para {correo_norm}")
+    print(f"📧 RESEND_API_KEY configurada: {'Sí' if resend.api_key and 'TuApiKeyAqui' not in resend.api_key else 'NO'}")
+    print(f"📧 MAIL_FROM: {MAIL_FROM}")
+
+    codigo = str(random.randint(1000, 9999))
+    coleccion_usuarios.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"recovery_code": codigo}}
+    )
+
+    background_tasks.add_task(enviar_correo_codigo, correo_norm, codigo)
+
+    return {"mensaje": "Si el correo está registrado, se enviará un código de verificación."}
+
+
+@ruta_baseusuarios.post("/recuperar/confirmar")
+async def recuperar_base_confirmar(data: ConfirmarBaseInput):
+    correo_norm = data.correo.strip().lower()
+
+    doc = coleccion_usuarios.find_one({"correo": {"$regex": f"^{correo_norm}$", "$options": "i"}})
+    if not doc:
+        raise HTTPException(status_code=400, detail="Correo no encontrado")
+
+    codigo_guardado = doc.get("recovery_code")
+    if not codigo_guardado or codigo_guardado != data.codigo:
+        raise HTTPException(status_code=403, detail="Código inválido o expirado")
+
+    coleccion_usuarios.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": {"clave": data.nuevaClave.strip()},
+            "$unset": {"recovery_code": ""}
+        }
+    )
+    return {"mensaje": "Contraseña actualizada correctamente"}
 
 
 # ==============================================================================
@@ -361,6 +427,27 @@ async def actualizar_notificaciones_mc(id: str, notificaciones_mc: List[str] = B
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return {"mensaje": "Notificaciones actualizadas", "notificaciones_mc": notificaciones_mc}
+
+
+@ruta_baseusuarios.patch("/{id}/datos", response_model=dict)
+async def actualizar_datos_usuario(id: str, data: ActualizarDatosInput):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    actualiza: dict = {
+        "nombre":   data.nombre.strip().upper(),
+        "correo":   data.correo.strip().upper() if data.correo and data.correo.strip() else None,
+        "regional": data.regional.strip().upper(),
+        "celular":  data.celular.strip().upper() if data.celular and data.celular.strip() else None,
+    }
+    if data.clave and data.clave.strip():
+        actualiza["clave"] = data.clave.strip()
+    result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    actualizado = coleccion_usuarios.find_one({"_id": oid})
+    return {"mensaje": "Datos actualizados", "usuario": modelo_usuario(actualizado)}
 
 
 @ruta_baseusuarios.patch("/{id}/clientes", response_model=dict)

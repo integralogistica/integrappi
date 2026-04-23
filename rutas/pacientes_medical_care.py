@@ -1022,6 +1022,8 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
 
     # ── Etapa 3: V3 sin paciente / zona gris / llave vacía ──────────────────
     llaves_pacientes = [p['llave'] for p in resultado_pacientes if p.get('llave')]
+    # Mapa llave → cedula para lookup del cronograma en registros sin paciente
+    llave_a_cedula = {p.get('llave', ''): p.get('cedula', '') for p in pacientes if p.get('llave') and p.get('cedula')}
     sin_paciente: list = []
     zona_gris: list = []
     llave_vacia: list = []
@@ -1063,10 +1065,12 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
                 # (aunque ese paciente haya sido reclamado por otro V3 como mejor match).
                 llaves_v3_con_paciente.add(llave_v3)
             else:
+                cedula_cercana = llave_a_cedula.get(mejor_llave_p, '')
                 sin_paciente.append({
                     **reg_base,
                     'similitud': round(mejor_sim * 100, 1),
                     'llave_paciente_cercana': mejor_llave_p,
+                    'f_pref_teorica': cronograma_dict.get(cedula_cercana, '') if cedula_cercana else '',
                 })
 
         if (idx + 1) % paso_reporte_v3 == 0 or (idx + 1) == total_v3:
@@ -1414,31 +1418,59 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
         ws2 = wb.create_sheet('V3 Sin Paciente')
     else:
         ws2 = wb.active
-        ws2.title = 'V3 Sin Paciente'
-    ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
-    ws2['A1'].font, ws2['A1'].alignment = title_font, center
-    ws2.merge_cells('A1:I1')
-    ws2.row_dimensions[1].height = 22
-    set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino', 'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
-    fila2 = 3
-    for r in v3_sin_paciente_data:
-        for reg in r['registros']:
-            estado_v3      = reg.get('estado_pedido', '')
-            fecha_pref_str = reg.get('fecha_preferente', '')
-            fecha_pref_dt  = _fecha_dt(fecha_pref_str)
-            # Sin paciente = siempre rojo salvo ENTREGADO
-            es_entregado_v3 = estado_v3 == 'ENTREGADO'
-            fill = entregado_fill if es_entregado_v3 else urgente_fill
-            fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
-            vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
-                    reg.get('cliente_destino',''), reg.get('direccion_destino',''),
-                    reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
-            for c, val in enumerate(vals, 1):
-                font = red_font if fecha_pref_urgente and c == 8 else None
-                style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
-            fila2 += 1
-    for i, w in enumerate([14,18,16,28,32,13,14,12,12], 1):
-        ws2.column_dimensions[get_column_letter(i)].width = w
+        ws2.title = 'Pacientes no montados'
+
+    if solo_sin_paciente:
+        # ── Formato cliente: "Pacientes no montados" ───────────────────────────
+        total_sin = sum(len(r['registros']) for r in v3_sin_paciente_data)
+        ws2['A1'] = f'{total_sin} pedidos de V3 sin paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+        ws2['A1'].font, ws2['A1'].alignment = title_font, center
+        ws2.merge_cells('A1:H1')
+        ws2.row_dimensions[1].height = 22
+        set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
+                                 'Dirección', 'Teléfono', 'F. Pref SAP', 'F. Pref. Integra'])
+        fila2 = 3
+        for r in v3_sin_paciente_data:
+            for reg in r['registros']:
+                fecha_pref_str   = reg.get('fecha_preferente', '')
+                fecha_pref_dt    = _fecha_dt(fecha_pref_str)
+                f_pref_integra   = reg.get('f_pref_teorica', '')
+                fecha_pref_urgente = fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
+                        reg.get('cliente_destino',''), reg.get('direccion_destino',''),
+                        reg.get('telefono',''), fecha_pref_str, f_pref_integra]
+                for c, val in enumerate(vals, 1):
+                    font = red_font if fecha_pref_urgente and c == 7 else None
+                    style_cell(ws2.cell(row=fila2, column=c, value=val), urgente_fill, font)
+                fila2 += 1
+        for i, w in enumerate([14, 18, 16, 28, 32, 13, 12, 12], 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
+    else:
+        # ── Formato interno: "V3 Sin Paciente" (original) ─────────────────────
+        ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+        ws2['A1'].font, ws2['A1'].alignment = title_font, center
+        ws2.merge_cells('A1:I1')
+        ws2.row_dimensions[1].height = 22
+        set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
+                                 'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
+        fila2 = 3
+        for r in v3_sin_paciente_data:
+            for reg in r['registros']:
+                estado_v3      = reg.get('estado_pedido', '')
+                fecha_pref_str = reg.get('fecha_preferente', '')
+                fecha_pref_dt  = _fecha_dt(fecha_pref_str)
+                es_entregado_v3 = estado_v3 == 'ENTREGADO'
+                fill = entregado_fill if es_entregado_v3 else urgente_fill
+                fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
+                        reg.get('cliente_destino',''), reg.get('direccion_destino',''),
+                        reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
+                for c, val in enumerate(vals, 1):
+                    font = red_font if fecha_pref_urgente and c == 8 else None
+                    style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
+                fila2 += 1
+        for i, w in enumerate([14, 18, 16, 28, 32, 13, 14, 12, 12], 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
     ws2.freeze_panes = 'A3'
 
     buffer = io.BytesIO()
