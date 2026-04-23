@@ -1507,51 +1507,77 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
         fecha_legible = _fmt_fecha_legible(fecha_calculo)
         calculado_str = f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else ''
 
-        # ── 1. Retraso operación: Excel completo a usuarios operacionales MC ──
+        # ── 1. Retraso operación: Solo pacientes con estado retraso ──
         usuarios_retraso = list(col_usuarios.find(
             {'notificaciones_mc': 'retraso_operacion', 'correo': {'$exists': True, '$nin': [None, '']}},
             {'correo': 1, '_id': 0}
         ))
         dest_retraso = [u['correo'] for u in usuarios_retraso if u.get('correo')]
         if dest_retraso:
-            excel_bytes, nombre_archivo = _generar_excel_bytes(cache)
+            cache_retraso = dict(cache)
+            rutas_filtradas = []
+            for ruta in cache.get('ocupacion_rutas', []):
+                pacientes_retraso = [
+                    p for p in ruta.get('pacientes', [])
+                    if p.get('estado_cruce', '').lower() in ('retraso operación', 'retraso operacion')
+                ]
+                if pacientes_retraso:
+                    rutas_filtradas.append({**ruta, 'pacientes': pacientes_retraso})
+            cache_retraso['ocupacion_rutas'] = rutas_filtradas
+            total_retraso = sum(len(r['pacientes']) for r in rutas_filtradas)
+            excel_bytes, nombre_archivo = _generar_excel_bytes(cache_retraso)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
                 'to':      dest_retraso,
-                'subject': f'Cruce Pacientes ↔ V3 — {fecha_legible}',
+                'subject': f'Retrasos Operación — {fecha_legible} ({total_retraso})',
                 'html': (
-                    f'<p>Se adjunta el reporte de cruce <strong>Pacientes ↔ V3</strong> '
+                    f'<p>Se adjunta el reporte de <strong>Retrasos de Operación</strong> '
                     f'generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
-                    f'<p>El archivo contiene dos hojas: <em>Ocupacion Rutas</em> y <em>V3 Sin Paciente</em>.</p>'
+                    f'<p>Total registros con retraso: <strong>{total_retraso}</strong>.</p>'
                     f'<p>Saludos,<br>IntegrApp</p>'
                 ),
                 'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
             })
-            logger.info(f'[cruce_email] Retraso-op enviado a {len(dest_retraso)}: {dest_retraso}')
+            logger.info(f'[cruce_email] Retraso-op enviado a {len(dest_retraso)}: {dest_retraso} ({total_retraso} registros)')
         else:
             logger.warning('[cruce_email] Sin destinatarios para retraso_operacion')
 
-        # ── 2. Sin cruce: Solo hoja V3 Sin Paciente → usuarios + contactos CLIENTE_FMC ──
+        # ── 2. Sin cruce: Pacientes sin cruce + V3 sin paciente → usuarios + contactos CLIENTE_FMC ──
         usuarios_sin_cruce = list(col_usuarios.find(
             {'notificaciones_mc': 'sin_cruce', 'correo': {'$exists': True, '$nin': [None, '']}},
             {'correo': 1, '_id': 0}
         ))
         dest_sin_cruce = [u['correo'] for u in usuarios_sin_cruce if u.get('correo')]
         if dest_sin_cruce:
-            excel_sc, nombre_sc = _generar_excel_bytes(cache, solo_sin_paciente=True)
+            cache_sc = dict(cache)
+            rutas_sc = []
+            for ruta in cache.get('ocupacion_rutas', []):
+                pacientes_sc = [
+                    p for p in ruta.get('pacientes', [])
+                    if not p.get('en_v3', False)
+                ]
+                if pacientes_sc:
+                    rutas_sc.append({**ruta, 'pacientes': pacientes_sc})
+            cache_sc['ocupacion_rutas'] = rutas_sc
+            total_sin_cruce = sum(len(r['pacientes']) for r in rutas_sc)
+            total_v3_sp = sum(len(r.get('registros', [])) for r in cache.get('v3_sin_paciente', []))
+            excel_sc, nombre_sc = _generar_excel_bytes(cache_sc)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
                 'to':      dest_sin_cruce,
-                'subject': f'V3 Sin Paciente — {fecha_legible}',
+                'subject': f'Sin Cruce + V3 Sin Paciente — {fecha_legible}',
                 'html': (
-                    f'<p>Se adjunta el reporte de <strong>V3 Sin Paciente</strong> '
-                    f'generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
-                    f'<p>Estos son los pedidos V3 que aún no tienen un paciente asignado en las rutas Medical Care.</p>'
+                    f'<p>Se adjunta el reporte generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
+                    f'<p>El archivo contiene dos hojas:</p>'
+                    f'<ul>'
+                    f'<li><strong>Pacientes sin cruce</strong>: {total_sin_cruce} pacientes no han sido tramitados por parte de FMC.</li>'
+                    f'<li><strong>V3 Sin Paciente</strong>: {total_v3_sp} pedidos en la V3 de los cuales no tenemos información del paciente.</li>'
+                    f'</ul>'
                     f'<p>Saludos,<br>IntegrApp</p>'
                 ),
                 'attachments': [{'filename': nombre_sc, 'content': list(excel_sc)}],
             })
-            logger.info(f'[cruce_email] Sin-cruce enviado a {len(dest_sin_cruce)}: {dest_sin_cruce}')
+            logger.info(f'[cruce_email] Sin-cruce enviado a {len(dest_sin_cruce)}: {dest_sin_cruce} ({total_sin_cruce} sin cruce, {total_v3_sp} v3 sin paciente)')
         else:
             logger.warning('[cruce_email] Sin destinatarios para sin_cruce')
 

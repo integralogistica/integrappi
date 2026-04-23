@@ -875,6 +875,25 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 
 ## Historial de cambios relevantes
 
+### Abril 2026 — Recuperación de clave, notificaciones filtradas y perfil CLIENTE_FMC
+
+**`rutas/baseusuarios.py` — Recuperación de contraseña:**
+- Nuevo endpoint `POST /baseusuarios/recuperar/solicitar`: busca correo con regex case-insensitive (`$regex`, `$options: "i"`), genera código de 4 dígitos, lo almacena con expiración de 10 minutos y envía vía Resend.
+- Nuevo endpoint `POST /baseusuarios/recuperar/confirmar`: valida código contra BD, actualiza contraseña del usuario.
+- Modelos Pydantic: `RecuperarBaseInput(correo)` y `ConfirmarBaseInput(correo, codigo, nuevaClave)`.
+
+**`rutas/pacientes_medical_care.py` — Notificaciones filtradas por tipo:**
+- `retraso_operacion`: el Excel adjunto contiene solo pacientes con `estado_cruce` en `("retraso operación", "retraso fmc", "retraso operacion")`.
+- `sin_cruce`: el Excel adjunto contiene 2 hojas — pacientes sin cruce (`en_v3 = False`) y pedidos V3 sin paciente (`v3_sin_paciente`).
+- Subject del correo incluye conteo de registros por tipo.
+
+**Perfil CLIENTE_FMC en `baseusuarios.py`:**
+- Usuarios con perfil `CLIENTE_FMC` tienen `clave = "SIN_ACCESO"` y `clientes = []` — no pueden hacer login en el sistema.
+- Solo existen para recibir notificaciones por correo según las campanitas asignadas.
+- Desde GestionUsuarios, un admin puede cambiar el perfil de CLIENTE_FMC a otro (ej: ANALISTA), lo cual requiere asignar una contraseña nueva.
+
+---
+
 ### Abril 2026 — Eliminación de "zona gris" en cruce Pacientes ↔ V3
 
 **`rutas/pacientes_medical_care.py` — `_motor_cruce()`, Etapa 3:**
