@@ -1319,7 +1319,7 @@ async def v3_sin_paciente():
     }
 
 
-def _generar_excel_bytes(cache: dict, cedi: str = None) -> tuple:
+def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool = False) -> tuple:
     """
     Genera el Excel del cruce y retorna (bytes, nombre_archivo).
     Reutilizado por el endpoint de descarga y el envío por correo.
@@ -1376,42 +1376,45 @@ def _generar_excel_bytes(cache: dict, cedi: str = None) -> tuple:
             cell.font = font
         cell.alignment = left
 
-    ws1 = wb.active
-    ws1.title = 'Ocupacion Rutas'
-    ws1['A1'] = f'Cruce Pacientes ↔ V3  |  {_fmt_fecha_legible(fecha_calculo)}'
-    ws1['A1'].font, ws1['A1'].alignment = title_font, center
-    ws1.merge_cells('A1:K1')
-    ws1.row_dimensions[1].height = 22
-    set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado',
-                             'En V3', 'Estado Pedido', 'F. Pedido', 'F. Preferente', 'Similitud %'])
-    fila = 3
-    for r in ocupacion_rutas_data:
-        for p in r['pacientes']:
-            en_v3          = p.get('en_v3', False)
-            estado_pedido  = p.get('estado_pedido', '')
-            fecha_pref_str = p.get('fecha_preferente', '')
-            fecha_pref_dt  = _fecha_dt(fecha_pref_str)
-            es_entregado = en_v3 and estado_pedido == 'ENTREGADO'
-            es_rojo      = not es_entregado and (
-                not en_v3 or
-                estado_pedido == 'POR PROGRAMAR' or
-                (fecha_pref_dt is not None and fecha_pref_dt <= _limite)
-            )
-            fill = entregado_fill if es_entregado else (urgente_fill if es_rojo else None)
-            vals = [r.get('cedi',''), r['ruta'], p['paciente'], p['cedula'],
-                    p.get('direccion_original',''), p.get('estado',''),
-                    'SÍ' if en_v3 else 'NO', estado_pedido,
-                    p.get('fecha_pedido',''), fecha_pref_str, p.get('similitud', 0)]
-            fecha_pref_urgente = not es_entregado and fecha_pref_dt is not None and fecha_pref_dt <= _limite
-            for c, val in enumerate(vals, 1):
-                font = red_font if fecha_pref_urgente and c == 10 else None
-                style_cell(ws1.cell(row=fila, column=c, value=val), fill, font)
-            fila += 1
-    for i, w in enumerate([14,18,28,14,32,10,6,18,12,12,12], 1):
-        ws1.column_dimensions[get_column_letter(i)].width = w
-    ws1.freeze_panes = 'A3'
-
-    ws2 = wb.create_sheet('V3 Sin Paciente')
+    if not solo_sin_paciente:
+        ws1 = wb.active
+        ws1.title = 'Ocupacion Rutas'
+        ws1['A1'] = f'Cruce Pacientes ↔ V3  |  {_fmt_fecha_legible(fecha_calculo)}'
+        ws1['A1'].font, ws1['A1'].alignment = title_font, center
+        ws1.merge_cells('A1:K1')
+        ws1.row_dimensions[1].height = 22
+        set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado',
+                                 'En V3', 'Estado Pedido', 'F. Pedido', 'F. Preferente', 'Similitud %'])
+        fila = 3
+        for r in ocupacion_rutas_data:
+            for p in r['pacientes']:
+                en_v3          = p.get('en_v3', False)
+                estado_pedido  = p.get('estado_pedido', '')
+                fecha_pref_str = p.get('fecha_preferente', '')
+                fecha_pref_dt  = _fecha_dt(fecha_pref_str)
+                es_entregado = en_v3 and estado_pedido == 'ENTREGADO'
+                es_rojo      = not es_entregado and (
+                    not en_v3 or
+                    estado_pedido == 'POR PROGRAMAR' or
+                    (fecha_pref_dt is not None and fecha_pref_dt <= _limite)
+                )
+                fill = entregado_fill if es_entregado else (urgente_fill if es_rojo else None)
+                vals = [r.get('cedi',''), r['ruta'], p['paciente'], p['cedula'],
+                        p.get('direccion_original',''), p.get('estado',''),
+                        'SÍ' if en_v3 else 'NO', estado_pedido,
+                        p.get('fecha_pedido',''), fecha_pref_str, p.get('similitud', 0)]
+                fecha_pref_urgente = not es_entregado and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                for c, val in enumerate(vals, 1):
+                    font = red_font if fecha_pref_urgente and c == 10 else None
+                    style_cell(ws1.cell(row=fila, column=c, value=val), fill, font)
+                fila += 1
+        for i, w in enumerate([14,18,28,14,32,10,6,18,12,12,12], 1):
+            ws1.column_dimensions[get_column_letter(i)].width = w
+        ws1.freeze_panes = 'A3'
+        ws2 = wb.create_sheet('V3 Sin Paciente')
+    else:
+        ws2 = wb.active
+        ws2.title = 'V3 Sin Paciente'
     ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
     ws2['A1'].font, ws2['A1'].alignment = title_font, center
     ws2.merge_cells('A1:I1')
@@ -1440,14 +1443,16 @@ def _generar_excel_bytes(cache: dict, cedi: str = None) -> tuple:
 
     buffer = io.BytesIO()
     wb.save(buffer)
-    nombre = f"cruce_mc{'_'+cedi if cedi else ''}_{fecha_calculo.replace(' ','_').replace(':','-')}.xlsx"
+    prefijo = 'v3_sin_paciente' if solo_sin_paciente else 'cruce_mc'
+    nombre = f"{prefijo}{'_'+cedi if cedi else ''}_{fecha_calculo.replace(' ','_').replace(':','-')}.xlsx"
     return buffer.getvalue(), nombre
 
 
 def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
     """
-    Envía el Excel del cruce por correo a todos los usuarios con MEDICAL_CARE.
-    Se llama tras cada recálculo (automático o manual).
+    Envía el Excel del cruce segmentado por notificaciones_mc:
+    - 'retraso_operacion': Excel completo (ambas hojas) → usuarios operacionales MC
+    - 'sin_cruce': Solo hoja 'V3 Sin Paciente' → usuarios + contactos cliente (CLIENTE_FMC)
     """
     import os
     import logging
@@ -1462,37 +1467,62 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             return
         _resend.api_key = api_key
 
-        # Buscar usuarios con MEDICAL_CARE y correo registrado
         col_usuarios = bd['baseusuarios']
-        usuarios = list(col_usuarios.find(
-            {'clientes': 'MEDICAL_CARE', 'correo': {'$exists': True, '$nin': [None, '']}},
-            {'correo': 1, 'nombre': 1, '_id': 0}
-        ))
-        destinatarios = [u['correo'] for u in usuarios if u.get('correo')]
-        if not destinatarios:
-            logger.warning('[cruce_email] Sin destinatarios con MEDICAL_CARE y correo registrado')
-            return
-
         cache = coleccion_cache.find_one({'tipo': 'cruce_completo'}, {'_id': 0})
         if not cache:
             return
-        excel_bytes, nombre_archivo = _generar_excel_bytes(cache)
 
-        _resend.Emails.send({
-            'from':    f'IntegrApp <{mail_from}>',
-            'to':      destinatarios,
-            'subject': f'Cruce Pacientes ↔ V3 — {_fmt_fecha_legible(fecha_calculo)}',
-            'html': (
-                f'<p>Se adjunta el reporte de cruce <strong>Pacientes ↔ V3</strong> '
-                f'generado el <strong>{_fmt_fecha_legible(fecha_calculo)}</strong>'
-                + (f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else '')
-                + f'.</p>'
-                f'<p>El archivo contiene dos hojas: <em>Ocupacion Rutas</em> y <em>V3 Sin Paciente</em>.</p>'
-                f'<p>Saludos,<br>IntegrApp</p>'
-            ),
-            'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
-        })
-        logger.info(f'[cruce_email] Excel enviado a {len(destinatarios)} usuario(s): {destinatarios}')
+        fecha_legible = _fmt_fecha_legible(fecha_calculo)
+        calculado_str = f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else ''
+
+        # ── 1. Retraso operación: Excel completo a usuarios operacionales MC ──
+        usuarios_retraso = list(col_usuarios.find(
+            {'notificaciones_mc': 'retraso_operacion', 'correo': {'$exists': True, '$nin': [None, '']}},
+            {'correo': 1, '_id': 0}
+        ))
+        dest_retraso = [u['correo'] for u in usuarios_retraso if u.get('correo')]
+        if dest_retraso:
+            excel_bytes, nombre_archivo = _generar_excel_bytes(cache)
+            _resend.Emails.send({
+                'from':    f'IntegrApp <{mail_from}>',
+                'to':      dest_retraso,
+                'subject': f'Cruce Pacientes ↔ V3 — {fecha_legible}',
+                'html': (
+                    f'<p>Se adjunta el reporte de cruce <strong>Pacientes ↔ V3</strong> '
+                    f'generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
+                    f'<p>El archivo contiene dos hojas: <em>Ocupacion Rutas</em> y <em>V3 Sin Paciente</em>.</p>'
+                    f'<p>Saludos,<br>IntegrApp</p>'
+                ),
+                'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
+            })
+            logger.info(f'[cruce_email] Retraso-op enviado a {len(dest_retraso)}: {dest_retraso}')
+        else:
+            logger.warning('[cruce_email] Sin destinatarios para retraso_operacion')
+
+        # ── 2. Sin cruce: Solo hoja V3 Sin Paciente → usuarios + contactos CLIENTE_FMC ──
+        usuarios_sin_cruce = list(col_usuarios.find(
+            {'notificaciones_mc': 'sin_cruce', 'correo': {'$exists': True, '$nin': [None, '']}},
+            {'correo': 1, '_id': 0}
+        ))
+        dest_sin_cruce = [u['correo'] for u in usuarios_sin_cruce if u.get('correo')]
+        if dest_sin_cruce:
+            excel_sc, nombre_sc = _generar_excel_bytes(cache, solo_sin_paciente=True)
+            _resend.Emails.send({
+                'from':    f'IntegrApp <{mail_from}>',
+                'to':      dest_sin_cruce,
+                'subject': f'V3 Sin Paciente — {fecha_legible}',
+                'html': (
+                    f'<p>Se adjunta el reporte de <strong>V3 Sin Paciente</strong> '
+                    f'generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
+                    f'<p>Estos son los pedidos V3 que aún no tienen un paciente asignado en las rutas Medical Care.</p>'
+                    f'<p>Saludos,<br>IntegrApp</p>'
+                ),
+                'attachments': [{'filename': nombre_sc, 'content': list(excel_sc)}],
+            })
+            logger.info(f'[cruce_email] Sin-cruce enviado a {len(dest_sin_cruce)}: {dest_sin_cruce}')
+        else:
+            logger.warning('[cruce_email] Sin destinatarios para sin_cruce')
+
     except Exception as e:
         logger.error(f'[cruce_email] Error: {e}')
 

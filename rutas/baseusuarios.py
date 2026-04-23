@@ -92,6 +92,8 @@ def modelo_usuario(u) -> dict:
         "perfil": u["perfil"],
         "usuario": u["usuario"],
         "clientes": u.get("clientes") or ["KABI"],
+        "activo": u.get("activo", True),
+        "notificaciones_mc": u.get("notificaciones_mc") or [],
     }
 
 def enviar_correo_codigo(destinatario: str, codigo: str):
@@ -227,7 +229,7 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
@@ -311,9 +313,12 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
     encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
-        
+
+    if not encontrado.get("activo", True):
+        raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")
+
     clave_almacenada = str(encontrado.get("clave", "")).strip()
-    
+
     if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
@@ -327,6 +332,35 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
             "clientes": encontrado.get("clientes") or ["KABI"],
         }
     }
+
+
+@ruta_baseusuarios.patch("/{id}/activo", response_model=dict)
+async def toggle_activo_usuario(id: str, activo: bool = Body(..., embed=True)):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    result = coleccion_usuarios.update_one({"_id": oid}, {"$set": {"activo": activo}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return {"mensaje": "Estado actualizado", "activo": activo}
+
+
+_NOTIF_MC_VALIDAS = {'retraso_operacion', 'sin_cruce'}
+
+@ruta_baseusuarios.patch("/{id}/notificaciones_mc", response_model=dict)
+async def actualizar_notificaciones_mc(id: str, notificaciones_mc: List[str] = Body(..., embed=True)):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    invalidas = [n for n in notificaciones_mc if n not in _NOTIF_MC_VALIDAS]
+    if invalidas:
+        raise HTTPException(status_code=400, detail=f"Notificaciones inválidas: {invalidas}")
+    result = coleccion_usuarios.update_one({"_id": oid}, {"$set": {"notificaciones_mc": notificaciones_mc}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return {"mensaje": "Notificaciones actualizadas", "notificaciones_mc": notificaciones_mc}
 
 
 @ruta_baseusuarios.patch("/{id}/clientes", response_model=dict)
