@@ -2689,7 +2689,9 @@ async def pbi_documentos(
     # 3) Paginación
     skip = (page - 1) * page_size
 
-    # 4) Aggregation: pedidos ∪ pedidos_completados → sort → facet (slice + total)
+    # 4) Aggregation: pedidos ∪ pedidos_completados → sort → skip → limit+1
+    # Se pide page_size+1 para detectar has_more sin necesitar $facet ni $count,
+    # evitando que MongoDB procese todo el dataset en memoria.
     pipeline = [
         {"$match": filtro_base},
         {"$unionWith": {
@@ -2697,26 +2699,27 @@ async def pbi_documentos(
             "pipeline": [{"$match": filtro_base}]
         }},
         {"$sort": SON([("fecha_creacion", 1), ("_id", 1)])},
-        {"$facet": {
-            "items": [{"$skip": skip}, {"$limit": page_size}],
-            "total": [{"$count": "n"}]
-        }}
+        {"$skip": skip},
+        {"$limit": page_size + 1},
     ]
 
-    agg = list(coleccion_pedidos.aggregate(pipeline))
-    if not agg:
-        return {"page": page, "page_size": page_size, "count": 0, "has_more": False, "next_page": None, "items": []}
+    try:
+        raw = list(coleccion_pedidos.aggregate(pipeline))
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error en aggregation: {e}")
 
-    items = agg[0].get("items", [])
-    total = (agg[0].get("total", [{}])[0].get("n", 0)) if agg[0].get("total") else 0
+    has_more = len(raw) > page_size
+    items_raw = raw[:page_size]
 
-    # 5) _id → id (string)
+    # 5) _id → id (string), demás tipos BSON → serializables
     out: List[dict] = []
-    for d in items:
+    for d in items_raw:
         d["id"] = str(d.pop("_id"))
+        for k, v in d.items():
+            if hasattr(v, '__class__') and v.__class__.__name__ in ('Decimal128', 'ObjectId'):
+                d[k] = str(v)
         out.append(d)
 
-    has_more = (skip + len(out)) < total
     next_page = page + 1 if has_more else None
 
     return {
