@@ -1323,7 +1323,7 @@ async def v3_sin_paciente():
     }
 
 
-def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool = False) -> tuple:
+def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool = False, nombre_hoja: str = 'Ocupacion Rutas', sin_hoja_v3: bool = False) -> tuple:
     """
     Genera el Excel del cruce y retorna (bytes, nombre_archivo).
     Reutilizado por el endpoint de descarga y el envío por correo.
@@ -1382,7 +1382,7 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
 
     if not solo_sin_paciente:
         ws1 = wb.active
-        ws1.title = 'Ocupacion Rutas'
+        ws1.title = nombre_hoja
         ws1['A1'] = f'Cruce Pacientes ↔ V3  |  {_fmt_fecha_legible(fecha_calculo)}'
         ws1['A1'].font, ws1['A1'].alignment = title_font, center
         ws1.merge_cells('A1:K1')
@@ -1415,63 +1415,65 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
         for i, w in enumerate([14,18,28,14,32,10,6,18,12,12,12], 1):
             ws1.column_dimensions[get_column_letter(i)].width = w
         ws1.freeze_panes = 'A3'
-        ws2 = wb.create_sheet('V3 Sin Paciente')
+        if not sin_hoja_v3:
+            ws2 = wb.create_sheet('V3 Sin Paciente')
     else:
         ws2 = wb.active
         ws2.title = 'Pacientes no montados'
 
-    if solo_sin_paciente:
-        # ── Formato cliente: "Pacientes no montados" ───────────────────────────
-        total_sin = sum(len(r['registros']) for r in v3_sin_paciente_data)
-        ws2['A1'] = f'{total_sin} pedidos de V3 sin paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
-        ws2['A1'].font, ws2['A1'].alignment = title_font, center
-        ws2.merge_cells('A1:H1')
-        ws2.row_dimensions[1].height = 22
-        set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                 'Dirección', 'Teléfono', 'F. Pref SAP', 'F. Pref. Integra'])
-        fila2 = 3
-        for r in v3_sin_paciente_data:
-            for reg in r['registros']:
-                fecha_pref_str   = reg.get('fecha_preferente', '')
-                fecha_pref_dt    = _fecha_dt(fecha_pref_str)
-                f_pref_integra   = reg.get('f_pref_teorica', '')
-                fecha_pref_urgente = fecha_pref_dt is not None and fecha_pref_dt <= _limite
-                vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
-                        reg.get('cliente_destino',''), reg.get('direccion_destino',''),
-                        reg.get('telefono',''), fecha_pref_str, f_pref_integra]
-                for c, val in enumerate(vals, 1):
-                    font = red_font if fecha_pref_urgente and c == 7 else None
-                    style_cell(ws2.cell(row=fila2, column=c, value=val), urgente_fill, font)
-                fila2 += 1
-        for i, w in enumerate([14, 18, 16, 28, 32, 13, 12, 12], 1):
-            ws2.column_dimensions[get_column_letter(i)].width = w
-    else:
-        # ── Formato interno: "V3 Sin Paciente" (original) ─────────────────────
-        ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
-        ws2['A1'].font, ws2['A1'].alignment = title_font, center
-        ws2.merge_cells('A1:I1')
-        ws2.row_dimensions[1].height = 22
-        set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                 'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
-        fila2 = 3
-        for r in v3_sin_paciente_data:
-            for reg in r['registros']:
-                estado_v3      = reg.get('estado_pedido', '')
-                fecha_pref_str = reg.get('fecha_preferente', '')
-                fecha_pref_dt  = _fecha_dt(fecha_pref_str)
-                es_entregado_v3 = estado_v3 == 'ENTREGADO'
-                fill = entregado_fill if es_entregado_v3 else urgente_fill
-                fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
-                vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
-                        reg.get('cliente_destino',''), reg.get('direccion_destino',''),
-                        reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
-                for c, val in enumerate(vals, 1):
-                    font = red_font if fecha_pref_urgente and c == 8 else None
-                    style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
-                fila2 += 1
-        for i, w in enumerate([14, 18, 16, 28, 32, 13, 14, 12, 12], 1):
-            ws2.column_dimensions[get_column_letter(i)].width = w
-    ws2.freeze_panes = 'A3'
+    if not sin_hoja_v3:
+        if solo_sin_paciente:
+            # ── Formato cliente: "Pacientes no montados" ───────────────────────────
+            total_sin = sum(len(r['registros']) for r in v3_sin_paciente_data)
+            ws2['A1'] = f'{total_sin} pedidos de V3 sin paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+            ws2['A1'].font, ws2['A1'].alignment = title_font, center
+            ws2.merge_cells('A1:H1')
+            ws2.row_dimensions[1].height = 22
+            set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
+                                     'Dirección', 'Teléfono', 'F. Pref SAP', 'F. Pref. Integra'])
+            fila2 = 3
+            for r in v3_sin_paciente_data:
+                for reg in r['registros']:
+                    fecha_pref_str   = reg.get('fecha_preferente', '')
+                    fecha_pref_dt    = _fecha_dt(fecha_pref_str)
+                    f_pref_integra   = reg.get('f_pref_teorica', '')
+                    fecha_pref_urgente = fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                    vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
+                            reg.get('cliente_destino',''), reg.get('direccion_destino',''),
+                            reg.get('telefono',''), fecha_pref_str, f_pref_integra]
+                    for c, val in enumerate(vals, 1):
+                        font = red_font if fecha_pref_urgente and c == 7 else None
+                        style_cell(ws2.cell(row=fila2, column=c, value=val), urgente_fill, font)
+                    fila2 += 1
+            for i, w in enumerate([14, 18, 16, 28, 32, 13, 12, 12], 1):
+                ws2.column_dimensions[get_column_letter(i)].width = w
+        else:
+            # ── Formato interno: "V3 Sin Paciente" (original) ─────────────────────
+            ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+            ws2['A1'].font, ws2['A1'].alignment = title_font, center
+            ws2.merge_cells('A1:I1')
+            ws2.row_dimensions[1].height = 22
+            set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
+                                     'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
+            fila2 = 3
+            for r in v3_sin_paciente_data:
+                for reg in r['registros']:
+                    estado_v3      = reg.get('estado_pedido', '')
+                    fecha_pref_str = reg.get('fecha_preferente', '')
+                    fecha_pref_dt  = _fecha_dt(fecha_pref_str)
+                    es_entregado_v3 = estado_v3 == 'ENTREGADO'
+                    fill = entregado_fill if es_entregado_v3 else urgente_fill
+                    fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                    vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
+                            reg.get('cliente_destino',''), reg.get('direccion_destino',''),
+                            reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
+                    for c, val in enumerate(vals, 1):
+                        font = red_font if fecha_pref_urgente and c == 8 else None
+                        style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
+                    fila2 += 1
+            for i, w in enumerate([14, 18, 16, 28, 32, 13, 14, 12, 12], 1):
+                ws2.column_dimensions[get_column_letter(i)].width = w
+        ws2.freeze_panes = 'A3'
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -1507,28 +1509,38 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
         fecha_legible = _fmt_fecha_legible(fecha_calculo)
         calculado_str = f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else ''
 
-        # ── 1. Retraso operación: Solo pacientes con estado retraso ──
+        # ── 1. Retraso operación: Solo pacientes con estado retraso, filtrado por CEDI del usuario ──
         usuarios_retraso = list(col_usuarios.find(
             {'notificaciones_mc': 'retraso_operacion', 'correo': {'$exists': True, '$nin': [None, '']}},
-            {'correo': 1, '_id': 0}
+            {'correo': 1, 'regional': 1, 'perfil': 1, '_id': 0}
         ))
-        dest_retraso = [u['correo'] for u in usuarios_retraso if u.get('correo')]
-        if dest_retraso:
+        for usr in usuarios_retraso:
+            correo = usr.get('correo')
+            if not correo:
+                continue
+            es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
+            cedi_usr = (usr.get('regional') or '').strip().upper()
             cache_retraso = dict(cache)
             rutas_filtradas = []
             for ruta in cache.get('ocupacion_rutas', []):
+                if not es_admin and cedi_usr and (ruta.get('cedi') or '').upper() != cedi_usr:
+                    continue
                 pacientes_retraso = [
                     p for p in ruta.get('pacientes', [])
                     if p.get('estado_cruce', '').lower() in ('retraso operación', 'retraso operacion')
                 ]
                 if pacientes_retraso:
                     rutas_filtradas.append({**ruta, 'pacientes': pacientes_retraso})
+            if not rutas_filtradas:
+                logger.info(f'[cruce_email] Retraso-op: sin registros para {correo} (CEDI={cedi_usr})')
+                continue
             cache_retraso['ocupacion_rutas'] = rutas_filtradas
+            cache_retraso['v3_sin_paciente'] = []
             total_retraso = sum(len(r['pacientes']) for r in rutas_filtradas)
-            excel_bytes, nombre_archivo = _generar_excel_bytes(cache_retraso)
+            excel_bytes, nombre_archivo = _generar_excel_bytes(cache_retraso, nombre_hoja='Pacientes con Retraso', sin_hoja_v3=True)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
-                'to':      dest_retraso,
+                'to':      [correo],
                 'subject': f'Retrasos Operación — {fecha_legible} ({total_retraso})',
                 'html': (
                     f'<p>Se adjunta el reporte de <strong>Retrasos de Operación</strong> '
@@ -1538,33 +1550,50 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                 ),
                 'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
             })
-            logger.info(f'[cruce_email] Retraso-op enviado a {len(dest_retraso)}: {dest_retraso} ({total_retraso} registros)')
-        else:
+            logger.info(f'[cruce_email] Retraso-op enviado a {correo} (CEDI={cedi_usr}, admin={es_admin}, {total_retraso} registros)')
+        if not usuarios_retraso:
             logger.warning('[cruce_email] Sin destinatarios para retraso_operacion')
 
-        # ── 2. Sin cruce: Pacientes sin cruce + V3 sin paciente → usuarios + contactos CLIENTE_FMC ──
+        # ── 2. Sin cruce: Pacientes sin cruce + V3 sin paciente, filtrado por CEDI del usuario ──
         usuarios_sin_cruce = list(col_usuarios.find(
             {'notificaciones_mc': 'sin_cruce', 'correo': {'$exists': True, '$nin': [None, '']}},
-            {'correo': 1, '_id': 0}
+            {'correo': 1, 'regional': 1, 'perfil': 1, '_id': 0}
         ))
-        dest_sin_cruce = [u['correo'] for u in usuarios_sin_cruce if u.get('correo')]
-        if dest_sin_cruce:
+        for usr in usuarios_sin_cruce:
+            correo = usr.get('correo')
+            if not correo:
+                continue
+            es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
+            es_cliente_fmc = (usr.get('perfil') or '').upper() == 'CLIENTE_FMC'
+            ver_todo = es_admin or es_cliente_fmc
+            cedi_usr = (usr.get('regional') or '').strip().upper()
             cache_sc = dict(cache)
             rutas_sc = []
             for ruta in cache.get('ocupacion_rutas', []):
+                if not ver_todo and cedi_usr and (ruta.get('cedi') or '').upper() != cedi_usr:
+                    continue
                 pacientes_sc = [
                     p for p in ruta.get('pacientes', [])
                     if not p.get('en_v3', False)
                 ]
                 if pacientes_sc:
                     rutas_sc.append({**ruta, 'pacientes': pacientes_sc})
+            if not rutas_sc:
+                logger.info(f'[cruce_email] Sin-cruce: sin registros para {correo} (CEDI={cedi_usr})')
+                continue
             cache_sc['ocupacion_rutas'] = rutas_sc
+            # Filtrar v3_sin_paciente por CEDI si no es admin ni CLIENTE_FMC
+            if not ver_todo and cedi_usr:
+                cache_sc['v3_sin_paciente'] = [
+                    r for r in cache.get('v3_sin_paciente', [])
+                    if (r.get('cedi') or '').upper() == cedi_usr
+                ]
             total_sin_cruce = sum(len(r['pacientes']) for r in rutas_sc)
-            total_v3_sp = sum(len(r.get('registros', [])) for r in cache.get('v3_sin_paciente', []))
+            total_v3_sp = sum(len(r.get('registros', [])) for r in cache_sc.get('v3_sin_paciente', []))
             excel_sc, nombre_sc = _generar_excel_bytes(cache_sc)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
-                'to':      dest_sin_cruce,
+                'to':      [correo],
                 'subject': f'Sin Cruce + V3 Sin Paciente — {fecha_legible}',
                 'html': (
                     f'<p>Se adjunta el reporte generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
@@ -1577,8 +1606,8 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                 ),
                 'attachments': [{'filename': nombre_sc, 'content': list(excel_sc)}],
             })
-            logger.info(f'[cruce_email] Sin-cruce enviado a {len(dest_sin_cruce)}: {dest_sin_cruce} ({total_sin_cruce} sin cruce, {total_v3_sp} v3 sin paciente)')
-        else:
+            logger.info(f'[cruce_email] Sin-cruce enviado a {correo} (CEDI={cedi_usr}, admin={es_admin}, {total_sin_cruce} sin cruce, {total_v3_sp} v3 sin paciente)')
+        if not usuarios_sin_cruce:
             logger.warning('[cruce_email] Sin destinatarios para sin_cruce')
 
     except Exception as e:
