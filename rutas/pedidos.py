@@ -182,7 +182,7 @@ def estado_por_autorizacion(costo_real: float, costo_teorico: float):
     if diff <= 0:
         return ("PREAUTORIZADO", max(porc, 0.0))
 
-    if porc <= 10.0:
+    if porc <= 7.0:
         return ("REQUIERE AUTORIZACION COORDINADOR", porc)
 
     return ("REQUIERE AUTORIZACION CONTROL", porc)
