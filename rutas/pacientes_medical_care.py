@@ -1345,6 +1345,8 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
     from datetime import datetime as _dt, timedelta as _td
     _hoy = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
     _limite = _hoy + _td(days=5)
+    _mes_actual = _hoy.month
+    _anio_actual = _hoy.year
 
     def _fecha_dt(s):
         """Parsea 'YYYY-MM-DD' a datetime, retorna None si falla."""
@@ -1383,36 +1385,63 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
     if not solo_sin_paciente:
         ws1 = wb.active
         ws1.title = nombre_hoja
-        ws1['A1'] = f'Cruce Pacientes ↔ V3  |  {_fmt_fecha_legible(fecha_calculo)}'
+        ws1['A1'] = f'Pacientes SIN CRUCE (< 6 días hábiles, mes actual)  |  {_fmt_fecha_legible(fecha_calculo)}'
         ws1['A1'].font, ws1['A1'].alignment = title_font, center
-        ws1.merge_cells('A1:K1')
+        ws1.merge_cells('A1:F1')
         ws1.row_dimensions[1].height = 22
-        set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Estado',
-                                 'En V3', 'Estado Pedido', 'F. Pedido', 'F. Preferente', 'Similitud %'])
+        set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'F. Pref. Integra'])
+
+        # Calcular mañana para filtro de días hábiles
+        _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
         fila = 3
+        import logging
+        logger = logging.getLogger(__name__)
         for r in ocupacion_rutas_data:
             for p in r['pacientes']:
-                en_v3          = p.get('en_v3', False)
-                estado_pedido  = p.get('estado_pedido', '')
-                fecha_pref_str = p.get('fecha_preferente', '')
-                fecha_pref_dt  = _fecha_dt(fecha_pref_str)
-                es_entregado = en_v3 and estado_pedido == 'ENTREGADO'
-                es_rojo      = not es_entregado and (
-                    not en_v3 or
-                    estado_pedido == 'POR PROGRAMAR' or
-                    (fecha_pref_dt is not None and fecha_pref_dt <= _limite)
-                )
-                fill = entregado_fill if es_entregado else (urgente_fill if es_rojo else None)
+                # FILTRO 0: Solo pacientes SIN CRUCE (en_v3 = False)
+                if p.get('en_v3', False):
+                    continue  # Excluir pacientes ya cruzados
+
+                f_pref_teorica = p.get('f_pref_teorica', '')
+                paciente_nombre = p.get('paciente', '')
+                paciente_cedula = p.get('cedula', '')
+                ruta_nombre = r.get('ruta', '')
+
+                # Log para diagnóstico: pacientes que se excluyen
+                exclusion_reason = None
+
+                if not f_pref_teorica:
+                    exclusion_reason = 'sin f_pref_teorica'
+                else:
+                    # Usar _parsear_fecha_texto que acepta múltiples formatos (DD/MM/YYYY, YYYY-MM-DD, etc.)
+                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+                    if not f_pref_dt:
+                        exclusion_reason = f'fecha inválida: {f_pref_teorica}'
+                    elif f_pref_dt.month != _mes_actual or f_pref_dt.year != _anio_actual:
+                        exclusion_reason = f'mes diferente: {f_pref_dt.month}/{f_pref_dt.year} vs {_mes_actual}/{_anio_actual}'
+                    else:
+                        # FILTRO 2: Solo incluir si F. Pref. Integra < 6 días hábiles
+                        dias_habiles = _calcular_dias_habiles(_manana, f_pref_teorica)
+                        if dias_habiles >= 6:
+                            exclusion_reason = f'días hábiles >= 6: {dias_habiles}'
+
+                if exclusion_reason:
+                    logger.info(f"[Excel filtro] Excluido: {ruta_nombre} | {paciente_nombre} ({paciente_cedula}) | f_pref={f_pref_teorica} | {exclusion_reason}")
+                    continue  # Excluir según el motivo
+
+                # Determinar color de fondo según urgencia
+                fecha_pref_dt_urgente = _parsear_fecha_texto(f_pref_teorica)
+                es_rojo = fecha_pref_dt_urgente is not None and fecha_pref_dt_urgente <= _limite
+                fill = urgente_fill if es_rojo else None
+
                 vals = [r.get('cedi',''), r['ruta'], p['paciente'], p['cedula'],
-                        p.get('direccion_original',''), p.get('estado',''),
-                        'SÍ' if en_v3 else 'NO', estado_pedido,
-                        p.get('fecha_pedido',''), fecha_pref_str, p.get('similitud', 0)]
-                fecha_pref_urgente = not es_entregado and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                        p.get('direccion_original',''), f_pref_teorica]
+
                 for c, val in enumerate(vals, 1):
-                    font = red_font if fecha_pref_urgente and c == 10 else None
+                    font = red_font if es_rojo and c == 6 else None
                     style_cell(ws1.cell(row=fila, column=c, value=val), fill, font)
                 fila += 1
-        for i, w in enumerate([14,18,28,14,32,10,6,18,12,12,12], 1):
+        for i, w in enumerate([14,18,28,14,32,12], 1):
             ws1.column_dimensions[get_column_letter(i)].width = w
         ws1.freeze_panes = 'A3'
         if not sin_hoja_v3:
@@ -1424,54 +1453,89 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
     if not sin_hoja_v3:
         if solo_sin_paciente:
             # ── Formato cliente: "Pacientes no montados" ───────────────────────────
-            total_sin = sum(len(r['registros']) for r in v3_sin_paciente_data)
-            ws2['A1'] = f'{total_sin} pedidos de V3 sin paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+            ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
             ws2['A1'].font, ws2['A1'].alignment = title_font, center
-            ws2.merge_cells('A1:H1')
+            ws2.merge_cells('A1:F1')
             ws2.row_dimensions[1].height = 22
             set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                     'Dirección', 'Teléfono', 'F. Pref SAP', 'F. Pref. Integra'])
+                                     'Dirección', 'F. Pref. Integra'])
             fila2 = 3
+            # Calcular mañana para filtro de días hábiles
+            _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
+            total_sin_filtrado = 0
             for r in v3_sin_paciente_data:
                 for reg in r['registros']:
-                    fecha_pref_str   = reg.get('fecha_preferente', '')
-                    fecha_pref_dt    = _fecha_dt(fecha_pref_str)
-                    f_pref_integra   = reg.get('f_pref_teorica', '')
-                    fecha_pref_urgente = fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                    # FILTRO 1: Solo incluir si F. Pref. Integra existe y es del mes actual
+                    f_pref_integra = reg.get('f_pref_teorica', '')
+                    if not f_pref_integra:
+                        continue  # Excluir si no tiene fecha preferente teórica
+
+                    # Usar _parsear_fecha_texto que acepta múltiples formatos
+                    f_pref_dt = _parsear_fecha_texto(f_pref_integra)
+                    if not f_pref_dt or f_pref_dt.month != _mes_actual or f_pref_dt.year != _anio_actual:
+                        continue  # Excluir si no es del mes actual
+
+                    # FILTRO 2: Solo incluir si F. Pref. Integra < 6 días hábiles
+                    dias_habiles = _calcular_dias_habiles(_manana, f_pref_integra)
+                    if dias_habiles >= 6:
+                        continue  # Excluir si faltan 6 o más días hábiles
+
+                    total_sin_filtrado += 1
+                    fecha_pref_dt_urgente = _parsear_fecha_texto(f_pref_integra)
+                    es_rojo = fecha_pref_dt_urgente is not None and fecha_pref_dt_urgente <= _limite
+                    fill = urgente_fill if es_rojo else None
+
                     vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
-                            reg.get('cliente_destino',''), reg.get('direccion_destino',''),
-                            reg.get('telefono',''), fecha_pref_str, f_pref_integra]
+                            reg.get('cliente_destino',''), reg.get('direccion_destino',''), f_pref_integra]
+
                     for c, val in enumerate(vals, 1):
-                        font = red_font if fecha_pref_urgente and c == 7 else None
-                        style_cell(ws2.cell(row=fila2, column=c, value=val), urgente_fill, font)
+                        font = red_font if es_rojo and c == 6 else None
+                        style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
                     fila2 += 1
-            for i, w in enumerate([14, 18, 16, 28, 32, 13, 12, 12], 1):
+            # Actualizar título con el conteo filtrado
+            ws2['A1'] = f'{total_sin_filtrado} pedidos de V3 sin paciente (< 6 días hábiles, mes actual)  |  {_fmt_fecha_legible(fecha_calculo)}'
+            for i, w in enumerate([14, 18, 16, 28, 32, 12], 1):
                 ws2.column_dimensions[get_column_letter(i)].width = w
         else:
             # ── Formato interno: "V3 Sin Paciente" (original) ─────────────────────
-            ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+            ws2['A1'] = f'V3 Sin Paciente (< 6 días hábiles, mes actual)  |  {_fmt_fecha_legible(fecha_calculo)}'
             ws2['A1'].font, ws2['A1'].alignment = title_font, center
-            ws2.merge_cells('A1:I1')
+            ws2.merge_cells('A1:F1')
             ws2.row_dimensions[1].height = 22
             set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                     'Dirección', 'Teléfono', 'Estado Pedido', 'F. Preferente', 'Similitud %'])
+                                     'Dirección', 'F. Pref. Integra'])
             fila2 = 3
+            # Calcular mañana para filtro de días hábiles
+            _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
             for r in v3_sin_paciente_data:
                 for reg in r['registros']:
-                    estado_v3      = reg.get('estado_pedido', '')
-                    fecha_pref_str = reg.get('fecha_preferente', '')
-                    fecha_pref_dt  = _fecha_dt(fecha_pref_str)
-                    es_entregado_v3 = estado_v3 == 'ENTREGADO'
-                    fill = entregado_fill if es_entregado_v3 else urgente_fill
-                    fecha_pref_urgente = not es_entregado_v3 and fecha_pref_dt is not None and fecha_pref_dt <= _limite
+                    # FILTRO 1: Solo incluir si F. Pref. Integra existe y es del mes actual
+                    f_pref_integra = reg.get('f_pref_teorica', '')
+                    if not f_pref_integra:
+                        continue  # Excluir si no tiene fecha preferente teórica
+
+                    # Usar _parsear_fecha_texto que acepta múltiples formatos
+                    f_pref_dt = _parsear_fecha_texto(f_pref_integra)
+                    if not f_pref_dt or f_pref_dt.month != _mes_actual or f_pref_dt.year != _anio_actual:
+                        continue  # Excluir si no es del mes actual
+
+                    # FILTRO 2: Solo incluir si F. Pref. Integra < 6 días hábiles
+                    dias_habiles = _calcular_dias_habiles(_manana, f_pref_integra)
+                    if dias_habiles >= 6:
+                        continue  # Excluir si faltan 6 o más días hábiles
+
+                    fecha_pref_dt_urgente = _parsear_fecha_texto(f_pref_integra)
+                    es_rojo = fecha_pref_dt_urgente is not None and fecha_pref_dt_urgente <= _limite
+                    fill = urgente_fill if es_rojo else None
+
                     vals = [r.get('cedi',''), r['ruta'], reg.get('codigo_pedido',''),
-                            reg.get('cliente_destino',''), reg.get('direccion_destino',''),
-                            reg.get('telefono',''), estado_v3, fecha_pref_str, reg.get('similitud', 0)]
+                            reg.get('cliente_destino',''), reg.get('direccion_destino',''), f_pref_integra]
+
                     for c, val in enumerate(vals, 1):
-                        font = red_font if fecha_pref_urgente and c == 8 else None
+                        font = red_font if es_rojo and c == 6 else None
                         style_cell(ws2.cell(row=fila2, column=c, value=val), fill, font)
                     fila2 += 1
-            for i, w in enumerate([14, 18, 16, 28, 32, 13, 14, 12, 12], 1):
+            for i, w in enumerate([14, 18, 16, 28, 32, 12], 1):
                 ws2.column_dimensions[get_column_letter(i)].width = w
         ws2.freeze_panes = 'A3'
 
@@ -1555,6 +1619,11 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             logger.warning('[cruce_email] Sin destinatarios para retraso_operacion')
 
         # ── 2. Sin cruce: Pacientes sin cruce + V3 sin paciente, filtrado por CEDI del usuario ──
+        # NUEVA REGLA: Solo incluir registros con F. Pref. Integra < 6 días hábiles desde hoy Y del mes actual
+        hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        manana = (hoy + timedelta(days=1)).strftime('%Y-%m-%d')
+        mes_actual = hoy.month
+        anio_actual = hoy.year
         usuarios_sin_cruce = list(col_usuarios.find(
             {'notificaciones_mc': 'sin_cruce', 'correo': {'$exists': True, '$nin': [None, '']}},
             {'correo': 1, 'regional': 1, 'perfil': 1, '_id': 0}
@@ -1576,20 +1645,51 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                     p for p in ruta.get('pacientes', [])
                     if not p.get('en_v3', False)
                 ]
-                if pacientes_sc:
-                    rutas_sc.append({**ruta, 'pacientes': pacientes_sc})
+                # FILTRO POR FECHA: Solo pacientes con F. Pref. Integra < 6 días hábiles Y del mes actual
+                pacientes_sc_filtrados = []
+                for p in pacientes_sc:
+                    f_pref_teorica = p.get('f_pref_teorica', '')
+                    if not f_pref_teorica:
+                        continue  # Excluir si no tiene fecha preferente teórica
+
+                    # Usar _parsear_fecha_texto que acepta múltiples formatos
+                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+                    if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
+                        continue  # Excluir si no es del mes actual
+
+                    dias_habiles = _calcular_dias_habiles(manana, f_pref_teorica)
+                    if dias_habiles < 6:  # Menos de 6 días hábiles desde mañana
+                        pacientes_sc_filtrados.append(p)
+                if pacientes_sc_filtrados:
+                    rutas_sc.append({**ruta, 'pacientes': pacientes_sc_filtrados})
             if not rutas_sc:
                 logger.info(f'[cruce_email] Sin-cruce: sin registros para {correo} (CEDI={cedi_usr})')
                 continue
             cache_sc['ocupacion_rutas'] = rutas_sc
-            # Filtrar v3_sin_paciente por CEDI si no es admin ni CLIENTE_FMC
-            if not ver_todo and cedi_usr:
-                cache_sc['v3_sin_paciente'] = [
-                    r for r in cache.get('v3_sin_paciente', [])
-                    if (r.get('cedi') or '').upper() == cedi_usr
-                ]
+            # Filtrar v3_sin_paciente por CEDI y por fecha < 6 días hábiles Y del mes actual
+            v3_sp_filtrado = []
+            for r in cache.get('v3_sin_paciente', []):
+                if not ver_todo and cedi_usr and (r.get('cedi') or '').upper() != cedi_usr:
+                    continue
+                registros_filtrados = []
+                for reg in r.get('registros', []):
+                    f_pref_teorica = reg.get('f_pref_teorica', '')
+                    if not f_pref_teorica:
+                        continue  # Excluir si no tiene fecha preferente teórica
+
+                    # Usar _parsear_fecha_texto que acepta múltiples formatos
+                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+                    if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
+                        continue  # Excluir si no es del mes actual
+
+                    dias_habiles = _calcular_dias_habiles(manana, f_pref_teorica)
+                    if dias_habiles < 6:  # Menos de 6 días hábiles desde mañana
+                        registros_filtrados.append(reg)
+                if registros_filtrados:
+                    v3_sp_filtrado.append({**r, 'registros': registros_filtrados})
+            cache_sc['v3_sin_paciente'] = v3_sp_filtrado
             total_sin_cruce = sum(len(r['pacientes']) for r in rutas_sc)
-            total_v3_sp = sum(len(r.get('registros', [])) for r in cache_sc.get('v3_sin_paciente', []))
+            total_v3_sp = sum(len(r.get('registros', [])) for r in v3_sp_filtrado)
             excel_sc, nombre_sc = _generar_excel_bytes(cache_sc)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
@@ -1599,8 +1699,8 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                     f'<p>Se adjunta el reporte generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
                     f'<p>El archivo contiene dos hojas:</p>'
                     f'<ul>'
-                    f'<li><strong>Pacientes sin cruce</strong>: {total_sin_cruce} pacientes no han sido tramitados por parte de FMC.</li>'
-                    f'<li><strong>V3 Sin Paciente</strong>: {total_v3_sp} pedidos en la V3 de los cuales no tenemos información del paciente.</li>'
+                    f'<li><strong>Pacientes sin cruce</strong>: {total_sin_cruce} pacientes no han sido tramitados por parte de FMC (F. Pref. Integra < 6 días hábiles, mes actual).</li>'
+                    f'<li><strong>V3 Sin Paciente</strong>: {total_v3_sp} pedidos en la V3 de los cuales no tenemos información del paciente (F. Pref. Integra < 6 días hábiles, mes actual).</li>'
                     f'</ul>'
                     f'<p>Saludos,<br>IntegrApp</p>'
                 ),

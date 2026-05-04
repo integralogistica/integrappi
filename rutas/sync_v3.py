@@ -3,7 +3,7 @@ Endpoints para controlar la sincronización programada V3.
 """
 from fastapi import APIRouter, HTTPException
 from typing import List
-from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3, EXCEL_PATH
+from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 from bd.bd_cliente import bd_cliente
 
 _bd = bd_cliente['integra']
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/sync-v3", tags=["Sync V3"])
 # ── Configuración ────────────────────────────────────────────────────────────
 # horarios: lista de strings "HH:MM" — el loop ejecuta el sync cuando la hora coincide
 config = {
-    "horarios": ["15:52"],  # ← modifica aquí o via POST /sync-v3/config
+    "horarios": ["14:36"],  # ← modifica aquí o via POST /sync-v3/config
     "activo": True,
 }
 
@@ -37,7 +37,11 @@ def actualizar_ultimo_resultado(resultado: dict):
 @router.get("/config")
 def obtener_config():
     """Devuelve la configuración actual del sync."""
-    return {**config, "excel_path": EXCEL_PATH}
+    return {
+        **config,
+        "fuente": "API Siscore V3",
+        "endpoint": "https://integra-wms.appsiscore.com/app/ws/informe_v3.php"
+    }
 
 
 @router.post("/config")
@@ -61,9 +65,9 @@ def actualizar_config(horarios: List[str] = None, activo: bool = None):
 
 
 @router.post("/ejecutar")
-def ejecutar_manual():
+async def ejecutar_manual():
     """Dispara el sync manualmente ahora mismo."""
-    resultado = ejecutar_sync_v3()
+    resultado = await ejecutar_sync_v3()
     actualizar_ultimo_resultado(resultado)
     return resultado
 

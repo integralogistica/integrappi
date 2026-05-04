@@ -75,7 +75,7 @@ async def _loop_sync_v3():
             ultimo_ejecutado = ahora
             logger.info(f"[sync_v3] Ejecutando sync programado a las {ahora}")
             try:
-                resultado = await asyncio.to_thread(ejecutar_sync_v3)
+                resultado = await ejecutar_sync_v3()
                 actualizar_ultimo_resultado(resultado)
             except Exception as e:
                 logger.error(f"[sync_v3] Error en sync: {e}")

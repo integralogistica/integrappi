@@ -420,13 +420,16 @@ Sistema de gestión de pedidos específico para Medical Care con carga masiva de
 
 ### Sincronización Automática V3 (`/sync-v3`)
 
-Sistema de sincronización periódica que simula el consumo de una API leyendo un archivo Excel local (`api_v3.xlsx`) y reemplazando la colección `v3` en MongoDB. Diseñado para cuando la API real esté disponible: solo se cambia la fuente en `Funciones/sync_api_v3.py`.
+Sistema de sincronización periódica que consume directamente del **API de Siscore V3** y reemplaza la colección `v3` en MongoDB. El cálculo del rango de fechas es automático (desde el 1er día de hace 2 meses hasta hoy).
 
 **Funcionamiento:**
 - Al iniciar el servidor FastAPI, arranca una tarea de fondo (`asyncio`) que revisa cada 30 segundos si la hora actual coincide con alguno de los horarios configurados
-- Cuando coincide: borra todos los pedidos actuales de la colección `v3` e inserta los nuevos del Excel/API
+- Cuando coincide: consulta el API de Siscore, borra todos los pedidos actuales de la colección `v3` e inserta los nuevos
 - El chequeo cada 30s es solo comparación de strings en memoria — sin costo de red ni base de datos
-- La ejecución real (Excel + MongoDB) ocurre máximo N veces al día según los horarios definidos
+- La ejecución real (API + MongoDB) ocurre máximo N veces al día según los horarios definidos
+- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
+  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
+  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
 
 **Configuración de horarios** en `rutas/sync_v3.py`:
 ```python
@@ -438,24 +441,34 @@ config = {
 
 **Zona horaria:** `pytz America/Bogota` — funciona correctamente en Render (que corre en UTC)
 
-**Alias de columnas:** acepta `Fecha Solicitada` como equivalente de `Fecha Preferente`
+**Integración con API de Siscore V3:**
+- **Endpoint**: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
+- **Método**: POST JSON con autenticación vía token fijo
+- **Token**: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
+- **Parámetros**: `fecha_inicial`, `fecha_final`, `centro_distribucion` ("TODOS"), `incluir_pedidos_manuales` ("NO")
 
-**Filtro de clientes institucionales:** el sync aplica el mismo filtro que la carga manual — registros con palabras institucionales en `Cliente Destino` (DAVITA, VANTIVE, CLINICA, etc.) son excluidos antes de insertar en MongoDB. El conteo de excluidos se devuelve en `filtrados` en el resultado del sync.
+**Filtros aplicados** (igual que carga manual):
+1. Solo registros del mes actual según "Fecha Solicitada" (fecha_preferente)
+2. Exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, FARMA, HOSP, etc.)
+- Los registros filtrados se cuentan y se devuelven en `filtrados` en la respuesta del sync
 
 **Endpoints:**
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| GET | `/sync-v3/config` | Ver horarios configurados y ruta del Excel |
+| GET | `/sync-v3/config` | Ver horarios configurados y fuente de datos (API Siscore) |
 | POST | `/sync-v3/config?activo=false` | Pausar o reanudar el sync |
 | POST | `/sync-v3/config` + body `{"horarios":["06:00","14:00"]}` | Cambiar horarios en caliente (sin reiniciar) |
 | POST | `/sync-v3/ejecutar` | Disparar sync manualmente ahora mismo |
 | GET | `/sync-v3/estado` | Resultado del último sync: timestamp, exitosos, errores, segundos |
 
 **Archivos:**
-- `Funciones/sync_api_v3.py` — lógica core: lectura Excel, normalización, reemplazo en MongoDB
+- `Funciones/sync_api_v3.py` — lógica core: consulta API Siscore, mapeo de campos, normalización, reemplazo en MongoDB
 - `rutas/sync_v3.py` — endpoints y configuración de horarios
-- `api_v3.xlsx` — archivo Excel que simula la API (debe estar en la raíz de `integrappi/`)
+
+**Notificación WhatsApp:**
+- Tras cada sync exitoso, se envía automáticamente una notificación vía WhatsApp si `WHATSAPP_NOTIFY_NUMBER` está configurado
+- Usa la plantilla `confirmar_actualización` con el resumen de resultados
 
 ### Reportes y Análisis
 - **Reporte de uso de WhatsApp**: Estadísticas generales de interacciones
@@ -734,13 +747,54 @@ integrappi/
 ### Pedidos V3 Medical Care (`/pedidos-v3`)
 | Método | Ruta | Descripción |
 |---|---|---|
-| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE |
+| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE desde Excel |
+| POST | `/pedidos-v3/cargar-desde-api-stream?usuario=USUARIO` | **Carga masiva desde API de Siscore con progreso SSE (reemplaza Excel)** |
 | GET | `/pedidos-v3/?skip=0&limit=100` | Listar pedidos con paginación |
 | POST | `/pedidos-v3/?usuario=USUARIO` | Crear pedido individual |
 | PUT | `/pedidos-v3/{id}?usuario=USUARIO` | Actualizar pedido |
 | DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
 | GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
 | DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
+
+**Endpoint `/cargar-desde-api-stream` — Carga desde API de Siscore V3:**
+- **Endpoint**: `POST /pedidos-v3/cargar-desde-api-stream?usuario=USUARIO`
+- **Propósito**: Cargar pedidos V3 directamente desde el API de Siscore, reemplazando la carga manual de Excel
+- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
+  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
+  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
+- **Integración con Siscore**:
+  - Endpoint: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
+  - Método: POST con autenticación vía token fijo
+  - Token: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
+- **Progreso en tiempo real via SSE**:
+  - `stage: 'calculating'` - Calculando rango de fechas
+  - `stage: 'fetching'` - Consultando API de Siscore
+  - `stage: 'processing'` - Procesando registros (actualización cada 50)
+  - `stage: 'saving'` - Guardando en MongoDB
+  - `stage: 'complete'` - Carga completada con estadísticas finales
+- **Mapeo de campos de Siscore a MongoDB**:
+  - `Codigo Pedido` → `codigo_pedido`
+  - `Codigo Cliente Destino` → `codigo_cliente_destino`
+  - `Cliente Destino` → `cliente_destino` (normalizado)
+  - `Direccion Destino` → `direccion_destino` (normalizado)
+  - `Divipola` → `divipola`
+  - `Telefono` → `telefono` (normalizado)
+  - `Fecha Pedido` → `fecha_pedido` (YYYY-MM-DD HH:MM:SS → DD/MM/YYYY)
+  - `Fecha Solicitada` → `fecha_preferente` (YYYY-MM-DD → DD/MM/YYYY)
+  - `Fecha Entrega` → `fecha_entrega` (YYYY-MM-DD → DD/MM/YYYY)
+  - `Estado Pedido` → `estado_pedido`
+  - `Piezas` → `piezas`
+  - `Peso Real` → `peso_real`
+  - `Bodega Origen` → `bodega_origen`
+  - `Ruta` → `ruta`
+  - `Municipio Destino` → `municipio_destino`
+- **Filtros aplicados** (igual que carga Excel):
+  1. Solo registros del mes actual según "Fecha Solicitada" (fecha_preferente)
+  2. Exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, FARMA, HOSP, etc.)
+- **Normalización de datos**: Igual que carga Excel (cliente_destino, direccion_destino, telefono)
+- **Reemplazo de colección**: Elimina todos los pedidos anteriores antes de insertar los nuevos
+- **Manejo de errores**: Try-catch específico para errores de conexión HTTP, validación de respuesta API
+- **Respuesta final**: Incluye `registros_insertados`, `registros_filtrados`, `rango_fechas`, `tiempo_segundos`
 
 ### Debug (`/debug`, `/debug-siscore`)
 | Método | Ruta | Descripción |
@@ -760,6 +814,21 @@ Sistema de manifiestos y pagos de la operación logística. Se consulta vía RES
 
 ### Siscore
 Sistema de rastreo de guías vía SOAP/XML. Se consulta el historial de movimientos de una guía y se obtienen imágenes de trazabilidad. Soporta proxy para redes restringidas.
+
+**API de Informes V3 (Pedidos Medical Care):**
+- **Endpoint**: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
+- **Método**: POST con autenticación vía token fijo
+- **Token**: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
+- **Parámetros**:
+  - `token` (required): Token fijo de autenticación
+  - `fecha_inicial`: Fecha inicial en formato YYYY-MM-DD
+  - `fecha_final`: Fecha final en formato YYYY-MM-DD
+  - `centro_distribucion`: "TODOS" o centro específico
+  - `incluir_pedidos_manuales`: "SI" o "NO"
+  - `pedido_especifico`: Número de pedido específico (opcional)
+- **Respuesta**: JSON con `ok`, `total`, `filtros` y `data` (arreglo de pedidos)
+- **Campos devueltos**: Codigo Pedido, Cliente Destino, Direccion Destino, Divipola, Telefono, Fecha Pedido, Fecha Solicitada, Fecha Entrega, Estado Pedido, Piezas, Peso Real, Bodega Origen, Ruta, Municipio Destino, entre otros
+- **Uso en Integra**: Endpoint `POST /pedidos-v3/cargar-desde-api-stream` consume esta API para cargar pedidos V3 automáticamente
 
 ### WhatsApp Cloud API (Meta)
 Chatbot con máquina de estados para tres tipos de usuario:
@@ -875,6 +944,42 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 
 ## Historial de cambios relevantes
 
+### Mayo 2026 — Integración con API de Siscore V3 para carga automática de pedidos
+
+**`rutas/pedidos_v3.py` — Nuevo endpoint `/cargar-desde-api-stream`:**
+- **Endpoint**: `POST /pedidos-v3/cargar-desde-api-stream?usuario=USUARIO`
+- **Propósito**: Cargar pedidos V3 directamente desde el API de Siscore, reemplazando la carga manual de Excel
+- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
+  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
+  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
+- **Integración con Siscore**:
+  - Endpoint: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
+  - Método: POST JSON con autenticación vía token fijo
+  - Token: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
+- **Progreso en tiempo real via SSE**: stages 'calculating', 'fetching', 'processing', 'saving', 'complete'
+- **Mapeo de campos**: `Codigo Pedido`, `Cliente Destino`, `Direccion Destino`, `Fecha Solicitada` (→ `fecha_preferente`), `Ruta`, etc.
+- **Filtros aplicados**: mes actual + exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, etc.)
+- **Normalización de datos**: Igual que carga Excel (cliente_destino, direccion_destino, telefono)
+
+**`Funciones/sync_api_v3.py` — Sync automático ahora consume de API Siscore:**
+- **Antes**: Leía archivo Excel local (`api_v3.xlsx`)
+- **Ahora**: Consume directamente del API de Siscore V3
+- **Misma lógica de filtros**: mes actual + exclusión de clientes institucionales
+- **Mapeo automático de campos**: Usa las mismas funciones que el endpoint manual (`_mapear_campos_siscore`)
+- **Notificación WhatsApp**: Envía resumen tras cada sync exitoso si `WHATSAPP_NOTIFY_NUMBER` está configurado
+
+**Funciones auxiliares agregadas en `pedidos_v3.py`:**
+- `_calcular_rango_fechas()`: Calcula desde el 1er día de hace 2 meses hasta hoy usando `dateutil.relativedelta`
+- `_convertir_fecha_siscore_a_dd_mm_yyyy()`: Convierte fechas de Siscore (YYYY-MM-DD) a DD/MM/YYYY
+- `_mapear_campos_siscore()`: Mapea campos de la respuesta de Siscore al schema de MongoDB con filtros
+- `_consultar_api_siscore_v3()`: Consulta asíncrona al API de Siscore con httpx
+
+**Archivos modificados:**
+- `integrappi/rutas/pedidos_v3.py`: Nuevo endpoint + funciones auxiliares
+- `integrappi/Funciones/sync_api_v3.py`: Ahora consume de API Siscore (eliminada dependencia de Excel)
+- `integrappi/rutas/sync_v3.py`: Endpoint `/config` actualizado para mostrar fuente "API Siscore V3"
+- `integrappi/README.md`: Documentación actualizada
+
 ### Abril 2026 — Recuperación de clave, notificaciones filtradas y perfil CLIENTE_FMC
 
 **`rutas/baseusuarios.py` — Recuperación de contraseña:**
@@ -882,10 +987,12 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 - Nuevo endpoint `POST /baseusuarios/recuperar/confirmar`: valida código contra BD, actualiza contraseña del usuario.
 - Modelos Pydantic: `RecuperarBaseInput(correo)` y `ConfirmarBaseInput(correo, codigo, nuevaClave)`.
 
-**`rutas/pacientes_medical_care.py` — Notificaciones filtradas por tipo:**
-- `retraso_operacion`: el Excel adjunto contiene solo pacientes con `estado_cruce` en `("retraso operación", "retraso fmc", "retraso operacion")`.
-- `sin_cruce`: el Excel adjunto contiene 2 hojas — pacientes sin cruce (`en_v3 = False`) y pedidos V3 sin paciente (`v3_sin_paciente`).
-- Subject del correo incluye conteo de registros por tipo.
+**`rutas/pacientes_medical_care.py` — Notificaciones filtradas por tipo y CEDI:**
+- Correos individuales por usuario (ya no se envía uno masivo a todos).
+- `retraso_operacion`: Excel con una sola hoja "Pacientes con Retraso" — solo pacientes con `estado_cruce = "retraso operación"`. Sin hoja "V3 Sin Paciente".
+- `sin_cruce`: Excel con 2 hojas — pacientes sin cruce (`en_v3 = False`) y pedidos V3 sin paciente. Texto: "pacientes no han sido tramitados por parte de FMC" y "pedidos en la V3 de los cuales no tenemos información del paciente".
+- **Filtro por CEDI/regional**: los correos se filtran por el campo `regional` del usuario. ADMIN ve todo. CLIENTE_FMC también ve todo (son clientes externos). Los demás perfiles solo ven su CEDI.
+- Subject del correo incluye conteo de registros.
 
 **Perfil CLIENTE_FMC en `baseusuarios.py`:**
 - Usuarios con perfil `CLIENTE_FMC` tienen `clave = "SIN_ACCESO"` y `clientes = []` — no pueden hacer login en el sistema.

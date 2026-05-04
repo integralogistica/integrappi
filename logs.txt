@@ -1,121 +1,57 @@
-let
-  BaseRoot  = "https://integrappi-dvmh.onrender.com",
-  PageSize  = 5000000,
-  FechaDesde = Date.ToText(Date.From(RangeStart), "yyyy-MM-dd"),
-  FechaHasta = Date.ToText(Date.From(RangeEnd),   "yyyy-MM-dd"),
-  Regionales = null,
-
-  // Pide una página y devuelve {Items, HasMore}
-  Fetch = (p as number) as record =>
-    let
-      q =
-        if Regionales = null then
-          [ fecha_desde = FechaDesde, fecha_hasta = FechaHasta,
-            page = Text.From(p), page_size = Text.From(PageSize) ]
-        else
-          [ fecha_desde = FechaDesde, fecha_hasta = FechaHasta,
-            page = Text.From(p), page_size = Text.From(PageSize),
-            regionales = Regionales ],
-
-      src = Json.Document(
-              Web.Contents(
-                BaseRoot,
-                [
-                  RelativePath = "pedidos/pbi/documentos",
-                  Query       = q,
-                  Timeout     = #duration(0,0,180,0)
-                ]
-              )
-            ),
-      items    = try src[items]   otherwise {},
-      hasMore0 = try src[has_more] otherwise null,
-      // Fallback: si no viene has_more, asumimos que hay más si items == PageSize
-      hasMore  = if hasMore0 is logical then hasMore0 else List.Count(items) = PageSize
-    in
-      [Items = items, HasMore = hasMore],
-
-  // Genera lista de listas (items por página)
-  PagesItems =
-    List.Generate(
-      () => [p = 1, r = Fetch(1)],
-      each [p] = 1 or [r][HasMore],
-      each [p = [p] + 1, r = Fetch([p])],
-      each [r][Items]
-    ),
-
-  // Une todas las listas de records en una sola
-  AllItems   = if List.Count(PagesItems) = 0 then {} else List.Combine(PagesItems),
-  ItemsTable = Table.FromList(AllItems, Splitter.SplitByNothing(), {"items"}),
-
-  // Columnas a expandir (mismas que en tu versión)
-  Cols = {
-    "fecha_creacion","nit_cliente","origen","destino","num_cajas","num_kilos","num_kilos_sicetac",
-    "tipo_viaje","tipo_vehiculo","tipo_vehiculo_sicetac","vehiculo","valor_flete","valor_declarado",
-    "planilla_siscore","ubicacion_cargue","direccion_cargue","ubicacion_descargue","direccion_descargue",
-    "observaciones","seguro","desvio","cargue_descargue","descargue_kabi","punto_adicional","total_puntos",
-    "flete_real","destino_real","creado_por","regional","consecutivo_pedido","consecutivo_integrapp",
-    "consecutivo_vehiculo","valor_flete_sistema","total_flete_vehiculo","total_desvio_vehiculo",
-    "total_cajas_vehiculo","total_kilos_vehiculo","total_kilos_vehiculo_sicetac","total_puntos_vehiculo",
-    "punto_adicional_teorico","cargue_descargue_teorico","costo_teorico_vehiculo","estado",
-    "porcentaje_sobre_teorico","autorizado_por","fecha_autorizacion","diferencia_flete","fecha_fusion",
-    "observacion_fusion","usuario_fusion","Observaciones_ajustes","fecha_ajuste_destino","fecha_division",
-    "observacion_division","total_cargue_descargue","total_cargue_per_juridica","total_descargue_kabi",
-    "total_flete_solicitado","total_punto_adicional","usr_solicita_ajuste","usuario_ajusta_destino",
-    "usuario_division","observaciones_aprobador","fecha_pedido_actualizado_vulcano","numero_pedido",
-    "pedido_actualizado_vulcano_por","id"
+{
+  "ok": true,
+  "total": 59,
+  "filtros": {
+    "fecha_inicial": "2026-05-01",
+    "fecha_final": "2026-05-04",
+    "centro_distribucion": "TODOS",
+    "incluir_pedidos_manuales": "SI",
+    "pedido": null
   },
-
-  // EXPANDIR (4 argumentos; los faltantes quedan null)
-  Expanded = Table.ExpandRecordColumn(ItemsTable, "items", Cols, Cols),
-
-  // fecha_creacion tolerante
-  TFecha =
-    if List.Contains(Table.ColumnNames(Expanded), "fecha_creacion") then
-      Table.TransformColumns(
-        Expanded,
-        {{"fecha_creacion", each try DateTime.FromText(_) otherwise null, type nullable datetime}}
-      )
-    else
-      Expanded,
-
-  // Garantizar Observaciones_ajustes como texto y "" si null
-  TObsPrep =
-    if List.Contains(Table.ColumnNames(TFecha), "Observaciones_ajustes")
-    then TFecha
-    else Table.AddColumn(TFecha, "Observaciones_ajustes", each null),
-
-  TObsNullToBlank =
-    Table.ReplaceValue(TObsPrep, null, "", Replacer.ReplaceValue, {"Observaciones_ajustes"}),
-
-  TObsText = Table.TransformColumnTypes(TObsNullToBlank, {{"Observaciones_ajustes", type text}}),
-
-  Output = Table.Buffer(TObsText),
-
-  #"Tipo cambiado" = Table.TransformColumnTypes(
-    Output,
+  "data": [
     {
-      {"total_puntos", type number}, {"punto_adicional", type number}, {"descargue_kabi", type number},
-      {"cargue_descargue", type number}, {"flete_real", type number}, {"consecutivo_pedido", type text},
-      {"valor_flete_sistema", type number}, {"total_flete_vehiculo", type number}, {"total_desvio_vehiculo", type number},
-      {"total_cajas_vehiculo", type number}, {"total_kilos_vehiculo", type number}, {"total_kilos_vehiculo_sicetac", type number},
-      {"total_puntos_vehiculo", type number}, {"punto_adicional_teorico", type number}, {"cargue_descargue_teorico", type number},
-      {"costo_teorico_vehiculo", type number}, {"porcentaje_sobre_teorico", type number}, {"diferencia_flete", type number},
-      {"observacion_fusion", type text}, {"usuario_fusion", type text}, {"Observaciones_ajustes", type text},
-      {"total_cargue_per_juridica", type number}, {"total_cargue_descargue", type number}, {"total_descargue_kabi", type number},
-      {"total_flete_solicitado", type number}, {"total_punto_adicional", type number}, {"usr_solicita_ajuste", type text},
-      {"usuario_ajusta_destino", type text}, {"usuario_division", type text}, {"observaciones_aprobador", type text},
-      {"id", type text}, {"pedido_actualizado_vulcano_por", type text}, {"numero_pedido", type text}
+      "": "https://integra.appsiscore.com/app/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xtransaccion.php?guia=3537282041",
+      "Codigo Interno": "3537282041",
+      "Codigo Pedido": "3537282041",
+      "Codigo Empresa": "FMC",
+      "Nombre Linea Distribucion": "MASIVOS",
+      "Cliente Origen": "FRESENIUS MEDICAL CARE",
+      "Departamento Origen": "SANTANDER",
+      "Municipio Origen": "BUCARAMANGA",
+      "Codigo Cliente Destino": "0920229955",
+      "Grupo": "CLIENTES PRODUCTO",
+      "Cliente Destino": "Davita Colombia S.A.S U.R. Cabecera",
+      "Tercero": "",
+      "Direccion Destino": "Cll.  54 # 33-45 piso 1",
+      "Divipola": "68001000",
+      "Departamento Destino": "SANTANDER",
+      "Municipio Destino": "BUCARAMANGA",
+      "Telefono": "",
+      "Fecha Pedido": "2026-05-04 11:50:20",
+      "Fecha Solicitada": "2026-05-15",
+      "Fecha Entrega": null,
+      "Estado Pedido": "",
+      "Novedad": "",
+      "Piezas": null,
+      "Neveras": "0",
+      "Contenedores": "0",
+      "Peso Real": "0",
+      "Peso Volumetrico": "0",
+      "Servicio": "NORMAL",
+      "Bodega Origen": "CO06",
+      "Bodega Destino": "CO06",
+      "Bodega Actual": "CO06",
+      "Fecha Contabilizacion": "2026-05-15",
+      "Cajas Fraccionadas": null,
+      "Cajas SL100": "0",
+      "Factura": null,
+      "S.Distribucion": null,
+      "Observaciones": null,
+      "Costo": null,
+      "F_Estimada": "2026-05-05",
+      "Fecha Contingencia": "0000-00-00",
+      "Planilla": null,
+      "Ruta": "URBANO BUCARAMANGA"
     }
-  ),
-
-  #"Personalizada agregada"  = Table.AddColumn(#"Tipo cambiado",  "Necesito autorizacion", each if [diferencia_flete] > 0 then "Si" else "No"),
-  #"Personalizada agregada1" = Table.AddColumn(#"Personalizada agregada", "Sobrecosto", each if [diferencia_flete] > 0 then [diferencia_flete] else 0),
-    #"Columna condicional agregada" = Table.AddColumn(#"Personalizada agregada1", "Ahorro", each if [diferencia_flete] < 0 then [diferencia_flete] else 0),
-  #"Tipo cambiado1"          = Table.TransformColumnTypes(#"Columna condicional agregada",{{"Necesito autorizacion", type text}, {"Sobrecosto", type number}, {"Ahorro", type number}}),
-  #"Valor reemplazado"       = Table.ReplaceValue(#"Tipo cambiado1", "", "sin definir", Replacer.ReplaceValue, {"Observaciones_ajustes"}),
-    #"Tipo cambiado2" = Table.TransformColumnTypes(#"Valor reemplazado",{{"num_cajas", type number}, {"num_kilos", type number}}),
-    #"Columna condicional agregada1" = Table.AddColumn(#"Tipo cambiado2", "capacidad", each if [tipo_vehiculo_sicetac] = "NHR" then 2300 else if [tipo_vehiculo_sicetac] = "TURBO" then 4500 else if [tipo_vehiculo_sicetac] = "NIES" then 6100 else if [tipo_vehiculo_sicetac] = "SENCILLO" then 8200 else if [tipo_vehiculo_sicetac] = "PATINETA" then 17000 else 32000),
-    #"Tipo cambiado3" = Table.TransformColumnTypes(#"Columna condicional agregada1",{{"capacidad", type number}}),
-    #"Columnas reordenadas" = Table.ReorderColumns(#"Tipo cambiado3",{"fecha_creacion", "nit_cliente", "origen", "destino", "num_cajas", "num_kilos", "capacidad","num_kilos_sicetac", "tipo_viaje", "tipo_vehiculo", "tipo_vehiculo_sicetac", "vehiculo", "valor_flete", "valor_declarado", "planilla_siscore", "ubicacion_cargue", "direccion_cargue", "ubicacion_descargue", "direccion_descargue", "observaciones", "seguro", "desvio", "cargue_descargue", "descargue_kabi", "punto_adicional", "total_puntos", "flete_real", "destino_real", "creado_por", "regional", "consecutivo_pedido", "consecutivo_integrapp", "consecutivo_vehiculo", "valor_flete_sistema", "total_flete_vehiculo", "total_desvio_vehiculo", "total_cajas_vehiculo", "total_kilos_vehiculo", "total_kilos_vehiculo_sicetac", "total_puntos_vehiculo", "punto_adicional_teorico", "cargue_descargue_teorico", "costo_teorico_vehiculo", "estado", "porcentaje_sobre_teorico", "autorizado_por", "fecha_autorizacion", "diferencia_flete", "fecha_fusion", "observacion_fusion", "usuario_fusion", "Observaciones_ajustes", "fecha_ajuste_destino", "fecha_division", "observacion_division", "total_cargue_descargue", "total_cargue_per_juridica", "total_descargue_kabi", "total_flete_solicitado", "total_punto_adicional", "usr_solicita_ajuste", "usuario_ajusta_destino", "usuario_division", "observaciones_aprobador", "fecha_pedido_actualizado_vulcano",  "numero_pedido", "pedido_actualizado_vulcano_por", "id", "Necesito autorizacion", "Sobrecosto", "Ahorro"})
-in
-  #"Columnas reordenadas"
+  ]
+}

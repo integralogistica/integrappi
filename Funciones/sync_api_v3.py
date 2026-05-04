@@ -1,20 +1,19 @@
 """
-Sincronización periódica V3 — simula consumo de API leyendo un Excel local.
-Ruta del archivo: integrappi/api_pacientes.xlsx
+Sincronización periódica V3 — consume directamente del API de Siscore.
+Endpoint: https://integra-wms.appsiscore.com/app/ws/informe_v3.php
 """
 import os
 import time
 import logging
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from bd.bd_cliente import bd_cliente
-from Funciones.normalizacion_medical_care import (
-    fx_normalizar_paciente,
-    fx_normalizar_direccion,
-    fx_normalizar_celular,
+from rutas.pedidos_v3 import (
+    _calcular_rango_fechas,
+    _consultar_api_siscore_v3,
+    _convertir_fecha_siscore_a_dd_mm_yyyy,
+    _mapear_campos_siscore,
 )
-from rutas.pedidos_v3 import _parsear_fecha, _es_cliente_excluido
 from rutas.pacientes_medical_care import ejecutar_cruce_automatico
 from Funciones.whatsapp_utils_integra import enviar_template_sync
 
@@ -71,202 +70,106 @@ _COLECCION = _BD['v3']
 _HISTORICO = _BD['v3_historico']
 _CACHE_CRUCE = _BD['cache_cruce_mc']
 
-# Ruta al Excel que simula la API
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXCEL_PATH = os.path.join(_BASE_DIR, 'api_v3.xlsx')
 
-# Columnas requeridas — "Fecha Solicitada" es alias de "Fecha Preferente"
-_COLUMNAS_REQUERIDAS = [
-    'Codigo Pedido',
-    'Codigo Cliente Destino',
-    'Cliente Destino',
-    'Direccion Destino',
-    'Divipola',
-    'Telefono',
-    'Fecha Pedido',
-    'Fecha Preferente',   # también acepta "Fecha Solicitada"
-    'Estado Pedido',
-    'Piezas',
-    'Peso Real',
-    'Bodega Origen',
-    'Ruta',
-    'Municipio Destino',
-    'Fecha Entrega',   # opcional — puede estar vacío o ausente
-    'Planilla',        # opcional — puede estar vacío o ausente
-]
-
-# Aliases de columnas (clave: nombre alternativo en minúsculas, valor: nombre canónico)
-_ALIASES = {
-    'fecha solicitada': 'Fecha Preferente',
-}
-
-
-def ejecutar_sync_v3() -> dict:
+async def ejecutar_sync_v3() -> dict:
     """
-    Lee el Excel (simulando una API), normaliza los datos y hace upsert en MongoDB.
+    Consume del API de Siscore, normaliza los datos y hace upsert en MongoDB.
     Retorna un dict con el resultado: exitosos, errores, total, timestamp.
     Al terminar (éxito o error) envía notificación WhatsApp si WHATSAPP_NOTIFY_NUMBER está configurado.
     """
-    resultado = _ejecutar_sync_v3_interno()
+    resultado = await _ejecutar_sync_v3_interno()
     _notificar_sync_v3(resultado)
     return resultado
 
 
-def _ejecutar_sync_v3_interno() -> dict:
+async def _ejecutar_sync_v3_interno() -> dict:
+    """
+    Ejecuta el sync de V3 consumiendo directamente del API de Siscore.
+    Calcula el rango de fechas automáticamente (1er día de hace 2 meses → hoy).
+    """
     inicio = time.time()
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     errores = []
     exitosos = 0
+    filtrados = 0
     total = 0
 
-    if not os.path.exists(EXCEL_PATH):
-        msg = f"Archivo no encontrado: {EXCEL_PATH}"
-        logger.error(msg)
-        return {'exitosos': 0, 'errores': [msg], 'total': 0, 'timestamp': timestamp,
-                'segundos': 0, 'ok': False}
-
     try:
-        df = pd.read_excel(EXCEL_PATH, engine='openpyxl')
-    except Exception as e:
-        msg = f"Error al leer Excel: {e}"
-        logger.error(msg)
-        return {'exitosos': 0, 'errores': [msg], 'total': 0, 'timestamp': timestamp,
-                'segundos': 0, 'ok': False}
+        # Paso 1: Calcular rango de fechas
+        fecha_inicial, fecha_final = _calcular_rango_fechas()
+        logger.info(f"[sync_v3] Rango de fechas: {fecha_inicial} a {fecha_final}")
 
-    # Normalizar nombres de columnas (strip + lowercase para mapeo)
-    mapeo = {}
-    for col in df.columns:
-        col_lower = col.strip().lower()
-        # ¿Es un alias?
-        if col_lower in _ALIASES:
-            mapeo[col] = _ALIASES[col_lower]
-            continue
-        # ¿Coincide con alguna columna requerida?
-        for req in _COLUMNAS_REQUERIDAS:
-            if col_lower == req.lower():
-                mapeo[col] = req
-                break
+        # Paso 2: Consultar API de Siscore
+        logger.info("[sync_v3] Consultando API de Siscore...")
+        respuesta_api = await _consultar_api_siscore_v3(
+            fecha_inicial=fecha_inicial,
+            fecha_final=fecha_final,
+            centro_distribucion="TODOS",
+            incluir_pedidos_manuales="NO"
+        )
 
-    df = df.rename(columns=mapeo)
-    # Si quedaron columnas duplicadas tras el rename, conservar solo la primera aparición
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    # Validar que exista al menos "Codigo Pedido"
-    if 'Codigo Pedido' not in df.columns:
-        msg = "El archivo no tiene la columna 'Codigo Pedido'"
-        logger.error(msg)
-        return {'exitosos': 0, 'errores': [msg], 'total': 0, 'timestamp': timestamp,
-                'segundos': 0, 'ok': False}
-
-    total = len(df)
-    filtrados = 0
-    operaciones = []
-
-    for idx, fila in df.iterrows():
-        try:
-            def _str(campo):
-                v = fila.get(campo)
-                if not pd.notna(v):
-                    return ''
-                if isinstance(v, float) and v.is_integer():
-                    return str(int(v))
-                return str(v).strip()
-
-            codigo_pedido = _str('Codigo Pedido')
-            if not codigo_pedido:
-                errores.append(f"Fila {idx + 2}: 'Codigo Pedido' vacío")
-                continue
-
-            codigo_cliente   = _str('Codigo Cliente Destino')
-            cliente_original = _str('Cliente Destino')
-            direccion_original = _str('Direccion Destino')
-            divipola         = _str('Divipola')
-            telefono_original = _str('Telefono')
-            fecha_pedido     = _parsear_fecha(fila.get('Fecha Pedido'))
-            fecha_preferente = _parsear_fecha(fila.get('Fecha Preferente'))
-            estado_pedido    = _str('Estado Pedido').upper()
-            piezas           = _str('Piezas')
-            peso_real        = _str('Peso Real')
-            bodega_origen    = _str('Bodega Origen')
-            ruta             = _str('Ruta')
-            municipio_destino = _str('Municipio Destino')
-            fecha_entrega     = _parsear_fecha(fila.get('Fecha Entrega'))
-            planilla          = _str('Planilla')
-
-            cliente_normalizado   = fx_normalizar_paciente(cliente_original) or cliente_original
-            direccion_normalizada = fx_normalizar_direccion(direccion_original) or direccion_original
-            telefono_normalizado  = fx_normalizar_celular(telefono_original) or telefono_original
-            llave = f"{cliente_normalizado} {direccion_normalizada}".strip()
-
-            # FILTRO 1: Solo registros del mes actual según fecha_preferente
-            hoy = datetime.now()
-            if fecha_preferente:
-                try:
-                    partes = fecha_preferente.split('/')
-                    if len(partes) == 3 and (int(partes[1]) != hoy.month or int(partes[2]) != hoy.year):
-                        filtrados += 1
-                        continue
-                except Exception:
-                    pass
-            else:
-                filtrados += 1
-                continue
-
-            # FILTRO 2: Excluir clientes institucionales (no son pacientes individuales).
-            if _es_cliente_excluido(cliente_original.upper()):
-                filtrados += 1
-                continue
-
-            documento = {
-                'codigo_pedido':             codigo_pedido,
-                'codigo_cliente_destino':    codigo_cliente,
-                'cliente_destino':           cliente_normalizado,
-                'cliente_destino_original':  cliente_original,
-                'direccion_destino':         direccion_normalizada,
-                'direccion_destino_original': direccion_original,
-                'llave':                     llave,
-                'divipola':                  divipola,
-                'telefono':                  telefono_normalizado,
-                'telefono_original':         telefono_original,
-                'fecha_pedido':              fecha_pedido,
-                'fecha_preferente':          fecha_preferente,
-                'estado_pedido':             estado_pedido,
-                'piezas':                    piezas,
-                'peso_real':                 peso_real,
-                'bodega_origen':             bodega_origen,
-                'ruta':                      ruta,
-                'municipio_destino':         municipio_destino,
-                'fecha_entrega':             fecha_entrega,
-                'planilla':                  planilla,
-                'usuario_carga':             'sync_api',
-                'fecha_carga':               timestamp,
+        # Paso 3: Validar respuesta
+        if not respuesta_api.get('ok'):
+            error_msg = respuesta_api.get('error', 'Error desconocido')
+            logger.error(f"[sync_v3] Error del API: {error_msg}")
+            return {
+                'exitosos': 0,
+                'errores': [error_msg],
+                'total': 0,
+                'timestamp': timestamp,
+                'segundos': 0,
+                'ok': False
             }
 
-            operaciones.append(documento)
-            exitosos += 1
+        datos = respuesta_api.get('data', [])
+        total = len(datos)
+        logger.info(f"[sync_v3] API retornó {total} registros")
 
-        except Exception as e:
-            msg = f"Fila {idx + 2}: {e}"
-            errores.append(msg)
-            logger.warning(f"[sync_v3] {msg}")
+        # Paso 4: Procesar y mapear registros
+        operaciones = []
 
-    # Reemplazar colección: borrar todo e insertar los nuevos
-    if operaciones:
-        try:
-            _COLECCION.delete_many({})
-            _COLECCION.insert_many(operaciones, ordered=False)
-        except Exception as e:
-            errores.append(f"Error en MongoDB: {e}")
-            exitosos = 0
+        for registro in datos:
+            try:
+                # Mapear campos de Siscore a schema MongoDB
+                documento = _mapear_campos_siscore(registro)
+
+                if documento is None:
+                    filtrados += 1
+                else:
+                    # Agregar metadata de sync
+                    documento['usuario_carga'] = 'sync_api'
+                    documento['fecha_carga'] = timestamp
+                    operaciones.append(documento)
+                    exitosos += 1
+
+            except Exception as e:
+                errores.append(f"Error procesando registro: {str(e)}")
+                logger.warning(f"[sync_v3] Error procesando registro: {e}")
+                continue
+
+        # Paso 5: Reemplazar colección en MongoDB
+        if operaciones:
+            try:
+                _COLECCION.delete_many({})
+                _COLECCION.insert_many(operaciones, ordered=False)
+                logger.info(f"[sync_v3] Insertados {exitosos} registros en MongoDB")
+            except Exception as e:
+                errores.append(f"Error en MongoDB: {e}")
+                exitosos = 0
+
+    except Exception as e:
+        error_msg = f"Error en sync V3: {str(e)}"
+        logger.error(f"[sync_v3] {error_msg}")
+        errores.append(error_msg)
 
     segundos = round(time.time() - inicio, 2)
-    logger.info(f"[sync_v3] {exitosos}/{total} registros — {segundos}s")
+    logger.info(f"[sync_v3] {exitosos}/{total} registros — {filtrados} filtrados — {segundos}s")
 
     resultado = {
-        'ok': True,
+        'ok': exitosos > 0,
         'exitosos': exitosos,
         'filtrados': filtrados,
-        'errores': errores[:20],   # máx 20 errores en respuesta
+        'errores': errores[:20],  # máx 20 errores en respuesta
         'total': total,
         'timestamp': timestamp,
         'segundos': segundos,
