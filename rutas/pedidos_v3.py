@@ -8,6 +8,7 @@ import time
 import json
 import io
 import re
+import os
 from datetime import datetime, timedelta, date
 from typing import List, Optional
 from bd.bd_cliente import bd_cliente
@@ -21,6 +22,8 @@ from dateutil.relativedelta import relativedelta
 import httpx
 import logging
 import asyncio
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
 
@@ -124,6 +127,25 @@ def _calcular_rango_fechas() -> tuple[str, str]:
     fecha_inicial = (hoy - relativedelta(months=2)).replace(day=1)
     fecha_final = hoy
     return fecha_inicial.strftime('%Y-%m-%d'), fecha_final.strftime('%Y-%m-%d')
+
+
+def _get_proxy_url() -> Optional[str]:
+    """
+    Obtiene la configuración de proxy desde variables de entorno.
+    Usa VULCANO_PROXY_URL como fuente.
+
+    Acepta estos formatos en env:
+      - http://ip:3128
+      - http://user:pass@ip:3128
+      - ip:3128              (se normaliza a http://ip:3128)
+      - user:pass@ip:3128    (se normaliza a http://user:pass@ip:3128)
+    """
+    proxy_url = os.getenv("VULCANO_PROXY_URL", "").strip()
+    if not proxy_url:
+        return None
+    if "://" not in proxy_url:
+        proxy_url = "http://" + proxy_url
+    return proxy_url
 
 
 def _convertir_fecha_siscore_a_dd_mm_yyyy(fecha_siscore: str) -> str:
@@ -271,10 +293,21 @@ async def _consultar_api_siscore_v3(
         "pedido_especifico": ""
     }
 
-    timeout = httpx.Timeout(60.0, connect=30.0)
+    timeout = httpx.Timeout(120.0, connect=60.0)  # Aumentado para redes con proxy
+
+    # Obtener configuración de proxy
+    proxy_url = _get_proxy_url()
+
+    logger.info(f"[API Siscore V3] Proxy: {'HABILITADO' if proxy_url else 'NO CONFIGURADO'}")
+    if proxy_url:
+        logger.info(f"[API Siscore V3] Proxy URL: {proxy_url.split('@')[-1]}")  # Solo muestra host:puerto
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            proxy=proxy_url,  # Usa proxy si está configurado
+            trust_env=False,
+        ) as client:
             response = await client.post(
                 SISCORE_V3_ENDPOINT,
                 json=payload,
@@ -285,7 +318,8 @@ async def _consultar_api_siscore_v3(
     except httpx.HTTPStatusError as e:
         raise RuntimeError(f"Error HTTP Siscore: {e.response.status_code} - {e.response.text[:500]}")
     except httpx.RequestError as e:
-        raise RuntimeError(f"Error de conexión Siscore: {str(e)}")
+        proxy_info = f" (vía proxy: {_get_proxy_url()})" if proxy_url else ""
+        raise RuntimeError(f"Error de conexión Siscore{proxy_info}: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Error inesperado consultando Siscore: {str(e)}")
 

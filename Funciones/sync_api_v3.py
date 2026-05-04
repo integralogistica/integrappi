@@ -40,16 +40,16 @@ def _notificar_sync_v3(resultado: dict):
         cruce = resultado.get('cruce') or {}
         linea_cruce = ''
         if cruce.get('ok'):
-            linea_cruce = f"\nCruce: {cruce['total_pacientes']} pac., {cruce['total_sin_paciente']} sin match"
+            linea_cruce = f" | Cruce: {cruce['total_pacientes']} pac., {cruce['total_sin_paciente']} sin match"
         cuerpo = (
             f"OK {resultado['exitosos']}/{resultado['total']} pedidos · {resultado['segundos']}s"
             + linea_cruce
-            + f"\n{ts_fmt}"
+            + f" | {ts_fmt}"
         )
     else:
         errores = resultado.get('errores', [])
         detalle = errores[0] if errores else 'Error desconocido'
-        cuerpo = f"ERROR sync V3\n{detalle}\n{ts_fmt}"
+        cuerpo = f"ERROR sync V3 | {detalle} | {ts_fmt}"
 
     try:
         res = enviar_template_sync(

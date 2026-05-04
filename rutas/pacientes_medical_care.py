@@ -1323,7 +1323,7 @@ async def v3_sin_paciente():
     }
 
 
-def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool = False, nombre_hoja: str = 'Ocupacion Rutas', sin_hoja_v3: bool = False) -> tuple:
+def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool = False, nombre_hoja: str = 'Pacientes sin montar', sin_hoja_v3: bool = False) -> tuple:
     """
     Genera el Excel del cruce y retorna (bytes, nombre_archivo).
     Reutilizado por el endpoint de descarga y el envío por correo.
@@ -1384,8 +1384,8 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
 
     if not solo_sin_paciente:
         ws1 = wb.active
-        ws1.title = nombre_hoja
-        ws1['A1'] = f'Pacientes SIN CRUCE (< 6 días hábiles, mes actual)  |  {_fmt_fecha_legible(fecha_calculo)}'
+        ws1.title = 'Pacientes sin montar'
+        ws1['A1'] = f'Pacientes sin montar (< 6 días hábiles, mes actual)  |  {_fmt_fecha_legible(fecha_calculo)}'
         ws1['A1'].font, ws1['A1'].alignment = title_font, center
         ws1.merge_cells('A1:F1')
         ws1.row_dimensions[1].height = 22
@@ -1445,15 +1445,15 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
             ws1.column_dimensions[get_column_letter(i)].width = w
         ws1.freeze_panes = 'A3'
         if not sin_hoja_v3:
-            ws2 = wb.create_sheet('V3 Sin Paciente')
+            ws2 = wb.create_sheet('Pedidos sin paciente asociado')
     else:
         ws2 = wb.active
-        ws2.title = 'Pacientes no montados'
+        ws2.title = 'Pedidos sin paciente asociado'
 
     if not sin_hoja_v3:
         if solo_sin_paciente:
             # ── Formato cliente: "Pacientes no montados" ───────────────────────────
-            ws2['A1'] = f'V3 Sin Paciente  |  {_fmt_fecha_legible(fecha_calculo)}'
+            ws2['A1'] = f'Pedidos sin paciente asociado  |  {_fmt_fecha_legible(fecha_calculo)}'
             ws2['A1'].font, ws2['A1'].alignment = title_font, center
             ws2.merge_cells('A1:F1')
             ws2.row_dimensions[1].height = 22
