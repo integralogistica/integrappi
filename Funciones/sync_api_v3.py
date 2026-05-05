@@ -394,25 +394,26 @@ def _notificar_sync_v3(resultado: dict):
             try:
                 if tipo_notif == 'retraso_operacion' and stats['total_retraso_operacion'] > 0:
                     if es_admin and 'desglose_por_cedi' in stats:
-                        # Mensaje con desglose para admin (una sola lÃ­nea)
+                        # Mensaje con desglose para admin - una sola línea sin saltos de línea
                         desglose = _formatear_desglose_cedi(stats, 'retraso_operacion')
-                        mensaje = (
-                            f"ðŸš¨ Retraso OperaciÃ³n {texto_regional} | {desglose} | "
-                            f"Total: {stats['total_retraso_operacion']} pedidos | El Excel con el detalle fue enviado a tu correo"
+                        mensaje_admin = (
+                            f"🚨 RETRASO OPERACIÓN - {texto_regional} | {desglose} | "
+                            f"Total: {stats['total_retraso_operacion']} pedidos | Excel enviado a tu correo"
+                        )
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='confirmar_actualizacion',
+                            language_code='es_CO',
+                            body_params=[mensaje_admin],
                         )
                     else:
-                        # Mensaje simple para operativo
-                        mensaje = (
-                            f"ðŸš¨ Retraso OperaciÃ³n {texto_regional} | "
-                            f"Tienes {stats['total_retraso_operacion']} pedidos con retraso operaciÃ³n que requieren montaje urgente | "
-                            f"El Excel con el detalle fue enviado a tu correo"
+                        # Mensaje simple para operativo - usa template oficial con 2 parámetros
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='retraso_operacion_fmc_',
+                            language_code='es_CO',
+                            body_params=[texto_regional, str(stats['total_retraso_operacion'])],
                         )
-                    res = enviar_template_sync(
-                        to=celular_limpio,
-                        template_name='confirmar_actualizacion',
-                        language_code='es_CO',
-                        body_params=[mensaje],
-                    )
                     if res:
                         logger.info(f"[sync_v3] WS enviado a {celular_limpio} ({nombre_usuario}) - retraso_operacion")
                     else:
@@ -420,25 +421,26 @@ def _notificar_sync_v3(resultado: dict):
 
                 elif tipo_notif == 'sin_cruce' and stats['total_sin_cruce'] > 0:
                     if es_admin and 'desglose_por_cedi' in stats:
-                        # Mensaje con desglose para admin (una sola lÃ­nea)
+                        # Mensaje con desglose para admin - una sola línea sin saltos de línea
                         desglose = _formatear_desglose_cedi(stats, 'sin_cruce')
-                        mensaje = (
-                            f"âš ï¸ Pacientes Sin Montar {texto_regional} | {desglose} | "
-                            f"Total: {stats['total_sin_cruce']} pacientes | El Excel con el detalle fue enviado a tu correo"
+                        mensaje_admin = (
+                            f"⚠️ PACIENTES SIN MONTAR - {texto_regional} | {desglose} | "
+                            f"Total: {stats['total_sin_cruce']} pacientes | Excel enviado a tu correo"
+                        )
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='confirmar_actualizacion',
+                            language_code='es_CO',
+                            body_params=[mensaje_admin],
                         )
                     else:
-                        # Mensaje simple para operativo
-                        mensaje = (
-                            f"âš ï¸ Pacientes Sin Montar {texto_regional} | "
-                            f"Tienes {stats['total_sin_cruce']} pacientes que aÃºn no han sido montados por parte del cliente | "
-                            f"El Excel con el detalle fue enviado a tu correo"
+                        # Mensaje simple para operativo - usa template oficial con 2 parámetros
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='pacientes_sin_montar_fmc',
+                            language_code='es_CO',
+                            body_params=[texto_regional, str(stats['total_sin_cruce'])],
                         )
-                    res = enviar_template_sync(
-                        to=celular_limpio,
-                        template_name='confirmar_actualizacion',
-                        language_code='es_CO',
-                        body_params=[mensaje],
-                    )
                     if res:
                         logger.info(f"[sync_v3] WS enviado a {celular_limpio} ({nombre_usuario}) - sin_cruce")
                     else:
