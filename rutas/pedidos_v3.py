@@ -293,7 +293,7 @@ async def _consultar_api_siscore_v3(
         "pedido_especifico": ""
     }
 
-    timeout = httpx.Timeout(120.0, connect=60.0)  # Aumentado para redes con proxy
+    timeout = httpx.Timeout(600.0, connect=120.0)  # 10 minutos total, 2 minutos para conectar (endpoint Siscore tarda 5-7 min)
 
     # Obtener configuración de proxy
     proxy_url = _get_proxy_url()
@@ -317,11 +317,22 @@ async def _consultar_api_siscore_v3(
             return response.json()
     except httpx.HTTPStatusError as e:
         raise RuntimeError(f"Error HTTP Siscore: {e.response.status_code} - {e.response.text[:500]}")
+    except httpx.ConnectTimeout as e:
+        proxy_info = f" (vía proxy: {_get_proxy_url()})" if proxy_url else ""
+        raise RuntimeError(f"Timeout conectando a Siscore{proxy_info}. El servidor no respondió en el tiempo esperado.")
+    except httpx.ReadTimeout as e:
+        proxy_info = f" (vía proxy: {_get_proxy_url()})" if proxy_url else ""
+        raise RuntimeError(f"Timeout leyendo respuesta de Siscore{proxy_info}. El endpoint tardó más de 10 minutos en responder (normal: 5-7 minutos).")
+    except httpx.ProxyError as e:
+        raise RuntimeError(f"Error con el proxy ({_get_proxy_url()}): {str(e)}")
+    except httpx.ConnectError as e:
+        proxy_info = f" (vía proxy: {_get_proxy_url()})" if proxy_url else ""
+        raise RuntimeError(f"Error conectando a Siscore{proxy_info}. Verifica que el proxy esté configurado y el endpoint sea accesible: {str(e)}")
     except httpx.RequestError as e:
         proxy_info = f" (vía proxy: {_get_proxy_url()})" if proxy_url else ""
-        raise RuntimeError(f"Error de conexión Siscore{proxy_info}: {str(e)}")
+        raise RuntimeError(f"Error de conexión Siscore{proxy_info}: {type(e).__name__}: {str(e)}")
     except Exception as e:
-        raise RuntimeError(f"Error inesperado consultando Siscore: {str(e)}")
+        raise RuntimeError(f"Error inesperado consultando Siscore: {type(e).__name__}: {str(e)}")
 
 
 # Columnas requeridas en el Excel
