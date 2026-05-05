@@ -309,8 +309,8 @@ El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Pa
 - Lee el cruce desde `cache_cruce_mc`
 - Aplica filtro `cedi` si se indica
 - Genera un `.xlsx` con openpyxl con dos hojas:
-  - **Hoja 1 "Ocupación por Rutas"**: una fila por paciente con CEDI, ruta, nombre, cédula, estado, en_v3, similitud, llave_v3. Filas coloreadas: verde (en_v3=True), amarillo (sim≥50%), rojo (sim<50%)
-  - **Hoja 2 "V3 sin Paciente"**: una fila por pedido V3 sin cruce con CEDI, ruta, código_pedido, cliente, dirección, similitud, paciente_cercano. Filas rojas
+  - **Hoja 1 "Pacientes sin montar"**: una fila por paciente con CEDI, ruta, nombre, cédula, dirección, F. Pref. Integra. Filas coloreadas: verde (fecha preferente ≤ 5 días), rojo (fecha preferente > 5 días)
+  - **Hoja 2 "Pedidos sin paciente asociado"**: una fila por pedido V3 sin cruce con CEDI, ruta, código_pedido, cliente, dirección, F. Pref. Integra. Filas rojas
   - Headers en negrita, freeze panes en fila 1, anchos de columna auto-ajustados
 
 **Documentación:**
@@ -446,6 +446,27 @@ config = {
 - **Método**: POST JSON con autenticación vía token fijo
 - **Token**: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
 - **Parámetros**: `fecha_inicial`, `fecha_final`, `centro_distribucion` ("TODOS"), `incluir_pedidos_manuales` ("NO")
+
+**Soporte para Proxy:**
+- **Variable de entorno**: `VULCANO_PROXY_URL` (opcional)
+- **Formatos aceptados**: `http://ip:puerto`, `http://user:pass@ip:puerto`, o solo `ip:puerto`
+- **Función**: `_get_proxy_url()` en `rutas/pedidos_v3.py` lee la variable y normaliza el formato
+- **Timeout aumentado**: 120s (connect: 60s) para dar tiempo a conexiones con proxy
+- **Logs de diagnóstico**: Muestra si proxy está habilitado o no configurado al ejecutar sync
+- **Compatibilidad**: Si no hay proxy configurado, la conexión es directa a internet
+
+**Plantilla de WhatsApp (opcional):**
+- **Template name**: `confirmar_actualizacion`
+- **Formato recomendado**:
+  ```
+  🔄 *Actualización V3*
+  
+  {{1}}
+  
+  _Integra Logística_
+  ```
+- Donde `{{1}}` se reemplaza por: `OK 45/50 pedidos · 3s | Cruce: 6209 pac., 269 sin match | 04 may 2026 15:57`
+- **Nota**: Meta no permite saltos de línea en plantillas, por eso se usa ` | ` como separador
 
 **Filtros aplicados** (igual que carga manual):
 1. Solo registros del mes actual según "Fecha Solicitada" (fecha_preferente)
@@ -975,10 +996,25 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 - `_consultar_api_siscore_v3()`: Consulta asíncrona al API de Siscore con httpx
 
 **Archivos modificados:**
-- `integrappi/rutas/pedidos_v3.py`: Nuevo endpoint + funciones auxiliares
-- `integrappi/Funciones/sync_api_v3.py`: Ahora consume de API Siscore (eliminada dependencia de Excel)
+- `integrappi/rutas/pedidos_v3.py`: Nuevo endpoint + funciones auxiliares + soporte para proxy
+- `integrappi/Funciones/sync_api_v3.py`: Ahora consume de API Siscore (eliminada dependencia de Excel) + fix de WhatsApp (eliminado `\n` del mensaje)
 - `integrappi/rutas/sync_v3.py`: Endpoint `/config` actualizado para mostrar fuente "API Siscore V3"
+- `integrappi/rutas/pacientes_medical_care.py`: Nombres de hojas Excel cambiados ("Pacientes sin montar", "Pedidos sin paciente asociado")
 - `integrappi/README.md`: Documentación actualizada
+
+### Mayo 2026 — Fix de plantilla WhatsApp y cambios en nombres de hojas Excel
+
+**`Funciones/sync_api_v3.py` — Fix de notificación WhatsApp:**
+- **Antes**: El mensaje incluía saltos de línea `\n` que Meta rechaza (error 400: "Param text cannot have new-line/tab characters")
+- **Ahora**: Se usa ` | ` como separador en lugar de `\n`
+- **Ejemplo**: `OK 45/50 pedidos · 3s | Cruce: 6209 pac., 269 sin match | 04 may 2026 15:57`
+- **Formato de plantilla recomendado**: Texto de relleno + variable `{{1}}` (Meta no admite plantillas con solo la variable)
+
+**`rutas/pacientes_medical_care.py` — Cambios en exportación Excel:**
+- **Hoja 1**: Nombre cambiado de "Ocupación por Rutas" a "Pacientes sin montar"
+- **Hoja 2**: Nombre cambiado de "V3 Sin Paciente" a "Pedidos sin paciente asociado"
+- **Función `_generar_excel_bytes()`**: Parámetro `nombre_hoja` con default `'Pacientes sin montar'`
+- **Headers de hojas**: Actualizados con los nuevos nombres
 
 ### Abril 2026 — Recuperación de clave, notificaciones filtradas y perfil CLIENTE_FMC
 
