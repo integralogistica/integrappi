@@ -1,5 +1,5 @@
-"""
-Sincronización periódica V3 — consume directamente del API de Siscore.
+﻿"""
+SincronizaciÃ³n periÃ³dica V3 â€” consume directamente del API de Siscore.
 Endpoint: https://integra-wms.appsiscore.com/app/ws/informe_v3.php
 """
 import os
@@ -21,8 +21,9 @@ from Funciones.whatsapp_utils_integra import enviar_template_sync
 logger = logging.getLogger(__name__)
 
 
+
 def _mapear_regional_a_cedi(regional: str) -> str:
-    """Mapea código de regional a nombre de CEDI."""
+    """Mapea cÃ³digo de regional a nombre de CEDI."""
     mapa = {
         'CO04': 'BARRANQUILLA',
         'CO05': 'CALI',
@@ -33,17 +34,115 @@ def _mapear_regional_a_cedi(regional: str) -> str:
     return mapa.get(regional, regional)
 
 
-def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
+def _filtrar_pacientes_urgentes(pacientes: list, mes_actual: int, anio_actual: int) -> list:
     """
-    Obtiene estadísticas del cruce filtradas por regional.
-    USA LOS MISMOS FILTROS QUE EL EXCEL:
-    1. Sin cruce (en_v3 = False)
-    2. Fecha preferente del mes actual
-    3. < 6 días hábiles (urgentes)
+    Filtra pacientes que son urgentes:
+    - Fecha preferente del mes actual
+    - Menos de 6 días hábiles desde mañana
+    """
+    _manana = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime('%Y-%m-%d')
+    co_holidays = holidays.CountryHoliday('CO')
+
+    def _parsear_fecha_texto(fecha_str: str):
+        if not fecha_str:
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d'):
+            try:
+                return datetime.strptime(fecha_str[:10], fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _calcular_dias_habiles(fecha_desde_str: str, fecha_hasta_str: str) -> int:
+        try:
+            if '/' in fecha_desde_str:
+                desde = datetime.strptime(fecha_desde_str.split(' ')[0], '%d/%m/%Y')
+            elif '-' in fecha_desde_str:
+                desde = datetime.strptime(fecha_desde_str.split(' ')[0], '%Y-%m-%d')
+            else:
+                return 0
+            if '/' in fecha_hasta_str:
+                hasta = datetime.strptime(fecha_hasta_str.split(' ')[0], '%d/%m/%Y')
+            elif '-' in fecha_hasta_str:
+                hasta = datetime.strptime(fecha_hasta_str.split(' ')[0], '%Y-%m-%d')
+            else:
+                return 0
+            dias = 0
+            actual = desde
+            while actual <= hasta:
+                # Contar lunes-sábado (excluir solo domingos y festivos)
+                if actual.weekday() < 6 and actual not in co_holidays:
+                    dias += 1
+                actual += timedelta(days=1)
+            return dias
+        except Exception:
+            return 0
+
+    pacientes_filtrados = []
+    for p in pacientes:
+        f_pref_teorica = p.get('f_pref_teorica', '')
+        if not f_pref_teorica:
+            continue
+        f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+        if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
+            continue
+        dias_habiles = _calcular_dias_habiles(_manana, f_pref_teorica)
+        if dias_habiles < 6:
+            pacientes_filtrados.append(p)
+    return pacientes_filtrados
+
+
+def obtener_estadisticas_notificaciones(cruce_cache: dict, regional: str = None, es_admin: bool = False) -> dict:
+    """
+    FunciÃ³n PÃšBLICA compartida para obtener estadÃ­sticas de notificaciones MC.
+    Usada por:
+    - Sync automÃ¡tico V3 (sync_api_v3.py)
+    - RecÃ¡lculo manual (pacientes_medical_care.py)
+
+    Garantiza que WhatsApp y Correo siempre muestren los mismos nÃºmeros.
 
     Args:
         cruce_cache: Cache completo del cruce desde MongoDB
-        regional: Código de regional (ej: 'CO04') o None para todas
+        regional: CÃ³digo de regional (ej: 'CO04') o None para todas
+        es_admin: Si es True, ve todas las regionales; si es False, filtra por regional
+
+    Returns:
+        dict con total_retraso_operacion, total_sin_cruce, total_pacientes, desglose_por_cedi
+    """
+    # Reutilizar la lÃ³gica existente pero con parÃ¡metro es_admin explÃ­cito
+    _regional_param = None if es_admin else regional
+    return _obtener_estadisticas_por_regional(cruce_cache, _regional_param)
+
+
+def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
+    """
+    Obtiene estadÃ­sticas del cruce filtradas por regional.
+    USA LOS MISMOS FILTROS QUE EL EXCEL:
+    1. Sin cruce (en_v3 = False)
+    2. Fecha preferente del mes actual
+    3. < 6 dÃ­as hÃ¡biles (urgentes)
+
+    Esta funciÃ³n es compartida por:
+    - Sync automÃ¡tico V3 (sync_api_v3.py)
+    - RecÃ¡lculo manual (pacientes_medical_care.py)
+
+    Args:
+        cruce_cache: Cache completo del cruce desde MongoDB
+        regional: CÃ³digo de regional (ej: 'CO04') o None para todas
+
+    Returns:
+        dict con totales y desglose por regional (para admin)
+    """
+    """
+    Obtiene estadÃ­sticas del cruce filtradas por regional.
+    USA LOS MISMOS FILTROS QUE EL EXCEL:
+    1. Sin cruce (en_v3 = False)
+    2. Fecha preferente del mes actual
+    3. < 6 dÃ­as hÃ¡biles (urgentes)
+
+    Args:
+        cruce_cache: Cache completo del cruce desde MongoDB
+        regional: CÃ³digo de regional (ej: 'CO04') o None para todas
 
     Returns:
         dict con totales y desglose por regional (para admin)
@@ -58,7 +157,7 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
     co_holidays = holidays.CountryHoliday('CO')
 
     def _parsear_fecha_texto(fecha_str: str):
-        """Parsea fechas en múltiples formatos."""
+        """Parsea fechas en mÃºltiples formatos."""
         if not fecha_str:
             return None
         for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d'):
@@ -69,7 +168,7 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
         return None
 
     def _calcular_dias_habiles(fecha_desde_str: str, fecha_hasta_str: str) -> int:
-        """Calcula días hábiles entre dos fechas."""
+        """Calcula dÃ­as hÃ¡biles entre dos fechas."""
 
         try:
             # Parsear fechas
@@ -87,11 +186,12 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
             else:
                 return 0
 
-            # Contar días hábiles
+            # Contar dÃ­as hÃ¡biles
             dias = 0
             actual = desde
             while actual <= hasta:
-                if actual.weekday() < 5 and actual not in co_holidays:
+                # Contar lunes-sÃ¡bado (excluir solo domingos y festivos)
+                if actual.weekday() < 6 and actual not in co_holidays:
                     dias += 1
                 actual += timedelta(days=1)
 
@@ -137,13 +237,14 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
                 f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
                 if f_pref_dt and f_pref_dt.month == _mes_actual and f_pref_dt.year == _anio_actual:
                     tiene_fecha_mes_actual = True
-                    # Calcular días hábiles
+                    # Calcular dÃ­as hÃ¡biles
                     dias_habiles = _calcular_dias_habiles(_manana, f_pref_teorica)
                     if dias_habiles < 6:
                         es_urgente = True
 
-            # Contar retraso operación (requiere urgencia)
-            if paciente.get('estado_cruce') == 'retraso operación' and es_urgente:
+            # Contar retraso operaciÃ³n (solo verifica estado, sin filtro de urgencia)
+            estado_cruce = (paciente.get('estado_cruce') or '').lower()
+            if estado_cruce in ('retraso operación', 'retraso operacion'):
                 stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
 
             # Contar sin cruce (requiere los 3 filtros)
@@ -175,11 +276,11 @@ def _notificar_sync_v3(resultado: dict):
     """
     Sistema de notificaciones WhatsApp personalizado para Medical Care.
 
-    Envía mensajes a usuarios según sus preferencias de notificación:
-    - 'retraso_operacion': Pacientes con retraso operación (requieren montaje urgente)
+    EnvÃ­a mensajes a usuarios segÃºn sus preferencias de notificaciÃ³n:
+    - 'retraso_operacion': Pacientes con retraso operaciÃ³n (requieren montaje urgente)
     - 'sin_cruce': Pacientes sin cruce (no han sido tramitados por FMC)
 
-    También guarda el historial en MongoDB para consumo por PowerBI.
+    TambiÃ©n guarda el historial en MongoDB para consumo por PowerBI.
     """
     from bson.objectid import ObjectId as _ObjectId
 
@@ -239,7 +340,7 @@ def _notificar_sync_v3(resultado: dict):
         else:
             notificaciones = notificaciones_raw or []
 
-        # Normalizar celular: eliminar espacios, guiones, paréntesis; anteponer 57 si no tiene
+        # Normalizar celular: eliminar espacios, guiones, parÃ©ntesis; anteponer 57 si no tiene
         celular_limpio = ''.join(c for c in celular if c.isdigit())
         if not celular_limpio.startswith('57'):
             celular_limpio = '57' + celular_limpio
@@ -248,8 +349,9 @@ def _notificar_sync_v3(resultado: dict):
         es_admin = (usuario.get('perfil', '').upper() == 'ADMIN')
         regional_para_stats = None if es_admin else regional
 
-        # Obtener estadísticas (todas si es ADMIN, solo su regional si no)
+        # Obtener estadÃ­sticas (todas si es ADMIN, solo su regional si no)
         stats = _obtener_estadisticas_por_regional(cruce_cache, regional_para_stats)
+        logger.info(f"[sync_v3] Stats para {nombre_usuario} (regional={regional_para_stats}, es_admin={es_admin}): sin_cruce={stats['total_sin_cruce']}, retraso={stats['total_retraso_operacion']}")
 
         # Determinar el texto de regional para el mensaje
         if es_admin:
@@ -257,7 +359,7 @@ def _notificar_sync_v3(resultado: dict):
         else:
             texto_regional = _mapear_regional_a_cedi(regional)
 
-        # Función auxiliar para formatear desglose por CEDI
+        # FunciÃ³n auxiliar para formatear desglose por CEDI
         def _formatear_desglose_cedi(stats_dict, tipo):
             """Genera string con desglose por CEDI para admin."""
             if 'desglose_por_cedi' not in stats_dict:
@@ -287,22 +389,22 @@ def _notificar_sync_v3(resultado: dict):
             'total_pacientes': stats['total_pacientes'],
         })
 
-        # Enviar notificaciones según tipo
+        # Enviar notificaciones segÃºn tipo
         for tipo_notif in notificaciones:
             try:
                 if tipo_notif == 'retraso_operacion' and stats['total_retraso_operacion'] > 0:
                     if es_admin and 'desglose_por_cedi' in stats:
-                        # Mensaje con desglose para admin (una sola línea)
+                        # Mensaje con desglose para admin (una sola lÃ­nea)
                         desglose = _formatear_desglose_cedi(stats, 'retraso_operacion')
                         mensaje = (
-                            f"🚨 Retraso Operación {texto_regional} | {desglose} | "
+                            f"ðŸš¨ Retraso OperaciÃ³n {texto_regional} | {desglose} | "
                             f"Total: {stats['total_retraso_operacion']} pedidos | El Excel con el detalle fue enviado a tu correo"
                         )
                     else:
                         # Mensaje simple para operativo
                         mensaje = (
-                            f"🚨 Retraso Operación {texto_regional} | "
-                            f"Tienes {stats['total_retraso_operacion']} pedidos con retraso operación que requieren montaje urgente | "
+                            f"ðŸš¨ Retraso OperaciÃ³n {texto_regional} | "
+                            f"Tienes {stats['total_retraso_operacion']} pedidos con retraso operaciÃ³n que requieren montaje urgente | "
                             f"El Excel con el detalle fue enviado a tu correo"
                         )
                     res = enviar_template_sync(
@@ -318,17 +420,17 @@ def _notificar_sync_v3(resultado: dict):
 
                 elif tipo_notif == 'sin_cruce' and stats['total_sin_cruce'] > 0:
                     if es_admin and 'desglose_por_cedi' in stats:
-                        # Mensaje con desglose para admin (una sola línea)
+                        # Mensaje con desglose para admin (una sola lÃ­nea)
                         desglose = _formatear_desglose_cedi(stats, 'sin_cruce')
                         mensaje = (
-                            f"⚠️ Pacientes Sin Montar {texto_regional} | {desglose} | "
+                            f"âš ï¸ Pacientes Sin Montar {texto_regional} | {desglose} | "
                             f"Total: {stats['total_sin_cruce']} pacientes | El Excel con el detalle fue enviado a tu correo"
                         )
                     else:
                         # Mensaje simple para operativo
                         mensaje = (
-                            f"⚠️ Pacientes Sin Montar {texto_regional} | "
-                            f"Tienes {stats['total_sin_cruce']} pacientes que aún no han sido montados por parte del cliente | "
+                            f"âš ï¸ Pacientes Sin Montar {texto_regional} | "
+                            f"Tienes {stats['total_sin_cruce']} pacientes que aÃºn no han sido montados por parte del cliente | "
                             f"El Excel con el detalle fue enviado a tu correo"
                         )
                     res = enviar_template_sync(
@@ -342,7 +444,7 @@ def _notificar_sync_v3(resultado: dict):
                     else:
                         logger.warning(f"[sync_v3] WS no enviado a {celular_limpio} (tokens/error)")
             except Exception as e:
-                logger.error(f"[sync_v3] Error enviando notificación a {celular_limpio}: {e}")
+                logger.error(f"[sync_v3] Error enviando notificaciÃ³n a {celular_limpio}: {e}")
 
     # Guardar datos agregados por regional para PowerBI
     if datos_powerbi:
@@ -389,7 +491,7 @@ async def ejecutar_sync_v3() -> dict:
     """
     Consume del API de Siscore, normaliza los datos y hace upsert en MongoDB.
     Retorna un dict con el resultado: exitosos, errores, total, timestamp.
-    Al terminar (éxito o error) envía notificación WhatsApp si WHATSAPP_NOTIFY_NUMBER está configurado.
+    Al terminar (Ã©xito o error) envÃ­a notificaciÃ³n WhatsApp si WHATSAPP_NOTIFY_NUMBER estÃ¡ configurado.
     """
     resultado = await _ejecutar_sync_v3_interno()
     _notificar_sync_v3(resultado)
@@ -399,7 +501,7 @@ async def ejecutar_sync_v3() -> dict:
 async def _ejecutar_sync_v3_interno() -> dict:
     """
     Ejecuta el sync de V3 consumiendo directamente del API de Siscore.
-    Calcula el rango de fechas automáticamente (1er día de hace 2 meses → hoy).
+    Calcula el rango de fechas automÃ¡ticamente (1er dÃ­a de hace 2 meses â†’ hoy).
     """
     inicio = time.time()
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -437,7 +539,7 @@ async def _ejecutar_sync_v3_interno() -> dict:
 
         datos = respuesta_api.get('data', [])
         total = len(datos)
-        logger.info(f"[sync_v3] API retornó {total} registros")
+        logger.info(f"[sync_v3] API retornÃ³ {total} registros")
 
         # Paso 4: Procesar y mapear registros
         operaciones = []
@@ -461,7 +563,7 @@ async def _ejecutar_sync_v3_interno() -> dict:
                 logger.warning(f"[sync_v3] Error procesando registro: {e}")
                 continue
 
-        # Paso 5: Reemplazar colección en MongoDB
+        # Paso 5: Reemplazar colecciÃ³n en MongoDB
         if operaciones:
             try:
                 _COLECCION.delete_many({})
@@ -477,21 +579,21 @@ async def _ejecutar_sync_v3_interno() -> dict:
         errores.append(error_msg)
 
     segundos = round(time.time() - inicio, 2)
-    logger.info(f"[sync_v3] {exitosos}/{total} registros — {filtrados} filtrados — {segundos}s")
+    logger.info(f"[sync_v3] {exitosos}/{total} registros â€” {filtrados} filtrados â€” {segundos}s")
 
     resultado = {
         'ok': exitosos > 0,
         'exitosos': exitosos,
         'filtrados': filtrados,
-        'errores': errores[:20],  # máx 20 errores en respuesta
+        'errores': errores[:20],  # mÃ¡x 20 errores en respuesta
         'total': total,
         'timestamp': timestamp,
         'segundos': segundos,
     }
 
-    # Tras un sync exitoso, recalcular el cruce pacientes <-> V3 automáticamente
+    # Tras un sync exitoso, recalcular el cruce pacientes <-> V3 automÃ¡ticamente
     if exitosos > 0:
-        logger.info("[sync_v3] Ejecutando cruce automático post-sync...")
+        logger.info("[sync_v3] Ejecutando cruce automÃ¡tico post-sync...")
         resultado['cruce'] = ejecutar_cruce_automatico('sync_automatico')
 
     return resultado
@@ -499,10 +601,10 @@ async def _ejecutar_sync_v3_interno() -> dict:
 
 def archivar_mes_v3() -> dict:
     """
-    Guarda una copia de seguridad de la colección v3 y el último cruce en v3_historico.
-    Se ejecuta automáticamente el último día de cada mes a las 00:00 (hora Bogotá).
-    También se puede disparar manualmente desde POST /sync-v3/archivar.
-    Usa upsert por (anio, mes) — si se ejecuta varias veces en el mismo mes, sobreescribe.
+    Guarda una copia de seguridad de la colecciÃ³n v3 y el Ãºltimo cruce en v3_historico.
+    Se ejecuta automÃ¡ticamente el Ãºltimo dÃ­a de cada mes a las 00:00 (hora BogotÃ¡).
+    TambiÃ©n se puede disparar manualmente desde POST /sync-v3/archivar.
+    Usa upsert por (anio, mes) â€” si se ejecuta varias veces en el mismo mes, sobreescribe.
     """
     from datetime import datetime
     ahora = datetime.now()
@@ -526,7 +628,7 @@ def archivar_mes_v3() -> dict:
             }},
             upsert=True
         )
-        logger.info(f"[archivo_mensual] OK — {len(registros)} registros archivados ({mes}/{anio})")
+        logger.info(f"[archivo_mensual] OK â€” {len(registros)} registros archivados ({mes}/{anio})")
         return {'ok': True, 'anio': anio, 'mes': mes, 'total': len(registros), 'fecha_corte': fecha_corte}
 
     except Exception as e:

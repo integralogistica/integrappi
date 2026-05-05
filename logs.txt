@@ -1,57 +1,86 @@
-{
-  "ok": true,
-  "total": 59,
-  "filtros": {
-    "fecha_inicial": "2026-05-01",
-    "fecha_final": "2026-05-04",
-    "centro_distribucion": "TODOS",
-    "incluir_pedidos_manuales": "SI",
-    "pedido": null
-  },
-  "data": [
-    {
-      "": "https://integra.appsiscore.com/app/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xtransaccion.php?guia=3537282041",
-      "Codigo Interno": "3537282041",
-      "Codigo Pedido": "3537282041",
-      "Codigo Empresa": "FMC",
-      "Nombre Linea Distribucion": "MASIVOS",
-      "Cliente Origen": "FRESENIUS MEDICAL CARE",
-      "Departamento Origen": "SANTANDER",
-      "Municipio Origen": "BUCARAMANGA",
-      "Codigo Cliente Destino": "0920229955",
-      "Grupo": "CLIENTES PRODUCTO",
-      "Cliente Destino": "Davita Colombia S.A.S U.R. Cabecera",
-      "Tercero": "",
-      "Direccion Destino": "Cll.  54 # 33-45 piso 1",
-      "Divipola": "68001000",
-      "Departamento Destino": "SANTANDER",
-      "Municipio Destino": "BUCARAMANGA",
-      "Telefono": "",
-      "Fecha Pedido": "2026-05-04 11:50:20",
-      "Fecha Solicitada": "2026-05-15",
-      "Fecha Entrega": null,
-      "Estado Pedido": "",
-      "Novedad": "",
-      "Piezas": null,
-      "Neveras": "0",
-      "Contenedores": "0",
-      "Peso Real": "0",
-      "Peso Volumetrico": "0",
-      "Servicio": "NORMAL",
-      "Bodega Origen": "CO06",
-      "Bodega Destino": "CO06",
-      "Bodega Actual": "CO06",
-      "Fecha Contabilizacion": "2026-05-15",
-      "Cajas Fraccionadas": null,
-      "Cajas SL100": "0",
-      "Factura": null,
-      "S.Distribucion": null,
-      "Observaciones": null,
-      "Costo": null,
-      "F_Estimada": "2026-05-05",
-      "Fecha Contingencia": "0000-00-00",
-      "Planilla": null,
-      "Ruta": "URBANO BUCARAMANGA"
-    }
-  ]
-}
+ASUS@DESKTOP-JIQ34KO MINGW64 ~/OneDrive - Integra Logistica/Desarrollos/integra/integrappi (main)
+$ uvicorn main:app --reload
+INFO:     Will watch for changes in these directories: ['C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [21944] using WatchFiles
+🔌 Intentando conectar a MongoDB (intento 1/3)...
+✅ Conexión exitosa a MongoDB
+INFO:     Started server process [18620]
+INFO:     Waiting for application startup.
+[LIFESPAN] Iniciando aplicación...
+INFO:main:[LIFESPAN] Iniciando aplicación...
+[LIFESPAN] Tarea de sync creada: <Task pending name='Task-3' coro=<_loop_sync_v3() running at C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\main.py:38>>
+INFO:main:[LIFESPAN] Tarea de sync creada: <Task pending name='Task-3' coro=<_loop_sync_v3() running at C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\main.py:38>>
+[sync_v3] Tarea de fondo iniciada
+INFO:main:[sync_v3] Tarea de fondo iniciada
+INFO:     Application startup complete.
+INFO:     127.0.0.1:63079 - "GET /pacientes-medical-care/ocupacion-rutas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49321 - "GET /pacientes-medical-care/ocupacion-rutas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54750 - "GET /sync-v3/estado HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53476 - "GET /pacientes-medical-care/ocupacion-rutas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53241 - "GET /sync-v3/estado HTTP/1.1" 200 OK
+INFO:rutas.pacientes_medical_care:[/recalcular-cruce] usuario=EZARATE, enviar_correo=True
+INFO:     127.0.0.1:53241 - "POST /pacientes-medical-care/recalcular-cruce?usuario=EZARATE&enviar_correo=true HTTP/1.1" 200 OK
+INFO:rutas.pacientes_medical_care:[recalcular-cruce] Completado. fecha=2026-05-05 17:33:19, pacientes=6209, total_v3=4210, sin_paciente=310, zona_gris=0, llave_vacia=0
+INFO:rutas.pacientes_medical_care:[cruce_email] Usuarios con notificación retraso_operacion: 1
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Enviando notificaciones a 2 usuarios
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Usuario: EDWIN ZARATE, perfil=ADMIN, notificaciones=['retraso_operacion']
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Stats para EDWIN ZARATE (regional=None, es_admin=True): sin_cruce=1148, retraso=0
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Usuario: EDWIN PRUEBA, perfil=CLIENTE_FMC, notificaciones=['sin_cruce']
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Stats para EDWIN PRUEBA (regional=FUNZA, es_admin=False): sin_cruce=317, retraso=0
+INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op para edwin.zarate@integralogistica.com (CEDI=TODAS, admin=True): 167 pacientes urgentes con retraso, stats compartida=0
+INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
+INFO:rutas.pacientes_medical_care:[whatsapp_cruce] WS enviado a 573218695196 (EDWIN PRUEBA) - sin_cruce
+INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op enviado a edwin.zarate@integralogistica.com (CEDI=TODAS, admin=True, 167 registros)
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R104 | LOPEZ SANCHEZ JORGE MAURO (79744107) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R104 | GAITAN BUENO JORGE ELIECER (7168230) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R115 | FRANCISCO JAVIER TRUJILLO GALVIS (93453733) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R115 | SERGIO ALFONSO PEDRAZA (1073382275) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R115 |  (1002263877) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | YEIMMY BASTO BENAVIDES (49670038) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | MARÃA EMMA SANTOS DE ROMERO (21110469) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | AYALA ATEHORTUA ASTRID (38286261) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | GUILLERMO ALBERTO ESPINOSA GUTIERRE GUIL (7184375) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | AMPARO BERMUDEZ DE RUEDA AMPARO, BERMUD (38282123) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | VELOZA CAMARGO EMIGDIO (14317605) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | LUZ MARINA ROBAYO TRIANA (20633242) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | MORENO SANCHEZ CARLOS JULIO (3052030) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 |  (38287224) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | NAYRU GUTIERREZ ESCOBAR NAYRU, GUTIERRE (20633643) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | MAHECHA ACERO JOSE FERNEY (79003036) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | ELVIA ROJAS ELVIA ELVIA, ROJAS, (20828565) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | LINARES CASTILLO, FERMIN ARCAN (3050460) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | SALDAÑA  LUIS ALBERTO (14315277) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | ZAMORA MAHECHA PEDRO JULIO (10164367) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | GUZMAN ISAZA HENRY EDGAR (3166167) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | MARROQUIN GAITAN EDUARDO (3131151) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 |  (20429797) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | MUÑOZ GONZALEZ FRANKLIN (10174695) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R121 | LUZ MERCEDES CRUZ (65714453) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R912 | DORIS SANCHEZ SANCHEZ DORIS DORIS, SANC (55065371) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: R912 | DAMARIS YURLEy ALVAREZ CALDERON DAMARIS, (1077872592) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | PEREZ MORALES OCTAVIO (79402862) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | JOSE ALEXANDER GONZALEZ OSORIO (75146122) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 |  (40439277) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | HUMBERT HERNAN ROJAS MALDONADO (1090457803) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | MARÍA DEL ROSARIO DIAZ GUTIERREZ (55157245) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 |  (26592427) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 |  (80719746) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | HERMILLO CORDOBA VILLAMUEL HERMILLO HER (4937590) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | CARMELA CALDERON CALDERON (1075222042) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 |  (12224275) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: RE-951 | MARCO FIDEL VARGAR BARRERA (4904076) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | ELBER VILLANUEVA CARRILLO (80233428) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | FABIO LIBARDO GIRALDO AUZA FABIO,LIBARDO (19201921) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA |  (80162205) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | JORGE  ALBERTO FLOREZ URREA (3182766) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | RENGIFO, CAROLINA (46649331) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | NICOL VANESSA SANTANA RODRIGUEZ NICOL NI (1001049983) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA |  (5559899) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[Excel filtro] Excluido: URBANO BOGOTA | LINA MAYERLY LINA MAYERLY (1124502396) | f_pref=12/05/2026 | días hábiles >= 6: 6
+INFO:rutas.pacientes_medical_care:[cruce_email] Sin-cruce enviado a INTEGRAPPLOGISTICA@GMAIL.COM (CEDI=FUNZA, admin=False, 317 sin cruce, 70 v3 sin paciente)
+[sync_v3] Tick - Hora Bogotá: 17:33
+[sync_v3] Horarios configurados: ['08:00', '14:00', '16:06'], hora actual: 17:33
+[sync_v3] Tick - Hora Bogotá: 17:34
+[sync_v3] Horarios configurados: ['08:00', '14:00', '16:06'], hora actual: 17:34
+INFO:     127.0.0.1:51396 - "GET /sync-v3/estado HTTP/1.1" 200 OK

@@ -1587,45 +1587,63 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
         fecha_legible = _fmt_fecha_legible(fecha_calculo)
         calculado_str = f' por <strong>{calculado_por}</strong>' if calculado_por != 'sync_automatico' else ''
 
-        # ── 1. Retraso operación: Solo pacientes con estado retraso, filtrado por CEDI del usuario ──
+        # ── 1. Retraso operación: Usar función compartida para obtener pacientes con retraso ──
+        from Funciones.sync_api_v3 import obtener_estadisticas_notificaciones, _filtrar_pacientes_urgentes
+
+        hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        mes_actual = hoy.month
+        anio_actual = hoy.year
+
         usuarios_retraso = list(col_usuarios.find(
             {'notificaciones_mc': 'retraso_operacion', 'correo': {'$exists': True, '$nin': [None, '']}},
-            {'correo': 1, 'regional': 1, 'perfil': 1, '_id': 0}
+            {'correo': 1, 'regional': 1, 'perfil': 1, 'nombre': 1, '_id': 0}
         ))
+        logger.info(f'[cruce_email] Usuarios con notificación retraso_operacion: {len(usuarios_retraso)}')
         for usr in usuarios_retraso:
             correo = usr.get('correo')
             if not correo:
                 continue
             es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
             regional_usr = (usr.get('regional') or '').strip().upper()
+            nombre_usuario = usr.get('nombre', '')
 
-            # Mapear código de regional a nombre de CEDI
-            mapa_regional_cedi = {
-                'CO04': 'BARRANQUILLA',
-                'CO05': 'CALI',
-                'CO06': 'BUCARAMANGA',
-                'CO07': 'FUNZA',
-                'CO09': 'MEDELLIN',
-            }
-            cedi_usr = mapa_regional_cedi.get(regional_usr, regional_usr).upper()
+            # Usar la FUNCIÓN COMPARTIDA para obtener estadísticas SOLO para verificar si hay datos
+            regional_param = None if es_admin else regional_usr
+            stats = obtener_estadisticas_notificaciones(cache, regional_param, es_admin)
 
+            # Filtrar pacientes de retraso para el Excel
             cache_retraso = dict(cache)
             rutas_filtradas = []
             for ruta in cache.get('ocupacion_rutas', []):
-                if not es_admin and cedi_usr and (ruta.get('cedi') or '').upper() != cedi_usr:
-                    continue
+                # Filtrar por CEDI del usuario (solo ADMIN ve todo)
+                if not es_admin and regional_usr:
+                    ruta_cedi = (ruta.get('cedi') or '').upper()
+                    cedi_usr = _CEDI_MAPA.get(regional_usr, regional_usr).upper()
+                    if ruta_cedi != cedi_usr:
+                        continue
+
+                # Filtrar pacientes con retraso operación (sin filtro de urgencia)
                 pacientes_retraso = [
                     p for p in ruta.get('pacientes', [])
                     if p.get('estado_cruce', '').lower() in ('retraso operación', 'retraso operacion')
                 ]
+
                 if pacientes_retraso:
                     rutas_filtradas.append({**ruta, 'pacientes': pacientes_retraso})
-            if not rutas_filtradas:
-                logger.info(f'[cruce_email] Retraso-op: sin registros para {correo} (CEDI={cedi_usr})')
+
+            # Calcular total desde los datos filtrados
+            total_retraso = sum(len(r['pacientes']) for r in rutas_filtradas)
+
+            cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+            logger.info(f'[cruce_email] Retraso-op para {correo} (CEDI={cedi_display}, admin={es_admin}): {total_retraso} pacientes con retraso, stats compartida={stats["total_retraso_operacion"]}')
+
+            if total_retraso == 0:
+                cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+                logger.info(f'[cruce_email] Retraso-op: sin registros para {correo} (CEDI={cedi_display}, admin={es_admin})')
                 continue
+
             cache_retraso['ocupacion_rutas'] = rutas_filtradas
             cache_retraso['v3_sin_paciente'] = []
-            total_retraso = sum(len(r['pacientes']) for r in rutas_filtradas)
             excel_bytes, nombre_archivo = _generar_excel_bytes(cache_retraso, nombre_hoja='Pacientes con Retraso', sin_hoja_v3=True)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
@@ -1639,16 +1657,16 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                 ),
                 'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
             })
-            logger.info(f'[cruce_email] Retraso-op enviado a {correo} (CEDI={cedi_usr}, admin={es_admin}, {total_retraso} registros)')
+            cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+            logger.info(f'[cruce_email] Retraso-op enviado a {correo} (CEDI={cedi_display}, admin={es_admin}, {total_retraso} registros)')
         if not usuarios_retraso:
             logger.warning('[cruce_email] Sin destinatarios para retraso_operacion')
 
-        # ── 2. Sin cruce: Pacientes sin cruce + V3 sin paciente, filtrado por CEDI del usuario ──
-        # NUEVA REGLA: Solo incluir registros con F. Pref. Integra < 6 días hábiles desde hoy Y del mes actual
+        # ── 2. Sin cruce: Usar función compartida para filtrar pacientes ──
         hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        manana = (hoy + timedelta(days=1)).strftime('%Y-%m-%d')
         mes_actual = hoy.month
         anio_actual = hoy.year
+
         usuarios_sin_cruce = list(col_usuarios.find(
             {'notificaciones_mc': 'sin_cruce', 'correo': {'$exists': True, '$nin': [None, '']}},
             {'correo': 1, 'regional': 1, 'perfil': 1, '_id': 0}
@@ -1658,81 +1676,74 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             if not correo:
                 continue
             es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
-            es_cliente_fmc = (usr.get('perfil') or '').upper() == 'CLIENTE_FMC'
-            ver_todo = es_admin or es_cliente_fmc
             regional_usr = (usr.get('regional') or '').strip().upper()
 
-            # Mapear código de regional a nombre de CEDI
-            mapa_regional_cedi = {
-                'CO04': 'BARRANQUILLA',
-                'CO05': 'CALI',
-                'CO06': 'BUCARAMANGA',
-                'CO07': 'FUNZA',
-                'CO09': 'MEDELLIN',
-            }
-            cedi_usr = mapa_regional_cedi.get(regional_usr, regional_usr).upper()
+            # Usar la FUNCIÓN COMPARTIDA para obtener estadísticas
+            regional_param = None if es_admin else regional_usr
+            stats = obtener_estadisticas_notificaciones(cache, regional_param, es_admin)
 
+            total_sin_cruce = stats['total_sin_cruce']
+            if total_sin_cruce == 0:
+                cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+                logger.info(f'[cruce_email] Sin-cruce: sin registros para {correo} (CEDI={cedi_display}, admin={es_admin})')
+                continue
+
+            # Filtrar pacientes sin cruce para el Excel (usando función compartida)
             cache_sc = dict(cache)
             rutas_sc = []
-            for ruta in cache.get('ocupacion_rutas', []):
-                # Filtrar por CEDI del usuario (si tiene una asignada)
-                # ADMIN y CLIENTE_FMC ven todo, usuarios con regional ven solo su CEDI
-                if not ver_todo and regional_usr:
-                    ruta_cedi = (ruta.get('cedi') or '').upper()
-                    if ruta_cedi != cedi_usr:
-                        continue
-                pacientes_sc = [
-                    p for p in ruta.get('pacientes', [])
-                    if not p.get('en_v3', False)
-                ]
-                # FILTRO POR FECHA: Solo pacientes con F. Pref. Integra < 6 días hábiles Y del mes actual
-                pacientes_sc_filtrados = []
-                for p in pacientes_sc:
-                    f_pref_teorica = p.get('f_pref_teorica', '')
-                    if not f_pref_teorica:
-                        continue  # Excluir si no tiene fecha preferente teórica
-
-                    # Usar _parsear_fecha_texto que acepta múltiples formatos
-                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
-                    if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
-                        continue  # Excluir si no es del mes actual
-
-                    dias_habiles = _calcular_dias_habiles(manana, f_pref_teorica)
-                    if dias_habiles < 6:  # Menos de 6 días hábiles desde mañana
-                        pacientes_sc_filtrados.append(p)
-                if pacientes_sc_filtrados:
-                    rutas_sc.append({**ruta, 'pacientes': pacientes_sc_filtrados})
-            if not rutas_sc:
-                logger.info(f'[cruce_email] Sin-cruce: sin registros para {correo} (CEDI={cedi_usr})')
-                continue
-            cache_sc['ocupacion_rutas'] = rutas_sc
-            # Filtrar v3_sin_paciente por CEDI y por fecha < 6 días hábiles Y del mes actual
             v3_sp_filtrado = []
-            for r in cache.get('v3_sin_paciente', []):
-                # Filtrar por CEDI del usuario (si tiene una asignada)
-                if not ver_todo and regional_usr:
-                    ruta_cedi = (r.get('cedi') or '').upper()
+
+            for ruta in cache.get('ocupacion_rutas', []):
+                # Filtrar por CEDI del usuario (solo ADMIN ve todo)
+                if not es_admin and regional_usr:
+                    ruta_cedi = (ruta.get('cedi') or '').upper()
+                    cedi_usr = _CEDI_MAPA.get(regional_usr, regional_usr).upper()
                     if ruta_cedi != cedi_usr:
                         continue
+
+                # Filtrar pacientes sin cruce URGENTES (usando función compartida)
+                pacientes_urgentes = _filtrar_pacientes_urgentes(ruta.get('pacientes', []), mes_actual, anio_actual)
+                pacientes_sc = [p for p in pacientes_urgentes if not p.get('en_v3', False)]
+
+                if pacientes_sc:
+                    rutas_sc.append({**ruta, 'pacientes': pacientes_sc})
+
+            # Filtrar V3 sin paciente por CEDI (solo admin ve todo)
+            for r in cache.get('v3_sin_paciente', []):
+                if not es_admin and regional_usr:
+                    ruta_cedi = (r.get('cedi') or '').upper()
+                    cedi_usr = _CEDI_MAPA.get(regional_usr, regional_usr).upper()
+                    if ruta_cedi != cedi_usr:
+                        continue
+
+                # Filtrar registros urgentes
                 registros_filtrados = []
                 for reg in r.get('registros', []):
                     f_pref_teorica = reg.get('f_pref_teorica', '')
                     if not f_pref_teorica:
-                        continue  # Excluir si no tiene fecha preferente teórica
+                        continue
 
-                    # Usar _parsear_fecha_texto que acepta múltiples formatos
-                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
-                    if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
-                        continue  # Excluir si no es del mes actual
-
-                    dias_habiles = _calcular_dias_habiles(manana, f_pref_teorica)
-                    if dias_habiles < 6:  # Menos de 6 días hábiles desde mañana
+                    # Crear un paciente temporal para usar la función compartida
+                    paciente_temp = {'f_pref_teorica': f_pref_teorica}
+                    pacientes_filtrados = _filtrar_pacientes_urgentes([paciente_temp], mes_actual, anio_actual)
+                    if pacientes_filtrados:
                         registros_filtrados.append(reg)
+
                 if registros_filtrados:
                     v3_sp_filtrado.append({**r, 'registros': registros_filtrados})
+
+            if not rutas_sc and not v3_sp_filtrado:
+                cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+                logger.info(f'[cruce_email] Sin-cruce: sin registros para {correo} (CEDI={cedi_display}, admin={es_admin})')
+                continue
+
+            cache_sc['ocupacion_rutas'] = rutas_sc
             cache_sc['v3_sin_paciente'] = v3_sp_filtrado
+
+            # Calcular totales desde los datos filtrados (no desde stats para evitar inconsistencias)
             total_sin_cruce = sum(len(r['pacientes']) for r in rutas_sc)
             total_v3_sp = sum(len(r.get('registros', [])) for r in v3_sp_filtrado)
+
             excel_sc, nombre_sc = _generar_excel_bytes(cache_sc)
             _resend.Emails.send({
                 'from':    f'IntegrApp <{mail_from}>',
@@ -1749,7 +1760,8 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                 ),
                 'attachments': [{'filename': nombre_sc, 'content': list(excel_sc)}],
             })
-            logger.info(f'[cruce_email] Sin-cruce enviado a {correo} (CEDI={cedi_usr}, admin={es_admin}, {total_sin_cruce} sin cruce, {total_v3_sp} v3 sin paciente)')
+            cedi_display = "TODAS" if es_admin else _CEDI_MAPA.get(regional_usr, regional_usr)
+            logger.info(f'[cruce_email] Sin-cruce enviado a {correo} (CEDI={cedi_display}, admin={es_admin}, {total_sin_cruce} sin cruce, {total_v3_sp} v3 sin paciente)')
         if not usuarios_sin_cruce:
             logger.warning('[cruce_email] Sin destinatarios para sin_cruce')
 
@@ -1760,13 +1772,27 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
 def _enviar_notificaciones_whatsapp_cruce():
     """
     Envía notificaciones WhatsApp tras un recálculo manual del cruce.
-    Reutiliza la misma lógica que sync_api_v3 pero sin el contexto del sync.
+    Usa la MISMA función que sync_api_v3 para garantizar consistencia.
     """
     from Funciones.whatsapp_utils_integra import enviar_template_sync
+    from Funciones.sync_api_v3 import obtener_estadisticas_notificaciones
     from bd.bd_cliente import bd_cliente as _bd_cli
     import logging
 
     logger_local = logging.getLogger(__name__)
+
+    # Mapeo local de regional a CEDI (mismo formato que sync_api_v3.py)
+    _MAPEO_REGIONAL_CEDI = {
+        'CO04': 'BARRANQUILLA',
+        'CO05': 'CALI',
+        'CO06': 'BUCARAMANGA',
+        'CO07': 'FUNZA',
+        'CO09': 'MEDELLIN',
+    }
+
+    def _mapear_regional_a_cedi(regional: str) -> str:
+        """Mapea código de regional a nombre de CEDI."""
+        return _MAPEO_REGIONAL_CEDI.get(regional, regional)
 
     try:
         # Obtener cache completo del cruce
@@ -1774,79 +1800,6 @@ def _enviar_notificaciones_whatsapp_cruce():
         if not cruce_cache:
             logger_local.warning("[whatsapp_cruce] No hay cache de cruce disponible")
             return
-
-        # Obtener fecha/hora actual
-        from datetime import datetime as _dt
-        ahora = _dt.now()
-        fecha_hora = ahora.strftime('%Y-%m-%d %H:%M:%S')
-
-        # Mapeo de regional a CEDI
-        def _mapear_regional_a_cedi(regional: str) -> str:
-            mapa = {
-                'CO04': 'BARRANQUILLA',
-                'CO05': 'CALI',
-                'CO06': 'BUCARAMANGA',
-                'CO07': 'FUNZA',
-                'CO09': 'MEDELLIN',
-            }
-            return mapa.get(regional, regional)
-
-        def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
-            """Obtiene estadísticas del cruce filtradas por regional, con desglose por CEDI para admin."""
-            cedi_filtro = _mapear_regional_a_cedi(regional) if regional else None
-
-            # Obtener pacientes desde ocupacion_rutas
-            ocupacion_rutas = cruce_cache.get('ocupacion_rutas', [])
-            pacientes_por_ruta = {}
-
-            # Diccionario para agrupar por CEDI
-            stats_por_cedi = {}
-
-            for ruta in ocupacion_rutas:
-                ruta_cedi = ruta.get('cedi', '')
-                if cedi_filtro and ruta_cedi != cedi_filtro:
-                    continue
-
-                # Inicializar contador para este CEDI si no existe
-                if ruta_cedi not in stats_por_cedi:
-                    stats_por_cedi[ruta_cedi] = {
-                        'total_pacientes': 0,
-                        'retraso_operacion': 0,
-                        'sin_cruce': 0,
-                    }
-
-                for paciente in ruta.get('pacientes', []):
-                    cedula = paciente.get('cedula')
-                    pacientes_por_ruta[cedula] = paciente
-
-                    # Contar por CEDI
-                    stats_por_cedi[ruta_cedi]['total_pacientes'] += 1
-
-                    if paciente.get('estado_cruce') == 'retraso operación':
-                        stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
-
-                    if not paciente.get('en_v3', False):
-                        stats_por_cedi[ruta_cedi]['sin_cruce'] += 1
-
-            # Si se filtra por regional, retornar solo ese CEDI
-            if cedi_filtro:
-                return {
-                    'total_retraso_operacion': stats_por_cedi.get(cedi_filtro, {}).get('retraso_operacion', 0),
-                    'total_sin_cruce': stats_por_cedi.get(cedi_filtro, {}).get('sin_cruce', 0),
-                    'total_pacientes': stats_por_cedi.get(cedi_filtro, {}).get('total_pacientes', 0),
-                }
-
-            # Si no hay filtro (admin), retornar totales y desglose
-            total_retraso_operacion = sum(s['retraso_operacion'] for s in stats_por_cedi.values())
-            total_sin_cruce = sum(s['sin_cruce'] for s in stats_por_cedi.values())
-            total_pacientes = sum(s['total_pacientes'] for s in stats_por_cedi.values())
-
-            return {
-                'total_retraso_operacion': total_retraso_operacion,
-                'total_sin_cruce': total_sin_cruce,
-                'total_pacientes': total_pacientes,
-                'desglose_por_cedi': stats_por_cedi,  # Incluye desglose para admin
-            }
 
         # Obtener usuarios con MEDICAL_CARE y notificaciones_mc activas
         col_usuarios = _bd_cli['integra']['baseusuarios']
@@ -1874,6 +1827,9 @@ def _enviar_notificaciones_whatsapp_cruce():
             nombre_usuario = usuario.get('nombre', '')
             perfil_usuario = usuario.get('perfil', '')
 
+            # Log para depuración
+            logger_local.info(f"[whatsapp_cruce] Usuario: {nombre_usuario}, perfil={perfil_usuario}, notificaciones={notificaciones_raw}")
+
             # Normalizar notificaciones a lista (maneja ambos formatos: string o array)
             if isinstance(notificaciones_raw, str):
                 notificaciones = [notificaciones_raw]
@@ -1889,8 +1845,10 @@ def _enviar_notificaciones_whatsapp_cruce():
             es_admin = (perfil_usuario or '').upper() == 'ADMIN'
             regional_para_stats = None if es_admin else regional
 
-            # Obtener estadísticas (todas si es ADMIN, solo su regional si no)
-            stats = _obtener_estadisticas_por_regional(cruce_cache, regional_para_stats)
+            # Obtener estadísticas usando la FUNCIÓN COMPARTIDA con sync_api_v3
+            # Esto garantiza que WhatsApp y Email muestren los mismos números
+            stats = obtener_estadisticas_notificaciones(cruce_cache, regional_para_stats, es_admin)
+            logger_local.info(f"[whatsapp_cruce] Stats para {nombre_usuario} (regional={regional_para_stats}, es_admin={es_admin}): sin_cruce={stats['total_sin_cruce']}, retraso={stats['total_retraso_operacion']}")
 
             # Determinar el texto de regional para el mensaje
             if es_admin:
