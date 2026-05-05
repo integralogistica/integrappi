@@ -28,7 +28,7 @@ from rutas.debug import ruta_debug_network
 from rutas.debug_siscore import ruta_debug_siscore
 from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
 from rutas.pedidos_v3 import router as ruta_pedidos_v3
-from rutas.sync_v3 import router as ruta_sync_v3, config as sync_config, actualizar_ultimo_resultado
+from rutas.sync_v3 import router as ruta_sync_v3, _obtener_config_desde_db, actualizar_ultimo_resultado
 from rutas.cronograma_mc import router as ruta_cronograma_mc
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
@@ -67,6 +67,7 @@ async def _loop_sync_v3():
                 logger.error(f"[archivo_mensual] Error: {e}")
 
         # ── Sync programado ──────────────────────────────────────────────────
+        sync_config = _obtener_config_desde_db()
         if not sync_config.get("activo", True):
             continue
 
