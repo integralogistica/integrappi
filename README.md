@@ -431,13 +431,15 @@ Sistema de sincronización periódica que consume directamente del **API de Sisc
   - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
   - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
 
-**Configuración de horarios** en `rutas/sync_v3.py`:
-```python
-config = {
-    "horarios": ["05:00", "10:30", "19:00"],  # hora Colombia (America/Bogota)
-    "activo": True,
-}
-```
+**Configuración de horarios almacenada en MongoDB:**
+- **Colección**: `config_v3` con documento `{ tipo: "sync_config", horarios: [], activo: true }`
+- **Horarios por defecto**: `['08:00', '14:00']` (se crean automáticamente si no existen)
+- **Gestión desde UI**: el portal MedicalCare permite agregar/eliminar horarios sin reiniciar el servidor
+- **Endpoints de gestión**:
+  - `GET /sync-v3/config` - obtiene configuración actual
+  - `POST /sync-v3/config` - actualiza horarios o estado activo
+  - `POST /sync-v3/horarios?horario=HH:MM` - agrega un nuevo horario
+  - `DELETE /sync-v3/horarios/HH:MM` - elimina un horario
 
 **Zona horaria:** `pytz America/Bogota` — funciona correctamente en Render (que corre en UTC)
 
@@ -477,11 +479,16 @@ config = {
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| GET | `/sync-v3/config` | Ver horarios configurados y fuente de datos (API Siscore) |
+| GET | `/sync-v3/config` | Ver horarios configurados, estado activo y fuente de datos (API Siscore) |
 | POST | `/sync-v3/config?activo=false` | Pausar o reanudar el sync |
 | POST | `/sync-v3/config` + body `{"horarios":["06:00","14:00"]}` | Cambiar horarios en caliente (sin reiniciar) |
+| POST | `/sync-v3/horarios?horario=HH:MM` | Agregar un nuevo horario a la configuración |
+| DELETE | `/sync-v3/horarios/HH:MM` | Eliminar un horario de la configuración |
 | POST | `/sync-v3/ejecutar` | Disparar sync manualmente ahora mismo |
 | GET | `/sync-v3/estado` | Resultado del último sync: timestamp, exitosos, errores, segundos |
+| POST | `/sync-v3/archivar` | Ejecutar corte mensual manualmente |
+| GET | `/sync-v3/historico` | Listar meses archivados |
+| GET | `/sync-v3/historico/{anio}/{mes}` | Ver cruce archivado de un mes específico |
 
 **Archivos:**
 - `Funciones/sync_api_v3.py` — lógica core: consulta API Siscore, mapeo de campos, normalización, reemplazo en MongoDB
@@ -1160,6 +1167,39 @@ Archivo: `rutas/pacientes_medical_care.py`
   - **📱 (azul)**: cruce por celular
   - **Sin badge**: sin cruce
 - **Histórico**: nueva pestaña que muestra cortes mensuales automáticos generados el último día de cada mes a las 00:00.
+
+### Mayo 2026 — Sistema de gestión de configuración V3 y mejoras en notificaciones
+
+**`rutas/sync_v3.py` — Configuración en MongoDB:**
+- **Antes**: horarios hardcoded en `['08:00', '14:00']`
+- **Ahora**: configuración dinámica almacenada en colección `config_v3`
+- **Funciones**:
+  - `_obtener_config_desde_db()`: lee config desde MongoDB, crea default si no existe
+  - `_guardar_config_en_db()`: actualiza horarios o estado activo
+- **Nuevos endpoints**:
+  - `POST /sync-v3/horarios?horario=HH:MM` - agrega horario
+  - `DELETE /sync-v3/horarios/HH:MM` - elimina horario
+- **Validaciones**:
+  - Formato HH:MM validado antes de guardar
+  - No permite eliminar todos los horarios (debe haber al menos uno)
+  - Detecta horarios duplicados antes de agregar
+
+**`main.py` — Loop de sync actualizado:**
+- **Antes**: importaba hardcoded `horarios` desde `sync_v3.py`
+- **Ahora**: lee configuración desde MongoDB cada 30 segundos
+- **Función `_loop_sync_v3()`**: llama `_obtener_config_desde_db()` para obtener horarios y estado activo
+- **Corte mensual automático**: último día de cada mes a las 00:00 ejecuta `archivar_mes_v3()`
+
+**`rutas/pedidos_v3.py` — Timeout aumentado para API Siscore:**
+- **Timeout aumentado**: de 120s a 600s (10 minutos) para endpoint Siscore V3
+- **Timeout de conexión**: 120s (2 minutos para establecer conexión)
+- **Mejor manejo de errores**: distingue entre `httpx.ReadTimeout` y `httpx.ConnectTimeout`
+- **Mensaje de error específico**: indica tiempo normal de respuesta (5-7 minutos)
+
+**Notificaciones WhatsApp mejoradas:**
+- **Referencia a Excel**: todos los mensajes incluyen "El Excel con el detalle fue enviado a tu correo"
+- **Archivos afectados**: `Funciones/sync_api_v3.py`, `rutas/pacientes_medical_care.py`
+- **Tipos de notificación**: retraso operación, sin cruce, recálculo manual de cruce
 
 ### Marzo 2025 — Multi-cliente y panel de administración
 - **`baseusuarios.py`**: añadido campo `clientes: Optional[List[str]]` al modelo `BaseUsuario`. El endpoint `/login` ahora devuelve el array `clientes` en la respuesta. Compatibilidad hacia atrás: documentos sin el campo retornan `["KABI"]` por defecto.

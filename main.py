@@ -44,55 +44,87 @@ async def _loop_sync_v3():
     from datetime import datetime
     import calendar
     import pytz
+
+    print("[sync_v3] Tarea de fondo iniciada")  # Print para asegurar que se vea en Render
     logger.info("[sync_v3] Tarea de fondo iniciada")
+
     ultimo_ejecutado: str | None = None    # evita doble ejecución del sync en el mismo minuto
     ultimo_archivado: str | None = None    # evita doble archivo en el mismo mes ('YYYY-MM')
     _tz = pytz.timezone('America/Bogota')
 
     while True:
-        await asyncio.sleep(30)  # revisa cada 30 segundos
+        try:
+            await asyncio.sleep(30)  # revisa cada 30 segundos
 
-        hoy   = datetime.now(_tz)
-        ahora = hoy.strftime("%H:%M")
+            hoy   = datetime.now(_tz)
+            ahora = hoy.strftime("%H:%M")
 
-        # ── Corte mensual: último día del mes a las 00:00 ────────────────────
-        ultimo_dia_mes = calendar.monthrange(hoy.year, hoy.month)[1]
-        clave_mes      = hoy.strftime('%Y-%m')
-        if hoy.day == ultimo_dia_mes and ahora == "00:00" and clave_mes != ultimo_archivado:
-            ultimo_archivado = clave_mes
-            logger.info(f"[archivo_mensual] Ejecutando corte de fin de mes {clave_mes}")
-            try:
-                await asyncio.to_thread(archivar_mes_v3)
-            except Exception as e:
-                logger.error(f"[archivo_mensual] Error: {e}")
+            # Log cada tick para debugging (temporal)
+            print(f"[sync_v3] Tick - Hora Bogotá: {ahora}")  # Print para debugging
 
-        # ── Sync programado ──────────────────────────────────────────────────
-        sync_config = _obtener_config_desde_db()
-        if not sync_config.get("activo", True):
-            continue
+            # ── Corte mensual: último día del mes a las 00:00 ────────────────────
+            ultimo_dia_mes = calendar.monthrange(hoy.year, hoy.month)[1]
+            clave_mes      = hoy.strftime('%Y-%m')
+            if hoy.day == ultimo_dia_mes and ahora == "00:00" and clave_mes != ultimo_archivado:
+                ultimo_archivado = clave_mes
+                logger.info(f"[archivo_mensual] Ejecutando corte de fin de mes {clave_mes}")
+                try:
+                    await asyncio.to_thread(archivar_mes_v3)
+                except Exception as e:
+                    logger.error(f"[archivo_mensual] Error: {e}")
 
-        horarios = sync_config.get("horarios", [])
-        if ahora in horarios and ahora != ultimo_ejecutado:
-            ultimo_ejecutado = ahora
-            logger.info(f"[sync_v3] Ejecutando sync programado a las {ahora}")
-            try:
-                resultado = await ejecutar_sync_v3()
-                actualizar_ultimo_resultado(resultado)
-            except Exception as e:
-                logger.error(f"[sync_v3] Error en sync: {e}")
-        elif ahora not in horarios:
-            ultimo_ejecutado = None  # reset para que el próximo horario pueda ejecutar
+            # ── Sync programado ──────────────────────────────────────────────────
+            sync_config = _obtener_config_desde_db()
+            if not sync_config.get("activo", True):
+                print(f"[sync_v3] Sync inactivo, tick a las {ahora}")
+                continue
+
+            horarios = sync_config.get("horarios", [])
+            print(f"[sync_v3] Horarios configurados: {horarios}, hora actual: {ahora}")
+
+            if ahora in horarios and ahora != ultimo_ejecutado:
+                ultimo_ejecutado = ahora
+                print(f"[sync_v3] ¡EJECUTANDO sync programado a las {ahora}!")
+                logger.info(f"[sync_v3] Ejecutando sync programado a las {ahora}")
+                try:
+                    resultado = await ejecutar_sync_v3()
+                    actualizar_ultimo_resultado(resultado)
+                except Exception as e:
+                    logger.error(f"[sync_v3] Error en sync: {e}")
+            elif ahora not in horarios:
+                ultimo_ejecutado = None  # reset para que el próximo horario pueda ejecutar
+
+        except asyncio.CancelledError:
+            print("[sync_v3] Tarea cancelada (apagando servidor)")
+            raise
+        except Exception as e:
+            print(f"[sync_v3] Error en loop principal: {e}")
+            logger.error(f"[sync_v3] Error en loop principal: {e}")
+            # Continuar ejecutando a pesar del error
+            await asyncio.sleep(60)  # Esperar 1 min antes de reintentar
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[LIFESPAN] Iniciando aplicación...")
+    logger.info("[LIFESPAN] Iniciando aplicación...")
+
+    # Crear la tarea de fondo
     task = asyncio.create_task(_loop_sync_v3())
-    yield
-    task.cancel()
+    print(f"[LIFESPAN] Tarea de sync creada: {task}")
+    logger.info(f"[LIFESPAN] Tarea de sync creada: {task}")
+
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        print("[LIFESPAN] Apagando servidor, cancelando tarea de sync...")
+        logger.info("[LIFESPAN] Apagando servidor, cancelando tarea de sync...")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            print("[LIFESPAN] Tarea cancelada exitosamente")
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
