@@ -1675,8 +1675,12 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             cache_sc = dict(cache)
             rutas_sc = []
             for ruta in cache.get('ocupacion_rutas', []):
-                if not ver_todo and cedi_usr and (ruta.get('cedi') or '').upper() != cedi_usr:
-                    continue
+                # Filtrar por CEDI del usuario (si tiene una asignada)
+                # ADMIN y CLIENTE_FMC ven todo, usuarios con regional ven solo su CEDI
+                if not ver_todo and regional_usr:
+                    ruta_cedi = (ruta.get('cedi') or '').upper()
+                    if ruta_cedi != cedi_usr:
+                        continue
                 pacientes_sc = [
                     p for p in ruta.get('pacientes', [])
                     if not p.get('en_v3', False)
@@ -1705,8 +1709,11 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             # Filtrar v3_sin_paciente por CEDI y por fecha < 6 días hábiles Y del mes actual
             v3_sp_filtrado = []
             for r in cache.get('v3_sin_paciente', []):
-                if not ver_todo and cedi_usr and (r.get('cedi') or '').upper() != cedi_usr:
-                    continue
+                # Filtrar por CEDI del usuario (si tiene una asignada)
+                if not ver_todo and regional_usr:
+                    ruta_cedi = (r.get('cedi') or '').upper()
+                    if ruta_cedi != cedi_usr:
+                        continue
                 registros_filtrados = []
                 for reg in r.get('registros', []):
                     f_pref_teorica = reg.get('f_pref_teorica', '')
