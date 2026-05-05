@@ -5,7 +5,8 @@ Endpoint: https://integra-wms.appsiscore.com/app/ws/informe_v3.php
 import os
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import holidays
 
 from bd.bd_cliente import bd_cliente
 from rutas.pedidos_v3 import (
@@ -35,6 +36,10 @@ def _mapear_regional_a_cedi(regional: str) -> str:
 def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
     """
     Obtiene estadísticas del cruce filtradas por regional.
+    USA LOS MISMOS FILTROS QUE EL EXCEL:
+    1. Sin cruce (en_v3 = False)
+    2. Fecha preferente del mes actual
+    3. < 6 días hábiles (urgentes)
 
     Args:
         cruce_cache: Cache completo del cruce desde MongoDB
@@ -44,6 +49,55 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
         dict con totales y desglose por regional (para admin)
     """
     cedi_filtro = _mapear_regional_a_cedi(regional) if regional else None
+
+    # Fecha actual para filtros (igual que en el Excel)
+    _hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    _manana = (_hoy + timedelta(days=1)).strftime('%Y-%m-%d')
+    _mes_actual = _hoy.month
+    _anio_actual = _hoy.year
+    co_holidays = holidays.CountryHoliday('CO')
+
+    def _parsear_fecha_texto(fecha_str: str):
+        """Parsea fechas en múltiples formatos."""
+        if not fecha_str:
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d'):
+            try:
+                return datetime.strptime(fecha_str[:10], fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _calcular_dias_habiles(fecha_desde_str: str, fecha_hasta_str: str) -> int:
+        """Calcula días hábiles entre dos fechas."""
+
+        try:
+            # Parsear fechas
+            if '/' in fecha_desde_str:
+                desde = datetime.strptime(fecha_desde_str.split(' ')[0], '%d/%m/%Y')
+            elif '-' in fecha_desde_str:
+                desde = datetime.strptime(fecha_desde_str.split(' ')[0], '%Y-%m-%d')
+            else:
+                return 0
+
+            if '/' in fecha_hasta_str:
+                hasta = datetime.strptime(fecha_hasta_str.split(' ')[0], '%d/%m/%Y')
+            elif '-' in fecha_hasta_str:
+                hasta = datetime.strptime(fecha_hasta_str.split(' ')[0], '%Y-%m-%d')
+            else:
+                return 0
+
+            # Contar días hábiles
+            dias = 0
+            actual = desde
+            while actual <= hasta:
+                if actual.weekday() < 5 and actual not in co_holidays:
+                    dias += 1
+                actual += timedelta(days=1)
+
+            return dias
+        except Exception:
+            return 0
 
     # Obtener pacientes desde ocupacion_rutas
     ocupacion_rutas = cruce_cache.get('ocupacion_rutas', [])
@@ -72,10 +126,28 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
             # Contar por CEDI
             stats_por_cedi[ruta_cedi]['total_pacientes'] += 1
 
-            if paciente.get('estado_cruce') == 'retraso operación':
+            # --- FILTROS PARA NOTIFICACIONES (IGUALES AL EXCEL) ---
+
+            f_pref_teorica = paciente.get('f_pref_teorica', '')
+            tiene_fecha_mes_actual = False
+            es_urgente = False
+
+            # Verificar si tiene fecha del mes actual y es urgente
+            if f_pref_teorica:
+                f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+                if f_pref_dt and f_pref_dt.month == _mes_actual and f_pref_dt.year == _anio_actual:
+                    tiene_fecha_mes_actual = True
+                    # Calcular días hábiles
+                    dias_habiles = _calcular_dias_habiles(_manana, f_pref_teorica)
+                    if dias_habiles < 6:
+                        es_urgente = True
+
+            # Contar retraso operación (requiere urgencia)
+            if paciente.get('estado_cruce') == 'retraso operación' and es_urgente:
                 stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
 
-            if not paciente.get('en_v3', False):
+            # Contar sin cruce (requiere los 3 filtros)
+            if not paciente.get('en_v3', False) and tiene_fecha_mes_actual and es_urgente:
                 stats_por_cedi[ruta_cedi]['sin_cruce'] += 1
 
     # Si se filtra por regional, retornar solo ese CEDI
