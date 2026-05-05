@@ -1253,6 +1253,13 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                             args=(usuario, fecha_calculo),
                             daemon=True
                         ).start()
+
+                    # Enviar notificaciones WhatsApp a usuarios con notificaciones_mc configuradas
+                    threading.Thread(
+                        target=_enviar_notificaciones_whatsapp_cruce,
+                        daemon=True
+                    ).start()
+
                     logger.info(
                         f"[recalcular-cruce] Completado. fecha={fecha_calculo}, "
                         f"pacientes={len(pacientes)}, total_v3={result['total_v3']}, "
@@ -1398,9 +1405,16 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
         logger = logging.getLogger(__name__)
         for r in ocupacion_rutas_data:
             for p in r['pacientes']:
-                # FILTRO 0: Solo pacientes SIN CRUCE (en_v3 = False)
-                if p.get('en_v3', False):
-                    continue  # Excluir pacientes ya cruzados
+                # FILTRO 0: Si es reporte de retraso operación (sin_hoja_v3=True), incluir pacientes con estado_cruce = "retraso operación"
+                # Si es reporte normal, solo pacientes SIN CRUCE (en_v3 = False)
+                if sin_hoja_v3:
+                    # Para retraso operación: incluir pacientes con en_v3=True y estado_cruce = "retraso operación"
+                    if not p.get('en_v3', False) or p.get('estado_cruce', '').lower() not in ('retraso operación', 'retraso operacion'):
+                        continue  # Excluir pacientes sin cruce o sin estado de retraso
+                else:
+                    # Para reporte normal: excluir pacientes ya cruzados
+                    if p.get('en_v3', False):
+                        continue
 
                 f_pref_teorica = p.get('f_pref_teorica', '')
                 paciente_nombre = p.get('paciente', '')
@@ -1583,7 +1597,18 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             if not correo:
                 continue
             es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
-            cedi_usr = (usr.get('regional') or '').strip().upper()
+            regional_usr = (usr.get('regional') or '').strip().upper()
+
+            # Mapear código de regional a nombre de CEDI
+            mapa_regional_cedi = {
+                'CO04': 'BARRANQUILLA',
+                'CO05': 'CALI',
+                'CO06': 'BUCARAMANGA',
+                'CO07': 'FUNZA',
+                'CO09': 'MEDELLIN',
+            }
+            cedi_usr = mapa_regional_cedi.get(regional_usr, regional_usr).upper()
+
             cache_retraso = dict(cache)
             rutas_filtradas = []
             for ruta in cache.get('ocupacion_rutas', []):
@@ -1635,7 +1660,18 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             es_admin = (usr.get('perfil') or '').upper() == 'ADMIN'
             es_cliente_fmc = (usr.get('perfil') or '').upper() == 'CLIENTE_FMC'
             ver_todo = es_admin or es_cliente_fmc
-            cedi_usr = (usr.get('regional') or '').strip().upper()
+            regional_usr = (usr.get('regional') or '').strip().upper()
+
+            # Mapear código de regional a nombre de CEDI
+            mapa_regional_cedi = {
+                'CO04': 'BARRANQUILLA',
+                'CO05': 'CALI',
+                'CO06': 'BUCARAMANGA',
+                'CO07': 'FUNZA',
+                'CO09': 'MEDELLIN',
+            }
+            cedi_usr = mapa_regional_cedi.get(regional_usr, regional_usr).upper()
+
             cache_sc = dict(cache)
             rutas_sc = []
             for ruta in cache.get('ocupacion_rutas', []):
@@ -1712,6 +1748,224 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
 
     except Exception as e:
         logger.error(f'[cruce_email] Error: {e}')
+
+
+def _enviar_notificaciones_whatsapp_cruce():
+    """
+    Envía notificaciones WhatsApp tras un recálculo manual del cruce.
+    Reutiliza la misma lógica que sync_api_v3 pero sin el contexto del sync.
+    """
+    from Funciones.whatsapp_utils_integra import enviar_template_sync
+    from bd.bd_cliente import bd_cliente as _bd_cli
+    import logging
+
+    logger_local = logging.getLogger(__name__)
+
+    try:
+        # Obtener cache completo del cruce
+        cruce_cache = coleccion_cache.find_one({'tipo': 'cruce_completo'})
+        if not cruce_cache:
+            logger_local.warning("[whatsapp_cruce] No hay cache de cruce disponible")
+            return
+
+        # Obtener fecha/hora actual
+        from datetime import datetime as _dt
+        ahora = _dt.now()
+        fecha_hora = ahora.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Mapeo de regional a CEDI
+        def _mapear_regional_a_cedi(regional: str) -> str:
+            mapa = {
+                'CO04': 'BARRANQUILLA',
+                'CO05': 'CALI',
+                'CO06': 'BUCARAMANGA',
+                'CO07': 'FUNZA',
+                'CO09': 'MEDELLIN',
+            }
+            return mapa.get(regional, regional)
+
+        def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
+            """Obtiene estadísticas del cruce filtradas por regional, con desglose por CEDI para admin."""
+            cedi_filtro = _mapear_regional_a_cedi(regional) if regional else None
+
+            # Obtener pacientes desde ocupacion_rutas
+            ocupacion_rutas = cruce_cache.get('ocupacion_rutas', [])
+            pacientes_por_ruta = {}
+
+            # Diccionario para agrupar por CEDI
+            stats_por_cedi = {}
+
+            for ruta in ocupacion_rutas:
+                ruta_cedi = ruta.get('cedi', '')
+                if cedi_filtro and ruta_cedi != cedi_filtro:
+                    continue
+
+                # Inicializar contador para este CEDI si no existe
+                if ruta_cedi not in stats_por_cedi:
+                    stats_por_cedi[ruta_cedi] = {
+                        'total_pacientes': 0,
+                        'retraso_operacion': 0,
+                        'sin_cruce': 0,
+                    }
+
+                for paciente in ruta.get('pacientes', []):
+                    cedula = paciente.get('cedula')
+                    pacientes_por_ruta[cedula] = paciente
+
+                    # Contar por CEDI
+                    stats_por_cedi[ruta_cedi]['total_pacientes'] += 1
+
+                    if paciente.get('estado_cruce') == 'retraso operación':
+                        stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
+
+                    if not paciente.get('en_v3', False):
+                        stats_por_cedi[ruta_cedi]['sin_cruce'] += 1
+
+            # Si se filtra por regional, retornar solo ese CEDI
+            if cedi_filtro:
+                return {
+                    'total_retraso_operacion': stats_por_cedi.get(cedi_filtro, {}).get('retraso_operacion', 0),
+                    'total_sin_cruce': stats_por_cedi.get(cedi_filtro, {}).get('sin_cruce', 0),
+                    'total_pacientes': stats_por_cedi.get(cedi_filtro, {}).get('total_pacientes', 0),
+                }
+
+            # Si no hay filtro (admin), retornar totales y desglose
+            total_retraso_operacion = sum(s['retraso_operacion'] for s in stats_por_cedi.values())
+            total_sin_cruce = sum(s['sin_cruce'] for s in stats_por_cedi.values())
+            total_pacientes = sum(s['total_pacientes'] for s in stats_por_cedi.values())
+
+            return {
+                'total_retraso_operacion': total_retraso_operacion,
+                'total_sin_cruce': total_sin_cruce,
+                'total_pacientes': total_pacientes,
+                'desglose_por_cedi': stats_por_cedi,  # Incluye desglose para admin
+            }
+
+        # Obtener usuarios con MEDICAL_CARE y notificaciones_mc activas
+        col_usuarios = _bd_cli['integra']['baseusuarios']
+
+        # Buscar usuarios que tienen MEDICAL_CARE en clientes y notificaciones_mc configuradas
+        usuarios_notif = list(col_usuarios.find({
+            'clientes': 'MEDICAL_CARE',
+            '$or': [
+                {'notificaciones_mc': {'$exists': True, '$ne': [], '$nin': [[None], ''], '$type': 'array'}},
+                {'notificaciones_mc': {'$exists': True, '$ne': '', '$ne': None, '$type': 'string'}},
+            ],
+            'celular': {'$exists': True, '$ne': None, '$ne': ''}
+        }))
+
+        if not usuarios_notif:
+            logger_local.info("[whatsapp_cruce] No hay usuarios con notificaciones MC configuradas")
+            return
+
+        logger_local.info(f"[whatsapp_cruce] Enviando notificaciones a {len(usuarios_notif)} usuarios")
+
+        for usuario in usuarios_notif:
+            celular = usuario.get('celular', '').strip()
+            regional = usuario.get('regional', '')
+            notificaciones_raw = usuario.get('notificaciones_mc', [])
+            nombre_usuario = usuario.get('nombre', '')
+            perfil_usuario = usuario.get('perfil', '')
+
+            # Normalizar notificaciones a lista (maneja ambos formatos: string o array)
+            if isinstance(notificaciones_raw, str):
+                notificaciones = [notificaciones_raw]
+            else:
+                notificaciones = notificaciones_raw or []
+
+            # Normalizar celular: eliminar espacios, guiones, paréntesis; anteponer 57 si no tiene
+            celular_limpio = ''.join(c for c in celular if c.isdigit())
+            if not celular_limpio.startswith('57'):
+                celular_limpio = '57' + celular_limpio
+
+            # Verificar si es ADMIN para enviar todas las regiones o solo la suya
+            es_admin = (perfil_usuario or '').upper() == 'ADMIN'
+            regional_para_stats = None if es_admin else regional
+
+            # Obtener estadísticas (todas si es ADMIN, solo su regional si no)
+            stats = _obtener_estadisticas_por_regional(cruce_cache, regional_para_stats)
+
+            # Determinar el texto de regional para el mensaje
+            if es_admin:
+                texto_regional = "TODAS LAS REGIONALES"
+            else:
+                texto_regional = _mapear_regional_a_cedi(regional)
+
+            # Función auxiliar para formatear desglose por CEDI
+            def _formatear_desglose_cedi(stats_dict, tipo):
+                """Genera string con desglose por CEDI para admin."""
+                if 'desglose_por_cedi' not in stats_dict:
+                    return ""
+
+                # Orden de CEDIS
+                orden_cedis = ['FUNZA', 'CALI', 'MEDELLIN', 'BARRANQUILLA', 'BUCARAMANGA']
+                partes = []
+                for cedi in orden_cedis:
+                    if cedi in stats_dict['desglose_por_cedi']:
+                        valor = stats_dict['desglose_por_cedi'][cedi][tipo]
+                        partes.append(f"{cedi}: {valor}")
+
+                return ' | '.join(partes) if partes else ""
+
+            # Enviar notificaciones según tipo
+            for tipo_notif in notificaciones:
+                try:
+                    if tipo_notif == 'retraso_operacion' and stats['total_retraso_operacion'] > 0:
+                        if es_admin and 'desglose_por_cedi' in stats:
+                            # Mensaje con desglose para admin (una sola línea)
+                            desglose = _formatear_desglose_cedi(stats, 'retraso_operacion')
+                            mensaje = (
+                                f"🚨 Retraso Operación {texto_regional} | {desglose} | "
+                                f"Total: {stats['total_retraso_operacion']} pedidos | El Excel con el detalle fue enviado a tu correo"
+                            )
+                        else:
+                            # Mensaje simple para operativo
+                            mensaje = (
+                                f"🚨 Retraso Operación {texto_regional} | "
+                                f"Tienes {stats['total_retraso_operacion']} pedidos con retraso operación que requieren montaje urgente | "
+                                f"El Excel con el detalle fue enviado a tu correo"
+                            )
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='confirmar_actualizacion',
+                            language_code='es_CO',
+                            body_params=[mensaje],
+                        )
+                        if res:
+                            logger_local.info(f"[whatsapp_cruce] WS enviado a {celular_limpio} ({nombre_usuario}) - retraso_operacion")
+                        else:
+                            logger_local.warning(f"[whatsapp_cruce] WS no enviado a {celular_limpio} (tokens/error)")
+
+                    elif tipo_notif == 'sin_cruce' and stats['total_sin_cruce'] > 0:
+                        if es_admin and 'desglose_por_cedi' in stats:
+                            # Mensaje con desglose para admin (una sola línea)
+                            desglose = _formatear_desglose_cedi(stats, 'sin_cruce')
+                            mensaje = (
+                                f"⚠️ Pacientes Sin Montar {texto_regional} | {desglose} | "
+                                f"Total: {stats['total_sin_cruce']} pacientes | El Excel con el detalle fue enviado a tu correo"
+                            )
+                        else:
+                            # Mensaje simple para operativo
+                            mensaje = (
+                                f"⚠️ Pacientes Sin Montar {texto_regional} | "
+                                f"Tienes {stats['total_sin_cruce']} pacientes que aún no han sido montados por parte del cliente | "
+                                f"El Excel con el detalle fue enviado a tu correo"
+                            )
+                        res = enviar_template_sync(
+                            to=celular_limpio,
+                            template_name='confirmar_actualizacion',
+                            language_code='es_CO',
+                            body_params=[mensaje],
+                        )
+                        if res:
+                            logger_local.info(f"[whatsapp_cruce] WS enviado a {celular_limpio} ({nombre_usuario}) - sin_cruce")
+                        else:
+                            logger_local.warning(f"[whatsapp_cruce] WS no enviado a {celular_limpio} (tokens/error)")
+                except Exception as e:
+                    logger_local.error(f"[whatsapp_cruce] Error enviando notificación a {celular_limpio}: {e}")
+
+    except Exception as e:
+        logger_local.error(f"[whatsapp_cruce] Error general: {e}")
 
 
 @router.get("/exportar-cruce-excel")

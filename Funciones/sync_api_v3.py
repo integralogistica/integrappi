@@ -19,56 +19,298 @@ from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 logger = logging.getLogger(__name__)
 
-# Número de teléfono destino para notificaciones (con código de país, sin +)
-# Ej: 573001234567
-_NOTIFY_NUMBER = os.getenv('WHATSAPP_NOTIFY_NUMBER', '')
+
+def _mapear_regional_a_cedi(regional: str) -> str:
+    """Mapea código de regional a nombre de CEDI."""
+    mapa = {
+        'CO04': 'BARRANQUILLA',
+        'CO05': 'CALI',
+        'CO06': 'BUCARAMANGA',
+        'CO07': 'FUNZA',
+        'CO09': 'MEDELLIN',
+    }
+    return mapa.get(regional, regional)
+
+
+def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) -> dict:
+    """
+    Obtiene estadísticas del cruce filtradas por regional.
+
+    Args:
+        cruce_cache: Cache completo del cruce desde MongoDB
+        regional: Código de regional (ej: 'CO04') o None para todas
+
+    Returns:
+        dict con totales y desglose por regional (para admin)
+    """
+    cedi_filtro = _mapear_regional_a_cedi(regional) if regional else None
+
+    # Obtener pacientes desde ocupacion_rutas
+    ocupacion_rutas = cruce_cache.get('ocupacion_rutas', [])
+    pacientes_por_ruta = {}
+
+    # Diccionario para agrupar por CEDI
+    stats_por_cedi = {}
+
+    for ruta in ocupacion_rutas:
+        ruta_cedi = ruta.get('cedi', '')
+        if cedi_filtro and ruta_cedi != cedi_filtro:
+            continue
+
+        # Inicializar contador para este CEDI si no existe
+        if ruta_cedi not in stats_por_cedi:
+            stats_por_cedi[ruta_cedi] = {
+                'total_pacientes': 0,
+                'retraso_operacion': 0,
+                'sin_cruce': 0,
+            }
+
+        for paciente in ruta.get('pacientes', []):
+            cedula = paciente.get('cedula')
+            pacientes_por_ruta[cedula] = paciente
+
+            # Contar por CEDI
+            stats_por_cedi[ruta_cedi]['total_pacientes'] += 1
+
+            if paciente.get('estado_cruce') == 'retraso operación':
+                stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
+
+            if not paciente.get('en_v3', False):
+                stats_por_cedi[ruta_cedi]['sin_cruce'] += 1
+
+    # Si se filtra por regional, retornar solo ese CEDI
+    if cedi_filtro:
+        return {
+            'total_retraso_operacion': stats_por_cedi.get(cedi_filtro, {}).get('retraso_operacion', 0),
+            'total_sin_cruce': stats_por_cedi.get(cedi_filtro, {}).get('sin_cruce', 0),
+            'total_pacientes': stats_por_cedi.get(cedi_filtro, {}).get('total_pacientes', 0),
+        }
+
+    # Si no hay filtro (admin), retornar totales y desglose
+    total_retraso_operacion = sum(s['retraso_operacion'] for s in stats_por_cedi.values())
+    total_sin_cruce = sum(s['sin_cruce'] for s in stats_por_cedi.values())
+    total_pacientes = sum(s['total_pacientes'] for s in stats_por_cedi.values())
+
+    return {
+        'total_retraso_operacion': total_retraso_operacion,
+        'total_sin_cruce': total_sin_cruce,
+        'total_pacientes': total_pacientes,
+        'desglose_por_cedi': stats_por_cedi,  # Incluye desglose para admin
+    }
 
 
 def _notificar_sync_v3(resultado: dict):
-    """Envía WhatsApp con la plantilla confirmar_actualizacion tras cada sync."""
-    if not _NOTIFY_NUMBER:
+    """
+    Sistema de notificaciones WhatsApp personalizado para Medical Care.
+
+    Envía mensajes a usuarios según sus preferencias de notificación:
+    - 'retraso_operacion': Pacientes con retraso operación (requieren montaje urgente)
+    - 'sin_cruce': Pacientes sin cruce (no han sido tramitados por FMC)
+
+    También guarda el historial en MongoDB para consumo por PowerBI.
+    """
+    from bson.objectid import ObjectId as _ObjectId
+
+    # Solo notificar si el sync fue exitoso y hay cruce disponible
+    if not resultado.get('ok') or resultado.get('exitosos', 0) == 0:
         return
-    ts = resultado.get('timestamp', '')
-    # Formato corto del timestamp: "09 abr 2026 09:42"
-    try:
-        from datetime import datetime as _dt
-        ts_fmt = _dt.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d %b %Y %H:%M')
-    except Exception:
-        ts_fmt = ts
 
-    if resultado.get('ok') and resultado.get('exitosos', 0) > 0:
-        cruce = resultado.get('cruce') or {}
-        linea_cruce = ''
-        if cruce.get('ok'):
-            linea_cruce = f" | Cruce: {cruce['total_pacientes']} pac., {cruce['total_sin_paciente']} sin match"
-        cuerpo = (
-            f"OK {resultado['exitosos']}/{resultado['total']} pedidos · {resultado['segundos']}s"
-            + linea_cruce
-            + f" | {ts_fmt}"
-        )
-    else:
-        errores = resultado.get('errores', [])
-        detalle = errores[0] if errores else 'Error desconocido'
-        cuerpo = f"ERROR sync V3 | {detalle} | {ts_fmt}"
+    cruce = resultado.get('cruce') or {}
+    if not cruce.get('ok'):
+        logger.warning("[sync_v3] No hay cruce disponible para notificaciones")
+        return
 
-    try:
-        res = enviar_template_sync(
-            to=_NOTIFY_NUMBER,
-            template_name='confirmar_actualizacion',
-            language_code='es_CO',
-            body_params=[cuerpo],
-        )
-        if res:
-            logger.info(f"[sync_v3] Notificación WS enviada a {_NOTIFY_NUMBER}")
+    # Obtener cache completo del cruce
+    cruce_cache = _CACHE_CRUCE.find_one({'tipo': 'cruce_completo'})
+    if not cruce_cache:
+        logger.warning("[sync_v3] No hay cache de cruce disponible")
+        return
+
+    # Obtener fecha/hora actual para historial
+    ahora = datetime.now()
+    fecha_hora = ahora.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Obtener usuarios con MEDICAL_CARE y notificaciones_mc activas
+    from bd.bd_cliente import bd_cliente as _bd_cli
+    col_usuarios = _bd_cli['integra']['baseusuarios']
+
+    # Buscar usuarios que tienen MEDICAL_CARE en clientes y notificaciones_mc configuradas
+    # Maneja ambos formatos: string (antiguo) o array (nuevo)
+    usuarios_notif = list(col_usuarios.find({
+        'clientes': 'MEDICAL_CARE',
+        '$or': [
+            {'notificaciones_mc': {'$exists': True, '$ne': [], '$nin': [[None], ''], '$type': 'array'}},
+            {'notificaciones_mc': {'$exists': True, '$ne': '', '$ne': None, '$type': 'string'}},
+        ],
+        'celular': {'$exists': True, '$ne': None, '$ne': ''}
+    }))
+
+    if not usuarios_notif:
+        logger.info("[sync_v3] No hay usuarios con notificaciones MC configuradas")
+        return
+
+    logger.info(f"[sync_v3] Enviando notificaciones a {len(usuarios_notif)} usuarios")
+
+    # Recopilar datos para PowerBI (agrupados por regional)
+    datos_powerbi = []
+
+    for usuario in usuarios_notif:
+        celular = usuario.get('celular', '').strip()
+        regional = usuario.get('regional', '')
+        notificaciones_raw = usuario.get('notificaciones_mc', [])
+        nombre_usuario = usuario.get('nombre', '')
+        usuario_id = str(usuario.get('_id', ''))
+
+        # Normalizar notificaciones a lista (maneja ambos formatos: string o array)
+        if isinstance(notificaciones_raw, str):
+            notificaciones = [notificaciones_raw]
         else:
-            logger.warning(f"[sync_v3] Notificación WS no enviada (tokens no configurados o error en API)")
-    except Exception as e:
-        logger.error(f"[sync_v3] Error enviando notificación WS: {e}")
+            notificaciones = notificaciones_raw or []
+
+        # Normalizar celular: eliminar espacios, guiones, paréntesis; anteponer 57 si no tiene
+        celular_limpio = ''.join(c for c in celular if c.isdigit())
+        if not celular_limpio.startswith('57'):
+            celular_limpio = '57' + celular_limpio
+
+        # Verificar si es ADMIN para enviar todas las regionales o solo la suya
+        es_admin = (usuario.get('perfil', '').upper() == 'ADMIN')
+        regional_para_stats = None if es_admin else regional
+
+        # Obtener estadísticas (todas si es ADMIN, solo su regional si no)
+        stats = _obtener_estadisticas_por_regional(cruce_cache, regional_para_stats)
+
+        # Determinar el texto de regional para el mensaje
+        if es_admin:
+            texto_regional = "TODAS LAS REGIONALES"
+        else:
+            texto_regional = _mapear_regional_a_cedi(regional)
+
+        # Función auxiliar para formatear desglose por CEDI
+        def _formatear_desglose_cedi(stats_dict, tipo):
+            """Genera string con desglose por CEDI para admin."""
+            if 'desglose_por_cedi' not in stats_dict:
+                return ""
+
+            # Orden de CEDIS
+            orden_cedis = ['FUNZA', 'CALI', 'MEDELLIN', 'BARRANQUILLA', 'BUCARAMANGA']
+            partes = []
+            for cedi in orden_cedis:
+                if cedi in stats_dict['desglose_por_cedi']:
+                    valor = stats_dict['desglose_por_cedi'][cedi][tipo]
+                    partes.append(f"{cedi}: {valor}")
+
+            return ' | '.join(partes) if partes else ""
+
+        # Preparar datos para PowerBI
+        datos_powerbi.append({
+            'fecha_hora': fecha_hora,
+            'regional': regional if not es_admin else 'TODAS',
+            'nombre_cedi': texto_regional,
+            'usuario_id': usuario_id,
+            'usuario_nombre': nombre_usuario,
+            'celular': celular_limpio,
+            'notificaciones': notificaciones,
+            'total_retraso_operacion': stats['total_retraso_operacion'],
+            'total_sin_cruce': stats['total_sin_cruce'],
+            'total_pacientes': stats['total_pacientes'],
+        })
+
+        # Enviar notificaciones según tipo
+        for tipo_notif in notificaciones:
+            try:
+                if tipo_notif == 'retraso_operacion' and stats['total_retraso_operacion'] > 0:
+                    if es_admin and 'desglose_por_cedi' in stats:
+                        # Mensaje con desglose para admin (una sola línea)
+                        desglose = _formatear_desglose_cedi(stats, 'retraso_operacion')
+                        mensaje = (
+                            f"🚨 Retraso Operación {texto_regional} | {desglose} | "
+                            f"Total: {stats['total_retraso_operacion']} pedidos | El Excel con el detalle fue enviado a tu correo"
+                        )
+                    else:
+                        # Mensaje simple para operativo
+                        mensaje = (
+                            f"🚨 Retraso Operación {texto_regional} | "
+                            f"Tienes {stats['total_retraso_operacion']} pedidos con retraso operación que requieren montaje urgente | "
+                            f"El Excel con el detalle fue enviado a tu correo"
+                        )
+                    res = enviar_template_sync(
+                        to=celular_limpio,
+                        template_name='confirmar_actualizacion',
+                        language_code='es_CO',
+                        body_params=[mensaje],
+                    )
+                    if res:
+                        logger.info(f"[sync_v3] WS enviado a {celular_limpio} ({nombre_usuario}) - retraso_operacion")
+                    else:
+                        logger.warning(f"[sync_v3] WS no enviado a {celular_limpio} (tokens/error)")
+
+                elif tipo_notif == 'sin_cruce' and stats['total_sin_cruce'] > 0:
+                    if es_admin and 'desglose_por_cedi' in stats:
+                        # Mensaje con desglose para admin (una sola línea)
+                        desglose = _formatear_desglose_cedi(stats, 'sin_cruce')
+                        mensaje = (
+                            f"⚠️ Pacientes Sin Montar {texto_regional} | {desglose} | "
+                            f"Total: {stats['total_sin_cruce']} pacientes | El Excel con el detalle fue enviado a tu correo"
+                        )
+                    else:
+                        # Mensaje simple para operativo
+                        mensaje = (
+                            f"⚠️ Pacientes Sin Montar {texto_regional} | "
+                            f"Tienes {stats['total_sin_cruce']} pacientes que aún no han sido montados por parte del cliente | "
+                            f"El Excel con el detalle fue enviado a tu correo"
+                        )
+                    res = enviar_template_sync(
+                        to=celular_limpio,
+                        template_name='confirmar_actualizacion',
+                        language_code='es_CO',
+                        body_params=[mensaje],
+                    )
+                    if res:
+                        logger.info(f"[sync_v3] WS enviado a {celular_limpio} ({nombre_usuario}) - sin_cruce")
+                    else:
+                        logger.warning(f"[sync_v3] WS no enviado a {celular_limpio} (tokens/error)")
+            except Exception as e:
+                logger.error(f"[sync_v3] Error enviando notificación a {celular_limpio}: {e}")
+
+    # Guardar datos agregados por regional para PowerBI
+    if datos_powerbi:
+        try:
+            # Agrupar por regional para tener un registro por CEDI
+            por_regional = {}
+            for dato in datos_powerbi:
+                reg = dato['regional']
+                if reg not in por_regional:
+                    por_regional[reg] = {
+                        'fecha_hora': fecha_hora,
+                        'regional': reg,
+                        'nombre_cedi': dato['nombre_cedi'],
+                        'total_retraso_operacion': dato['total_retraso_operacion'],
+                        'total_sin_cruce': dato['total_sin_cruce'],
+                        'total_pacientes': dato['total_pacientes'],
+                        'usuarios_notificados': [],
+                    }
+                # Agregar usuario si tiene notificaciones activas con datos
+                if dato['total_retraso_operacion'] > 0 or dato['total_sin_cruce'] > 0:
+                    por_regional[reg]['usuarios_notificados'].append({
+                        'usuario_id': dato['usuario_id'],
+                        'usuario_nombre': dato['usuario_nombre'],
+                        'celular': dato['celular'],
+                        'notificaciones': dato['notificaciones'],
+                    })
+
+            # Insertar registros por regional
+            registros_insertar = list(por_regional.values())
+            if registros_insertar:
+                _HISTORIAL_NOTIF.insert_many(registros_insertar)
+                logger.info(f"[sync_v3] Guardados {len(registros_insertar)} registros en notificaciones_mc_historial")
+        except Exception as e:
+            logger.error(f"[sync_v3] Error guardando historial de notificaciones: {e}")
 
 _BD = bd_cliente['integra']
 _COLECCION = _BD['v3']
 _HISTORICO = _BD['v3_historico']
 _CACHE_CRUCE = _BD['cache_cruce_mc']
+_HISTORIAL_NOTIF = _BD['notificaciones_mc_historial']
 
 
 async def ejecutar_sync_v3() -> dict:

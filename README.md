@@ -487,9 +487,18 @@ config = {
 - `Funciones/sync_api_v3.py` — lógica core: consulta API Siscore, mapeo de campos, normalización, reemplazo en MongoDB
 - `rutas/sync_v3.py` — endpoints y configuración de horarios
 
-**Notificación WhatsApp:**
-- Tras cada sync exitoso, se envía automáticamente una notificación vía WhatsApp si `WHATSAPP_NOTIFY_NUMBER` está configurado
-- Usa la plantilla `confirmar_actualización` con el resumen de resultados
+**Notificación WhatsApp Personalizada:**
+- Tras cada sync exitoso, se envían notificaciones personalizadas a usuarios según sus preferencias `notificaciones_mc`
+- **Retraso operación**: Usuarios con `notificaciones_mc: "retraso_operacion"` reciben conteo de pacientes con retraso operación
+- **Sin cruce**: Usuarios con `notificaciones_mc: "sin_cruce"` reciben conteo de pacientes sin montar
+- Mensajes filtrados por regional del usuario (CO04=BARRANQUILLA, CO05=CALI, etc.)
+- Números de celular normalizados automáticamente (se agrega 57 para Colombia)
+- Usa la plantilla `confirmar_actualizacion` con mensajes personalizados
+
+**Historial para PowerBI:**
+- Colección `notificaciones_mc_historial`: almacena un registro por regional por sync
+- Campos: fecha_hora, regional, nombre_cedi, total_retraso_operacion, total_sin_cruce, total_pacientes, usuarios_notificados
+- Documentación completa: `docs/NOTIFICACIONES_MC_V3.md`
 
 ### Reportes y Análisis
 - **Reporte de uso de WhatsApp**: Estadísticas generales de interacciones
@@ -1001,6 +1010,35 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 - `integrappi/rutas/sync_v3.py`: Endpoint `/config` actualizado para mostrar fuente "API Siscore V3"
 - `integrappi/rutas/pacientes_medical_care.py`: Nombres de hojas Excel cambiados ("Pacientes sin montar", "Pedidos sin paciente asociado")
 - `integrappi/README.md`: Documentación actualizada
+
+### Mayo 2026 — Nuevo sistema de notificaciones WhatsApp para Medical Care
+
+**`Funciones/sync_api_v3.py` — Sistema completo de notificaciones personalizadas:**
+- **Antes**: Enviaba un solo mensaje genérico a un número hardcoded
+- **Ahora**: Sistema inteligente que:
+  - Busca usuarios con `MEDICAL_CARE` en clientes y `notificaciones_mc` configuradas
+  - **Retraso operación**: Envía conteo de pacientes con estado "retraso operación" a usuarios operacionales
+  - **Sin cruce**: Envía conteo de pacientes sin montar a usuarios de seguimiento
+  - Filtra por regional (BARRANQUILLA, CALI, BUCARAMANGA, FUNZA, MEDELLIN)
+  - Normaliza números de celular (agrega 57 para Colombia)
+  - Guarda historial en colección `notificaciones_mc_historial` para PowerBI
+- **Nuevas funciones**:
+  - `_mapear_regional_a_cedi()`: Mapea códigos CO04, CO05, etc. a nombres
+  - `_obtener_estadisticas_por_regional()`: Calcula conteos por regional desde cache del cruce
+  - `_notificar_sync_v3()`: Reescrita completamente para manejar el nuevo sistema
+- **Mensajes personalizados**:
+  - Retraso operación: "🚨 Tienes X pedidos con retraso operación que requieren montaje urgente"
+  - Sin cruce: "⚠️ Tienes X pacientes que aún no han sido montados por parte del cliente"
+
+**Colección MongoDB `notificaciones_mc_historial`:**
+- Un registro por regional por cada sync V3 exitoso
+- Campos: fecha_hora, regional, nombre_cedi, total_retraso_operacion, total_sin_cruce, total_pacientes, usuarios_notificados
+- Diseñada para consumo directo por PowerBI
+- Incluye array con detalle de usuarios notificados
+
+**Documentación:**
+- `docs/NOTIFICACIONES_MC_V3.md`: Documentación completa del sistema
+- Incluye ejemplos de queries para PowerBI, configuración de usuarios, troubleshooting
 
 ### Mayo 2026 — Fix de plantilla WhatsApp y cambios en nombres de hojas Excel
 
