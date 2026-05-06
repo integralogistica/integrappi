@@ -118,27 +118,20 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
     """
     Obtiene estadÃ­sticas del cruce filtradas por regional.
     USA LOS MISMOS FILTROS QUE EL EXCEL:
+
+    RETRASO OPERACIÃ“N (para operaciÃ³n/retrasos en cedi):
+    1. Estado = 'retraso operaciÃ³n'
+    2. Fecha preferente del mes actual
+    3. ≤ 3 dÃ­as hÃ¡biles (urgentes)
+
+    SIN CRUCE (para clientes):
     1. Sin cruce (en_v3 = False)
     2. Fecha preferente del mes actual
-    3. < 6 dÃ­as hÃ¡biles (urgentes)
+    3. ≤ 6 dÃ­as hÃ¡biles (urgentes)
 
     Esta funciÃ³n es compartida por:
     - Sync automÃ¡tico V3 (sync_api_v3.py)
     - RecÃ¡lculo manual (pacientes_medical_care.py)
-
-    Args:
-        cruce_cache: Cache completo del cruce desde MongoDB
-        regional: CÃ³digo de regional (ej: 'CO04') o None para todas
-
-    Returns:
-        dict con totales y desglose por regional (para admin)
-    """
-    """
-    Obtiene estadÃ­sticas del cruce filtradas por regional.
-    USA LOS MISMOS FILTROS QUE EL EXCEL:
-    1. Sin cruce (en_v3 = False)
-    2. Fecha preferente del mes actual
-    3. < 6 dÃ­as hÃ¡biles (urgentes)
 
     Args:
         cruce_cache: Cache completo del cruce desde MongoDB
@@ -230,7 +223,8 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
 
             f_pref_teorica = paciente.get('f_pref_teorica', '')
             tiene_fecha_mes_actual = False
-            es_urgente = False
+            es_urgente = False  # Para sin_cruce (≤ 6 días hábiles)
+            es_urgente_retraso = False  # Para retraso_operacion (≤ 3 días hábiles)
 
             # Verificar si tiene fecha del mes actual y es urgente
             if f_pref_teorica:
@@ -239,15 +233,17 @@ def _obtener_estadisticas_por_regional(cruce_cache: dict, regional: str = None) 
                     tiene_fecha_mes_actual = True
                     # Calcular dÃ­as hÃ¡biles
                     dias_habiles = _calcular_dias_habiles(_manana, f_pref_teorica)
-                    if dias_habiles < 6:
+                    if dias_habiles <= 6:
                         es_urgente = True
+                    if dias_habiles <= 3:
+                        es_urgente_retraso = True
 
-            # Contar retraso operaciÃ³n (solo verifica estado, sin filtro de urgencia)
+            # Contar retraso operaciÃ³n (requiere estado Y ≤ 3 dÃ­as hÃ¡biles)
             estado_cruce = (paciente.get('estado_cruce') or '').lower()
-            if estado_cruce in ('retraso operación', 'retraso operacion'):
+            if estado_cruce in ('retraso operación', 'retraso operacion') and es_urgente_retraso:
                 stats_por_cedi[ruta_cedi]['retraso_operacion'] += 1
 
-            # Contar sin cruce (requiere los 3 filtros)
+            # Contar sin cruce (requiere los 3 filtros: ≤ 6 dÃ­as hÃ¡biles)
             if not paciente.get('en_v3', False) and tiene_fecha_mes_actual and es_urgente:
                 stats_por_cedi[ruta_cedi]['sin_cruce'] += 1
 

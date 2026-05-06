@@ -195,6 +195,7 @@ def _mapear_campos_siscore(registro: dict) -> Optional[dict]:
         fecha_pedido_str = registro.get('Fecha Pedido', '')
         fecha_solicitada_str = registro.get('Fecha Solicitada', '')
         fecha_entrega_str = registro.get('Fecha Entrega', '')
+        planilla = str(registro.get('Planilla', '')).strip()
         estado_pedido = str(registro.get('Estado Pedido', '')).strip()
         piezas = str(registro.get('Piezas', '')).strip()
         peso_real = str(registro.get('Peso Real', '')).strip()
@@ -254,6 +255,7 @@ def _mapear_campos_siscore(registro: dict) -> Optional[dict]:
             'fecha_pedido': fecha_pedido,
             'fecha_preferente': fecha_preferente,
             'fecha_entrega': fecha_entrega,
+            'planilla': planilla,
             'estado_pedido': estado_pedido,
             'piezas': piezas,
             'peso_real': peso_real,
@@ -875,10 +877,10 @@ async def obtener_estados():
 async def eliminar_todos_pedidos(usuario: str):
     """
     Elimina todos los pedidos v3 (solo ADMIN)
-    
+
     Args:
         usuario: Usuario que realiza la eliminación
-    
+
     Returns:
         JSON con confirmación de eliminación
     """
@@ -893,4 +895,168 @@ async def eliminar_todos_pedidos(usuario: str):
         raise HTTPException(
             status_code=500,
             detail=f'Error al eliminar pedidos: {str(e)}'
+        )
+
+
+def _generar_excel_pedidos_v3(pedidos: list) -> tuple:
+    """
+    Genera un Excel con los pedidos V3 y retorna (bytes, nombre_archivo).
+
+    Args:
+        pedidos: Lista de pedidos V3
+
+    Returns:
+        tuple: (bytes del Excel, nombre del archivo)
+    """
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from datetime import datetime
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Pedidos V3'
+
+    # Estilos
+    header_fill = PatternFill('solid', fgColor='004D40')
+    header_font = Font(bold=True, color='FFFFFF', size=10)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+    thin_border = Border(
+        left=Side(style='thin', color='BDBDBD'),
+        right=Side(style='thin', color='BDBDBD'),
+        top=Side(style='thin', color='BDBDBD'),
+        bottom=Side(style='thin', color='BDBDBD')
+    )
+
+    # Headers
+    columnas = [
+        'Código Pedido',
+        'Cliente Destino',
+        'Dirección Destino',
+        'Municipio Destino',
+        'Departamento Destino',
+        'Ruta',
+        'Teléfono',
+        'Fecha Pedido',
+        'Fecha Preferente',
+        'Fecha Entrega',
+        'Planilla',
+        'Estado Pedido',
+        'Cajas',
+        'Peso Real'
+    ]
+
+    # Fila de título
+    ws['A1'] = f'Pedidos V3 - {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+    ws['A1'].font = Font(bold=True, size=14, color='004D40')
+    ws.merge_cells('A1:N1')
+
+    # Fila de encabezados
+    for col, titulo in enumerate(columnas, 1):
+        cell = ws.cell(row=2, column=col, value=titulo)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = thin_border
+
+    # Datos
+    for fila, pedido in enumerate(pedidos, start=3):
+        ws.cell(row=fila, column=1, value=pedido.get('codigo_pedido', '')).alignment = left
+        ws.cell(row=fila, column=2, value=pedido.get('cliente_destino_original', '')).alignment = left
+        ws.cell(row=fila, column=3, value=pedido.get('direccion_destino_original', '')).alignment = left
+        ws.cell(row=fila, column=4, value=pedido.get('municipio_destino', '')).alignment = left
+        ws.cell(row=fila, column=5, value=pedido.get('departamento_destino', '')).alignment = left
+        ws.cell(row=fila, column=6, value=pedido.get('ruta', '')).alignment = left
+        ws.cell(row=fila, column=7, value=pedido.get('telefono', '')).alignment = left
+        ws.cell(row=fila, column=8, value=pedido.get('fecha_pedido', '')).alignment = center
+        ws.cell(row=fila, column=9, value=pedido.get('fecha_preferente', '')).alignment = center
+        ws.cell(row=fila, column=10, value=pedido.get('fecha_entrega', '')).alignment = center
+        ws.cell(row=fila, column=11, value=pedido.get('planilla', '')).alignment = center
+        ws.cell(row=fila, column=12, value=pedido.get('estado_pedido', '')).alignment = center
+        ws.cell(row=fila, column=13, value=pedido.get('piezas', '')).alignment = center
+        ws.cell(row=fila, column=14, value=pedido.get('peso_real', '')).alignment = center
+
+        # Bordes para todas las celdas de datos
+        for col in range(1, 15):
+            cell = ws.cell(row=fila, column=col)
+            cell.border = thin_border
+
+    # Ajustar ancho de columnas
+    anchos = {
+        'A': 15, 'B': 35, 'C': 40, 'D': 25, 'E': 20,
+        'F': 12, 'G': 18, 'H': 15, 'I': 15, 'J': 15,
+        'K': 12, 'L': 18, 'M': 8, 'N': 10
+    }
+    for col, ancho in anchos.items():
+        ws.column_dimensions[col].width = ancho
+
+    # Freeze panes en la fila 2
+    ws.freeze_panes = 'A3'
+
+    # Generar bytes
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    fecha_str = datetime.now().strftime('%Y%m%d_%H%M')
+    nombre = f"pedidos_v3_{fecha_str}.xlsx"
+
+    return buffer.getvalue(), nombre
+
+
+@router.get("/exportar-excel")
+async def exportar_pedidos_v3_excel(
+    skip: int = 0,
+    limit: int = 10000,
+    estado: str = None
+):
+    """
+    Exporta los pedidos V3 a un archivo Excel.
+
+    Args:
+        skip: Registros a saltar (default 0)
+        limit: Límite de registros (default 10000)
+        estado: Filtro opcional por estado de pedido
+
+    Returns:
+        StreamingResponse con el archivo Excel
+    """
+    from fastapi.responses import StreamingResponse as SR
+    import io
+
+    try:
+        # Construir filtro
+        filtro = {}
+        if estado:
+            filtro['estado_pedido'] = estado
+
+        # Obtener pedidos
+        cursor = coleccion.find(filtro).skip(skip).limit(limit)
+        pedidos = []
+
+        for doc in cursor:
+            doc['_id'] = str(doc['_id'])
+            pedidos.append(doc)
+
+        if not pedidos:
+            raise HTTPException(
+                status_code=404,
+                detail='No hay pedidos para exportar con los filtros seleccionados'
+            )
+
+        # Generar Excel
+        excel_bytes, nombre_archivo = _generar_excel_pedidos_v3(pedidos)
+
+        return SR(
+            io.BytesIO(excel_bytes),
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={'Content-Disposition': f'attachment; filename="{nombre_archivo}"'}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f'Error al exportar pedidos: {str(e)}'
         )

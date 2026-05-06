@@ -1254,11 +1254,11 @@ async def recalcular_cruce(usuario: str, enviar_correo: bool = True):
                             daemon=True
                         ).start()
 
-                    # Enviar notificaciones WhatsApp a usuarios con notificaciones_mc configuradas
-                    threading.Thread(
-                        target=_enviar_notificaciones_whatsapp_cruce,
-                        daemon=True
-                    ).start()
+                        # Enviar notificaciones WhatsApp a usuarios con notificaciones_mc configuradas
+                        threading.Thread(
+                            target=_enviar_notificaciones_whatsapp_cruce,
+                            daemon=True
+                        ).start()
 
                     logger.info(
                         f"[recalcular-cruce] Completado. fecha={fecha_calculo}, "
@@ -1563,8 +1563,18 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
 def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
     """
     Envía el Excel del cruce segmentado por notificaciones_mc:
-    - 'retraso_operacion': Excel completo (ambas hojas) → usuarios operacionales MC
-    - 'sin_cruce': Solo hoja 'V3 Sin Paciente' → usuarios + contactos cliente (CLIENTE_FMC)
+
+    RETRASO OPERACIÃ“N (para operaciÃ³n/retrasos en cedi):
+    - Estado = 'retraso operaciÃ³n'
+    - Fecha preferente del mes actual
+    - ≤ 3 dÃ­as hÃ¡biles (urgentes)
+    - Excel con una hoja 'Pacientes con Retraso'
+
+    SIN CRUCE (para clientes):
+    - Sin cruce (en_v3 = False)
+    - Fecha preferente del mes actual
+    - ≤ 6 dÃ­as hÃ¡biles (urgentes)
+    - Excel con dos hojas: 'Pacientes sin cruce' + 'V3 Sin Paciente'
     """
     import os
     import logging
@@ -1611,9 +1621,11 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
             regional_param = None if es_admin else regional_usr
             stats = obtener_estadisticas_notificaciones(cache, regional_param, es_admin)
 
-            # Filtrar pacientes de retraso para el Excel
+            # Filtrar pacientes de retraso para el Excel (con filtro de < 3 días hábiles)
             cache_retraso = dict(cache)
             rutas_filtradas = []
+            manana_str = (hoy + timedelta(days=1)).strftime('%Y-%m-%d')
+
             for ruta in cache.get('ocupacion_rutas', []):
                 # Filtrar por CEDI del usuario (solo ADMIN ve todo)
                 if not es_admin and regional_usr:
@@ -1622,11 +1634,27 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                     if ruta_cedi != cedi_usr:
                         continue
 
-                # Filtrar pacientes con retraso operación (sin filtro de urgencia)
-                pacientes_retraso = [
-                    p for p in ruta.get('pacientes', [])
-                    if p.get('estado_cruce', '').lower() in ('retraso operación', 'retraso operacion')
-                ]
+                # Filtrar pacientes con retraso operación Y ≤ 3 días hábiles
+                pacientes_retraso = []
+                for p in ruta.get('pacientes', []):
+                    # Verificar estado
+                    if p.get('estado_cruce', '').lower() not in ('retraso operación', 'retraso operacion'):
+                        continue
+
+                    # Verificar filtro de días hábiles ≤ 3
+                    f_pref_teorica = p.get('f_pref_teorica', '')
+                    if not f_pref_teorica:
+                        continue
+
+                    # Verificar que sea del mes actual
+                    f_pref_dt = _parsear_fecha_texto(f_pref_teorica)
+                    if not f_pref_dt or f_pref_dt.month != mes_actual or f_pref_dt.year != anio_actual:
+                        continue
+
+                    # Calcular días hábiles y verificar que sea ≤ 3
+                    dias_habiles = _calcular_dias_habiles(manana_str, f_pref_teorica)
+                    if dias_habiles <= 3:
+                        pacientes_retraso.append(p)
 
                 if pacientes_retraso:
                     rutas_filtradas.append({**ruta, 'pacientes': pacientes_retraso})
@@ -1652,7 +1680,8 @@ def enviar_excel_cruce_por_correo(calculado_por: str, fecha_calculo: str):
                 'html': (
                     f'<p>Se adjunta el reporte de <strong>Retrasos de Operación</strong> '
                     f'generado el <strong>{fecha_legible}</strong>{calculado_str}.</p>'
-                    f'<p>Total registros con retraso: <strong>{total_retraso}</strong>.</p>'
+                    f'<p>Total registros con retraso: <strong>{total_retraso}</strong> '
+                    f'(pacientes con estado "retraso operación" y F. Pref. Integra ≤ 3 días hábiles, mes actual).</p>'
                     f'<p>Saludos,<br>IntegrApp</p>'
                 ),
                 'attachments': [{'filename': nombre_archivo, 'content': list(excel_bytes)}],
