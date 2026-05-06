@@ -1070,7 +1070,7 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
                     **reg_base,
                     'similitud': round(mejor_sim * 100, 1),
                     'llave_paciente_cercana': mejor_llave_p,
-                    'f_pref_teorica': cronograma_dict.get(cedula_cercana, '') if cedula_cercana else '',
+                    'f_pref_teorica': reg_base.get('fecha_preferente', ''),  # Usar fecha preferente original del V3
                 })
 
         if (idx + 1) % paso_reporte_v3 == 0 or (idx + 1) == total_v3:
