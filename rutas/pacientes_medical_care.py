@@ -1396,7 +1396,7 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
         ws1['A1'].font, ws1['A1'].alignment = title_font, center
         ws1.merge_cells('A1:F1')
         ws1.row_dimensions[1].height = 22
-        set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'F. Pref. Integra'])
+        set_header_row(ws1, 2, ['CEDI', 'Ruta', 'Paciente', 'Cédula', 'Dirección', 'Fecha Preferente'])
 
         # Calcular mañana para filtro de días hábiles
         _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
@@ -1472,7 +1472,7 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
             ws2.merge_cells('A1:F1')
             ws2.row_dimensions[1].height = 22
             set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                     'Dirección', 'F. Pref. Integra'])
+                                     'Dirección', 'Fecha Preferente'])
             fila2 = 3
             # Calcular mañana para filtro de días hábiles
             _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
@@ -1517,7 +1517,7 @@ def _generar_excel_bytes(cache: dict, cedi: str = None, solo_sin_paciente: bool 
             ws2.merge_cells('A1:F1')
             ws2.row_dimensions[1].height = 22
             set_header_row(ws2, 2, ['CEDI', 'Ruta', 'Código Pedido', 'Cliente Destino',
-                                     'Dirección', 'F. Pref. Integra'])
+                                     'Dirección', 'Fecha Preferente'])
             fila2 = 3
             # Calcular mañana para filtro de días hábiles
             _manana = (_hoy + _td(days=1)).strftime('%Y-%m-%d')
