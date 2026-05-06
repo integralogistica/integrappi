@@ -8,28 +8,36 @@ Sistema de notificaciones automáticas que se ejecutan tras cada sincronización
 
 ### 1. Retraso Operación
 - **Código**: `retraso_operacion`
-- **Reciben**: Usuarios operacionales que necesitan monitorear pedidos urgentes
-- **Contenido**: Conteo de pacientes con estado_cruce = "retraso operación"
-- **Mensaje**:
+- **Reciben**: Usuarios operacionales que necesitan monitorear pedidos con retraso
+- **Contenido**: Conteo de pacientes con estado_cruce = "retraso operación" (TODOS, sin filtro de urgencia)
+- **Plantillas**:
+  - **Operativos**: `retraso_operacion_fmc_` (2 parámetros: CEDI, total)
+  - **Admin**: `confirmar_actualizacion` con desglose por CEDI
+- **Ejemplo mensaje operativo**:
   ```
-  🚨 Retraso Operación - [CEDI]
-
-  Tienes X pedidos con retraso operación que requieren montaje urgente.
-
+  🚨 RETRASO OPERACIÓN — FUNZA
+  
+  Tienes 54 pedidos con retraso operación que requieren montaje urgente.
+  
   Por favor gestionar a la brevedad.
+  _Integra Logística_
   ```
 
 ### 2. Sin Cruce
 - **Código**: `sin_cruce`
 - **Reciben**: Usuarios que necesitan monitorear pacientes no montados
-- **Contenido**: Conteo de pacientes con en_v3 = False (sin cruce)
-- **Mensaje**:
+- **Contenido**: Conteo de pacientes con en_v3 = False (CON filtro: fecha del mes actual y < 6 días hábiles)
+- **Plantillas**:
+  - **Operativos**: `pacientes_sin_montar_fmc` (2 parámetros: CEDI, total)
+  - **Admin**: `confirmar_actualizacion` con desglose por CEDI
+- **Ejemplo mensaje operativo**:
   ```
-  ⚠️ Pacientes Sin Montar - [CEDI]
-
-  Tienes X pacientes que aún no han sido montados por parte del cliente.
-
-  Por favor gestionar con FMC.
+  ⚠️ PACIENTES SIN MONTAR — FUNZA
+  
+  Tienes 271 pacientes que aún no han sido montados por parte del cliente.
+  
+  Por favor gestionar con Fresenius Medical Care.
+  _Integra Logística_
   ```
 
 ## Configuración de Usuarios
@@ -127,19 +135,48 @@ WHATSAPP_API_TOKEN=your_token_here
 WHATSAPP_PHONE_NUMBER_ID=your_phone_id_here
 ```
 
-### Plantilla de WhatsApp:
-- **Nombre**: `confirmar_actualizacion`
+### Plantillas de WhatsApp:
+
+#### Para operativos (plantillas oficiales Meta):
+
+**1. retraso_operacion_fmc_** (Retraso Operación)
 - **Idioma**: `es_CO`
+- **Parámetros**: `{{1}}` = CEDI/regional, `{{2}}` = total de pedidos
 - **Formato**:
   ```
-  🔄 *Actualización V3*
+  🚨 *RETRASO OPERACIÓN* — {{1}}
 
+    Tienes {{2}} pedidos con retraso operación que requieren montaje urgente.
+
+    Por favor gestionar a la brevedad.
+    _Integra Logística_
+  ```
+
+**2. pacientes_sin_montar_fmc** (Sin Cruce)
+- **Idioma**: `es_CO`
+- **Parámetros**: `{{1}}` = CEDI/regional, `{{2}}` = total de pacientes
+- **Formato**:
+  ```
+  ⚠️  *PACIENTES SIN MONTAR* — {{1}}
+
+    Tienes {{2}} pacientes que aún no han sido montados por parte del cliente.
+
+    Por favor gestionar con Fresenius Medical Care.
+    _Integra Logística_
+  ```
+
+#### Para admin (con desglose por CEDI):
+
+**3. confirmar_actualizacion** (Plantilla genérica)
+- **Idioma**: `es_CO`
+- **Parámetros**: `{{1}}` = mensaje completo (una sola línea, sin saltos de línea)
+- **Formato**:
+  ```
   {{1}}
 
   _Integra Logística_
   ```
-
-Donde `{{1}}` se reemplaza por el mensaje personalizado.
+- **Nota**: Meta rechaza saltos de línea en templates genéricos, usar separador ` | `
 
 ## Funcionamiento
 
@@ -185,8 +222,20 @@ El sistema registra los siguientes logs:
 
 ### Mensajes no llegan:
 1. Verificar que el número esté formateado correctamente (57 + 10 dígitos)
-2. Verificar que la plantilla `confirmar_actualizacion` exista en Meta Business Suite
+2. Verificar que las plantillas existan en Meta Business Suite:
+   - `retraso_operacion_fmc_`
+   - `pacientes_sin_montar_fmc`
+   - `confirmar_actualizacion`
 3. Revisar logs de error de WhatsApp API
+4. Verificar que WHATSAPP_API_TOKEN y WHATSAPP_PHONE_NUMBER_ID estén configurados
+
+### Error 400 "Number of parameters does not match":
+- Las plantillas oficiales requieren exactamente 2 parámetros (CEDI, total)
+- No enviar un solo mensaje completo como parámetro
+
+### Error 400 "Param text cannot have new-line/tab characters":
+- Los mensajes para admin (`confirmar_actualizacion`) deben ser de una sola línea
+- Usar ` | ` como separador en lugar de `\n`
 
 ## Archivos del Sistema
 

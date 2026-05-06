@@ -496,11 +496,14 @@ Sistema de sincronización periódica que consume directamente del **API de Sisc
 
 **Notificación WhatsApp Personalizada:**
 - Tras cada sync exitoso, se envían notificaciones personalizadas a usuarios según sus preferencias `notificaciones_mc`
-- **Retraso operación**: Usuarios con `notificaciones_mc: "retraso_operacion"` reciben conteo de pacientes con retraso operación
-- **Sin cruce**: Usuarios con `notificaciones_mc: "sin_cruce"` reciben conteo de pacientes sin montar
-- Mensajes filtrados por regional del usuario (CO04=BARRANQUILLA, CO05=CALI, etc.)
-- Números de celular normalizados automáticamente (se agrega 57 para Colombia)
-- Usa la plantilla `confirmar_actualizacion` con mensajes personalizados
+- **Retraso operación**: Usuarios con `notificaciones_mc: "retraso_operacion"` reciben conteo de pacientes con retraso operación (TODOS, sin filtro de urgencia)
+- **Sin cruce**: Usuarios con `notificaciones_mc: "sin_cruce"` reciben conteo de pacientes sin montar (con filtro: fecha del mes actual y < 6 días hábiles)
+- **Plantillas oficiales Meta**: 
+  - Operativos: `retraso_operacion_fmc_` y `pacientes_sin_montar_fmc` (2 parámetros cada una)
+  - Admin: `confirmar_actualizacion` con desglose por CEDI (formato de una sola línea)
+- **Mensajes filtrados por regional** del usuario (CO04=BARRANQUILLA, CO05=CALI, etc.)
+- **Números de celular normalizados** automáticamente (se agrega 57 para Colombia)
+- **Encoding correcto**: Emojis (🚨, ⚠️) y tildes se muestran correctamente
 
 **Historial para PowerBI:**
 - Colección `notificaciones_mc_historial`: almacena un registro por regional por sync
@@ -1018,24 +1021,22 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 - `integrappi/rutas/pacientes_medical_care.py`: Nombres de hojas Excel cambiados ("Pacientes sin montar", "Pedidos sin paciente asociado")
 - `integrappi/README.md`: Documentación actualizada
 
-### Mayo 2026 — Nuevo sistema de notificaciones WhatsApp para Medical Care
+### Mayo 2026 — Actualización de notificaciones WhatsApp y cruce de pacientes
 
-**`Funciones/sync_api_v3.py` — Sistema completo de notificaciones personalizadas:**
-- **Antes**: Enviaba un solo mensaje genérico a un número hardcoded
-- **Ahora**: Sistema inteligente que:
-  - Busca usuarios con `MEDICAL_CARE` en clientes y `notificaciones_mc` configuradas
-  - **Retraso operación**: Envía conteo de pacientes con estado "retraso operación" a usuarios operacionales
-  - **Sin cruce**: Envía conteo de pacientes sin montar a usuarios de seguimiento
-  - Filtra por regional (BARRANQUILLA, CALI, BUCARAMANGA, FUNZA, MEDELLIN)
-  - Normaliza números de celular (agrega 57 para Colombia)
-  - Guarda historial en colección `notificaciones_mc_historial` para PowerBI
-- **Nuevas funciones**:
-  - `_mapear_regional_a_cedi()`: Mapea códigos CO04, CO05, etc. a nombres
-  - `_obtener_estadisticas_por_regional()`: Calcula conteos por regional desde cache del cruce
-  - `_notificar_sync_v3()`: Reescrita completamente para manejar el nuevo sistema
-- **Mensajes personalizados**:
-  - Retraso operación: "🚨 Tienes X pedidos con retraso operación que requieren montaje urgente"
-  - Sin cruce: "⚠️ Tienes X pacientes que aún no han sido montados por parte del cliente"
+**`Funciones/sync_api_v3.py` — Sistema de notificaciones WhatsApp mejorado:**
+- **Plantillas oficiales Meta**: Ahora usa plantillas autorizadas por Meta
+  - `retraso_operacion_fmc_`: Para notificaciones de retraso operación (2 parámetros: regional, total)
+  - `pacientes_sin_montar_fmc`: Para notificaciones de sin cruce (2 parámetros: regional, total)
+  - `confirmar_actualizacion`: Para admin con desglose por CEDI (requiere formato sin saltos de línea)
+- **Retraso operación**: Incluye TODOS los pacientes con estado "retraso operación" (sin filtro de urgencia/días hábiles)
+- **Sin cruce**: Se mantiene filtro de urgencia (fecha del mes actual y < 6 días hábiles)
+- **Encoding corregido**: Emojis y caracteres especiales (tildes) se muestran correctamente
+- **Mensajes para admin**: Formato de una sola línea con separador ` | ` (Meta no permite saltos de línea en templates genéricos)
+
+**`rutas/pacientes_medical_care.py` — Cambios en el cruce V3/pacientes:**
+- **V3 sin paciente**: Ahora usa `fecha_preferente` original del pedido V3 en lugar de fecha del cronograma del paciente cercano
+- **Hoja "Pedidos sin paciente asociado"**: Columna renombrada de "F. Pref. Integra" a "Fecha Preferente"
+- **Hoja "Pacientes sin montar"**: Mantiene título "F. Pref. Integra" (viene del cronograma de Integra)
 
 **Colección MongoDB `notificaciones_mc_historial`:**
 - Un registro por regional por cada sync V3 exitoso
@@ -1045,21 +1046,26 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 
 **Documentación:**
 - `docs/NOTIFICACIONES_MC_V3.md`: Documentación completa del sistema
-- Incluye ejemplos de queries para PowerBI, configuración de usuarios, troubleshooting
 
-### Mayo 2026 — Fix de plantilla WhatsApp y cambios en nombres de hojas Excel
+### Mayo 2026 — Múltiples mejoras en notificaciones y cruce de pacientes
 
-**`Funciones/sync_api_v3.py` — Fix de notificación WhatsApp:**
-- **Antes**: El mensaje incluía saltos de línea `\n` que Meta rechaza (error 400: "Param text cannot have new-line/tab characters")
-- **Ahora**: Se usa ` | ` como separador en lugar de `\n`
-- **Ejemplo**: `OK 45/50 pedidos · 3s | Cruce: 6209 pac., 269 sin match | 04 may 2026 15:57`
-- **Formato de plantilla recomendado**: Texto de relleno + variable `{{1}}` (Meta no admite plantillas con solo la variable)
+**`Funciones/sync_api_v3.py` — Plantillas oficiales Meta y encoding corregido:**
+- **Plantillas oficiales**: Ahora usa `retraso_operacion_fmc_` y `pacientes_sin_montar_fmc` (autorizadas por Meta)
+- **Encoding corregido**: Emojis y caracteres especiales (ó, í, etc.) se muestran correctamente
+- **Retraso operación**: Eliminado filtro de urgencia - ahora incluye TODOS los pacientes con ese estado
+- **Sin cruce**: Se mantiene filtro de urgencia (fecha del mes actual + < 6 días hábiles)
+- **Mensajes para admin**: Formato de una sola línea con separador ` | ` (Meta rechaza saltos de línea)
 
-**`rutas/pacientes_medical_care.py` — Cambios en exportación Excel:**
-- **Hoja 1**: Nombre cambiado de "Ocupación por Rutas" a "Pacientes sin montar"
-- **Hoja 2**: Nombre cambiado de "V3 Sin Paciente" a "Pedidos sin paciente asociado"
-- **Función `_generar_excel_bytes()`**: Parámetro `nombre_hoja` con default `'Pacientes sin montar'`
-- **Headers de hojas**: Actualizados con los nuevos nombres
+**`rutas/pacientes_medical_care.py` — Cambios en cruce V3/pacientes:**
+- **V3 sin paciente**: Ahora usa `fecha_preferente` original del pedido V3 (no del paciente cercano)
+- **Hoja Excel actualizada**: Columna renombrada de "F. Pref. Integra" a "Fecha Preferente"
+- **Hoja pacientes**: Mantiene "F. Pref. Integra" (fecha del cronograma de Integra)
+
+**`integrapp-next/src/Paginas/CrucePacientesV3P/index.tsx` — Frontend actualizado:**
+- **Festivos 2026**: Lista actualizada para coincidir con librería `holidays` de Python
+- **Cálculo días hábiles**: Ahora cuenta sábados (lunes-sábado, excluye solo domingos y festivos)
+- **Filtro retraso operación**: Sin filtro de urgencia - muestra todos los pacientes con ese estado
+- **Comparación case-insensitive**: Maneja 'retraso operación' y 'retraso operacion'
 
 ### Abril 2026 — Recuperación de clave, notificaciones filtradas y perfil CLIENTE_FMC
 
@@ -1071,7 +1077,11 @@ Estos scripts se corren de forma independiente, no son parte de la API:
 **`rutas/pacientes_medical_care.py` — Notificaciones filtradas por tipo y CEDI:**
 - Correos individuales por usuario (ya no se envía uno masivo a todos).
 - `retraso_operacion`: Excel con una sola hoja "Pacientes con Retraso" — solo pacientes con `estado_cruce = "retraso operación"`. Sin hoja "V3 Sin Paciente".
-- `sin_cruce`: Excel con 2 hojas — pacientes sin cruce (`en_v3 = False`) y pedidos V3 sin paciente. Texto: "pacientes no han sido tramitados por parte de FMC" y "pedidos en la V3 de los cuales no tenemos información del paciente".
+- `sin_cruce`: Excel con 2 hojas:
+  - **Pacientes sin montar**: Pacientes sin cruce (`en_v3 = False`) con columna "F. Pref. Integra" (fecha del cronograma)
+  - **Pedidos sin paciente asociado**: Pedidos V3 sin paciente con columna "Fecha Preferente" (fecha preferente original del V3)
+- **Filtro por CEDI/regional**: Los correos se filtran por el campo `regional` del usuario. ADMIN ve todo. CLIENTE_FMC también ve todo (son clientes externos). Los demás perfiles solo ven su CEDI.
+- **Subject del correo** incluye conteo de registros de ambas hojas
 - **Filtro por CEDI/regional**: los correos se filtran por el campo `regional` del usuario. ADMIN ve todo. CLIENTE_FMC también ve todo (son clientes externos). Los demás perfiles solo ven su CEDI.
 - Subject del correo incluye conteo de registros.
 
