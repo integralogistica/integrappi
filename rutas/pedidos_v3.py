@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pedidos-v3", tags=["Pedidos V3"])
 
 
+def _mapear_cedi_a_bodega(cedi: str) -> str:
+    """Mapea nombre de CEDI a código de bodega origen."""
+    mapa = {
+        'BARRANQUILLA': 'CO04',
+        'CALI': 'CO05',
+        'BUCARAMANGA': 'CO06',
+        'FUNZA': 'CO07',
+        'MEDELLIN': 'CO09',
+    }
+    return mapa.get(cedi.upper(), '')
+
+
 def _parsear_fecha(valor) -> str:
     """
     Convierte un valor de fecha a formato DD/MM/YYYY zero-padded.
@@ -762,12 +774,51 @@ async def cargar_pedidos_desde_api_stream(
     )
 
 
+@router.get("/rutas-por-cedi")
+async def obtener_rutas_por_cedi():
+    """
+    Obtiene el mapeo de rutas a CEDIs desde los pacientes de Medical Care.
+
+    Returns:
+        JSON con diccionario {cedi: [ruta1, ruta2, ...]}
+    """
+    try:
+        bd = bd_cliente['integra']
+        pacientes_mc = bd['pacientes_medical_care']
+
+        # Aggregate para obtener rutas únicas por CEDI
+        pipeline = [
+            {'$match': {'ruta': {'$exists': True, '$ne': ''}, 'cedi': {'$exists': True, '$ne': ''}}},
+            {'$group': {'_id': {'cedi': '$cedi', 'ruta': '$ruta'}}},
+            {'$group': {
+                '_id': '$_id.cedi',
+                'rutas': {'$addToSet': '$_id.ruta'}
+            }}
+        ]
+
+        resultados = list(pacientes_mc.aggregate(pipeline))
+
+        # Construir diccionario {cedi: [rutas]}
+        mapeo = {}
+        for doc in resultados:
+            cedi = doc['_id'].upper()
+            mapeo[cedi] = [r.upper() for r in doc.get('rutas', [])]
+
+        return mapeo
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f'Error al obtener rutas por CEDI: {str(e)}'
+        )
+
+
 @router.get("/")
 async def obtener_pedidos(
     skip: int = 0,
     limit: int = 100,
     estado: Optional[str] = None,
-    mes_actual: bool = True
+    mes_actual: bool = True,
+    bodega: Optional[str] = None
 ):
     """
     Obtiene la lista de pedidos v3 con paginación y filtro opcional por estado
@@ -777,6 +828,7 @@ async def obtener_pedidos(
         limit: Número máximo de registros a retornar
         estado: Filtro opcional por estado de pedido
         mes_actual: Si es True, filtra por fecha preferente del mes actual (default: True)
+        bodega: Filtro opcional por código de bodega origen (CO04, CO05, etc.) para filtrar por regional
 
     Returns:
         JSON con lista de pedidos
@@ -799,6 +851,14 @@ async def obtener_pedidos(
             # Ejemplo para abril 2026: busca DD/04/2026 (cualquier día del mes 04 del año 2026)
             filtro['fecha_preferente'] = {'$regex': f'^\\d{{2}}/{mes_actual_str}$'}
 
+        # Filtrar por bodega_origen (código de regional)
+        if bodega:
+            filtro['bodega_origen'] = bodega
+
+        # Contar total con el filtro completo
+        total = coleccion.count_documents(filtro)
+
+        # Obtener pedidos con paginación
         cursor = coleccion.find(filtro).sort('fecha_carga', -1).skip(skip).limit(limit)
         pedidos = []
 
@@ -813,9 +873,7 @@ async def obtener_pedidos(
             # Convertir ObjectId a string y eliminar _id
             doc['_id'] = str(doc['_id'])
             pedidos.append(doc)
-        
-        total = coleccion.count_documents(filtro)
-        
+
         return {
             'pedidos': pedidos,
             'total': total,
@@ -1008,7 +1066,8 @@ def _generar_excel_pedidos_v3(pedidos: list) -> tuple:
 async def exportar_pedidos_v3_excel(
     skip: int = 0,
     limit: int = 10000,
-    estado: str = None
+    estado: str = None,
+    bodega: str = None
 ):
     """
     Exporta los pedidos V3 a un archivo Excel.
@@ -1017,6 +1076,7 @@ async def exportar_pedidos_v3_excel(
         skip: Registros a saltar (default 0)
         limit: Límite de registros (default 10000)
         estado: Filtro opcional por estado de pedido
+        bodega: Filtro opcional por código de bodega origen (para filtrar por regional)
 
     Returns:
         StreamingResponse con el archivo Excel
@@ -1029,6 +1089,8 @@ async def exportar_pedidos_v3_excel(
         filtro = {}
         if estado:
             filtro['estado_pedido'] = estado
+        if bodega:
+            filtro['bodega_origen'] = bodega
 
         # Obtener pedidos
         cursor = coleccion.find(filtro).skip(skip).limit(limit)

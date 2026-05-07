@@ -63,6 +63,7 @@ class ActualizarDatosInput(BaseModel):
     regional: str
     celular: Optional[str] = None
     clave: Optional[str] = None  # solo si quiere cambiarla
+    usuario: Optional[str] = None  # nombre de usuario
 
 class UsuarioLite(BaseModel):
     id: str
@@ -435,14 +436,29 @@ async def actualizar_datos_usuario(id: str, data: ActualizarDatosInput):
         oid = ObjectId(id)
     except Exception:
         raise HTTPException(status_code=400, detail="ID inválido")
+
     actualiza: dict = {
         "nombre":   data.nombre.strip().upper(),
         "correo":   data.correo.strip().upper() if data.correo and data.correo.strip() else None,
         "regional": data.regional.strip().upper(),
         "celular":  data.celular.strip().upper() if data.celular and data.celular.strip() else None,
     }
+
+    # Verificar si se está cambiando el usuario
+    if data.usuario and data.usuario.strip():
+        nuevo_usuario = data.usuario.strip().upper()
+        # Buscar si ya existe otro usuario con ese nombre
+        usuario_existente = coleccion_usuarios.find_one({
+            "usuario": nuevo_usuario,
+            "_id": {"$ne": oid}
+        })
+        if usuario_existente:
+            raise HTTPException(status_code=400, detail="El nombre de usuario ya está en uso")
+        actualiza["usuario"] = nuevo_usuario
+
     if data.clave and data.clave.strip():
         actualiza["clave"] = data.clave.strip()
+
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")

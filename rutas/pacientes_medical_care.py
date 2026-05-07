@@ -846,12 +846,20 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
     llaves_v3 = [doc['llave'] for doc in registros_v3 if doc.get('llave')]
 
     docs_v3_por_llave: dict = {}
+    todos_docs_v3_por_llave: dict = {}
     contador_pedidos_por_llave: dict = {}
     for doc in registros_v3:
         llave = doc.get('llave') or ''
         if not llave:
             continue
         contador_pedidos_por_llave[llave] = contador_pedidos_por_llave.get(llave, 0) + 1
+
+        # Guardar todos los documentos por llave
+        if llave not in todos_docs_v3_por_llave:
+            todos_docs_v3_por_llave[llave] = []
+        todos_docs_v3_por_llave[llave].append(doc)
+
+        # Guardar el mejor documento por llave (para compatibilidad)
         if llave not in docs_v3_por_llave:
             docs_v3_por_llave[llave] = doc
         else:
@@ -933,6 +941,24 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
                 llaves_v3_con_paciente.add(lv)
 
         doc_v3 = docs_v3_por_llave.get(llave_v3_match, {}) if (en_v3 and llave_v3_match) else {}
+
+        # ── Construir lista de pedidos V3 ───────────────────────────────────────
+        pedidos_v3_list = []
+        if en_v3:
+            llaves_a_incluir = llaves_nombre_match if llaves_nombre_match else [llave_v3_match]
+            for lv in llaves_a_incluir:
+                for doc_v3_item in todos_docs_v3_por_llave.get(lv, []):
+                    pedidos_v3_list.append({
+                        'codigo_pedido': doc_v3_item.get('codigo_pedido', ''),
+                        'fecha_pedido': _fmt_fecha(doc_v3_item.get('fecha_pedido')),
+                        'fecha_preferente': _fmt_fecha(doc_v3_item.get('fecha_preferente')),
+                        'fecha_entrega': _fmt_fecha(doc_v3_item.get('fecha_entrega')),
+                        'estado_pedido': doc_v3_item.get('estado_pedido', ''),
+                        'planilla': doc_v3_item.get('planilla', ''),
+                        'ruta': doc_v3_item.get('ruta', ''),
+                        'cliente_destino': doc_v3_item.get('cliente_destino_original', ''),
+                    })
+
         paciente_result = {
             'paciente':           p.get('paciente_original', ''),
             'cedula':             p.get('cedula_original', ''),
@@ -964,6 +990,7 @@ def _motor_cruce(pacientes: list, registros_v3: list, cronograma_dict: dict):
                                   if (en_v3 and llaves_nombre_match)
                                   else (contador_pedidos_por_llave.get(llave_v3_match, 0)
                                         if (en_v3 and llave_v3_match) else 0),
+            'pedidos_v3':         pedidos_v3_list,
         }
         try:
             paciente_result['estado_cruce'] = _determinar_estado_cruce(
