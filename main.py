@@ -20,6 +20,7 @@ from rutas.clientes_siscore import ruta_clientes_siscore
 from rutas.clientes_general import ruta_clientes_general
 from rutas.ciudades_general import ruta_ciudades_general
 from rutas.fletes import ruta_fletes
+from rutas.tarifas_rutas_fmc import ruta_tarifas_rutas_fmc
 from rutas.pedidos import ruta_pedidos
 from rutas.consultar_biometrico import ruta_verificacion
 from rutas.whatsapp_integra import ruta_whatsapp_integra
@@ -30,6 +31,7 @@ from rutas.pacientes_medical_care import router as ruta_pacientes_medical_care
 from rutas.pedidos_v3 import router as ruta_pedidos_v3
 from rutas.sync_v3 import router as ruta_sync_v3, _obtener_config_desde_db, actualizar_ultimo_resultado
 from rutas.cronograma_mc import router as ruta_cronograma_mc
+from rutas.siscore_consultas import router as ruta_siscore_consultas
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -161,6 +163,7 @@ app.include_router(ruta_clientes_siscore)
 app.include_router(ruta_clientes_general)
 app.include_router(ruta_ciudades_general)
 app.include_router(ruta_fletes)
+app.include_router(ruta_tarifas_rutas_fmc)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
@@ -172,6 +175,7 @@ app.include_router(ruta_pacientes_medical_care)
 app.include_router(ruta_pedidos_v3)
 app.include_router(ruta_sync_v3)
 app.include_router(ruta_cronograma_mc)
+app.include_router(ruta_siscore_consultas)
 
 @app.get("/", tags=['Home'])
 async def root():

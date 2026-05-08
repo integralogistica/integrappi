@@ -1,1218 +1,162 @@
-# IntegraPPI — Backend API de Integra Logística
-
-Backend del sistema de gestión logística de **Integra Cadena de Servicios S.A.S.**, construido con FastAPI y MongoDB. Centraliza la operación de transportadores, empleados, clientes y pedidos, con integración a WhatsApp, sistemas de rastreo externos y generación de documentos.
-
-**Frontend:** ver `../integrapp-next/` (Next.js 14 App Router — migrado desde `../integrapp/` en marzo 2025)
-
----
-
-## Qué hace este sistema
-
-Sistema integral de gestión logística que centraliza toda la operación de Integra Cadena de Servicios S.A.S.:
-
-### Gestión de Usuarios y Autenticación
-- **Transportadores**: Registro, login, recuperación de clave, gestión de perfil
-- **Despachadores**: Acceso a torre de control, gestión de pedidos
-- **Seguridad**: Inspección de vehículos, aprobación de documentos
-- **Admin**: Gestión completa de usuarios, asignación de clientes y permisos
-- **Conductores**: Panel de conductor con documentos y firma digital
-- Autenticación JWT con expiración de 20 minutos
-- Recuperación de contraseña por correo con tokens de un solo uso (expiran en 30 minutos)
-- Verificación de códigos de seguridad para recuperación de clave de conductores
-
-### Gestión de Vehículos y Documentación
-- Registro de vehículos con placa, marca, modelo, capacidad
-- Carga de documentos: SOAT, tecnomecánica, tarjeta de propiedad, seguro, licencia de conducción
-- Carga de fotos del vehículo (exterior, interior, documentación)
-- Firma digital del propietario
-- Biometría: captura y verificación de huellas dactilares (5 dedos por mano)
-- Estados del vehículo: pendiente, en_revisión, aprobado, rechazado
-- Flujo de aprobación: Registro → Revisión por seguridad → Aprobado/Rechazado
-- Notificaciones por correo al cambiar estado del vehículo
-- Eliminación de documentos y fotos con limpieza en Google Cloud Storage
-
-### Gestión de Pedidos y Operaciones
-- Creación de pedidos individuales con: cliente, destinatario, dirección, municipio, departamento, región, kilos, costo real, costo teórico, observaciones
-- **Carga masiva de pedidos desde Excel**: soporta formatos con múltiples plantillas
-- Agrupación de pedidos por `consecutivo_vehiculo` (ej: FUNZA-20250711-FUN123)
-- Cálculo automático de totales por vehículo: kilos totales, costo real, costo teórico
-- Estados de pedidos: AUTORIZADO, PREAUTORIZADO, PENDIENTE, NO AUTORIZADO
-- Autorización de vehículos según perfil:
-  - ADMIN: puede autorizar cualquier estado
-  - OPERATIVO: puede autorizar AUTORIZADO y PREAUTORIZADO
-  - SEGURIDAD: no puede autorizar
-- Ajustes de totales por vehículo: kilos, tarifas, overrides manuales
-- **Fusión de vehículos**: combina dos o más vehículos en uno solo
-- **División de vehículos**: divide un vehículo en hasta 3 vehículos según criterios (destinatarios o consecutivos)
-- Carga de números de pedido desde Vulcano (integración masiva)
-- Exportación de pedidos autorizados a Excel con cálculo de tarifas y tipos de vehículo
-- Lista de pedidos completados con filtros por usuario, estados y regionales
-- API Power BI para estadísticas completadas por rango de fechas
-
-### Gestión de Clientes y Tarifas
-- **Clientes estándar**: NIT, nombre, contacto
-- **Clientes Siscore**: Entidad, NIT para integración con rastreo
-- **Clientes generales**: Base de datos de destinatarios con cliente_destinatario, dirección, municipio, departamento, coordenadas (lat, lon)
-- **Carga masiva** de clientes desde Excel (clientes, clientes_siscore, clientes_general)
-- **Tarifas de flete**: Origen, destino, tipos de vehículo (CAMIONETA, CARRY, 4X2, 6X2, 6X4, 8X2, 8X4) con costos asociados
-- Búsqueda de tarifa específica por origen, destino y tipo de vehículo
-- Carga masiva de tarifas desde Excel
-
-### Gestión de Municipios y Geolocalización
-- Base de datos de municipios colombianos con: municipio, departamento, latitud, longitud
-- Búsqueda de ubicación por nombre de municipio
-- Carga masiva de municipios desde Excel
-- Geocodificación automática usando Nominatim (OpenStreetMap)
-
-### Gestión de Manifiestos y Pagos
-- **Manifiestos activos** (ExtraePagosNoAplicados): Guías sin liquidar, con información de flete, saldos, fechas
-- **Manifiestos pagados** (ExtraePagosAplicados): Guías liquidadas con detalles de pago
-- **Novedades**: Registro de incidentes en manifiestos con fecha, descripción, estado
-- Consulta de manifiestos por tenedor (propietario de vehículo)
-
-### Chatbot WhatsApp Multi-rol
-Sistema de mensajería automatizado con máquina de estados para tres tipos de usuarios:
-
-**Transportador:**
-- Consulta de manifiestos activos y pagados
-- Verificación de saldos pendientes
-- Recuperación de clave de acceso
-- Consulta de manifiestos por año específico
-- Navegación intuitiva con menú numérico
-
-**Empleado:**
-- Solicitud de certificado laboral
-- Validación de identidad con cédula
-- Envío de certificado en PDF por correo electrónico
-- Opción de incluir o no información salarial
-
-**Cliente:**
-- Rastreo de guías de envío
-- Consulta de estado de guías (integración Siscore)
-- Visualización de imágenes de trazabilidad
-- Recepción de resultados por WhatsApp
-
-**Características técnicas:**
-- Máquina de estados con expiración automática de sesiones
-- Detección y prevención de mensajes duplicados
-- Registro detallado de todas las interacciones en MongoDB
-- Consultas asíncronas a Vulcano y Siscore
-- Soporte para proxies en redes restringidas
-
-### Integración con Sistemas Externos
-
-**Vulcano (Sistema de Manifiestos):**
-- Consulta de manifiestos por cédula de tenedor
-- Extracción de número de manifiesto, fecha, origen, destino, destinatario, estado
-- Consulta de manifiestos detallados con pagos y saldos
-- Autenticación JWT propia de Vulcano
-- Soporte para proxies y configuración de timeout
-- Manejo de errores y reintentos automáticos
-
-**Siscore (Rastreo de Guías - SOAP/XML):**
-- Consulta de trazabilidad de guías vía SOAP
-- Obtención de imágenes de trazabilidad (fotos de entrega)
-- Formateo de respuestas XML a JSON
-- Soporte para proxy en redes restringidas
-- Validación de existencia de guía antes de consultar
-
-**Google Cloud Storage:**
-- Almacenamiento de documentos de vehículos (SOAT, tecnomecánica, tarjeta, etc.)
-- Almacenamiento de fotos de vehículos
-- Almacenamiento de firmas digitales
-- Almacenamiento de imágenes de huellas dactilares
-- Optimización automática de imágenes (WebP, redimensionamiento)
-- Eliminación segura de archivos
-
-**Resend (Correo Electrónico):**
-- Envío de certificados laborales (PDF adjunto)
-- Envío de enlaces de recuperación de contraseña
-- Envío de códigos de verificación
-- Notificaciones de cambio de estado de vehículos
-- Envío de correos silenciosos (sin bloqueo de la API)
-
-### Gestión de Pacientes - Fresenius Medical Care
-Sistema completo de gestión de pacientes con importación masiva, normalización de datos, validación de duplicados y operaciones CRUD individuales.
-
-**Importación Masiva con Streaming SSE:**
-- **Endpoint `/cargar-masivo-stream`**: Carga de pacientes desde Excel (.xlsx, .xls, .xlsm) con progreso en tiempo real via Server-Sent Events (SSE)
-- **Progreso en tiempo real**: El backend envía eventos SSE con el estado actual de la carga:
-  - `stage: 'reading'` - Leyendo archivo Excel
-  - `stage: 'processing'` - Procesando registros (muestra progreso % y registros procesados/total)
-  - `stage: 'saving'` - Guardando en base de datos
-  - `stage: 'complete'` - Carga completada con estadísticas finales
-- **Solución a error "I/O operation on closed file"**: El contenido del archivo se lee ANTES de iniciar el StreamingResponse para evitar que el archivo se cierre antes de poder procesarlo
-- **Validación temprana**: Valida tipo de archivo y contenido vacío antes de iniciar el generador de SSE
-- **Métricas de respuesta**: Tiempo de procesamiento, registros exitosos, registros con errores, lista detallada de errores (primeros 50)
-- **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
-
-**Normalización Automática de Datos:**
-- Implementada en `Funciones/normalizacion_medical_care.py`. **Solo se normalizan los siguientes campos**; el resto se guarda tal cual viene del Excel:
-  - `fx_normalizar_paciente()` → campo `paciente`: Primeras **6** palabras, sin signos de puntuación, mayúsculas, reordenamiento alfabético, **máximo 2 ocurrencias por palabra**
-    - Ejemplo: "DUVAN DUVAN DUVAN ESPITIA F FELIPE" → "DUVAN DUVAN ESPITIA F FELIPE" (tercera "DUVAN" eliminada)
-    - Ejemplo: "Zarate Edwin" → "EDWIN ZARATE"
-  - `fx_normalizar_cedula()` → campo `cedula`: Solo dígitos
-  - `fx_normalizar_direccion()` → campo `direccion`: Normalización completa con corrección de errores comunes, reordenamiento alfabético
-    - Ejemplo: "CALLE 123 BARRIO CENTRO" → "123 BARRIO CALLE CENTRO"
-    - Corrige errores comunes: "CAKLE" → "CALLE", "CARREA" → "CARRERA", "TRASVERSAL" → "TRANSVERSAL"
-    - Normaliza abreviaturas: "KRA" → "CARRERA", "CLL" → "CALLE", "TV" → "TRANSVERSAL"
-  - `fx_separar_telefonos()` → campos `telefono1` y `telefono2`: Separa hasta dos números del campo celular usando separadores comunes (` - `, `/`, `,`, `;`, `|`, `y`). Limpia caracteres no numéricos al inicio/fin antes de partir. Guarda también `celular_original`
-    - Ejemplo: `"3168517637 - 3165334389"` → `telefono1: "3168517637"`, `telefono2: "3165334389"`
-    - Ejemplo: `"-3123418728"` → `telefono1: "3123418728"`, `telefono2: ""`
-- **Campos sin normalización** (se guardan como vienen): `sede`, `departamento`, `municipio`, `ruta`, `cedi`
-- **Corrección de caracteres mal codificados**: UTF-8 leído como Latin-1 (ej: `Ã³` → `O`, `Ãº` → `U`)
-
-**Validación de Duplicados:**
-- **Duplicados en el archivo**: Valida que no haya cédulas repetidas dentro del mismo archivo de carga
-- **Duplicados en base de datos**: Consulta MongoDB antes de insertar para evitar cédulas ya existentes
-- **Registra errores detallados**: Cada duplicado se registra con el número de fila y el valor de la cédula duplicada
-
-**Almacenamiento de Campos Originales y Normalizados:**
-- Los campos normalizados tienen su versión `_original`: `paciente_original`, `cedula_original`, `direccion_original`, `celular_original`
-- Los demás campos (`sede`, `departamento`, `municipio`, `ruta`, `cedi`) se guardan una sola vez tal cual vienen del Excel
-- Los teléfonos se almacenan en `telefono1`, `telefono2` (normalizados) y `celular_original` (valor crudo del Excel). El campo `celular` = `telefono1` por compatibilidad
-- **Ejemplo**:
-  - `cedula_original: "57 310 123 4567"` → `cedula: "573101234567"`
-  - `paciente_original: "MARÍA GONZÁLEZ, PEREZ"` → `paciente: "GONZALEZ MARIA PEREZ"`
-  - `celular_original: "3168517637 - 3165334389"` → `telefono1: "3168517637"`, `telefono2: "3165334389"`
-
-**Campo `llave`:**
-- Campo calculado automáticamente al crear/actualizar/cargar un paciente
-- Fórmula: `paciente_normalizado + " " + direccion_normalizada`
-- Sirve para cruzar pacientes con pedidos V3 mediante similitud de texto (fuzzy matching)
-
-**Campo `estado`:**
-- Valores posibles: `ACTIVO`, `INACTIVO`, `FALLECIDO`
-- Default en carga masiva y creación individual: `ACTIVO`
-- Solo modificable en la edición individual de cada paciente
-
-**Validación de Columnas:**
-- **Columna requerida**: solo `cedula` es obligatoria. `paciente` es opcional: si viene vacío el registro se crea sin nombre
-- **Columnas opcionales**: `sede`, `paciente`, `direccion`, `departamento`, `municipio`, `ruta`, `cedi`, `celular`
-- **Validación case-insensitive**: Las columnas pueden estar en mayúsculas, minúsculas o mezcladas
-- **Mensaje de error claro**: Indica qué columnas faltan si el archivo no cumple con el formato
-
-**Registro de Auditoría:**
-- **Usuario de carga**: Guarda el nombre del usuario que realizó la carga (`usuario_carga`)
-- **Fecha de carga**: Guarda fecha y hora exacta de la carga (`fecha_carga`)
-- **Usuario de actualización**: Guarda el usuario que actualizó un registro (`usuario_actualizacion`)
-- **Fecha de actualización**: Guarda fecha y hora de actualización (`fecha_actualizacion`)
-
-**CRUD Completo de Pacientes:**
-- **Crear paciente individual**: `POST /pacientes-medical-care/`
-  - Valida campos obligatorios (paciente, cedula)
-  - Normaliza todos los campos automáticamente
-  - Valida duplicados en base de datos
-  - Retorna el paciente creado con ID
-- **Actualizar paciente existente**: `PUT /pacientes-medical-care/{paciente_id}`
-  - Permite editar todos los campos
-  - Si la cédula cambia, valida que no exista en otro paciente
-  - Registra usuario y fecha de actualización
-  - Retorna el paciente actualizado
-- **Eliminar paciente individual**: `DELETE /pacientes-medical-care/{paciente_id}`
-  - Valida que el paciente existe
-  - Elimina el registro de MongoDB
-  - Retorna confirmación con ID del paciente eliminado
-- **Obtener paciente por ID**: `GET /pacientes-medical-care/{paciente_id}`
-  - Retorna todos los campos del paciente (originales y normalizados)
-  - Convierte ObjectId a string
-
-**Búsqueda y Listado:**
-- **Listado con paginación**: `GET /pacientes-medical-care/?skip=0&limit=100`
-  - Retorna lista de pacientes con paginación
-  - Convierte ObjectId a string en cada documento
-  - Total de registros en la respuesta
-- **Búsqueda por cédula**: `GET /pacientes-medical-care/buscar?cedula=123456789`
-  - Normaliza la cédula antes de buscar
-  - Búsqueda exacta en campo normalizado
-- **Búsqueda por nombre**: `GET /pacientes-medical-care/buscar?paciente=Juan`
-  - Búsqueda parcial con regex case-insensitive
-  - Busca en campo normalizado de paciente
-
-**Eliminación Masiva:**
-- **Endpoint**: `DELETE /pacientes-medical-care/eliminar-todos?usuario=USUARIO`
-- **Restricción**: Solo perfil ADMIN
-- **Retorna**: Número de registros eliminados y usuario que realizó la eliminación
-
-**Base de Datos:**
-- **Base de datos**: `integra` (MongoDB)
-- **Colección principal**: `pacientes_medical_care` — índice único en campo `cedula`
-- **Colección de cache**: `cache_cruce_mc` — documento único `{ tipo: "cruce_completo" }` con los resultados del último cruce, `fecha_calculo` y `calculado_por`
-- **Conexión**: Usa `bd.bd_cliente` desde `bd/bd_cliente.py`
-
-**Manejo de Errores:**
-- **Errores por fila**: Registra errores sin detener la carga completa
-- **Primeros 50 errores**: La respuesta incluye hasta 50 errores para no saturar la respuesta
-- **Mensajes descriptivos**: Cada error indica la fila y el motivo específico
-- **Códigos de estado HTTP**:
-  - 200 OK - Carga completada (con o sin errores)
-  - 400 Bad Request - Archivo inválido, columnas faltantes, campos obligatorios
-  - 409 Conflict - Duplicado encontrado
-  - 500 Internal Server Error - Error inesperado en el servidor
-
-**Endpoints Completos:**
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE (streaming) |
-| POST | `/pacientes-medical-care/cargar-masivo` | Carga masiva versión clásica (sin streaming) |
-| GET | `/pacientes-medical-care/?skip=0&limit=100&cedi=BARRANQUILLA` | Listar pacientes con paginación (filtro `cedi` opcional) |
-| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX&cedi=CALI` | Buscar por cédula o nombre (filtro `cedi` opcional) |
-| GET | `/pacientes-medical-care/ocupacion-rutas` | Lee el cruce desde cache `cache_cruce_mc` en MongoDB |
-| GET | `/pacientes-medical-care/v3-sin-paciente` | Lee V3 sin paciente desde cache `cache_cruce_mc` |
-| POST | `/pacientes-medical-care/recalcular-cruce?usuario=USUARIO` | Recalcula y guarda el cruce completo con progreso SSE |
-| GET | `/pacientes-medical-care/exportar-cruce-excel?cedi=FUNZA` | Exporta el cruce a Excel con 2 hojas (filtro `cedi` opcional) |
-| POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
-| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente (incluye campo `estado`) |
-| DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |
-| GET | `/pacientes-medical-care/{id}` | Obtener paciente por ID |
-| DELETE | `/pacientes-medical-care/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
-
-**Cruce Pacientes ↔ V3 con Cache:**
-
-El cruce es una operación O(n×m) (rapidfuzz sobre todas las combinaciones). Para evitar recalcularlo en cada petición:
-
-- **Cache en MongoDB**: los resultados se guardan en la colección `cache_cruce_mc` con un único documento `{ tipo: "cruce_completo" }` (upsert). Los endpoints GET leen desde ahí instantáneamente
-- **Recalcular bajo demanda**: `POST /recalcular-cruce` es el único punto que dispara el cálculo real. Devuelve un stream SSE con progreso real:
-  - `stage: 'loading'` (0-8%) — Cargando pacientes y pedidos V3 desde MongoDB
-  - `stage: 'comparing_patients'` (10-60%) — Comparando cada paciente contra todos los V3 (reporta cada 5%)
-  - `stage: 'comparing_v3'` (62-90%) — Identificando V3 sin paciente coincidente
-  - `stage: 'saving'` (95%) — Guardando resultado en `cache_cruce_mc`
-  - `stage: 'complete'` (100%) — Datos completos embebidos en el evento final
-- **Filtro por CEDI**: `GET /` y `GET /buscar` aceptan el param `cedi` (regex case-insensitive) para restringir resultados. Usado para control de acceso regional desde el frontend
-- **`/ocupacion-rutas` incluye `total_sin_paciente` y `total_v3`**: el endpoint GET retorna también el total de V3 sin paciente para que el frontend pueda mostrar el badge desde el primer cargue, y `total_v3` (pedidos V3 reales cargados al cruce) para calcular correctamente los pedidos emparejados sin double-counting
-
-**Algoritmo de cruce (motor):**
-- **Motor de similitud**: `rapidfuzz.fuzz.ratio` (extensión C++) — 20-50× más rápido que `difflib.SequenceMatcher`
-- **Criterio 1 — Nombre** (prioridad máxima): se compara el `paciente` normalizado contra el `cliente_destino` normalizado de todos los pedidos V3. Si la similitud ≥ 95%, se marca como cruce con `match_tipo: 'nombre'`
-- **Criterio 2 — Llave** (segunda prioridad): si no cruzó por nombre, se compara la `llave` del paciente contra todas las llaves V3. Si la similitud ≥ 73%, se marca como cruce con `match_tipo: 'llave'`
-- **Criterio 3 — Celular** (tercera prioridad, fallback): si no cruzó por nombre ni llave, se normalizan `telefono1` y `telefono2` del paciente y `telefono_original` del pedido V3 eliminando caracteres no numéricos (sin truncar). Si alguno coincide exactamente, se marca como cruce con `match_tipo: 'celular'`
-- **Sin cruce**: si no se cumple ninguno de los criterios anteriores, `match_tipo` es `None` y `en_v3` es `False`
-- **`_normalizar_cel()`**: elimina todo carácter no numérico del número de teléfono — **no trunca a 10 dígitos** para evitar falsos positivos por coincidencia parcial de sufijos
-- **Score de similitud**: el campo `similitud` siempre guarda el score fuzzy de la llave (0-100), independientemente de cuál criterio ganó el cruce
-- **Ordenamiento de pacientes por ruta**: dentro de cada ruta los pacientes se ordenan primero por `en_v3` descendente (los que sí cruzaron aparecen primero) y luego por `similitud` descendente dentro de cada grupo
-
-**Indicadores visuales del tipo de cruce (frontend):**
-- **👤 (persona)**: cruce por nombre ≥ 95% — badge verde
-- **🔑 (llave)**: cruce por llave (nombre+dirección) ≥ 73% — badge morado
-- **📱 (celular)**: cruce por número de celular exacto — badge azul
-- **Sin badge**: cuando no hay cruce (similitud < umbrales o sin coincidencias)
-
-**Campos del resultado de cruce por paciente:**
-- `paciente`, `cedula`, `direccion_original`, `ruta`, `cedi`, `llave`, `similitud`, `match_tipo`, `llave_v3`, `en_v3`, `estado`
-- Datos del pedido V3 cruzado: `estado_pedido`, `fecha_pedido`, `fecha_preferente`, `fecha_entrega`, `planilla`, `municipio_destino`, `divipola`
-- `ruta_v3`: ruta del pedido V3 que cruzó (vacío si no cruzó). Se considera **cambio de ruta** cuando `ruta_v3` es diferente a la ruta del paciente en Medical Care, o cuando viene vacío. Estos casos se marcan visualmente en el frontend con fondo rojo oscuro y se cuentan en el badge ⚠️ del encabezado de cada tarjeta
-- `celular_paciente`: `telefono1 / telefono2` del paciente (campos usados en el match por celular)
-- `telefono_v3`: `telefono_original` del pedido V3 que cruzó
-
-**Endpoint `exportar-cruce-excel`:**
-- Lee el cruce desde `cache_cruce_mc`
-- Aplica filtro `cedi` si se indica
-- Genera un `.xlsx` con openpyxl con dos hojas:
-  - **Hoja 1 "Pacientes sin montar"**: una fila por paciente con CEDI, ruta, nombre, cédula, dirección, F. Pref. Integra. Filas coloreadas: verde (fecha preferente ≤ 5 días), rojo (fecha preferente > 5 días)
-  - **Hoja 2 "Pedidos sin paciente asociado"**: una fila por pedido V3 sin cruce con CEDI, ruta, código_pedido, cliente, dirección, F. Pref. Integra. Filas rojas
-  - Headers en negrita, freeze panes en fila 1, anchos de columna auto-ajustados
-
-**Documentación:**
-- **Archivo de documentación**: `docs/MEDICAL_CARE_EXCEL_IMPORT.md` con detalles completos del sistema
-- **Plantilla de Excel**: `plantilla_pacientes.xlsx` en la raíz del proyecto
-
-### Gestión de Pedidos V3 - Fresenius Medical Care
-Sistema de gestión de pedidos específico para Medical Care con carga masiva desde Excel, normalización de datos y operaciones CRUD.
-
-**Importación Masiva con Streaming SSE:**
-- **Endpoint `/cargar-masivo-stream`**: Carga de pedidos desde Excel (.xlsx, .xls, .xlsm) con progreso en tiempo real via Server-Sent Events (SSE)
-- **Progreso en tiempo real**: El backend envía eventos SSE con el estado actual de la carga:
-  - `stage: 'reading'` - Leyendo archivo Excel
-  - `stage: 'processing'` - Procesando registros (muestra progreso % y registros procesados/total)
-  - `stage: 'saving'` - Guardando en base de datos
-  - `stage: 'complete'` - Carga completada con estadísticas finales
-- **Validación temprana**: Valida tipo de archivo y contenido vacío antes de iniciar el generador de SSE
-- **Métricas de respuesta**: Tiempo de procesamiento, registros exitosos, registros con errores, lista detallada de errores (primeros 50)
-- **Manejo de errores robusto**: Try-catch específico para lectura de archivo y lectura de Excel con mensajes de error claros enviados via SSE
-
-**Normalización Automática de Datos:**
-- **Solo se normalizan 3 campos**; el resto se guarda tal cual viene del Excel:
-  - `cliente_destino`: `fx_normalizar_paciente()` — primeras 4 palabras, mayúsculas, reordenamiento alfabético. Guarda también `cliente_destino_original`
-  - `direccion_destino`: `fx_normalizar_direccion()` — corrección de errores, abreviaturas, reordenamiento. Guarda también `direccion_destino_original`
-  - `telefono`: `fx_normalizar_celular()` — elimina caracteres no numéricos (guarda todos los dígitos sin truncar). Guarda también `telefono_original`
-- **Campos sin normalización** (sin `_original`): `codigo_pedido`, `codigo_cliente_destino`, `divipola`, `fecha_pedido`, `fecha_preferente`, `estado_pedido`, `piezas`, `peso_real`, `bodega_origen`, `ruta`, `municipio_destino`
-
-**Filtro de Clientes Institucionales:**
-- Los registros cuyo `Cliente Destino` (texto ORIGINAL en mayúsculas) contenga alguna de las siguientes palabras son **excluidos automáticamente** de la carga, tanto en carga manual como en sync automático:
-  `DAVITA`, `VANTIVE`, `CLINICA`, `FARMA`, `HOSP`, `FUNDACION`, `RENAL`, `MEDICO`, `SOCIEDAD`, `INSTITUTO`
-- La verificación se hace sobre el texto original (no normalizado) para no depender de transformaciones de texto
-- Los registros filtrados se cuentan y se devuelven en `registros_filtrados` en la respuesta del SSE / sync
-- Función helper: `_es_cliente_excluido(cliente_original.upper())` en `rutas/pedidos_v3.py`, importada también en `Funciones/sync_api_v3.py`
-
-**Normalización de Fechas (`_parsear_fecha`):**
-- Función `_parsear_fecha()` en `rutas/pedidos_v3.py` convierte cualquier formato de fecha a `DD/MM/YYYY` **siempre zero-padded**
-- Soporta: serial numérico de Excel (ej: `46076` → `23/02/2026`), `datetime`/`date` de pandas, strings `D/M/YYYY` o `DD/MM/YYYY` (con o sin padding), `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, `D-M-YYYY`, `YYYY/MM/DD`
-- **Formatos no reconocidos retornan `''`** → el registro es rechazado (no sube a Mongo)
-- Aplica a los campos `Fecha Pedido`, `Fecha Preferente` y `Fecha Entrega` tanto en carga manual como en sync automático
-- Garantiza que el regex de consulta `^\d{2}/04/2026$` en `GET /pedidos-v3/` siempre encuentre todas las fechas guardadas
-
-**Campo `llave`:**
-- Campo calculado automáticamente al cargar cada pedido
-- Fórmula: `cliente_destino_normalizado + " " + direccion_destino_normalizada`
-- Sirve para cruzar pedidos V3 con pacientes mediante similitud de texto
-
-**Validación de Duplicados:**
-- **Duplicados en el archivo**: Valida que no haya identificadores repetidos dentro del mismo archivo de carga
-- **Duplicados en base de datos**: Consulta MongoDB antes de insertar para evitar registros ya existentes
-- **Registra errores detallados**: Cada duplicado se registra con información del registro
-
-**CRUD Completo de Pedidos:**
-- **Listar pedidos**: `GET /pedidos-v3/?skip=0&limit=100`
-  - Retorna lista de pedidos con paginación
-  - Convierte ObjectId a string en cada documento
-  - Total de registros en la respuesta
-- **Crear pedido individual**: `POST /pedidos-v3/?usuario=USUARIO`
-  - Valida campos obligatorios
-  - Normaliza todos los campos automáticamente
-  - Valida duplicados en base de datos
-  - Retorna el pedido creado con ID
-- **Actualizar pedido existente**: `PUT /pedidos-v3/{pedido_id}?usuario=USUARIO`
-  - Permite editar todos los campos
-  - Valida que no exista en otro pedido si cambia el identificador
-  - Registra usuario y fecha de actualización
-  - Retorna el pedido actualizado
-- **Eliminar pedido individual**: `DELETE /pedidos-v3/{pedido_id}?usuario=USUARIO`
-  - Valida que el pedido existe
-  - Elimina el registro de MongoDB
-  - Retorna confirmación con ID del pedido eliminado
-- **Obtener pedido por ID**: `GET /pedidos-v3/{pedido_id}`
-  - Retorna todos los campos del pedido
-  - Convierte ObjectId a string
-
-**Eliminación Masiva:**
-- **Endpoint**: `DELETE /pedidos-v3/eliminar-todos?usuario=USUARIO`
-- **Restricción**: Solo perfil ADMIN
-- **Retorna**: Número de registros eliminados y usuario que realizó la eliminación
-
-**Base de Datos:**
-- **Base de datos**: `integra` (MongoDB)
-- **Colección**: `pedidos_v3`
-- **Conexión**: Usa `bd.bd_cliente` desde `bd/bd_cliente.py`
-
-**Manejo de Errores:**
-- **Errores por fila**: Registra errores sin detener la carga completa
-- **Primeros 50 errores**: La respuesta incluye hasta 50 errores para no saturar la respuesta
-- **Mensajes descriptivos**: Cada error indica la fila y el motivo específico
-- **Códigos de estado HTTP**:
-  - 200 OK - Carga completada (con o sin errores)
-  - 400 Bad Request - Archivo inválido, campos obligatorios faltantes
-  - 500 Internal Server Error - Error inesperado en el servidor
-
-**Endpoints Completos:**
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE (streaming) |
-| GET | `/pedidos-v3/?skip=0&limit=100` | Listar pedidos con paginación |
-| POST | `/pedidos-v3/?usuario=USUARIO` | Crear pedido individual |
-| PUT | `/pedidos-v3/{id}?usuario=USUARIO` | Actualizar pedido |
-| DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
-| GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
-| DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
-
----
-
-### Sincronización Automática V3 (`/sync-v3`)
-
-Sistema de sincronización periódica que consume directamente del **API de Siscore V3** y reemplaza la colección `v3` en MongoDB. El cálculo del rango de fechas es automático (desde el 1er día de hace 2 meses hasta hoy).
-
-**Funcionamiento:**
-- Al iniciar el servidor FastAPI, arranca una tarea de fondo (`asyncio`) que revisa cada 30 segundos si la hora actual coincide con alguno de los horarios configurados
-- Cuando coincide: consulta el API de Siscore, borra todos los pedidos actuales de la colección `v3` e inserta los nuevos
-- El chequeo cada 30s es solo comparación de strings en memoria — sin costo de red ni base de datos
-- La ejecución real (API + MongoDB) ocurre máximo N veces al día según los horarios definidos
-- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
-  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
-  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
-
-**Configuración de horarios almacenada en MongoDB:**
-- **Colección**: `config_v3` con documento `{ tipo: "sync_config", horarios: [], activo: true }`
-- **Horarios por defecto**: `['08:00', '14:00']` (se crean automáticamente si no existen)
-- **Gestión desde UI**: el portal MedicalCare permite agregar/eliminar horarios sin reiniciar el servidor
-- **Endpoints de gestión**:
-  - `GET /sync-v3/config` - obtiene configuración actual
-  - `POST /sync-v3/config` - actualiza horarios o estado activo
-  - `POST /sync-v3/horarios?horario=HH:MM` - agrega un nuevo horario
-  - `DELETE /sync-v3/horarios/HH:MM` - elimina un horario
-
-**Zona horaria:** `pytz America/Bogota` — funciona correctamente en Render (que corre en UTC)
-
-**Integración con API de Siscore V3:**
-- **Endpoint**: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
-- **Método**: POST JSON con autenticación vía token fijo
-- **Token**: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
-- **Parámetros**: `fecha_inicial`, `fecha_final`, `centro_distribucion` ("TODOS"), `incluir_pedidos_manuales` ("NO")
-
-**Soporte para Proxy:**
-- **Variable de entorno**: `VULCANO_PROXY_URL` (opcional)
-- **Formatos aceptados**: `http://ip:puerto`, `http://user:pass@ip:puerto`, o solo `ip:puerto`
-- **Función**: `_get_proxy_url()` en `rutas/pedidos_v3.py` lee la variable y normaliza el formato
-- **Timeout aumentado**: 120s (connect: 60s) para dar tiempo a conexiones con proxy
-- **Logs de diagnóstico**: Muestra si proxy está habilitado o no configurado al ejecutar sync
-- **Compatibilidad**: Si no hay proxy configurado, la conexión es directa a internet
-
-**Plantilla de WhatsApp (opcional):**
-- **Template name**: `confirmar_actualizacion`
-- **Formato recomendado**:
-  ```
-  🔄 *Actualización V3*
-  
-  {{1}}
-  
-  _Integra Logística_
-  ```
-- Donde `{{1}}` se reemplaza por: `OK 45/50 pedidos · 3s | Cruce: 6209 pac., 269 sin match | 04 may 2026 15:57`
-- **Nota**: Meta no permite saltos de línea en plantillas, por eso se usa ` | ` como separador
-
-**Filtros aplicados** (igual que carga manual):
-1. Solo registros del mes actual según "Fecha Solicitada" (fecha_preferente)
-2. Exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, FARMA, HOSP, etc.)
-- Los registros filtrados se cuentan y se devuelven en `filtrados` en la respuesta del sync
-
-**Endpoints:**
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/sync-v3/config` | Ver horarios configurados, estado activo y fuente de datos (API Siscore) |
-| POST | `/sync-v3/config?activo=false` | Pausar o reanudar el sync |
-| POST | `/sync-v3/config` + body `{"horarios":["06:00","14:00"]}` | Cambiar horarios en caliente (sin reiniciar) |
-| POST | `/sync-v3/horarios?horario=HH:MM` | Agregar un nuevo horario a la configuración |
-| DELETE | `/sync-v3/horarios/HH:MM` | Eliminar un horario de la configuración |
-| POST | `/sync-v3/ejecutar` | Disparar sync manualmente ahora mismo |
-| GET | `/sync-v3/estado` | Resultado del último sync: timestamp, exitosos, errores, segundos |
-| POST | `/sync-v3/archivar` | Ejecutar corte mensual manualmente |
-| GET | `/sync-v3/historico` | Listar meses archivados |
-| GET | `/sync-v3/historico/{anio}/{mes}` | Ver cruce archivado de un mes específico |
-
-**Archivos:**
-- `Funciones/sync_api_v3.py` — lógica core: consulta API Siscore, mapeo de campos, normalización, reemplazo en MongoDB
-- `rutas/sync_v3.py` — endpoints y configuración de horarios
-
-**Notificación WhatsApp Personalizada:**
-- Tras cada sync exitoso, se envían notificaciones personalizadas a usuarios según sus preferencias `notificaciones_mc`
-- **Retraso operación**: Usuarios con `notificaciones_mc: "retraso_operacion"` reciben conteo de pacientes con retraso operación (TODOS, sin filtro de urgencia)
-- **Sin cruce**: Usuarios con `notificaciones_mc: "sin_cruce"` reciben conteo de pacientes sin montar (con filtro: fecha del mes actual y < 6 días hábiles)
-- **Plantillas oficiales Meta**: 
-  - Operativos: `retraso_operacion_fmc_` y `pacientes_sin_montar_fmc` (2 parámetros cada una)
-  - Admin: `confirmar_actualizacion` con desglose por CEDI (formato de una sola línea)
-- **Mensajes filtrados por regional** del usuario (CO04=BARRANQUILLA, CO05=CALI, etc.)
-- **Números de celular normalizados** automáticamente (se agrega 57 para Colombia)
-- **Encoding correcto**: Emojis (🚨, ⚠️) y tildes se muestran correctamente
-
-**Historial para PowerBI:**
-- Colección `notificaciones_mc_historial`: almacena un registro por regional por sync
-- Campos: fecha_hora, regional, nombre_cedi, total_retraso_operacion, total_sin_cruce, total_pacientes, usuarios_notificados
-- Documentación completa: `docs/NOTIFICACIONES_MC_V3.md`
-
-### Reportes y Análisis
-- **Reporte de uso de WhatsApp**: Estadísticas generales de interacciones
-- **Números únicos por estado**: Conteo de usuarios por rol y fecha
-- **Descarga en Excel**: Exportación detallada de logs de WhatsApp
-- **Reporte de pedidos**: Exportación a Excel con filtros personalizados
-- **Reporte de pedidos completados**: Datos históricos para Power BI
-
-### Funciones de Empleados y Certificados
-- Base de datos de empleados con: identificación, nombres, apellidos, cargo, fecha ingreso, salario, estado civil, tipo de sangre, EPS, fondo de pensión, fondo de cesantías
-- Generación de certificados laborales en PDF con ReportLab
-- Opción de incluir u ocultar salario en el certificado
-- Envío automático del certificado por correo
-- Búsqueda de empleado por número de identificación
-- Carga masiva de empleados desde Excel a MongoDB
-
-### Herramientas de Debug y Diagnóstico
-- **Debug de red**: Verificación de IP pública, variables de entorno, conectividad
-- **Debug de Siscore**: Prueba de conexión SOAP, resolución de host, timeouts
-- **Endpoints de diagnóstico** para troubleshooting de integraciones
-
----
-
-## Stack tecnológico
-
-| Componente | Tecnología |
-|---|---|
-| Framework web | FastAPI 0.115 + Uvicorn |
-| Base de datos | MongoDB Atlas (PyMongo + Motor async) |
-| Autenticación | JWT (PyJWT) + OAuth2 + bcrypt |
-| Almacenamiento de archivos | Google Cloud Storage |
-| Correo electrónico | Resend |
-| Mensajería | WhatsApp Cloud API (Meta) |
-| Rastreo externo | Vulcano (REST) + Siscore (SOAP/XML) |
-| Generación de documentos | ReportLab (PDF) + openpyxl / xlsxwriter (Excel) |
-| Procesamiento de datos | Pandas, Pillow |
-| Validación | Pydantic v2 |
-
----
-
-## Estructura del proyecto
+# Integra API - Backend (FastAPI)
+
+API REST para el sistema de gestión de pedidos y pacientes Medical Care.
+
+## Endpoints Principales
+
+### Base de Usuarios (`/baseusuarios`)
+- `POST /` - Crear usuario
+- `GET /` - Listar usuarios
+- `GET /{id}` - Obtener usuario por ID
+- `PUT /{id}` - Actualizar usuario completo
+- `PATCH /{id}/datos` - Actualizar datos básicos (nombre, correo, regional, celular, clave, usuario)
+- `PATCH /{id}/clientes` - Actualizar clientes permitidos
+- `PATCH /{id}/perfil` - Cambiar perfil de usuario
+- `PATCH /{id}/activo` - Activar/desactivar usuario
+- `DELETE /{id}` - Eliminar usuario
+- `POST /login` - Login de usuario
+- `POST /loginseguridad` - Login seguridad
+- `POST /loginConductor` - Login conductor
+- `GET /perfiles-disponibles` - Lista de perfiles válidos
+- `GET /despachadores` - Lista de despachadores
+
+### Pacientes Medical Care (`/pacientes-medical-care`)
+- Carga masiva de pacientes desde Excel
+- Obtener pacientes con paginación
+- Recalcular cruce con V3 (SSE para progreso)
+- Obtener ocupación de rutas
+- Obtener V3 sin paciente (con filtros)
+- Obtener histórico por meses
+- Exportar a Excel
+- Gestión de cronograma de pacientes
+
+### Pedidos V3 (`/pedidos-v3`)
+- `GET /` - Obtener pedidos V3 con paginación y filtros
+  - Parámetros: `skip`, `limit`, `estado`, `mes_actual`, `bodega`
+  - **Filtro por `bodega_origen`** para restringir por regional
+- `GET /estados` - Lista de estados únicos
+- `POST /cargar-masivo-stream` - Carga desde Excel (SSE)
+- `POST /cargar-desde-api-stream` - Sincronización desde API Siscore (SSE)
+- `GET /exportar-excel` - Exportar a Excel
+  - **Respeta filtro por `bodega_origen`**
+- `PUT /{id}` - Actualizar pedido
+- `DELETE /{id}` - Eliminar pedido
+
+### Siscore Consultas (`/siscore`)
+- `POST /consultar-planillas` - Consulta planillas en API de Siscore V3
+  - **Parámetros**:
+    - `planillas`: Lista de planillas a buscar
+    - `fecha_inicio`, `fecha_fin`: Rango de fechas (opcional, se calcula automáticamente si está vacío)
+    - `perfil`: Perfil del usuario (para determinar filtro por regional)
+    - `centro_distribucion`: Centro de distribución del usuario (para operativos)
+  - **Rango automático**: 40 días hábiles hacia atrás desde hoy
+  - **Días hábiles**: Excluye fines de semana y festivos de Colombia
+  - **Filtro por regional**:
+    - Perfiles globales (ADMIN, COORDINADOR, CONTROL, ANALISTA): `centro_distribucion = "TODOS"`
+    - Perfiles operativos: Envía su regional (con conversión CO07 → "FUNZA - SAN DIEGO 7G")
+  - **Incluye pedidos manuales**: `incluir_pedidos_manuales = "SI"`
+  - **Timeout**: 5 minutos para consultas largas
+  - **Proxy**: Configuración opcional vía variable de entorno `VULCANO_PROXY_URL`
+- `GET /test-connection` - Prueba de conexión con Siscore
+
+### Sync V3 (`/sync-v3`)
+- `POST /recalcular` - Recalcular cruce completo
+- `POST /notificar-retraso-operacion` - Enviar notificaciones
+- `GET /estado` - Estado de última sincronización
+
+## Filtros por Regional
+
+### Campo `bodega_origen`
+
+Los pedidos V3 tienen un campo `bodega_origen` que indica la regional:
+
+| Código | Regional       |
+|--------|----------------|
+| CO04   | BARRANQUILLA   |
+| CO05   | CALI           |
+| CO06   | BUCARAMANGA    |
+| CO07   | FUNZA          |
+| CO09   | MEDELLIN       |
+
+### Implementación del Filtro
+
+**En endpoints GET:**
+```python
+if bodega:
+    filtro['bodega_origen'] = bodega
+```
+
+**En frontend:**
+- OPERADORES obtienen su regional de cookies
+- Se mapea nombre de regional a código (CALI → CO05)
+- Se pasa como parámetro `bodega` a la API
+
+## Base de Datos
+
+### Colecciones
+
+- **`baseusuarios`** - Usuarios del sistema
+- **`pacientes_medical_care`** - Pacientes de Medical Care
+- **`v3`** - Pedidos V3 sincronizados
+- **`cache_cruce_mc`** - Cache del cruce pacientes-V3
+- **`notificaciones_mc_historial`** - Historial de notificaciones
+- **`powerbi_notificaciones`** - Datos para PowerBI
+
+## Tecnologías
+
+- **Framework:** FastAPI
+- **Python:** 3.13
+- **Base de datos:** MongoDB
+- **SSE:** Server-Sent Events para progreso en tiempo real
+- **Excel:** openpyxl
+- **HTTP:** httpx para llamadas a APIs externas
+
+## Optimizaciones Recientes (2026-05-08)
+
+- **Nuevo endpoint `/siscore/consultar-planillas`**: Consulta de planillas en API Siscore V3
+  - Cálculo automático de rango de 40 días hábiles
+  - Filtrado por perfil y regional
+  - Incluye pedidos manuales
+  - Timeout de 5 minutos para consultas largas
+  - Proxy configurable para llamadas externas
+
+## Optimizaciones Recientes (2026-05-06)
+
+- **Filtro por regional:** Ahora usa `bodega_origen` directamente en consulta MongoDB (antes cruzaba rutas)
+- **Count_documents:** El total respeta todos los filtros aplicados
+- **Skip/Limit:** Se aplican en base de datos, no en Python
+- **Indexado:** Índice en `fecha_preferente` para optimizar consultas por mes
+
+## Estructura del Proyecto
 
 ```
 integrappi/
-├── main.py                  # Entrada de la app, registro de routers
-├── .env                     # Variables de entorno (no se sube al repo)
-├── credenciales.json        # Credenciales de Google Cloud (no se sube al repo)
-├── requirements.txt         # Dependencias Python
-│
-├── bd/                      # Capa de datos
-│   ├── bd_cliente.py        # Conexión a MongoDB
-│   ├── models/              # Funciones de formato de documentos MongoDB
-│   │   ├── usuario.py
-│   │   └── saldos.py
-│   └── schemas/             # Esquemas Pydantic para validación
-│       ├── usuario.py
-│       └── saldos.py
-│
-├── rutas/                   # Endpoints de la API (un archivo por dominio)
-│   ├── aut2.py              # Autenticación y usuarios (transportadores)
-│   ├── baseusuarios.py      # Usuarios base (despachadores, seguridad, conductores)
-│   ├── vehiculos.py         # Registro y documentos de vehículos
-│   ├── revision.py          # Revisión y observaciones de vehículos
-│   ├── puente_biometrico.py # Almacenamiento de huellas
-│   ├── consultar_biometrico.py # Verificación de huellas
-│   ├── empleados.py         # Empleados y certificados laborales
-│   ├── clientes.py          # Clientes estándar
-│   ├── clientes_siscore.py  # Clientes integrados con Siscore
-│   ├── clientes_general.py  # Destinos de entrega con geolocalización
-│   ├── ciudades_general.py  # Municipios y coordenadas
-│   ├── fletes.py            # Tarifas de flete
-│   ├── pedidos.py           # Pedidos (CRUD, carga masiva, reportes)
-│   ├── pagoSaldos.py        # Manifiestos de pago
-│   ├── novedades.py         # Novedades
-│   ├── whatsapp_integra.py  # Chatbot WhatsApp (webhook principal)
-│   ├── whatsapp_report_integra.py # Reportes de uso de WhatsApp
-│   ├── vulcano.py           # Cliente Vulcano (manifiestos)
-│   ├── pacientes_medical_care.py  # Pacientes FMC: CRUD, carga SSE, cruce cache, exportar Excel
-│   ├── pedidos_v3.py        # Pedidos V3 FMC: CRUD, carga masiva SSE, parseo de fechas
-│   ├── sync_v3.py           # Sync automático V3: config de horarios, trigger manual, estado
-│   ├── debug.py             # Diagnóstico de red y variables de entorno
-│   └── debug_siscore.py     # Diagnóstico de conexión Siscore
-│
-├── Funciones/               # Utilidades y lógica de integraciones
-│   ├── chat_state_integra.py          # Manejo de estado de conversaciones WhatsApp
-│   ├── whatsapp_utils_integra.py      # Envío de mensajes, autenticación de transportadores
-│   ├── whatsapp_logs_integra.py       # Registro de eventos WhatsApp en MongoDB
-│   ├── whatsapp_certificado_integra.py # Generación de certificados por WhatsApp
-│   ├── vulcano_whatsapp_format.py     # Formateo de manifiestos Vulcano para WhatsApp
-│   ├── siscore_ws_tracking.py         # Cliente SOAP para rastreo Siscore
-│   ├── siscore_ws_format.py           # Parseo de respuestas XML de Siscore
-│   ├── normalizacion_medical_care.py  # Normalización pacientes/direcciones/teléfonos FMC
-│   └── sync_api_v3.py                 # Lógica core del sync V3: lee Excel, normaliza, reemplaza MongoDB
-│
-├── scripts/                 # Scripts utilitarios (no son parte de la API)
-│   ├── crear_indice_sesiones.py  # Crea índices TTL en MongoDB para sesiones
-│   ├── subirEmpleados.py         # Carga masiva de empleados desde Excel a MongoDB
-│   ├── subirEmpleados.spec       # Configuración de PyInstaller para el script anterior
-│   ├── coor.py                   # Geocodifica municipios desde Excel (Nominatim)
-│   └── empleados.xlsx            # Plantilla de empleados
-│
-└── docs/
-    └── MANUAL WS TRACKING INTEGRA.docx  # Manual de uso del rastreo por WhatsApp
+├── main.py                 # Entry point
+├── bd/
+│   └── bd_cliente.py      # Cliente MongoDB
+├── rutas/
+│   ├── baseusuarios.py     # Gestión de usuarios
+│   ├── pacientes_medical_care.py  # Pacientes y cruce
+│   ├── pedidos_v3.py      # Pedidos V3
+│   ├── siscore_consultas.py  # Consultas a Siscore (planillas)
+│   └── ...                # Otras rutas
+├── Funciones/
+│   ├── normalizacion_medical_care.py
+│   └── sync_api_v3.py      # Sincronización V3
+└── requirements.txt        # Dependencias
 ```
 
----
-
-## Endpoints principales
-
-### Autenticación y usuarios (`/usuarios`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/usuarios/token` | Login, retorna JWT |
-| POST | `/usuarios/` | Crear usuario |
-| GET | `/usuarios/{id}` | Obtener usuario |
-| PUT | `/usuarios/{id}` | Actualizar usuario |
-| DELETE | `/usuarios/{id}` | Eliminar usuario |
-| POST | `/usuarios/recuperar/solicitar` | Solicitar recuperación de clave (envía correo) |
-| POST | `/usuarios/recuperar/confirmar` | Confirmar nueva clave con token |
-| POST | `/usuarios/cambiar-clave` | Cambiar clave autenticado |
-| GET | `/usuarios/cedula-nombre` | Listar solo cédula y nombre de usuarios |
-
-### Usuarios Torre de Control (`/baseusuarios`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/baseusuarios/` | Listar todos los usuarios |
-| POST | `/baseusuarios/` | Crear usuario |
-| PUT | `/baseusuarios/{id}` | Actualizar usuario |
-| DELETE | `/baseusuarios/{id}` | Eliminar usuario |
-| GET | `/baseusuarios/despachadores` | Listar solo despachadores |
-| POST | `/baseusuarios/login` | Login estándar — retorna datos del usuario incluyendo `clientes` |
-| POST | `/baseusuarios/loginseguridad` | Login perfil SEGURIDAD/ADMIN |
-| POST | `/baseusuarios/loginConductor` | Login perfil CONDUCTOR |
-| POST | `/baseusuarios/verificarRecuperacion` | Verificar recuperación (envía código) |
-| POST | `/baseusuarios/validarCodigoRecuperacion` | Validar código de recuperación |
-| POST | `/baseusuarios/cambiarClaveConductor` | Cambiar clave de conductor |
-| PATCH | `/baseusuarios/{id}/clientes` | Actualizar lista de clientes permitidos para un usuario |
-
-> **Campo `clientes`**: cada usuario en `baseusuarios` puede tener un array `clientes: ["KABI", "MEDICAL_CARE"]` que controla a qué portales de cliente tiene acceso. Si el campo no existe en el documento, se toma por defecto `["KABI"]` para compatibilidad con registros anteriores. Valores válidos: `KABI`, `MEDICAL_CARE`.
-
-### Vehículos (`/vehiculos`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/vehiculos/crear` | Registrar vehículo |
-| GET | `/vehiculos/obtener-vehiculos` | Listar vehículos del usuario |
-| GET | `/vehiculos/obtener-vehiculo/{placa}` | Obtener vehículo por placa |
-| PUT | `/vehiculos/actualizar-estado` | Cambiar estado (notifica por correo) |
-| PUT | `/vehiculos/actualizar-informacion/{placa}` | Actualizar información del vehículo |
-| PUT | `/vehiculos/subir-documento` | Subir documento (tarjeta, SOAT, etc.) |
-| PUT | `/vehiculos/subir-estudio-seguridad` | Subir estudio de seguridad |
-| PUT | `/vehiculos/subir-foto-seguridad` | Subir foto de seguridad |
-| PUT | `/vehiculos/subir-fotos` | Subir múltiples fotos |
-| PUT | `/vehiculos/subir-firma` | Subir imagen de firma |
-| GET | `/vehiculos/obtener-firma` | Obtener firma en base64 |
-| DELETE | `/vehiculos/eliminar-documento` | Eliminar documento |
-| DELETE | `/vehiculos/eliminar-foto` | Eliminar foto |
-| GET | `/vehiculos/obtener-vehiculos-incompletos` | Vehículos con documentación incompleta |
-| GET | `/vehiculos/obtener-aprobados-paginados` | Vehículos aprobados (paginado) |
-
-### Pedidos (`/pedidos`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/pedidos/` | Listar pedidos agrupados por consecutivo_vehiculo |
-| PUT | `/pedidos/autorizar-por-consecutivo-vehiculo` | Autorizar pedidos por vehículo |
-| PUT | `/pedidos/confirmar-preautorizados` | Confirmar pedidos preautorizados |
-| DELETE | `/pedidos/eliminar-por-consecutivo-vehiculo` | Eliminar pedidos por vehículo |
-| POST | `/pedidos/cargar-masivo` | Carga masiva desde Excel |
-| GET | `/pedidos/exportar-autorizados` | Exportar pedidos AUTORIZADOS a Excel |
-| POST | `/pedidos/cargar-numeros-pedido` | Cargar números de pedido desde Vulcano |
-| POST | `/pedidos/ajustes-vehiculos` | Ajustes por vehículo (kilos, tarifas) |
-| POST | `/pedidos/fusion-vehiculos` | Fusionar vehículos |
-| POST | `/pedidos/dividir-hasta-tres` | Dividir pedido en hasta 3 vehículos |
-| GET | `/pedidos/exportar-completados` | Exportar pedidos completados a Excel |
-| GET | `/pedidos/listar-completados` | Listar vehículos completados |
-| GET | `/pedidos/pbi-documentos` | API Power BI: documentos por rango de fechas |
-
-### WhatsApp (`/whatsapp-integra`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/whatsapp-integra/webhook` | Recibe mensajes entrantes |
-| GET | `/whatsapp-integra/webhook` | Verificación del webhook (Meta) |
-
-### WhatsApp - Reportes (`/whatsapp-report`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/whatsapp-report/resumen` | Estadísticas generales de uso |
-| GET | `/whatsapp-report/numeros-por-estado` | Números únicos por rol por día |
-| GET | `/whatsapp-report/numeros-por-estado/descargar-excel` | Descargar reporte de números en Excel |
-| GET | `/whatsapp-report/excel` | Descargar reporte detallado en Excel |
-
-### Biometría (`/biometria`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/biometria/capturar` | Capturar huella |
-| POST | `/biometria/guardar_completo` | Guardar huellas completas (10 dedos) |
-| POST | `/biometria/verificar` | Verificar huella |
-| POST | `/biometria/subir-imagen` | Subir imagen de huella |
-| GET | `/biometria/obtener-huellas-pdf/{cedula}` | Obtener huellas para generar PDF |
-
-### Empleados (`/empleados`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/empleados/` | Listar todos los empleados |
-| GET | `/empleados/buscar` | Buscar empleado por identificación |
-| POST | `/empleados/enviar` | Enviar certificado laboral por correo |
-
-### Clientes (`/clientes`, `/clientes-siscore`, `/clientes-general`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/clientes/` | Crear cliente estándar |
-| GET | `/clientes/` | Listar clientes estándar |
-| POST | `/clientes/cargar-masivo` | Carga masiva clientes estándar |
-| POST | `/clientes-siscore/` | Crear cliente Siscore |
-| GET | `/clientes-siscore/` | Listar clientes Siscore |
-| GET | `/clientes-siscore/nit-por-entidad/{entidad}` | Obtener NIT por entidad |
-| POST | `/clientes-siscore/cargar-masivo` | Carga masiva clientes Siscore |
-| GET | `/clientes-general/` | Listar clientes generales |
-| GET | `/clientes-general/por-destinatario/{destinatario}` | Obtener por destinatario |
-| GET | `/clientes-general/por-cliente-destinatario/{cliente_dest}` | Obtener por cliente_destinatario |
-| POST | `/clientes-general/cargar-masivo` | Carga masiva clientes generales |
-
-### Ciudades (`/ciudades-general`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/ciudades-general/` | Listar municipios |
-| GET | `/ciudades-general/ubicacion-por-municipio/{municipio}` | Obtener ubicación por municipio |
-| GET | `/ciudades-general/por-municipio/{municipio}` | Obtener por municipio |
-| POST | `/ciudades-general/cargar-masivo` | Carga masiva de municipios |
-
-### Fletes (`/fletes`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/fletes/` | Crear tarifa de flete |
-| GET | `/fletes/` | Listar todas las tarifas |
-| GET | `/fletes/{origen}/{destino}` | Obtener tarifa por ruta |
-| GET | `/fletes/buscar-tarifa` | Buscar tarifa específica por origen, destino, tipo |
-| PUT | `/fletes/{origen}/{destino}` | Actualizar tarifa |
-| DELETE | `/fletes/{origen}/{destino}` | Eliminar tarifa |
-| POST | `/fletes/cargar-masivo` | Carga masiva de tarifas |
-
-### Manifiestos y Pagos (`/pagoSaldos`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/pagoSaldos/` | Listar todos los manifiestos |
-| GET | `/pagoSaldos/{manifiesto_id}` | Obtener manifiesto por ID |
-| GET | `/pagoSaldos/tenedor/{tenedor}` | Listar manifiestos por tenedor |
-
-### Novedades (`/novedades`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/novedades/` | Listar todas las novedades |
-| GET | `/novedades/tenedor/{tenedor}` | Listar novedades por tenedor |
-
-### Revisión (`/revision`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/revision/enviar-observaciones` | Enviar observaciones de revisión |
-
-### Pacientes Medical Care (`/pacientes-medical-care`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/pacientes-medical-care/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE |
-| POST | `/pacientes-medical-care/cargar-masivo?usuario=USUARIO` | Carga masiva clásica |
-| GET | `/pacientes-medical-care/?skip=0&limit=100&cedi=BARRANQUILLA` | Listar pacientes (filtro `cedi` opcional) |
-| GET | `/pacientes-medical-care/buscar?cedula=XXX&paciente=XXX&cedi=CALI` | Buscar (filtro `cedi` opcional) |
-| GET | `/pacientes-medical-care/ocupacion-rutas` | Leer cruce desde cache |
-| GET | `/pacientes-medical-care/v3-sin-paciente` | Leer V3 sin paciente desde cache |
-| POST | `/pacientes-medical-care/recalcular-cruce?usuario=USUARIO` | Recalcular cruce completo (SSE streaming) |
-| GET | `/pacientes-medical-care/exportar-cruce-excel?cedi=FUNZA` | Exportar cruce a Excel (filtro `cedi` opcional) |
-| POST | `/pacientes-medical-care/?usuario=USUARIO` | Crear paciente individual |
-| PUT | `/pacientes-medical-care/{id}?usuario=USUARIO` | Actualizar paciente |
-| DELETE | `/pacientes-medical-care/{id}?usuario=USUARIO` | Eliminar paciente |
-| GET | `/pacientes-medical-care/{id}` | Obtener paciente por ID |
-| DELETE | `/pacientes-medical-care/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
-
-### Pedidos V3 Medical Care (`/pedidos-v3`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | `/pedidos-v3/cargar-masivo-stream?usuario=USUARIO` | Carga masiva con progreso SSE desde Excel |
-| POST | `/pedidos-v3/cargar-desde-api-stream?usuario=USUARIO` | **Carga masiva desde API de Siscore con progreso SSE (reemplaza Excel)** |
-| GET | `/pedidos-v3/?skip=0&limit=100` | Listar pedidos con paginación |
-| POST | `/pedidos-v3/?usuario=USUARIO` | Crear pedido individual |
-| PUT | `/pedidos-v3/{id}?usuario=USUARIO` | Actualizar pedido |
-| DELETE | `/pedidos-v3/{id}?usuario=USUARIO` | Eliminar pedido |
-| GET | `/pedidos-v3/{id}` | Obtener pedido por ID |
-| DELETE | `/pedidos-v3/eliminar-todos?usuario=USUARIO` | Eliminar todos (solo ADMIN) |
-
-**Endpoint `/cargar-desde-api-stream` — Carga desde API de Siscore V3:**
-- **Endpoint**: `POST /pedidos-v3/cargar-desde-api-stream?usuario=USUARIO`
-- **Propósito**: Cargar pedidos V3 directamente desde el API de Siscore, reemplazando la carga manual de Excel
-- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
-  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
-  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
-- **Integración con Siscore**:
-  - Endpoint: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
-  - Método: POST con autenticación vía token fijo
-  - Token: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
-- **Progreso en tiempo real via SSE**:
-  - `stage: 'calculating'` - Calculando rango de fechas
-  - `stage: 'fetching'` - Consultando API de Siscore
-  - `stage: 'processing'` - Procesando registros (actualización cada 50)
-  - `stage: 'saving'` - Guardando en MongoDB
-  - `stage: 'complete'` - Carga completada con estadísticas finales
-- **Mapeo de campos de Siscore a MongoDB**:
-  - `Codigo Pedido` → `codigo_pedido`
-  - `Codigo Cliente Destino` → `codigo_cliente_destino`
-  - `Cliente Destino` → `cliente_destino` (normalizado)
-  - `Direccion Destino` → `direccion_destino` (normalizado)
-  - `Divipola` → `divipola`
-  - `Telefono` → `telefono` (normalizado)
-  - `Fecha Pedido` → `fecha_pedido` (YYYY-MM-DD HH:MM:SS → DD/MM/YYYY)
-  - `Fecha Solicitada` → `fecha_preferente` (YYYY-MM-DD → DD/MM/YYYY)
-  - `Fecha Entrega` → `fecha_entrega` (YYYY-MM-DD → DD/MM/YYYY)
-  - `Estado Pedido` → `estado_pedido`
-  - `Piezas` → `piezas`
-  - `Peso Real` → `peso_real`
-  - `Bodega Origen` → `bodega_origen`
-  - `Ruta` → `ruta`
-  - `Municipio Destino` → `municipio_destino`
-- **Filtros aplicados** (igual que carga Excel):
-  1. Solo registros del mes actual según "Fecha Solicitada" (fecha_preferente)
-  2. Exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, FARMA, HOSP, etc.)
-- **Normalización de datos**: Igual que carga Excel (cliente_destino, direccion_destino, telefono)
-- **Reemplazo de colección**: Elimina todos los pedidos anteriores antes de insertar los nuevos
-- **Manejo de errores**: Try-catch específico para errores de conexión HTTP, validación de respuesta API
-- **Respuesta final**: Incluye `registros_insertados`, `registros_filtrados`, `rango_fechas`, `tiempo_segundos`
-
-### Debug (`/debug`, `/debug-siscore`)
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/debug/ip` | Obtener IP pública |
-| GET | `/debug/env` | Obtener variables de entorno |
-| GET | `/debug-siscore/siscore-test` | Probar conexión Siscore |
-
-> La documentación interactiva completa está disponible en `/docs` cuando el servidor está corriendo.
-
----
-
-## Integraciones externas
-
-### Vulcano
-Sistema de manifiestos y pagos de la operación logística. Se consulta vía REST con autenticación JWT propia. Provee el estado de guías (en tránsito, cumplidas, liquidadas) y el detalle de pagos a transportadores.
-
-### Siscore
-Sistema de rastreo de guías vía SOAP/XML. Se consulta el historial de movimientos de una guía y se obtienen imágenes de trazabilidad. Soporta proxy para redes restringidas.
-
-**API de Informes V3 (Pedidos Medical Care):**
-- **Endpoint**: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
-- **Método**: POST con autenticación vía token fijo
-- **Token**: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
-- **Parámetros**:
-  - `token` (required): Token fijo de autenticación
-  - `fecha_inicial`: Fecha inicial en formato YYYY-MM-DD
-  - `fecha_final`: Fecha final en formato YYYY-MM-DD
-  - `centro_distribucion`: "TODOS" o centro específico
-  - `incluir_pedidos_manuales`: "SI" o "NO"
-  - `pedido_especifico`: Número de pedido específico (opcional)
-- **Respuesta**: JSON con `ok`, `total`, `filtros` y `data` (arreglo de pedidos)
-- **Campos devueltos**: Codigo Pedido, Cliente Destino, Direccion Destino, Divipola, Telefono, Fecha Pedido, Fecha Solicitada, Fecha Entrega, Estado Pedido, Piezas, Peso Real, Bodega Origen, Ruta, Municipio Destino, entre otros
-- **Uso en Integra**: Endpoint `POST /pedidos-v3/cargar-desde-api-stream` consume esta API para cargar pedidos V3 automáticamente
-
-### WhatsApp Cloud API (Meta)
-Chatbot con máquina de estados para tres tipos de usuario:
-- **Transportador**: consulta de manifiestos, saldos, recuperación de clave
-- **Empleado**: solicitud de certificado laboral
-- **Cliente**: rastreo de envíos vía Siscore
-
-### Google Cloud Storage
-Almacenamiento de documentos de vehículos (bucket `integrapp`) e imágenes de huellas dactilares. Las imágenes se comprimen automáticamente a WebP antes de subir.
-
-### Resend
-Envío de correos para: certificados laborales (PDF adjunto), recuperación de clave, notificaciones de revisión de vehículos y códigos de verificación.
-
----
-
-## Variables de entorno
-
-Crear un archivo `.env` en la raíz con las siguientes variables:
-
-```env
-# Base de datos
-MONGO_URI=mongodb+srv://<usuario>:<clave>@<cluster>.mongodb.net/...
-
-# Google Cloud (ruta al archivo de credenciales)
-GOOGLE_APPLICATION_CREDENTIALS=./credenciales.json
-
-# Correo (Resend)
-RESEND_API_KEY=re_...
-MAIL_FROM=no-reply@integralogistica.com
-
-# JWT
-JWT_SECRET=<clave_secreta_larga>
-RESET_TOKEN_EXPIRE_MINUTES=30
-
-# WhatsApp (Meta)
-WHATSAPP_API_TOKEN=...
-WHATSAPP_PHONE_NUMBER_ID=...
-WHATSAPP_VERIFY_TOKEN=...
-
-# Siscore (SOAP)
-SISCORE_SOAP_TOKEN=...
-SISCORE_SOAP_ENDPOINT=https://integra.appsiscore.com/app/ws/trazabilidad.php
-SISCORE_SOAP_ACTION=ConsultarGuiaImagen
-
-# Vulcano
-VULCANO_HOST=https://...
-VULCANO_BASE_PATH=/vulcano
-VULCANO_USERNAME=...
-VULCANO_IDNAME=...
-VULCANO_AGENCY=001
-VULCANO_PROJECT=1
-VULCANO_IS_GROUP=0
-
-# Proxy (opcional, para redes restringidas)
-VULCANO_PROXY_URL=http://ip:puerto
-VULCANO_VERIFY_SSL=true
-VULCANO_CONNECT_TIMEOUT=10
-
-# Frontend (para links de recuperación de clave)
-FRONTEND_URL_RECUPERAR=https://integralogistica.com/integrapp/recuperar-clave
-```
-
----
-
-## Cómo correr el proyecto
-
-```bash
-# 1. Instalar dependencias
-pip install -r requirements.txt
-
-# 2. Configurar variables de entorno
-cp .env.example .env   # editar con los valores reales
-
-# 3. Iniciar el servidor
-python main.py
-```
-
-El servidor queda disponible en `http://localhost:8000`.
-
-- Documentación interactiva (Swagger): `http://localhost:8000/docs`
-- Documentación alternativa (ReDoc): `http://localhost:8000/redoc`
-
-### CORS habilitado para:
-- `http://localhost:5173` (frontend Vite legacy — `../integrapp/`)
-- `http://localhost:3000` (frontend Next.js — `../integrapp-next/`)
-- `http://127.0.0.1:3000`
-- `https://integralogistica.com` (producción)
-- `https://www.integralogistica.com`
-
----
-
-## Scripts utilitarios
-
-Estos scripts se corren de forma independiente, no son parte de la API:
-
-| Script | Uso |
-|---|---|
-| `scripts/subirEmpleados.py` | Interfaz gráfica para cargar empleados desde Excel a MongoDB |
-| `scripts/crear_indice_sesiones.py` | Crea índice TTL en MongoDB para expirar sesiones automáticamente |
-| `scripts/coor.py` | Geocodifica municipios desde un Excel usando OpenStreetMap (Nominatim) |
-
----
-
-## Seguridad
-
-- Contraseñas almacenadas con bcrypt (nunca en texto plano)
-- JWT con expiración de 20 minutos
-- Tokens de recuperación de un solo uso, expiran en 30 minutos
-- `.env` y `credenciales.json` excluidos del repositorio vía `.gitignore`
-- Endpoints protegidos con OAuth2 Bearer Token
-
----
-
-## Historial de cambios relevantes
-
-### Mayo 2026 — Integración con API de Siscore V3 para carga automática de pedidos
-
-**`rutas/pedidos_v3.py` — Nuevo endpoint `/cargar-desde-api-stream`:**
-- **Endpoint**: `POST /pedidos-v3/cargar-desde-api-stream?usuario=USUARIO`
-- **Propósito**: Cargar pedidos V3 directamente desde el API de Siscore, reemplazando la carga manual de Excel
-- **Cálculo automático de rango de fechas**: desde el 1er día del mes que está 2 meses atrás hasta hoy
-  - Ejemplo: Hoy 2026-05-04 → Consulta desde 2026-03-01 hasta 2026-05-04
-  - Ejemplo: Hoy 2026-06-16 → Consulta desde 2026-04-01 hasta 2026-06-16
-- **Integración con Siscore**:
-  - Endpoint: `https://integra-wms.appsiscore.com/app/ws/informe_v3.php`
-  - Método: POST JSON con autenticación vía token fijo
-  - Token: `n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA`
-- **Progreso en tiempo real via SSE**: stages 'calculating', 'fetching', 'processing', 'saving', 'complete'
-- **Mapeo de campos**: `Codigo Pedido`, `Cliente Destino`, `Direccion Destino`, `Fecha Solicitada` (→ `fecha_preferente`), `Ruta`, etc.
-- **Filtros aplicados**: mes actual + exclusión de clientes institucionales (DAVITA, VANTIVE, CLINICA, etc.)
-- **Normalización de datos**: Igual que carga Excel (cliente_destino, direccion_destino, telefono)
-
-**`Funciones/sync_api_v3.py` — Sync automático ahora consume de API Siscore:**
-- **Antes**: Leía archivo Excel local (`api_v3.xlsx`)
-- **Ahora**: Consume directamente del API de Siscore V3
-- **Misma lógica de filtros**: mes actual + exclusión de clientes institucionales
-- **Mapeo automático de campos**: Usa las mismas funciones que el endpoint manual (`_mapear_campos_siscore`)
-- **Notificación WhatsApp**: Envía resumen tras cada sync exitoso si `WHATSAPP_NOTIFY_NUMBER` está configurado
-
-**Funciones auxiliares agregadas en `pedidos_v3.py`:**
-- `_calcular_rango_fechas()`: Calcula desde el 1er día de hace 2 meses hasta hoy usando `dateutil.relativedelta`
-- `_convertir_fecha_siscore_a_dd_mm_yyyy()`: Convierte fechas de Siscore (YYYY-MM-DD) a DD/MM/YYYY
-- `_mapear_campos_siscore()`: Mapea campos de la respuesta de Siscore al schema de MongoDB con filtros
-- `_consultar_api_siscore_v3()`: Consulta asíncrona al API de Siscore con httpx
-
-**Archivos modificados:**
-- `integrappi/rutas/pedidos_v3.py`: Nuevo endpoint + funciones auxiliares + soporte para proxy
-- `integrappi/Funciones/sync_api_v3.py`: Ahora consume de API Siscore (eliminada dependencia de Excel) + fix de WhatsApp (eliminado `\n` del mensaje)
-- `integrappi/rutas/sync_v3.py`: Endpoint `/config` actualizado para mostrar fuente "API Siscore V3"
-- `integrappi/rutas/pacientes_medical_care.py`: Nombres de hojas Excel cambiados ("Pacientes sin montar", "Pedidos sin paciente asociado")
-- `integrappi/README.md`: Documentación actualizada
-
-### Mayo 2026 — Actualización de notificaciones WhatsApp y cruce de pacientes
-
-**`Funciones/sync_api_v3.py` — Sistema de notificaciones WhatsApp mejorado:**
-- **Plantillas oficiales Meta**: Ahora usa plantillas autorizadas por Meta
-  - `retraso_operacion_fmc_`: Para notificaciones de retraso operación (2 parámetros: regional, total)
-  - `pacientes_sin_montar_fmc`: Para notificaciones de sin cruce (2 parámetros: regional, total)
-  - `confirmar_actualizacion`: Para admin con desglose por CEDI (requiere formato sin saltos de línea)
-- **Retraso operación**: Incluye TODOS los pacientes con estado "retraso operación" (sin filtro de urgencia/días hábiles)
-- **Sin cruce**: Se mantiene filtro de urgencia (fecha del mes actual y < 6 días hábiles)
-- **Encoding corregido**: Emojis y caracteres especiales (tildes) se muestran correctamente
-- **Mensajes para admin**: Formato de una sola línea con separador ` | ` (Meta no permite saltos de línea en templates genéricos)
-
-**`rutas/pacientes_medical_care.py` — Cambios en el cruce V3/pacientes:**
-- **V3 sin paciente**: Ahora usa `fecha_preferente` original del pedido V3 en lugar de fecha del cronograma del paciente cercano
-- **Hoja "Pedidos sin paciente asociado"**: Columna renombrada de "F. Pref. Integra" a "Fecha Preferente"
-- **Hoja "Pacientes sin montar"**: Mantiene título "F. Pref. Integra" (viene del cronograma de Integra)
-
-**Colección MongoDB `notificaciones_mc_historial`:**
-- Un registro por regional por cada sync V3 exitoso
-- Campos: fecha_hora, regional, nombre_cedi, total_retraso_operacion, total_sin_cruce, total_pacientes, usuarios_notificados
-- Diseñada para consumo directo por PowerBI
-- Incluye array con detalle de usuarios notificados
-
-**Documentación:**
-- `docs/NOTIFICACIONES_MC_V3.md`: Documentación completa del sistema
-
-### Mayo 2026 — Múltiples mejoras en notificaciones y cruce de pacientes
-
-**`Funciones/sync_api_v3.py` — Plantillas oficiales Meta y encoding corregido:**
-- **Plantillas oficiales**: Ahora usa `retraso_operacion_fmc_` y `pacientes_sin_montar_fmc` (autorizadas por Meta)
-- **Encoding corregido**: Emojis y caracteres especiales (ó, í, etc.) se muestran correctamente
-- **Retraso operación**: Eliminado filtro de urgencia - ahora incluye TODOS los pacientes con ese estado
-- **Sin cruce**: Se mantiene filtro de urgencia (fecha del mes actual + < 6 días hábiles)
-- **Mensajes para admin**: Formato de una sola línea con separador ` | ` (Meta rechaza saltos de línea)
-
-**`rutas/pacientes_medical_care.py` — Cambios en cruce V3/pacientes:**
-- **V3 sin paciente**: Ahora usa `fecha_preferente` original del pedido V3 (no del paciente cercano)
-- **Hoja Excel actualizada**: Columna renombrada de "F. Pref. Integra" a "Fecha Preferente"
-- **Hoja pacientes**: Mantiene "F. Pref. Integra" (fecha del cronograma de Integra)
-
-**`integrapp-next/src/Paginas/CrucePacientesV3P/index.tsx` — Frontend actualizado:**
-- **Festivos 2026**: Lista actualizada para coincidir con librería `holidays` de Python
-- **Cálculo días hábiles**: Ahora cuenta sábados (lunes-sábado, excluye solo domingos y festivos)
-- **Filtro retraso operación**: Sin filtro de urgencia - muestra todos los pacientes con ese estado
-- **Comparación case-insensitive**: Maneja 'retraso operación' y 'retraso operacion'
-
-### Abril 2026 — Recuperación de clave, notificaciones filtradas y perfil CLIENTE_FMC
-
-**`rutas/baseusuarios.py` — Recuperación de contraseña:**
-- Nuevo endpoint `POST /baseusuarios/recuperar/solicitar`: busca correo con regex case-insensitive (`$regex`, `$options: "i"`), genera código de 4 dígitos, lo almacena con expiración de 10 minutos y envía vía Resend.
-- Nuevo endpoint `POST /baseusuarios/recuperar/confirmar`: valida código contra BD, actualiza contraseña del usuario.
-- Modelos Pydantic: `RecuperarBaseInput(correo)` y `ConfirmarBaseInput(correo, codigo, nuevaClave)`.
-
-**`rutas/pacientes_medical_care.py` — Notificaciones filtradas por tipo y CEDI:**
-- Correos individuales por usuario (ya no se envía uno masivo a todos).
-- `retraso_operacion`: Excel con una sola hoja "Pacientes con Retraso" — solo pacientes con `estado_cruce = "retraso operación"`. Sin hoja "V3 Sin Paciente".
-- `sin_cruce`: Excel con 2 hojas:
-  - **Pacientes sin montar**: Pacientes sin cruce (`en_v3 = False`) con columna "F. Pref. Integra" (fecha del cronograma)
-  - **Pedidos sin paciente asociado**: Pedidos V3 sin paciente con columna "Fecha Preferente" (fecha preferente original del V3)
-- **Filtro por CEDI/regional**: Los correos se filtran por el campo `regional` del usuario. ADMIN ve todo. CLIENTE_FMC también ve todo (son clientes externos). Los demás perfiles solo ven su CEDI.
-- **Subject del correo** incluye conteo de registros de ambas hojas
-- **Filtro por CEDI/regional**: los correos se filtran por el campo `regional` del usuario. ADMIN ve todo. CLIENTE_FMC también ve todo (son clientes externos). Los demás perfiles solo ven su CEDI.
-- Subject del correo incluye conteo de registros.
-
-**Perfil CLIENTE_FMC en `baseusuarios.py`:**
-- Usuarios con perfil `CLIENTE_FMC` tienen `clave = "SIN_ACCESO"` y `clientes = []` — no pueden hacer login en el sistema.
-- Solo existen para recibir notificaciones por correo según las campanitas asignadas.
-- Desde GestionUsuarios, un admin puede cambiar el perfil de CLIENTE_FMC a otro (ej: ANALISTA), lo cual requiere asignar una contraseña nueva.
-
----
-
-### Abril 2026 — Eliminación de "zona gris" en cruce Pacientes ↔ V3
-
-**`rutas/pacientes_medical_care.py` — `_motor_cruce()`, Etapa 3:**
-- Antes: V3 con llave ≥ 75% de similitud con algún paciente, pero no reclamados en Etapa 2, caían en `zona_gris` (categoría separada).
-- Ahora: cualquier V3 con similitud ≥ 75% contra cualquier paciente se agrega a `llaves_v3_con_paciente` → se trata como emparejado.
-- **Motivo**: la zona gris era un falso negativo. Los V3 con similitud suficiente deben contar como matched aunque el paciente haya sido reclamado por otro V3 con mejor score.
-- Impacto: `total_zona_gris` siempre será 0 en adelante; el badge "pedidos emparejados" del frontend incluye automáticamente estos registros (fórmula `total_v3 − sin_paciente − zona_gris − llave_vacia`).
-- Se mantienen los campos `v3_zona_gris`/`total_zona_gris` en cache y respuestas por compatibilidad, pero siempre llegan vacíos.
-
----
-
-### Abril 2026 — Correcciones en carga V3 y conteo de pedidos en cruce
-
-**`rutas/pedidos_v3.py` — `_parsear_fecha()` siempre zero-padded:**
-- Strings como `"1/4/2026"` se normalizan a `"01/04/2026"` via split/int con validación de rango (día 1-31, mes 1-12, año 1900-2100)
-- Formatos adicionales soportados: `%d-%m-%Y`, `%Y/%m/%d`
-- Formatos no reconocidos ahora retornan `''` en vez del texto crudo → el registro se filtra automáticamente (no sube a Mongo)
-- Seriales Excel inválidos también retornan `''`
-- Corrige discrepancia de ~8 registros entre "Registros exitosos" de la carga y "Total (mes actual)" en la tabla
-
-**`rutas/pacientes_medical_care.py` — `total_v3` en cruce y cache:**
-- `_motor_cruce()` ahora incluye `total_v3` (conteo real de pedidos V3 que entraron al cruce) en el resultado
-- Se guarda en `cache_cruce_mc` y se expone en `GET /ocupacion-rutas`, `GET /v3-sin-paciente` y el evento SSE `complete` de `POST /recalcular-cruce`
-- Permite al frontend calcular `pedidos_matched = total_v3 - total_sin_paciente - total_zona_gris - total_llave_vacia`, evitando el double-counting que ocurría al sumar `cant_pedidos_v3` de pacientes que coinciden con las mismas llaves V3
-
----
-
-### Abril 2026 — Correcciones en cálculo de estado del cruce (`_determinar_estado_cruce`)
-
-Archivo: `rutas/pacientes_medical_care.py`
-
-**Bug crítico: meses 0-indexados en `_obtener_festivos_colombia`**
-- Los festivos fijos y de Ley Emiliani usaban meses 0-indexados (estilo JavaScript), por ejemplo `(0, 1)` para el 1 de enero. Python requiere meses 1–12, por lo que `date(anio, 0, 1)` lanzaba `ValueError: month must be in 1..12`.
-- El error era capturado silenciosamente por el `try/except` de cada regla, haciendo que `_determinar_estado_cruce` siempre retornara `'—'` aunque hubiera motivo de alerta.
-- Corrección: todos los meses ahora son 1-indexados: enero=1, mayo=5, julio=7, agosto=8, diciembre=12, etc.
-
-**Regla 2 — "retraso FMC": semántica de "diferencia" y umbral estricto**
-- Antes: `_calcular_dias_habiles(f_pedido, f_pref_teorica) <= 6` (contando F. Pedido inclusive).
-- Ahora: se excluye F. Pedido del conteo (empieza desde el día siguiente) y se usa `< 6` (estrictamente menor). Esto alinea el cálculo con la semántica de "menos de 6 días hábiles de diferencia entre el pedido y la fecha preferente".
-
-**Regla 3 — "retraso operación": excluir hoy del conteo**
-- Antes: `_calcular_dias_habiles(hoy, f_pref_teorica) <= 3` (contando hoy inclusive), lo que devolvía 4 días para un rango lun→jue y nunca activaba la regla.
-- Ahora: empieza a contar desde mañana (`hoy + 1 día`), de modo que lun 20 abr → jue 23 abr = 3 días hábiles (mar, mié, jue) → activa "retraso operación".
-
-**Log al finalizar recálculo**
-- `POST /recalcular-cruce` ahora registra `logger.info` al completar, indicando `fecha_calculo`, total de pacientes procesados y total de V3 sin paciente. Antes solo se enviaba el evento SSE `'complete'` sin dejar rastro en los logs del servidor.
-
-### Abril 2026 — Mejoras en normalización de nombres y visualización de cruce
-- **`normalizacion_medical_care.py`**: función `fx_normalizar_paciente()` mejorada:
-  - **Límite aumentado**: de 4 a 6 palabras para capturar nombres completos
-  - **Eliminación de repeticiones excesivas**: máximo 2 ocurrencias por palabra (ej: "DUVAN DUVAN DUVAN" → "DUVAN DUVAN")
-  - Aplica tanto a carga de pacientes como a carga de pedidos V3 (manual y sync automático)
-  - **Direcciones sin cambio**: la función `fx_normalizar_direccion()` mantiene todas las palabras (sin eliminar repeticiones)
-- **`pacientes_medical_care.py`**: nueva columna en resultados de cruce:
-  - Campo `cliente_destino_v3` agregado: muestra el nombre del cliente destino encontrado en V3
-  - Disponible en endpoints de cruce: `/ocupacion-rutas`, `/recalcular-cruce`, exportación Excel
-- **Frontend (CrucePacientesV3)**: nueva columna "Cliente Destino" en tabla principal e histórica
-  - Posicionada después de "Ruta V3" para fácil referencia
-  - Muestra el nombre original del cliente destino tal como viene del Excel V3
-- **Frontend (CrucePacientesV3)**: badges visuales con emojis para tipos de cruce:
-  - **👤 (verde)**: cruce por nombre ≥ 95%
-  - **🔑 (morado)**: cruce por llave ≥ 73%
-  - **📱 (azul)**: cruce por celular exacto
-  - **Sin badge**: sin cruce
-
-### Abril 2026 — Mejoras en algoritmo de cruce Pacientes ↔ V3
-- **`normalizacion_medical_care.py`**: función `fx_normalizar_paciente()` mejorada:
-  - **Límite aumentado**: de 4 a 6 palabras para capturar nombres completos
-  - **Eliminación de repeticiones excesivas**: máximo 2 ocurrencias por palabra (ej: "DUVAN DUVAN DUVAN" → "DUVAN DUVAN")
-  - Aplica tanto a carga de pacientes como a carga de pedidos V3 (manual y sync automático)
-  - Mejora precisión en cruces al evitar repeticiones artificiales en la llave
-
-### Abril 2026 — Mejoras en algoritmo de cruce Pacientes ↔ V3
-- **`pacientes_medical_care.py`**: reordenamiento de criterios de cruce para mayor precisión:
-  - **Criterio 1 - Nombre (prioridad máxima)**: compara paciente normalizado vs cliente_destino V3 con similitud ≥ 95%. Si hay match, `match_tipo = 'nombre'` y NO se evalúan los demás criterios.
-  - **Criterio 2 - Llave (segunda prioridad)**: solo si NO cruzó por nombre, compara llave (paciente+dirección) vs llave V3 con similitud ≥ 73%. Si hay match, `match_tipo = 'llave'` y NO se evalúa celular.
-  - **Criterio 3 - Celular (tercera prioridad)**: solo si NO cruzó por nombre ni llave, compara teléfonos normalizados (coincidencia exacta). Si hay match, `match_tipo = 'celular'`.
-  - **Sin cruce**: si no se cumple ningún criterio, `match_tipo = None` (antes quedaba como 'llave' por defecto, lo cual era incorrecto).
-- **Campo `similitud`**: siempre guarda el score fuzzy de la llave (0-100), independientemente de cuál criterio ganó el cruce.
-- **Frontend**: badges con emojis para indicar tipo de cruce:
-  - **👤 (verde)**: cruce por nombre
-  - **🔑 (morado)**: cruce por llave
-  - **📱 (azul)**: cruce por celular
-  - **Sin badge**: sin cruce
-- **Histórico**: nueva pestaña que muestra cortes mensuales automáticos generados el último día de cada mes a las 00:00.
-
-### Mayo 2026 — Sistema de gestión de configuración V3 y mejoras en notificaciones
-
-**`rutas/sync_v3.py` — Configuración en MongoDB:**
-- **Antes**: horarios hardcoded en `['08:00', '14:00']`
-- **Ahora**: configuración dinámica almacenada en colección `config_v3`
-- **Funciones**:
-  - `_obtener_config_desde_db()`: lee config desde MongoDB, crea default si no existe
-  - `_guardar_config_en_db()`: actualiza horarios o estado activo
-- **Nuevos endpoints**:
-  - `POST /sync-v3/horarios?horario=HH:MM` - agrega horario
-  - `DELETE /sync-v3/horarios/HH:MM` - elimina horario
-- **Validaciones**:
-  - Formato HH:MM validado antes de guardar
-  - No permite eliminar todos los horarios (debe haber al menos uno)
-  - Detecta horarios duplicados antes de agregar
-
-**`main.py` — Loop de sync actualizado:**
-- **Antes**: importaba hardcoded `horarios` desde `sync_v3.py`
-- **Ahora**: lee configuración desde MongoDB cada 30 segundos
-- **Función `_loop_sync_v3()`**: llama `_obtener_config_desde_db()` para obtener horarios y estado activo
-- **Corte mensual automático**: último día de cada mes a las 00:00 ejecuta `archivar_mes_v3()`
-
-**`rutas/pedidos_v3.py` — Timeout aumentado para API Siscore:**
-- **Timeout aumentado**: de 120s a 600s (10 minutos) para endpoint Siscore V3
-- **Timeout de conexión**: 120s (2 minutos para establecer conexión)
-- **Mejor manejo de errores**: distingue entre `httpx.ReadTimeout` y `httpx.ConnectTimeout`
-- **Mensaje de error específico**: indica tiempo normal de respuesta (5-7 minutos)
-
-**Notificaciones WhatsApp mejoradas:**
-- **Referencia a Excel**: todos los mensajes incluyen "El Excel con el detalle fue enviado a tu correo"
-- **Archivos afectados**: `Funciones/sync_api_v3.py`, `rutas/pacientes_medical_care.py`
-- **Tipos de notificación**: retraso operación, sin cruce, recálculo manual de cruce
-
-### Marzo 2025 — Multi-cliente y panel de administración
-- **`baseusuarios.py`**: añadido campo `clientes: Optional[List[str]]` al modelo `BaseUsuario`. El endpoint `/login` ahora devuelve el array `clientes` en la respuesta. Compatibilidad hacia atrás: documentos sin el campo retornan `["KABI"]` por defecto.
-- **`baseusuarios.py`**: nuevo endpoint `PATCH /baseusuarios/{id}/clientes` para que administradores actualicen los portales de cliente a los que tiene acceso cada usuario. Solo acepta los valores `KABI` y `MEDICAL_CARE`.
-- **`baseusuarios.py`**: `modelo_usuario()` actualizado para incluir `clientes` en todas las respuestas CRUD.
-- **`main.py`**: CORS actualizado para incluir explícitamente `http://localhost:3000` y `http://127.0.0.1:3000`.
+## Cálculo de Días Hábiles
+
+Para el módulo de Solicitud de Vehículos, el sistema implementa cálculo de días hábiles para Colombia:
+
+### Festivos Considerados
+- **Festivos fijos**: 1 de enero, 6 de enero, 1 de mayo, 20 de julio, 7 de agosto, 8 de diciembre, 25 de diciembre
+- **Festivos móviles**: Jueves Santo, Viernes Santo, Ascensión, Corpus Christi, Sagrada Eucaristía
+- **Fines de semana**: Sábados y domingos
+
+### Implementación
+- Cálculo de Pascua usando algoritmo de Meeus/Jones/Butcher
+- Ley Emiliani: festivos que caen en martes se mueven al lunes anterior
+- Función `_obtener_festivos_colombia(anio)` retorna lista en formato YYYY-MM-DD
+- Función `_calcular_rango_3_dias_habiles()` retrocede 40 días hábiles desde hoy
