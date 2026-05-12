@@ -22,6 +22,7 @@ coleccion_tramites = db["tramite_fmc"]
 coleccion_tarifas = db["fletes_rutas_fmc"]
 coleccion_divipolas = db["divipolas"]
 coleccion_pedidos_medical = db["pedidos_medical"]
+coleccion_causales = db["causales"]
 
 # Configuración WS Siscore V3 (misma que en pedidos_v3)
 SISCORE_V3_ENDPOINT = "https://integra-wms.appsiscore.com/app/ws/informe_v3.php"
@@ -57,12 +58,71 @@ class GuardarSolicitudRequest(BaseModel):
     requiere_descargue: str = "NO"
     punto_adicional: bool = False
     desvio: bool = False
+    aforo: Optional[float] = None
+    placa: Optional[str] = None
     tipo_veh_sicetac: Optional[str] = None
+    solicitud_id: Optional[str] = None
+
+
+class ActualizarSolicitudRequest(BaseModel):
+    usuario: str
+    perfil: str
+    centro_distribucion: str
+    planilla: str
+    piezas: int
+    peso_real: float
+    ruta: str
+    codigos_pedido: str
+    cantidad_pedidos: int
+    cliente_origen: str
+    municipio_destino: str
+    departamento_destino: str
+    regional: Optional[str] = None
+    tarifa_calculada: float
+    tipo_vehiculo: str
+    total_solicitado: float
+    tarifa_base: Optional[float] = None
+    requiere_descargue: str = "NO"
+    punto_adicional: bool = False
+    desvio: bool = False
+    aforo: Optional[float] = None
+    placa: Optional[str] = None
+    tipo_veh_sicetac: Optional[str] = None
+    solicitud_id: str
 
 
 class EnviarTramiteRequest(BaseModel):
     solicitud_id: str
     usuario: str
+
+
+class ActualizarPlanillaPedidosRequest(BaseModel):
+    """Modelo para actualizar una planilla en pedidos_medical"""
+    planilla: str
+    tarifa_base: Optional[float] = None
+    requiere_descargue: Optional[float] = 0  # Valor numérico del descargue
+    punto_adicional: Optional[float] = 0     # Valor numérico del punto adicional
+    desvio: Optional[float] = 0              # Valor numérico del desvío
+    aforo: Optional[float] = None            # Valor numérico del aforo
+    placa: Optional[str] = None
+    tipo_veh_sicetac: Optional[str] = None
+    total_solicitado: float
+    causal: Optional[str] = None
+
+
+# Modelos para gestión de causales
+class CausalRequest(BaseModel):
+    """Modelo para crear/actualizar una causal"""
+    nombre: str
+    activo: bool = True
+
+
+class CausalResponse(BaseModel):
+    """Modelo de respuesta para causales"""
+    _id: str
+    nombre: str
+    activo: bool
+    fecha_creacion: Optional[datetime] = None
 
 
 class ConsultarTarifaRequest(BaseModel):
@@ -294,7 +354,7 @@ async def _consultar_api_siscore_planillas(
         "pedido_especifico": ""  # Vacío para traer todos los pedidos del rango
     }
 
-    timeout = httpx.Timeout(300.0, connect=60.0)  # 5 minutos total
+    timeout = httpx.Timeout(600.0, connect=120.0)  # 10 minutos total, 2 minutos para conectar
     proxy_url = _get_proxy_url()
 
     logger.info(f"[API Siscore] Consultando rango: {fecha_inicial} a {fecha_final}")
@@ -549,6 +609,8 @@ async def guardar_solicitud(request: GuardarSolicitudRequest):
     Guarda una solicitud de vehículo en la colección solicitud_veh_medical.
     """
     try:
+        logger.info(f"[GUARDAR SOLICITUD] Planilla: {request.planilla}, Placa: {request.placa}, Aforo: {request.aforo}")
+
         nueva_solicitud = {
             "usuario": request.usuario,
             "perfil": request.perfil,
@@ -570,6 +632,8 @@ async def guardar_solicitud(request: GuardarSolicitudRequest):
             "requiere_descargue": request.requiere_descargue,
             "punto_adicional": request.punto_adicional,
             "desvio": request.desvio,
+            "aforo": request.aforo,
+            "placa": request.placa,
             "tipo_veh_sicetac": request.tipo_veh_sicetac,
             "estado": "pendiente",
             "fecha_creacion": datetime.now(),
@@ -591,6 +655,74 @@ async def guardar_solicitud(request: GuardarSolicitudRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error al guardar solicitud: {str(e)}"
+        )
+
+
+@router.put("/actualizar-solicitud")
+async def actualizar_solicitud(request: ActualizarSolicitudRequest):
+    """
+    Actualiza una solicitud existente en la colección solicitud_veh_medical.
+    """
+    try:
+        from bson import ObjectId
+
+        logger.info(f"[ACTUALIZAR SOLICITUD] ID: {request.solicitud_id}, Placa: {request.placa}, Aforo: {request.aforo}")
+
+        if not ObjectId.is_valid(request.solicitud_id):
+            raise HTTPException(status_code=400, detail="ID de solicitud inválido")
+
+        # Campos a actualizar
+        campos_actualizar = {
+            "planilla": request.planilla,
+            "piezas": request.piezas,
+            "peso_real": request.peso_real,
+            "ruta": request.ruta,
+            "codigos_pedido": request.codigos_pedido,
+            "cantidad_pedidos": request.cantidad_pedidos,
+            "cliente_origen": request.cliente_origen,
+            "municipio_destino": request.municipio_destino,
+            "departamento_destino": request.departamento_destino,
+            "regional": request.regional,
+            "tarifa_calculada": request.tarifa_calculada,
+            "tipo_vehiculo": request.tipo_vehiculo,
+            "total_solicitado": request.total_solicitado,
+            "tarifa_base": request.tarifa_base,
+            "requiere_descargue": request.requiere_descargue,
+            "punto_adicional": request.punto_adicional,
+            "desvio": request.desvio,
+            "aforo": request.aforo,
+            "placa": request.placa,
+            "tipo_veh_sicetac": request.tipo_veh_sicetac,
+            "fecha_actualizacion": datetime.now()
+        }
+
+        # Actualizar el documento
+        resultado = coleccion_solicitudes.update_one(
+            {"_id": ObjectId(request.solicitud_id)},
+            {"$set": campos_actualizar}
+        )
+
+        if resultado.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+        logger.info(f"Solicitud actualizada: {request.solicitud_id} por usuario {request.usuario}")
+
+        # Obtener el documento actualizado para retornarlo
+        solicitud_actualizada = coleccion_solicitudes.find_one({"_id": ObjectId(request.solicitud_id)})
+        solicitud_actualizada["_id"] = str(solicitud_actualizada["_id"])
+
+        return {
+            "mensaje": "Solicitud actualizada exitosamente",
+            "solicitud": solicitud_actualizada
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al actualizar solicitud: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar solicitud: {str(e)}"
         )
 
 
@@ -717,6 +849,8 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "requiere_descargue": resultado.get("requiere_descargue", "NO"),
                 "punto_adicional": resultado.get("punto_adicional", False),
                 "desvio": resultado.get("desvio", False),
+                "aforo": resultado.get("aforo"),
+                "placa": resultado.get("placa"),
                 "tipo_veh_sicetac": resultado.get("tipo_veh_sicetac"),
                 "fecha_creacion": fecha_creacion
             }
@@ -735,6 +869,69 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 # Insertar nuevo
                 coleccion_pedidos_medical.insert_one(planilla_doc)
                 logger.info(f"Planilla {resultado.get('planilla')}: guardada")
+
+        logger.info(f"Total guardado: {len(request.resultados_consolidados)} planillas en pedidos_medical")
+
+        return {
+            "mensaje": f"Se guardaron/actualizaron {len(request.resultados_consolidados)} planillas",
+            "total": len(request.resultados_consolidados)
+        }
+
+    except Exception as e:
+        logger.error(f"Error al guardar búsqueda: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al guardar búsqueda: {str(e)}"
+        )
+
+
+@router.put("/actualizar-planilla-pedidos")
+async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest):
+    """
+    Actualiza una planilla específica en la colección pedidos_medical.
+    """
+    try:
+        logger.info(f"[ACTUALIZAR PLANILLA PEDIDOS] Planilla: {request.planilla}, Placa: {request.placa}, Aforo: {request.aforo}")
+
+        # Campos a actualizar
+        campos_actualizar = {
+            "tarifa_base": request.tarifa_base,
+            "requiere_descargue": request.requiere_descargue,
+            "punto_adicional": request.punto_adicional,
+            "desvio": request.desvio,
+            "aforo": request.aforo,
+            "placa": request.placa,
+            "tipo_veh_sicetac": request.tipo_veh_sicetac,
+            "total_solicitado": request.total_solicitado,
+            "causal": request.causal
+        }
+
+        # Actualizar el documento
+        resultado = coleccion_pedidos_medical.update_one(
+            {"planilla": request.planilla},
+            {"$set": campos_actualizar}
+        )
+
+        if resultado.matched_count == 0:
+            logger.warning(f"[ACTUALIZAR PLANILLA PEDIDOS] No se encontró planilla: {request.planilla}")
+            raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada en pedidos_medical")
+
+        logger.info(f"[ACTUALIZAR PLANILLA PEDIDOS] Planilla {request.planilla} actualizada - Modified: {resultado.modified_count}")
+
+        return {
+            "mensaje": "Planilla actualizada exitosamente en pedidos_medical",
+            "planilla": request.planilla,
+            "modified_count": resultado.modified_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al actualizar planilla en pedidos_medical: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar planilla: {str(e)}"
+        )
 
         logger.info(f"Total guardado: {len(request.resultados_consolidados)} planillas en pedidos_medical")
 
@@ -808,3 +1005,154 @@ async def obtener_resultados_recientes(limite: int = 100):
             status_code=500,
             detail=f"Error al obtener búsquedas: {str(e)}"
         )
+
+
+# ============= ENDPOINTS PARA GESTIÓN DE CAUSALES =============
+
+@router.get("/causales")
+async def obtener_causales():
+    """
+    Obtiene todas las causales activas para fusión de planillas.
+    """
+    try:
+        causales = list(coleccion_causales.find({"activo": True}))
+        for c in causales:
+            c["_id"] = str(c["_id"])
+        return {"causales": causales}
+    except Exception as e:
+        logger.error(f"Error al obtener causales: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener causales: {str(e)}")
+
+
+@router.get("/causales/todas")
+async def obtener_todas_causales():
+    """
+    Obtiene todas las causales (activas e inactivas) - solo para admin.
+    """
+    try:
+        causales = list(coleccion_causales.find({}).sort("fecha_creacion", -1))
+        for c in causales:
+            c["_id"] = str(c["_id"])
+        return {"causales": causales}
+    except Exception as e:
+        logger.error(f"Error al obtener todas las causales: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener causales: {str(e)}")
+
+
+@router.post("/causales")
+async def crear_causal(request: CausalRequest):
+    """
+    Crea una nueva causal de fusión.
+    """
+    try:
+        # Verificar si ya existe una causal con ese nombre
+        existente = coleccion_causales.find_one({"nombre": {"$regex": f"^{request.nombre}$", "$options": "i"}})
+        if existente:
+            raise HTTPException(status_code=400, detail="Ya existe una causal con ese nombre")
+
+        nueva_causal = {
+            "nombre": request.nombre,
+            "activo": request.activo,
+            "fecha_creacion": datetime.now()
+        }
+        result = coleccion_causales.insert_one(nueva_causal)
+        nueva_causal["_id"] = str(result.inserted_id)
+        logger.info(f"Causal creada: {nueva_causal['_id']} - {request.nombre}")
+        return {"mensaje": "Causal creada exitosamente", "causal": nueva_causal}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al crear causal: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al crear causal: {str(e)}")
+
+
+@router.put("/causales/{causal_id}")
+async def actualizar_causal(causal_id: str, request: CausalRequest):
+    """
+    Actualiza una causal existente.
+    """
+    try:
+        from bson import ObjectId
+        if not ObjectId.is_valid(causal_id):
+            raise HTTPException(status_code=400, detail="ID de causal inválido")
+
+        campos_actualizar = {
+            "nombre": request.nombre,
+            "activo": request.activo
+        }
+        resultado = coleccion_causales.update_one(
+            {"_id": ObjectId(causal_id)},
+            {"$set": campos_actualizar}
+        )
+
+        if resultado.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Causal no encontrada")
+
+        logger.info(f"Causal actualizada: {causal_id}")
+        return {"mensaje": "Causal actualizada exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al actualizar causal: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al actualizar causal: {str(e)}")
+
+
+@router.delete("/causales/{causal_id}")
+async def eliminar_causal(causal_id: str):
+    """
+    Elimina (desactiva) una causal.
+    """
+    try:
+        from bson import ObjectId
+        if not ObjectId.is_valid(causal_id):
+            raise HTTPException(status_code=400, detail="ID de causal inválido")
+
+        resultado = coleccion_causales.update_one(
+            {"_id": ObjectId(causal_id)},
+            {"$set": {"activo": False}}
+        )
+
+        if resultado.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Causal no encontrada")
+
+        logger.info(f"Causal eliminada (desactivada): {causal_id}")
+        return {"mensaje": "Causal eliminada exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al eliminar causal: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al eliminar causal: {str(e)}")
+
+
+@router.post("/causales/inicializar")
+async def inicializar_causales():
+    """
+    Inicializa las causales por defecto si no existen.
+    """
+    try:
+        causales_por_defecto = [
+            {"nombre": "lleva paqueteo", "activo": True},
+            {"nombre": "no se consiguio vehiculo", "activo": True}
+        ]
+
+        creadas = []
+        for causal_def in causales_por_defecto:
+            existente = coleccion_causales.find_one({"nombre": {"$regex": f"^{causal_def['nombre']}$", "$options": "i"}})
+            if not existente:
+                nueva_causal = {
+                    "nombre": causal_def["nombre"],
+                    "activo": causal_def["activo"],
+                    "fecha_creacion": datetime.now()
+                }
+                result = coleccion_causales.insert_one(nueva_causal)
+                nueva_causal["_id"] = str(result.inserted_id)
+                creadas.append(nueva_causal)
+                logger.info(f"Causal inicializada: {nueva_causal['_id']} - {causal_def['nombre']}")
+
+        if creadas:
+            return {"mensaje": f"Se inicializaron {len(creadas)} causales", "causales": creadas}
+        else:
+            return {"mensaje": "Las causales por defecto ya existen", "causales": []}
+    except Exception as e:
+        logger.error(f"Error al inicializar causales: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al inicializar causales: {str(e)}")
