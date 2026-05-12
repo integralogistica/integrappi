@@ -1,44 +1,44 @@
-ASUS@DESKTOP-JIQ34KO MINGW64 ~/OneDrive - Integra Logistica/Desarrollos/integra/integrappi (main)
-$ uvicorn main:app --reload
-INFO:     Will watch for changes in these directories: ['C:\\Users\\ASUS\\OneDrive - Integra Logistica\\Desarrollos\\integra\\integrappi']
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [21932] using WatchFiles
-🔌 Intentando conectar a MongoDB (intento 1/3)...
-✅ Conexión exitosa a MongoDB
-INFO:     Started server process [21408]
-INFO:     Waiting for application startup.
-[LIFESPAN] Iniciando aplicación...
-INFO:main:[LIFESPAN] Iniciando aplicación...
-[LIFESPAN] Tarea de sync creada: <Task pending name='Task-3' coro=<_loop_sync_v3() running at C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\main.py:38>>
-INFO:main:[LIFESPAN] Tarea de sync creada: <Task pending name='Task-3' coro=<_loop_sync_v3() running at C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\main.py:38>>
-[sync_v3] Tarea de fondo iniciada
-INFO:main:[sync_v3] Tarea de fondo iniciada
-INFO:     Application startup complete.
-INFO:rutas.pacientes_medical_care:[/recalcular-cruce] usuario=EZARATE, enviar_correo=True
-INFO:     127.0.0.1:50060 - "POST /pacientes-medical-care/recalcular-cruce?usuario=EZARATE&enviar_correo=true HTTP/1.1" 200 OK
-INFO:rutas.pacientes_medical_care:[recalcular-cruce] Completado. fecha=2026-05-05 18:46:24, pacientes=6209, total_v3=4210, sin_paciente=310, zona_gris=0, llave_vacia=0
-INFO:rutas.pacientes_medical_care:[cruce_email] Usuarios con notificación retraso_operacion: 2
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Enviando notificaciones a 3 usuarios
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Usuario: EDWIN ZARATE, perfil=ADMIN, notificaciones=['retraso_operacion']
-INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op para edwin.zarate@integralogistica.com (CEDI=TODAS, admin=True): 167 pacientes con retraso, stats compartida=167
-[sync_v3] Tick - Hora Bogotá: 18:46
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Stats para EDWIN ZARATE (regional=None, es_admin=True): sin_cruce=1054, retraso=167
-[sync_v3] Horarios configurados: ['08:00', '14:00', '18:32'], hora actual: 18:46
-INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op enviado a edwin.zarate@integralogistica.com (CEDI=TODAS, admin=True, 167 registros)
-INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op para EMZP1994@GMAIL.COM (CEDI=CALI, admin=False): 54 pacientes con retraso, stats compartida=54
-INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 400 Bad Request"
-❌ Template confirmar_actualizacion: 400 - {"error":{"message":"(#132018) There’s an issue with the parameters in your template","code":132018,"type":"OAuthException","error_data":{"messaging_product":"whatsapp","details":"Param text cannot have new-line/tab characters or more than 4 consecutive spaces"},"fbtrace_id":"AcSwe7D2jx4gboZnZ5NTd20"}}
-WARNING:rutas.pacientes_medical_care:[whatsapp_cruce] WS no enviado a 573125443396 (tokens/error)
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Usuario: JUAN SUAREZ, perfil=OPERATIVO, notificaciones=['retraso_operacion']
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Stats para JUAN SUAREZ (regional=CALI, es_admin=False): sin_cruce=261, retraso=54
-INFO:rutas.pacientes_medical_care:[cruce_email] Retraso-op enviado a EMZP1994@GMAIL.COM (CEDI=CALI, admin=False, 54 registros)
-INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] WS enviado a 573125443396 (JUAN SUAREZ) - retraso_operacion
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Usuario: EDWIN PRUEBA, perfil=CLIENTE_FMC, notificaciones=['sin_cruce']
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] Stats para EDWIN PRUEBA (regional=FUNZA, es_admin=False): sin_cruce=271, retraso=7
-INFO:rutas.pacientes_medical_care:[cruce_email] Sin-cruce enviado a INTEGRAPPLOGISTICA@GMAIL.COM (CEDI=FUNZA, admin=False, 271 sin cruce, 62 v3 sin paciente)
-INFO:httpx:HTTP Request: POST https://graph.facebook.com/v22.0/962664760261316/messages "HTTP/1.1 200 OK"
-INFO:rutas.pacientes_medical_care:[whatsapp_cruce] WS enviado a 573218695196 (EDWIN PRUEBA) - sin_cruce
-INFO:     127.0.0.1:59690 - "GET /sync-v3/estado HTTP/1.1" 200 OK
-[sync_v3] Tick - Hora Bogotá: 18:46
-[sync_v3] Horarios configurados: ['08:00', '14:00', '18:32'], hora actual: 18:46
+ {
+      "": "https://integra.appsiscore.com/app/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xMr3hVYKKkVzL0gGjnCFySIRO6RLPLb1qUb1bwop94Zq8Of/xtransaccion.php?guia=3537224117",
+      "Codigo Interno": "3537224117",
+      "Codigo Pedido": "3537224117",
+      "Codigo Empresa": "FMC",
+      "Nombre Linea Distribucion": "MASIVOS",
+      "Cliente Origen": "FRESENIUS MEDICAL CARE",
+      "Departamento Origen": "CUNDINAMARCA",
+      "Municipio Origen": "FUNZA",
+      "Codigo Cliente Destino": "0970301858",
+      "Grupo": "PACIENTES EN CASA",
+      "Cliente Destino": "JESUS ANTONIO GANTIVA COLORADO JESUS,ANT",
+      "Tercero": "",
+      "Direccion Destino": "Vereda La Floresta primer sector cerca a",
+      "Divipola": "25322000",
+      "Departamento Destino": "CUNDINAMARCA",
+      "Municipio Destino": "GUASCA",
+      "Telefono": "3133673103",
+      "Fecha Pedido": "2026-05-08 17:11:57",
+      "Fecha Solicitada": "2026-05-15",
+      "Fecha Entrega": "0000-00-00",
+      "Estado Pedido": "No Entregado",
+      "Novedad": "Sin Novedad",
+      "Piezas": "0",
+      "Neveras": "0",
+      "Contenedores": "0",
+      "Peso Real": "0",
+      "Peso Volumetrico": "0",
+      "Servicio": "NORMAL",
+      "Bodega Origen": "CO07",
+      "Bodega Destino": "CO07",
+      "Bodega Actual": "CO07",
+      "Fecha Contabilizacion": "2026-05-15",
+      "Cajas Fraccionadas": null,
+      "Cajas SL100": "0",
+      "Factura": null,
+      "S.Distribucion": null,
+      "Observaciones": null,
+      "Costo": null,
+      "F_Estimada": "2026-06-16",
+      "Fecha Contingencia": "0000-00-00",
+      "Planilla": null,
+      "Ruta": "R117"
+    },
