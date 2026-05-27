@@ -21,7 +21,7 @@ retry_delay = 5  # segundos
 
 for attempt in range(max_retries):
     try:
-        print(f"🔌 Intentando conectar a MongoDB (intento {attempt + 1}/{max_retries})...")
+        print(f"Intentando conectar a MongoDB (intento {attempt + 1}/{max_retries})...")
         bd_cliente = MongoClient(
             uri,
             serverSelectionTimeoutMS=30000,  # 30 segundos para dar tiempo al cluster a despertar
@@ -33,14 +33,14 @@ for attempt in range(max_retries):
 
         # Probar conexión
         bd_cliente.admin.command("ping")
-        print("✅ Conexión exitosa a MongoDB")
+        print("Conexion exitosa a MongoDB")
         break
 
     except (PyMongoError, ConfigurationError) as e:
-        print(f"⚠️ Intento {attempt + 1} falló: {e}")
+        print(f"Intento {attempt + 1} fallo: {e}")
 
         if attempt < max_retries - 1:
-            print(f"⏳ Reintentando en {retry_delay} segundos...")
+            print(f"Reintentando en {retry_delay} segundos...")
             time.sleep(retry_delay)
         else:
-            raise RuntimeError(f"❌ No se pudo conectar a MongoDB después de {max_retries} intentos: {e}")
+            raise RuntimeError(f"No se pudo conectar a MongoDB despues de {max_retries} intentos: {e}")

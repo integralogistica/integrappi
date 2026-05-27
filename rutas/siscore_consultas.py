@@ -1836,7 +1836,7 @@ class ExportarPlanillasExcelRequest(BaseModel):
 @router.post("/exportar-planillas-excel")
 async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
     """
-    Exporta planillas a Excel con todos sus datos.
+    Exporta planillas a Excel con formato para sistema de transporte.
     Filtra por regional si el perfil es OPERATIVO.
     """
     try:
@@ -1850,10 +1850,12 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         logger.info(f"Perfil: {request.perfil}")
         logger.info(f"Centro distribución: {request.centro_distribucion}")
         logger.info(f"Planillas solicitadas: {len(request.planillas)}")
-        logger.info(f"Planillas: {request.planillas}")
 
-        # Consultar planillas de MongoDB
-        consulta = {"planilla": {"$in": request.planillas}}
+        # Consultar planillas de MongoDB - SOLO APROBADAS
+        consulta = {
+            "planilla": {"$in": request.planillas},
+            "estado": "APROBADO"
+        }
 
         # Si es OPERATIVO, filtrar por regional
         if request.perfil == "OPERATIVO" and request.centro_distribucion:
@@ -1876,24 +1878,37 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         if not planillas_db:
             raise HTTPException(status_code=404, detail="No se encontraron planillas para exportar")
 
+        # Función para mapear tipo de vehículo
+        def mapear_tipo_vehiculo(tipo_vehiculo: str) -> str:
+            tipo_upper = tipo_vehiculo.upper() if tipo_vehiculo else ""
+            if tipo_upper == "CARRY":
+                return "CARRY"
+            elif tipo_upper == "NHR":
+                return "CAMIONETA"
+            elif tipo_upper == "TURBO":
+                return "TURBO"
+            elif tipo_upper in {"NIES", "SENCILLO"}:
+                return "SENCILLO"
+            elif tipo_upper == "PATINETA":
+                return "TRACTOCAMION"
+            return tipo_vehiculo
+
         # Crear workbook y worksheet
         wb = Workbook()
         ws = wb.active
         ws.title = "Planillas"
 
-        # Definir columnas
+        # Definir columnas NUEVO FORMATO
         columnas = [
-            "Planilla", "Estado", "Regional", "Cliente Origen", "Ruta",
-            "Municipio Principal", "Municipios Destino", "Cant. Destinos",
-            "Piezas", "Peso Real", "Cant. Pedidos", "Código Pedido",
-            "Flete Teórico", "Flete Base", "Total Solicitado",
-            "Diferencia", "% Diferencia", "Vehículo", "Placa",
-            "Descargue", "Punto Adic.", "Desvío", "Aforo",
-            "Fusionada", "Planillas Originales", "Causal Fusión",
-            "Observaciones",
-            "Usuario Registro", "Usuario Modificación", "Fecha Modificación",
-            "Usuario Solicitud Aut.", "Fecha Solicitud Aut.",
-            "Aprobado Por", "Fecha Aprobación"
+            "Consecutivo", "Tipo de viaje", "Linea de negocio", "Estado", "Observacion",
+            "Cliente", "Origen", "Destino", "Pedido cliente", "Guia", "CENTRO COSTO",
+            "Ubicacion Cargue", "Direccion cargue", "Ubicacion Descargue", "Direccion Descargue",
+            "Producto", "Naturaleza", "Tipo de vehiculo", "unidad", "Cantidad", "Tipo embalaje",
+            "Toneladas", "Flete unidad", "PUNTO ADICIONAL", "CARGUE-DESCARGUE PER JURIDICA",
+            "SEGURO", "Tipo pago", "Tolerancia", "Vlr hora STBY", "Vlr Declar Mercancia",
+            "Aprobar Poliza", "Flete por", "Valor unitario", "Aprobar cupo credito",
+            "Aprobar rentabilidad", "Otras caracteristicas", "REMESAS", "REMISION DEL CLIENTE",
+            "GUIA DE TRANSPORTE", "MANIFIESTO"
         ]
 
         # Estilos
@@ -1915,116 +1930,114 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
             cell.alignment = header_alignment
             cell.border = thin_border
 
-        # Ajustar ancho de columnas
-        ws.column_dimensions['A'].width = 15  # Planilla
-        ws.column_dimensions['B'].width = 12  # Estado
-        ws.column_dimensions['C'].width = 12  # Regional
-        ws.column_dimensions['D'].width = 20  # Cliente Origen
-        ws.column_dimensions['E'].width = 8   # Ruta
-        ws.column_dimensions['F'].width = 18  # Municipio Principal
-        ws.column_dimensions['G'].width = 30  # Municipios Destino
-        ws.column_dimensions['H'].width = 12  # Cant. Destinos
-        ws.column_dimensions['I'].width = 10  # Piezas
-        ws.column_dimensions['J'].width = 12  # Peso Real
-        ws.column_dimensions['K'].width = 12  # Cant. Pedidos
-        ws.column_dimensions['L'].width = 40  # Código Pedido
-        ws.column_dimensions['M'].width = 12  # Flete Teórico
-        ws.column_dimensions['N'].width = 12  # Flete Base
-        ws.column_dimensions['O'].width = 12  # Total Solicitado
-        ws.column_dimensions['P'].width = 12  # Diferencia
-        ws.column_dimensions['Q'].width = 12  # % Diferencia
-        ws.column_dimensions['R'].width = 12  # Vehículo
-        ws.column_dimensions['S'].width = 12  # Placa
-        ws.column_dimensions['T'].width = 12  # Descargue
-        ws.column_dimensions['U'].width = 12  # Punto Adic.
-        ws.column_dimensions['V'].width = 12  # Desvío
-        ws.column_dimensions['W'].width = 12  # Aforo
-        ws.column_dimensions['X'].width = 12  # Fusionada
-        ws.column_dimensions['Y'].width = 20  # Planillas Originales
-        ws.column_dimensions['Z'].width = 20  # Causal Fusión
-        ws.column_dimensions['AA'].width = 15  # Observaciones
-        ws.column_dimensions['AB'].width = 18  # Usuario Registro
-        ws.column_dimensions['AC'].width = 18  # Usuario Modificación
-        ws.column_dimensions['AD'].width = 18  # Fecha Modificación
-        ws.column_dimensions['AE'].width = 18  # Usuario Solicitud Aut.
-        ws.column_dimensions['AF'].width = 18  # Fecha Solicitud Aut.
-        ws.column_dimensions['AG'].width = 15  # Aprobado Por
-        ws.column_dimensions['AH'].width = 18  # Fecha Aprobación
+        # Ajustar ancho de columnas NUEVO FORMATO
+        column_widths = {
+            'A': 20, 'B': 15, 'C': 15, 'D': 12, 'E': 40, 'F': 15, 'G': 20,
+            'H': 20, 'I': 25, 'J': 20, 'K': 25, 'L': 25, 'M': 15, 'N': 12,
+            'O': 15, 'P': 12, 'Q': 15, 'R': 18, 'S': 12, 'T': 12, 'U': 15,
+            'V': 15, 'W': 12, 'X': 20, 'Y': 25, 'Z': 15, 'AA': 12, 'AB': 12,
+            'AC': 12, 'AD': 15, 'AE': 15, 'AF': 15, 'AG': 12, 'AH': 12, 'AI': 15,
+            'AJ': 12, 'AK': 20, 'AL': 20, 'AM': 12, 'AN': 20, 'AO': 20, 'AP': 12,
+            'AQ': 20, 'AR': 18
+        }
+        for col, width in column_widths.items():
+            ws.column_dimensions[col].width = width
 
-        # Escribir datos
+        # Regional del usuario
+        regional_usuario = request.centro_distribucion or "FUNZA"
+
+        # Escribir datos NUEVO FORMATO
         row_num = 2
         for doc in planillas_db:
             try:
-                teorico = doc.get("tarifa_calculada", 0)
-                total = doc.get("total_solicitado", 0)
+                # Obtener datos básicos
+                consecutivo = doc.get("consecutivo", "")
+                regional_doc = doc.get("regional", regional_usuario)
+                municipio_destino = doc.get("municipio_destino", "")
+                codigo_pedido = doc.get("codigo_pedido", "")
+                cliente_origen = doc.get("cliente_origen", "")
+                tipo_vehiculo = doc.get("tipo_vehiculo", "")
+                piezas = doc.get("piezas", 0)
+                peso_real = doc.get("peso_real", 0)
+                total_solicitado = doc.get("total_solicitado", 0)
+                punto_adicional_val = doc.get("punto_adicional", 0)
+                requiere_descargue_val = doc.get("requiere_descargue", 0)
 
-                # Asegurar que sean numéricos
+                # Tipo de viaje: Nacional si regional == municipio destino, sino Urbano
+                tipo_viaje = "NACIONAL" if regional_doc.upper() == municipio_destino.upper() else "URBANO"
+
+                # Observación: DN + código pedido
+                observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
+
+                # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
+                centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA{cliente_origen}"
+
+                # Toneladas: Peso Real / 1000 con 1 decimal
                 try:
-                    teorico = float(teorico) if teorico else 0
+                    peso_num = float(peso_real) if peso_real else 0
+                    toneladas = round(peso_num / 1000, 1)
                 except:
-                    teorico = 0
+                    toneladas = 0
 
+                # Valor unitario: Piezas * 20000
                 try:
-                    total = float(total) if total else 0
+                    piezas_num = int(piezas) if piezas else 0
+                    valor_unitario = piezas_num * 20000
                 except:
-                    total = 0
+                    valor_unitario = 0
 
-                diferencia = total - teorico
+                # PUNTO ADICIONAL: si hay valor en punto_adicional
+                punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else ""
 
-                # Calcular porcentaje de forma segura
-                if teorico > 0:
-                    porc_diferencia = (diferencia / teorico) * 100
-                else:
-                    porc_diferencia = 0
+                # CARGUE-DESCARGUE PER JURIDICA: si hay valor en requiere_descargue
+                cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else ""
 
                 datos = [
-                    doc.get("planilla", ""),
-                    doc.get("estado", "PREAPROBADO"),
-                    doc.get("regional", ""),
-                    doc.get("cliente_origen", ""),
-                    doc.get("ruta", ""),
-                    doc.get("municipio_destino", ""),
-                    doc.get("municipios_destino_lista", ""),
-                    doc.get("cantidad_destinos", 0),
-                    doc.get("piezas", 0),
-                    doc.get("peso_real", 0),
-                    doc.get("cantidad_pedidos", 0),
-                    doc.get("codigo_pedido", ""),
-                    teorico,
-                    doc.get("tarifa_base", 0),
-                    total,
-                    diferencia,
-                    f"{porc_diferencia:.1f}%",
-                    doc.get("tipo_vehiculo", ""),
-                    doc.get("placa", ""),
-                    doc.get("requiere_descargue", 0),
-                    doc.get("punto_adicional", 0),
-                    doc.get("desvio", 0),
-                    doc.get("aforo", 0),
-                    "Sí" if doc.get("fusion_info", {}).get("es_fusionada") else "No",
-                    ", ".join(doc.get("fusion_info", {}).get("planillas_originales", [])),
-                    doc.get("fusion_info", {}).get("causal", ""),
-                    doc.get("causal", ""),  # Causal de la modificación (Observaciones)
-                    # Trazabilidad completa
-                    doc.get("usuario_registro", ""),
-                    doc.get("usuario_modificacion", ""),
-                    doc.get("fecha_modificacion", ""),
-                    doc.get("usuario_solicitud_autorizacion", ""),
-                    doc.get("fecha_solicitud_autorizacion", ""),
-                    doc.get("aprobado_por", ""),
-                    doc.get("fecha_aprobacion", "")
+                    consecutivo,                                      # Consecutivo
+                    tipo_viaje,                                       # Tipo de viaje
+                    "MASIVO",                                         # Linea de negocio
+                    "PENDIENTE",                                      # Estado
+                    observacion,                                      # Observación
+                    cliente_origen,                                   # Cliente
+                    regional_doc,                                     # Origen
+                    municipio_destino,                                # Destino
+                    codigo_pedido,                                    # Pedido cliente
+                    codigo_pedido,                                    # Guía
+                    centro_costo,                                     # CENTRO COSTO
+                    "",                                               # Ubicacion Cargue (vacío)
+                    "INTEGRA_FUNZA",                                  # Direccion cargue
+                    "",                                               # Ubicacion Descargue (vacío)
+                    "INTEGRA_FUNZA",                                  # Direccion Descargue
+                    "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",  # Producto
+                    "NORMAL",                                         # Naturaleza
+                    mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
+                    "VEHICULOS",                                      # unidad
+                    piezas,                                           # Cantidad
+                    "PAQUETES",                                       # Tipo embalaje
+                    toneladas,                                        # Toneladas
+                    total_solicitado,                                 # Flete unidad
+                    punto_adicional,                                  # PUNTO ADICIONAL
+                    cargue_descargue,                                 # CARGUE-DESCARGUE PER JURIDICA
+                    0,                                                # SEGURO
+                    "CUPO",                                           # Tipo pago
+                    0,                                                # Tolerancia
+                    0,                                                # Vlr hora STBY
+                    0,                                                # Vlr Declar Mercancia
+                    1,                                                # Aprobar Poliza
+                    "CUPO",                                           # Flete por
+                    valor_unitario,                                   # Valor unitario
+                    1,                                                # Aprobar cupo credito
+                    1,                                                # Aprobar rentabilidad
+                    "FURGON",                                         # Otras caracteristicas
+                    1,                                                # REMESAS
+                    1,                                                # REMISION DEL CLIENTE
+                    1,                                                # GUIA DE TRANSPORTE
+                    1                                                 # MANIFIESTO
                 ]
 
                 for col_idx, valor in enumerate(datos, 1):
                     cell = ws.cell(row=row_num, column=col_idx, value=valor)
                     cell.border = thin_border
-
-                    # Colorear según estado
-                    if col_idx == 2:  # Columna Estado
-                        if valor == "APROBADO":
-                            cell.fill = PatternFill(start_color="d1fae5", end_color="d1fae5", fill_type="solid")
-                        elif valor == "REQUIERE_APROBACION" or (valor == "PREAPROBADO" and diferencia > 0):
-                            cell.fill = PatternFill(start_color="fef3c7", end_color="fef3c7", fill_type="solid")
 
                 row_num += 1
 
