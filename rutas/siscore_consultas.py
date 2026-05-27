@@ -108,6 +108,16 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     tipo_veh_sicetac: Optional[str] = None
     total_solicitado: float
     causal: Optional[str] = None
+    estado: Optional[str] = None  # 'PREAPROBADO' o 'APROBADO'
+    aprobado_por: Optional[str] = None
+    fecha_aprobacion: Optional[str] = None
+
+
+class ActualizarEstadoPlanillaRequest(BaseModel):
+    """Modelo para actualizar el estado de aprobación de una planilla"""
+    planilla: str
+    estado: str  # 'PREAPROBADO', 'REQUIERE_APROBACION' o 'APROBADO'
+    aprobado_por: str  # Usuario que aprueba
 
 
 # Modelos para gestión de causales
@@ -872,7 +882,10 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "aforo": resultado.get("aforo"),
                 "placa": resultado.get("placa"),
                 "tipo_veh_sicetac": resultado.get("tipo_veh_sicetac"),
-                "fecha_creacion": fecha_creacion
+                "fecha_creacion": fecha_creacion,
+                "estado": resultado.get("estado", "PREAPROBADO"),  # Estado por defecto (puede ser PREAPROBADO, REQUIERE_APROBACION o APROBADO)
+                "aprobado_por": resultado.get("aprobado_por"),
+                "fecha_aprobacion": resultado.get("fecha_aprobacion")
             }
 
             # Verificar si ya existe un documento con esta planilla
@@ -926,6 +939,17 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "causal": request.causal
         }
 
+        # Si se envía estado, actualizarlo (siempre que se edita vuelve a PREAPROBADO o REQUIERE_APROBACION)
+        if request.estado is not None:
+            campos_actualizar["estado"] = request.estado
+            if request.estado != "APROBADO":
+                # Limpiar campos de aprobación si no está aprobada
+                campos_actualizar["aprobado_por"] = None
+                campos_actualizar["fecha_aprobacion"] = None
+            else:
+                campos_actualizar["aprobado_por"] = request.aprobado_por
+                campos_actualizar["fecha_aprobacion"] = request.fecha_aprobacion
+
         # Actualizar el documento
         resultado = coleccion_pedidos_medical.update_one(
             {"planilla": request.planilla},
@@ -953,18 +977,269 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             detail=f"Error al actualizar planilla: {str(e)}"
         )
 
-        logger.info(f"Total guardado: {len(request.resultados_consolidados)} planillas en pedidos_medical")
 
-        return {
-            "mensaje": f"Se guardaron/actualizaron {len(request.resultados_consolidados)} planillas",
-            "total": len(request.resultados_consolidados)
+@router.put("/actualizar-estado-planilla")
+async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
+    """
+    Actualiza el estado de aprobación de una planilla en pedidos_medical.
+    """
+    try:
+        logger.info(f"=== ACTUALIZAR ESTADO PLANILLA ===")
+        logger.info(f"Planilla: {request.planilla}")
+        logger.info(f"Estado: {request.estado}")
+        logger.info(f"Aprobado por: {request.aprobado_por}")
+
+        # Campos a actualizar
+        campos_actualizar = {
+            "estado": request.estado,
+            "aprobado_por": request.aprobado_por,
+            "fecha_aprobacion": datetime.now() if request.estado == "APROBADO" else None
         }
 
+        # Actualizar el documento
+        resultado = coleccion_pedidos_medical.update_one(
+            {"planilla": request.planilla},
+            {"$set": campos_actualizar}
+        )
+
+        if resultado.matched_count == 0:
+            logger.warning(f"No se encontró planilla: {request.planilla}")
+            raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada en pedidos_medical")
+
+        logger.info(f"Planilla {request.planilla} actualizada - Estado: {request.estado}")
+
+        return {
+            "mensaje": f"Planilla actualizada a estado {request.estado}",
+            "planilla": request.planilla,
+            "estado": request.estado,
+            "modified_count": resultado.modified_count
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error al guardar búsqueda: {str(e)}")
+        logger.error(f"Error al actualizar estado de planilla: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error al guardar búsqueda: {str(e)}"
+            detail=f"Error al actualizar estado: {str(e)}"
+        )
+
+
+class ExportarPlanillasExcelRequest(BaseModel):
+    """Modelo para exportar planillas a Excel"""
+    planillas: List[str]
+    perfil: str
+    centro_distribucion: Optional[str] = None
+
+
+@router.post("/exportar-planillas-excel")
+async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
+    """
+    Exporta planillas a Excel con todos sus datos.
+    Filtra por regional si el perfil es OPERATIVO.
+    """
+    try:
+        from fastapi.responses import Response
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from datetime import datetime
+        import io
+
+        logger.info(f"=== EXPORTAR PLANILLAS EXCEL ===")
+        logger.info(f"Perfil: {request.perfil}")
+        logger.info(f"Centro distribución: {request.centro_distribucion}")
+        logger.info(f"Planillas solicitadas: {len(request.planillas)}")
+        logger.info(f"Planillas: {request.planillas}")
+
+        # Consultar planillas de MongoDB
+        consulta = {"planilla": {"$in": request.planillas}}
+
+        # Si es OPERATIVO, filtrar por regional
+        if request.perfil == "OPERATIVO" and request.centro_distribucion:
+            # Mapear centro de distribución a códigos de bodega
+            regional_map = {
+                "BARRANQUILLA": "CO04",
+                "CALI": "CO05",
+                "BUCARAMANGA": "CO06",
+                "FUNZA": "CO07",
+                "MEDELLIN": "CO09"
+            }
+            bodega = regional_map.get(request.centro_distribucion, "")
+            if bodega:
+                consulta["centro_costo"] = bodega
+
+        planillas_db = list(coleccion_pedidos_medical.find(consulta))
+
+        logger.info(f"Planillas encontradas en BD: {len(planillas_db)}")
+
+        if not planillas_db:
+            raise HTTPException(status_code=404, detail="No se encontraron planillas para exportar")
+
+        # Crear workbook y worksheet
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Planillas"
+
+        # Definir columnas
+        columnas = [
+            "Planilla", "Estado", "Regional", "Cliente Origen", "Ruta",
+            "Municipio Principal", "Municipios Destino", "Cant. Destinos",
+            "Piezas", "Peso Real", "Cant. Pedidos", "Código Pedido",
+            "Flete Teórico", "Flete Base", "Total Solicitado",
+            "Diferencia", "% Diferencia", "Vehículo", "Placa",
+            "Descargue", "Punto Adic.", "Desvío", "Aforo",
+            "Fusionada", "Planillas Originales", "Causal Fusión",
+            "Observaciones", "Aprobado Por", "Fecha Aprobación"
+        ]
+
+        # Estilos
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        # Escribir cabeceras
+        for col_idx, columna in enumerate(columnas, 1):
+            cell = ws.cell(row=1, column=col_idx, value=columna)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        # Ajustar ancho de columnas
+        ws.column_dimensions['A'].width = 15  # Planilla
+        ws.column_dimensions['B'].width = 12  # Estado
+        ws.column_dimensions['C'].width = 12  # Regional
+        ws.column_dimensions['D'].width = 20  # Cliente Origen
+        ws.column_dimensions['E'].width = 8   # Ruta
+        ws.column_dimensions['F'].width = 18  # Municipio Principal
+        ws.column_dimensions['G'].width = 30  # Municipios Destino
+        ws.column_dimensions['H'].width = 12  # Cant. Destinos
+        ws.column_dimensions['I'].width = 10  # Piezas
+        ws.column_dimensions['J'].width = 12  # Peso Real
+        ws.column_dimensions['K'].width = 12  # Cant. Pedidos
+        ws.column_dimensions['L'].width = 40  # Código Pedido
+        ws.column_dimensions['M'].width = 12  # Flete Teórico
+        ws.column_dimensions['N'].width = 12  # Flete Solicitado
+        ws.column_dimensions['O'].width = 12  # Total Solicitado
+        ws.column_dimensions['P'].width = 12  # Diferencia
+        ws.column_dimensions['Q'].width = 12  # % Diferencia
+        ws.column_dimensions['R'].width = 12  # Vehículo
+        ws.column_dimensions['S'].width = 12  # Placa
+        ws.column_dimensions['T'].width = 12  # Descargue
+        ws.column_dimensions['U'].width = 12  # Punto Adic.
+        ws.column_dimensions['V'].width = 12  # Desvío
+        ws.column_dimensions['W'].width = 12  # Aforo
+        ws.column_dimensions['X'].width = 12  # Fusionada
+        ws.column_dimensions['Y'].width = 20  # Planillas Originales
+        ws.column_dimensions['Z'].width = 20  # Causal Fusión
+        ws.column_dimensions['AA'].width = 15  # Observaciones
+        ws.column_dimensions['AB'].width = 15  # Aprobado Por
+        ws.column_dimensions['AC'].width = 18  # Fecha Aprobación
+
+        # Escribir datos
+        row_num = 2
+        for doc in planillas_db:
+            try:
+                teorico = doc.get("tarifa_calculada", 0)
+                total = doc.get("total_solicitado", 0)
+
+                # Asegurar que sean numéricos
+                try:
+                    teorico = float(teorico) if teorico else 0
+                except:
+                    teorico = 0
+
+                try:
+                    total = float(total) if total else 0
+                except:
+                    total = 0
+
+                diferencia = total - teorico
+
+                # Calcular porcentaje de forma segura
+                if teorico > 0:
+                    porc_diferencia = (diferencia / teorico) * 100
+                else:
+                    porc_diferencia = 0
+
+                datos = [
+                    doc.get("planilla", ""),
+                    doc.get("estado", "PREAPROBADO"),
+                    doc.get("regional", ""),
+                    doc.get("cliente_origen", ""),
+                    doc.get("ruta", ""),
+                    doc.get("municipio_destino", ""),
+                    doc.get("municipios_destino_lista", ""),
+                    doc.get("cantidad_destinos", 0),
+                    doc.get("piezas", 0),
+                    doc.get("peso_real", 0),
+                    doc.get("cantidad_pedidos", 0),
+                    doc.get("codigo_pedido", ""),
+                    teorico,
+                    doc.get("tarifa_base", 0),
+                    total,
+                    diferencia,
+                    f"{porc_diferencia:.1f}%",
+                    doc.get("tipo_vehiculo", ""),
+                    doc.get("placa", ""),
+                    doc.get("requiere_descargue", 0),
+                    doc.get("punto_adicional", 0),
+                    doc.get("desvio", 0),
+                    doc.get("aforo", 0),
+                    "Sí" if doc.get("fusion_info", {}).get("es_fusionada") else "No",
+                    ", ".join(doc.get("fusion_info", {}).get("planillas_originales", [])),
+                    doc.get("fusion_info", {}).get("causal", ""),
+                    doc.get("causal", ""),  # Causal de la modificación (Observaciones)
+                    doc.get("aprobado_por", ""),
+                    doc.get("fecha_aprobacion", "")
+                ]
+
+                for col_idx, valor in enumerate(datos, 1):
+                    cell = ws.cell(row=row_num, column=col_idx, value=valor)
+                    cell.border = thin_border
+
+                    # Colorear según estado
+                    if col_idx == 2:  # Columna Estado
+                        if valor == "APROBADO":
+                            cell.fill = PatternFill(start_color="d1fae5", end_color="d1fae5", fill_type="solid")
+                        elif valor == "REQUIERE_APROBACION" or (valor == "PREAPROBADO" and diferencia > 0):
+                            cell.fill = PatternFill(start_color="fef3c7", end_color="fef3c7", fill_type="solid")
+
+                row_num += 1
+
+            except Exception as e:
+                logger.error(f"Error procesando planilla {doc.get('planilla', 'desconocido')}: {str(e)}")
+                continue  # Saltar esta fila y continuar con la siguiente
+
+        # Guardar en memoria
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        logger.info(f"Excel generado con {row_num - 1} filas de datos")
+
+        # Retornar archivo
+        return Response(
+            content=output.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=planillas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al exportar Excel: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al exportar Excel: {str(e)}"
         )
 
 

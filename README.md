@@ -63,8 +63,13 @@ API REST para el sistema de gestión de pedidos y pacientes Medical Care.
 - `POST /enviar-tramite` - Envía a `tramite_fmc`
 - `GET /obtener-solicitudes-pendientes` - Obtiene solicitudes sin enviar (filtrado por usuario/perfil)
 - `POST /guardar-busqueda` - Guarda planillas en `pedidos_medical`
+  - **Parámetro adicional**: `planillas_a_eliminar` - Lista de planillas a eliminar (para fusión)
 - `GET /obtener-resultados-recientes` - Obtiene todas las planillas guardadas
-- `PUT /actualizar-planilla-pedidos` - Actualiza planilla en `solicitud_veh_medical`
+- `PUT /actualizar-planilla-pedidos` - Actualiza planilla en `pedidos_medical`
+  - **Campos actualizables**: `tarifa_base`, `requiere_descargue`, `punto_adicional`, `desvio`, `aforo`, `placa`, `tipo_veh_sicetac`
+  - **Gestión de estados**: `estado`, `aprobado_por`, `fecha_aprobacion`
+  - **Campo de causal**: `causal` (OBLIGATORIO si hay sobrecosto)
+- `POST /exportar-planillas-excel` - Exporta planillas a Excel con columna de Observaciones (causal)
 
 ### Causales (`/causales`)
 - `GET /causales` - Obtiene causales activas para dropdown de fusión
