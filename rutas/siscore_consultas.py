@@ -139,6 +139,7 @@ class GuardarBusquedaRequest(BaseModel):
     resultados_consolidados: List[dict]
     fecha_inicio: str
     fecha_fin: str
+    planillas_a_eliminar: Optional[List[str]] = None  # Planillas a eliminar (para fusión)
 
 
 def _obtener_festivos_colombia(anio: int) -> List[str]:
@@ -822,10 +823,25 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
     Guarda cada planilla como un documento independiente en pedidos_medical (como libros).
     """
     try:
+        logger.info(f"=== GUARDAR BÚSQUEDA ===")
+        logger.info(f"Usuario: {request.usuario}")
+        logger.info(f"Perfil: {request.perfil}")
+        logger.info(f"Planillas buscadas: {request.planillas_buscadas}")
+        logger.info(f"Cantidad de resultados: {len(request.resultados_consolidados)}")
+
+        # ELIMINAR planillas que se indicaron (para fusión)
+        if request.planillas_a_eliminar and len(request.planillas_a_eliminar) > 0:
+            logger.info(f"Planillas a eliminar: {request.planillas_a_eliminar}")
+            resultado_delete = coleccion_pedidos_medical.delete_many({
+                "planilla": {"$in": request.planillas_a_eliminar}
+            })
+            logger.info(f"Eliminadas {resultado_delete.deleted_count} planillas de MongoDB")
+
         fecha_creacion = datetime.now()
 
         # Guardar cada resultado como un documento independiente
         for resultado in request.resultados_consolidados:
+            logger.info(f"Procesando planilla: {resultado.get('planilla')}")
             planilla_doc = {
                 "usuario_registro": request.usuario,  # Quien guardó (auditoría)
                 "perfil": request.perfil,
@@ -845,6 +861,10 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "tarifa_calculada": resultado.get("tarifa_calculada", 0),
                 "tipo_vehiculo": resultado.get("tipo_vehiculo"),
                 "total_solicitado": resultado.get("total_solicitado", 0),
+                "cantidad_destinos": resultado.get("cantidad_destinos", 0),
+                "municipios_destino_lista": resultado.get("municipios_destino_lista", "-"),
+                "municipios_con_pedidos": resultado.get("municipios_con_pedidos", {}),
+                "fusion_info": resultado.get("fusion_info"),  # Historial de fusión
                 "tarifa_base": resultado.get("tarifa_base"),
                 "requiere_descargue": resultado.get("requiere_descargue", "NO"),
                 "punto_adicional": resultado.get("punto_adicional", False),

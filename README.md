@@ -58,6 +58,20 @@ API REST para el sistema de gestión de pedidos y pacientes Medical Care.
   - **Timeout**: 5 minutos para consultas largas
   - **Proxy**: Configuración opcional vía variable de entorno `VULCANO_PROXY_URL`
 - `GET /test-connection` - Prueba de conexión con Siscore
+- `POST /consultar-tarifa` - Consulta tarifa según ruta y tipo de vehículo
+- `POST /guardar-solicitud` - Guarda solicitud en `solicitud_veh_medical`
+- `POST /enviar-tramite` - Envía a `tramite_fmc`
+- `GET /obtener-solicitudes-pendientes` - Obtiene solicitudes sin enviar (filtrado por usuario/perfil)
+- `POST /guardar-busqueda` - Guarda planillas en `pedidos_medical`
+- `GET /obtener-resultados-recientes` - Obtiene todas las planillas guardadas
+- `PUT /actualizar-planilla-pedidos` - Actualiza planilla en `solicitud_veh_medical`
+
+### Causales (`/causales`)
+- `GET /causales` - Obtiene causales activas para dropdown de fusión
+- `GET /causales/todas` - Obtiene todas las causales (activas e inactivas) - solo admin
+- `POST /causales` - Crea nueva causal de fusión
+- `PUT /causales/{id}` - Actualiza causal (nombre, activo/inactivo)
+- `POST /causales/inicializar` - Inicializa causales por defecto si no existen
 
 ### Sync V3 (`/sync-v3`)
 - `POST /recalcular` - Recalcular cruce completo
