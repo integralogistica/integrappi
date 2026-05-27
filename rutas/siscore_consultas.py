@@ -1091,23 +1091,41 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         fusiones_por_regional = {}  # {regional: [resultados_fusionados]}
 
         for resultado in request.resultados_consolidados:
-            # Obtener regional prioritizando centro_distribucion, luego centro_costo, luego regional
-            regional = resultado.get("regional") or resultado.get("centro_distribucion") or resultado.get("centro_costo") or "TODOS"
+            # Obtener regional prioritizando:
+            # 1. Regional del resultado (que no sea '-' ni 'TODOS' ni vacía)
+            # 2. Centro de distribución del resultado (que no sea '-' ni 'TODOS' ni vacío)
+            # 3. Centro de costo del resultado
+            # 4. Centro de distribución del USUARIO (fallback)
+            regional_resultado = resultado.get("regional") or resultado.get("centro_distribucion") or resultado.get("centro_costo")
+
+            # Si la regional del resultado es inválida ('-', 'TODOS', vacía), usar la del usuario
+            if not regional_resultado or regional_resultado in ['-', 'TODOS', '']:
+                regional_calculada = request.centro_distribucion or "TODOS"
+            else:
+                regional_calculada = regional_resultado
 
             # Limpiar y normalizar el nombre de la regional
-            regional = regional.upper().strip()
+            regional_calculada = regional_calculada.upper().strip()
+
+            # Si aún queda en inválida, usar TODOS
+            if regional_calculada in ['-', 'TODOS', '']:
+                regional_calculada = "TODOS"
+
+            # Guardar la regional calculada en el resultado para usarla después
+            resultado["regional_calculada"] = regional_calculada
+
             fusion_info = resultado.get("fusion_info")
 
             if fusion_info and fusion_info.get("es_fusionada"):
                 # Es una planilla fusionada
-                if regional not in fusiones_por_regional:
-                    fusiones_por_regional[regional] = []
-                fusiones_por_regional[regional].append(resultado)
+                if regional_calculada not in fusiones_por_regional:
+                    fusiones_por_regional[regional_calculada] = []
+                fusiones_por_regional[regional_calculada].append(resultado)
             else:
                 # Es una planilla individual
-                if regional not in resultados_por_regional:
-                    resultados_por_regional[regional] = []
-                resultados_por_regional[regional].append(resultado)
+                if regional_calculada not in resultados_por_regional:
+                    resultados_por_regional[regional_calculada] = []
+                resultados_por_regional[regional_calculada].append(resultado)
 
         # Procesar fusiones primero (para asignar un solo número base con letras)
         fusiones_procesadas = []  # [(resultado, consecutivo_info), ...]
@@ -1265,7 +1283,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "cliente_origen": resultado.get("cliente_origen", "-"),
                 "municipio_destino": resultado.get("municipio_destino", "-"),
                 "departamento_destino": resultado.get("departamento_destino", "-"),
-                "regional": resultado.get("regional"),
+                "regional": resultado.get("regional_calculada"),  # Usar la regional calculada con fallback
                 "centro_costo": resultado.get("centro_costo"),
                 "tarifa_calculada": resultado.get("tarifa_calculada", 0),
                 "tipo_vehiculo": resultado.get("tipo_vehiculo"),
@@ -1738,6 +1756,7 @@ class EliminarPlanillaRequest(BaseModel):
 async def eliminar_planilla(request: EliminarPlanillaRequest):
     """
     Elimina una planilla de la colección pedidos_medical.
+    Si es una planilla fusionada, también elimina las planillas originales marcadas como fusionada: true.
     Incluye trazabilidad de quién eliminó.
     """
     try:
@@ -1751,7 +1770,32 @@ async def eliminar_planilla(request: EliminarPlanillaRequest):
             logger.warning(f"[ELIMINAR PLANILLA] No se encontró planilla: {request.planilla}")
             raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada en pedidos_medical")
 
-        # Eliminar la planilla
+        # Verificar si es una planilla fusionada
+        fusion_info = doc_actual.get("fusion_info")
+        es_fusionada = fusion_info and fusion_info.get("es_fusionada") == True
+
+        planillas_eliminadas = [request.planilla]
+
+        # Si es una planilla fusionada, eliminar también las planillas originales marcadas como fusionada: true
+        if es_fusionada:
+            logger.info(f"[ELIMINAR PLANILLA] La planilla {request.planilla} es una fusión, eliminando originales también")
+
+            # Buscar planillas originales marcadas como fusionada: true que apuntan a esta planilla
+            planillas_originales_fusionadas = list(coleccion_pedidos_medical.find({
+                "fusionada": True,
+                "fusionada_en.planilla_fusionada": request.planilla
+            }))
+
+            logger.info(f"[ELIMINAR PLANILLA] Encontradas {len(planillas_originales_fusionadas)} planillas originales fusionadas")
+
+            # Eliminar cada planilla original
+            for doc_original in planillas_originales_fusionadas:
+                planilla_original = doc_original.get("planilla")
+                logger.info(f"[ELIMINAR PLANILLA] Eliminando planilla original fusionada: {planilla_original}")
+                coleccion_pedidos_medical.delete_one({"planilla": planilla_original})
+                planillas_eliminadas.append(planilla_original)
+
+        # Eliminar la planilla principal
         resultado = coleccion_pedidos_medical.delete_one({"planilla": request.planilla})
 
         if resultado.deleted_count == 0:
@@ -1759,12 +1803,17 @@ async def eliminar_planilla(request: EliminarPlanillaRequest):
             raise HTTPException(status_code=500, detail=f"No se pudo eliminar la planilla {request.planilla}")
 
         logger.info(f"[ELIMINAR PLANILLA] Planilla {request.planilla} eliminada por {request.usuario}")
+        if es_fusionada:
+            logger.info(f"[ELIMINAR PLANILLA] Total planillas eliminadas: {len(planillas_eliminadas)} - {planillas_eliminadas}")
 
         return {
             "mensaje": f"Planilla {request.planilla} eliminada exitosamente",
             "planilla": request.planilla,
             "deleted_count": resultado.deleted_count,
-            "eliminado_por": request.usuario
+            "eliminado_por": request.usuario,
+            "es_fusionada": es_fusionada,
+            "planillas_eliminadas": planillas_eliminadas,
+            "total_eliminadas": len(planillas_eliminadas)
         }
 
     except HTTPException:
