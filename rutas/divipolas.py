@@ -5,8 +5,11 @@ from pymongo import MongoClient
 from pydantic import BaseModel
 from typing import List
 import os
+import logging
 import pandas as pd
 from io import StringIO, BytesIO
+
+logger = logging.getLogger("divipolas")
 
 # Conexión MongoDB
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
@@ -35,6 +38,12 @@ ruta_divipolas = APIRouter(
 class Divipola(BaseModel):
     divipola: str
     ruta: str
+    latitud: float
+    longitud: float
+    poblacion: str
+    departamento: str
+    ubicacion_descargue: str
+    direccion_descargue: str
 
 # Modelo de salida
 def modelo_divipola(d: dict) -> dict:
@@ -42,6 +51,12 @@ def modelo_divipola(d: dict) -> dict:
         "id": str(d.get("_id", "")),
         "divipola": d.get("divipola", ""),
         "ruta": d.get("ruta", ""),
+        "latitud": d.get("latitud", 0),
+        "longitud": d.get("longitud", 0),
+        "poblacion": d.get("poblacion", ""),
+        "departamento": d.get("departamento", ""),
+        "ubicacion_descargue": d.get("ubicacion_descargue", ""),
+        "direccion_descargue": d.get("direccion_descargue", ""),
     }
 
 # Listar todas las divipolas
@@ -55,6 +70,12 @@ async def obtener_divipolas():
 async def crear_divipola(data: Divipola):
     divipola = data.divipola.strip()
 
+    if data.longitud >= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="La longitud debe ser negativa (ej: -74.06). Colombia está en el hemisferio occidental."
+        )
+
     if coleccion_divipolas.find_one({"divipola": divipola}):
         raise HTTPException(
             status_code=409,
@@ -63,7 +84,13 @@ async def crear_divipola(data: Divipola):
 
     nuevo = {
         "divipola": divipola,
-        "ruta": data.ruta.strip()
+        "ruta": data.ruta.strip(),
+        "latitud": data.latitud,
+        "longitud": data.longitud,
+        "poblacion": data.poblacion.strip(),
+        "departamento": data.departamento.strip(),
+        "ubicacion_descargue": data.ubicacion_descargue.strip(),
+        "direccion_descargue": data.direccion_descargue.strip()
     }
 
     result = coleccion_divipolas.insert_one(nuevo)
@@ -78,9 +105,21 @@ async def actualizar_divipola(divipola_id: str, data: Divipola):
     if not ObjectId.is_valid(divipola_id):
         raise HTTPException(status_code=400, detail="ID inválido")
 
+    if data.longitud >= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="La longitud debe ser negativa (ej: -74.06). Colombia está en el hemisferio occidental."
+        )
+
     actualiza = {
         "divipola": data.divipola.strip(),
-        "ruta": data.ruta.strip()
+        "ruta": data.ruta.strip(),
+        "latitud": data.latitud,
+        "longitud": data.longitud,
+        "poblacion": data.poblacion.strip(),
+        "departamento": data.departamento.strip(),
+        "ubicacion_descargue": data.ubicacion_descargue.strip(),
+        "direccion_descargue": data.direccion_descargue.strip()
     }
 
     result = coleccion_divipolas.update_one(
@@ -120,11 +159,20 @@ async def cargar_divipolas_masivo(archivo: UploadFile = File(...)):
 
         if nombre_archivo.endswith(('.xlsx', '.xls')):
             logger.info("Leyendo archivo Excel...")
-            df = pd.read_excel(archivo.file, engine='openpyxl' if nombre_archivo.endswith('.xlsx') else 'xlrd')
+            df = pd.read_excel(
+                archivo.file,
+                engine='openpyxl' if nombre_archivo.endswith('.xlsx') else 'xlrd',
+                dtype={"DIVIPOLA": str, "divipola": str, "Divipola": str}
+            )
         else:
             logger.info("Leyendo archivo CSV...")
             contenido = await archivo.read()
-            df = pd.read_csv(StringIO(contenido.decode('utf-8')), sep=',', on_bad_lines='skip')
+            df = pd.read_csv(
+                StringIO(contenido.decode('utf-8')),
+                sep=',',
+                on_bad_lines='skip',
+                dtype={"DIVIPOLA": str, "divipola": str, "Divipola": str}
+            )
 
         logger.info(f"Filas leídas: {len(df)}")
         logger.info(f"Columnas: {list(df.columns)}")
@@ -133,15 +181,29 @@ async def cargar_divipolas_masivo(archivo: UploadFile = File(...)):
         df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
         logger.info(f"Columnas normalizadas: {list(df.columns)}")
 
+        # Asegurar que DIVIPOLA sea texto puro (sin .0 de float ni ceros perdidos)
+        df["DIVIPOLA"] = df["DIVIPOLA"].apply(lambda x: str(int(float(x))) if str(x).endswith(".0") else str(x).strip())
+
         # Verificar columnas requeridas
-        columnas_requeridas = {"DIVIPOLA", "RUTA"}
+        columnas_requeridas = {"DIVIPOLA", "RUTA", "LATITUD", "LONGITUD", "POBLACION", "DEPARTAMENTO", "UBICACION_DESCARGUE", "DIRECCION_DESCARGUE"}
 
         if not columnas_requeridas.issubset(df.columns):
             faltantes = columnas_requeridas - set(df.columns)
             logger.error(f"Faltan columnas: {faltantes}")
             raise HTTPException(
                 status_code=400,
-                detail=f"El archivo debe tener las columnas: {', '.join(columnas_requeridas)}. Faltan: {', '.join(faltantes)}"
+                detail=f"El archivo debe tener las columnas: {', '.join(sorted(columnas_requeridas))}. Faltan: {', '.join(sorted(faltantes))}"
+            )
+
+        # Validar que LONGITUD sea negativa en todas las filas
+        df["LONGITUD"] = pd.to_numeric(df["LONGITUD"], errors="coerce")
+        df["LATITUD"] = pd.to_numeric(df["LATITUD"], errors="coerce")
+        filas_longitud_invalida = df[df["LONGITUD"] >= 0].index.tolist()
+        if filas_longitud_invalida:
+            detalle = ", ".join([f"Fila {idx + 2}" for idx in filas_longitud_invalida[:10]])
+            raise HTTPException(
+                status_code=422,
+                detail=f"La longitud debe ser negativa. Filas con longitud positiva o cero: {detalle}"
             )
 
         # Verificar duplicados dentro del archivo
@@ -174,33 +236,31 @@ async def cargar_divipolas_masivo(archivo: UploadFile = File(...)):
                 detail=f"Las siguientes divipolas ya existen en el sistema:\n" + "\n".join(duplicados_db[:10])
             )
 
-        registros_exitosos = 0
-        registros_errores = 0
+        logger.info(f"Preparando {len(df)} registros para inserción masiva...")
 
-        logger.info(f"Insertando {len(df)} registros...")
+        registros = []
         for _, row in df.iterrows():
-            try:
-                registro = {
-                    "divipola": str(row["DIVIPOLA"]).strip(),
-                    "ruta": str(row["RUTA"]).strip()
-                }
+            registros.append({
+                "divipola": str(row["DIVIPOLA"]).strip(),
+                "ruta": str(row["RUTA"]).strip(),
+                "latitud": float(row["LATITUD"]),
+                "longitud": float(row["LONGITUD"]),
+                "poblacion": str(row["POBLACION"]).strip(),
+                "departamento": str(row["DEPARTAMENTO"]).strip(),
+                "ubicacion_descargue": str(row["UBICACION_DESCARGUE"]).strip(),
+                "direccion_descargue": str(row["DIRECCION_DESCARGUE"]).strip()
+            })
 
-                coleccion_divipolas.insert_one(registro)
-                registros_exitosos += 1
+        logger.info(f"Insertando {len(registros)} registros en una sola operación...")
+        resultado = coleccion_divipolas.insert_many(registros)
+        registros_exitosos = len(resultado.inserted_ids)
 
-            except Exception as e:
-                logger.error(f"Error insertando registro: {e}")
-                if "duplicate key" in str(e):
-                    registros_errores += 1
-                else:
-                    registros_errores += 1
-
-        logger.info(f"Carga finalizada: {registros_exitosos} exitosos, {registros_errores} errores")
+        logger.info(f"Carga finalizada: {registros_exitosos} registros insertados")
 
         return {
-            "mensaje": f"Carga completada. {registros_exitosos} registros procesados exitosamente, {registros_errores} con errores",
+            "mensaje": f"Carga completada. {registros_exitosos} registros procesados exitosamente.",
             "exitosos": registros_exitosos,
-            "errores": registros_errores
+            "errores": 0
         }
 
     except HTTPException:
@@ -218,7 +278,13 @@ async def descargar_plantilla():
 
     columnas = {
         "DIVIPOLA": [],
-        "RUTA": []
+        "RUTA": [],
+        "LATITUD": [],
+        "LONGITUD": [],
+        "POBLACION": [],
+        "DEPARTAMENTO": [],
+        "UBICACION DESCARGUE": [],
+        "DIRECCION DESCARGUE": []
     }
 
     df = pd.DataFrame(columnas)
@@ -261,7 +327,13 @@ async def descargar_excel():
     for doc in docs:
         datos.append({
             "DIVIPOLA": doc.get("divipola", ""),
-            "RUTA": doc.get("ruta", "")
+            "RUTA": doc.get("ruta", ""),
+            "LATITUD": doc.get("latitud", 0),
+            "LONGITUD": doc.get("longitud", 0),
+            "POBLACION": doc.get("poblacion", ""),
+            "DEPARTAMENTO": doc.get("departamento", ""),
+            "UBICACION DESCARGUE": doc.get("ubicacion_descargue", ""),
+            "DIRECCION DESCARGUE": doc.get("direccion_descargue", "")
         })
 
     df = pd.DataFrame(datos)

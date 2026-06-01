@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional
 import httpx
@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+import pandas as pd
 from pymongo import MongoClient
 
 load_dotenv()
@@ -22,6 +23,7 @@ coleccion_tramites = db["tramite_fmc"]
 coleccion_tarifas = db["fletes_rutas_fmc"]
 coleccion_divipolas = db["divipolas"]
 coleccion_pedidos_medical = db["pedidos_medical"]
+coleccion_historico = db["pedidos_medical_historico"]
 coleccion_causales = db["causales"]
 
 # Configuración WS Siscore V3 (misma que en pedidos_v3)
@@ -126,6 +128,110 @@ class ActualizarEstadoPlanillaRequest(BaseModel):
     planilla: str
     estado: str  # 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
     aprobado_por: str  # Usuario que aprueba
+
+
+# ============= ENDPOINT IMPORTAR VULCANO =============
+
+@router.post("/importar-vulcano")
+async def importar_vulcano(archivo: UploadFile = File(...)):
+    """
+    Importa pedidos Vulcano desde un Excel con columnas CONSECUTIVO y PEDIDO.
+    Busca planillas en pedidos_medical por consecutivo, agrega pedido_vulcano,
+    mueve el documento a pedidos_medical_historico y lo elimina de pedidos_medical.
+    Solo accesible para ADMIN y ANALISTA (validar en frontend).
+    """
+    try:
+        logger.info(f"=== IMPORTAR VULCANO ===")
+        logger.info(f"Archivo recibido: {archivo.filename}")
+
+        nombre_archivo = archivo.filename.lower()
+
+        if nombre_archivo.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(
+                archivo.file,
+                engine='openpyxl' if nombre_archivo.endswith('.xlsx') else 'xlrd',
+                dtype=str
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Solo se aceptan archivos Excel (.xlsx, .xls)")
+
+        logger.info(f"Filas leídas: {len(df)}")
+
+        # Normalizar columnas
+        df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
+        logger.info(f"Columnas normalizadas: {list(df.columns)}")
+
+        # Validar columnas requeridas
+        columnas_requeridas = {"CONSECUTIVO", "PEDIDO"}
+        if not columnas_requeridas.issubset(df.columns):
+            faltantes = columnas_requeridas - set(df.columns)
+            raise HTTPException(
+                status_code=400,
+                detail=f"El archivo debe tener las columnas: CONSECUTIVO, PEDIDO. Faltan: {', '.join(sorted(faltantes))}"
+            )
+
+        # Limpiar datos
+        df["CONSECUTIVO"] = df["CONSECUTIVO"].astype(str).str.strip()
+        df["PEDIDO"] = df["PEDIDO"].astype(str).str.strip()
+
+        exitosos = 0
+        no_encontrados = 0
+        errores = 0
+        detalles_no_encontrados = []
+
+        for _, row in df.iterrows():
+            consecutivo = row["CONSECUTIVO"]
+            pedido = row["PEDIDO"]
+
+            if not consecutivo or consecutivo == 'nan' or consecutivo == '':
+                continue
+
+            # Buscar planilla por consecutivo
+            doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
+
+            if not doc:
+                no_encontrados += 1
+                detalles_no_encontrados.append(consecutivo)
+                logger.warning(f"Consecutivo no encontrado: {consecutivo}")
+                continue
+
+            try:
+                # Agregar campo pedido_vulcano
+                doc["pedido_vulcano"] = pedido
+                doc["fecha_movimiento_historico"] = datetime.now()
+
+                # Copiar a historico
+                coleccion_historico.insert_one(doc)
+
+                # Eliminar de pedidos_medical
+                coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+
+                exitosos += 1
+                logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+
+            except Exception as e:
+                errores += 1
+                logger.error(f"Error procesando consecutivo {consecutivo}: {str(e)}")
+
+        logger.info(f"Importación Vulcano finalizada: {exitosos} exitosos, {no_encontrados} no encontrados, {errores} errores")
+
+        resultado = {
+            "mensaje": f"Importación completada. {exitosos} planillas movidas a histórico.",
+            "exitosos": exitosos,
+            "no_encontrados": no_encontrados,
+            "errores": errores
+        }
+
+        if detalles_no_encontrados:
+            resultado["consecutivos_no_encontrados"] = detalles_no_encontrados[:20]
+
+        return resultado
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al importar Vulcano: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
 
 
 # Modelos para gestión de causales
@@ -484,18 +590,6 @@ def _determinar_tipo_vehiculo(peso_real: float) -> str:
 
 
 def _obtener_tarifa_ruta(centro_costo: str, ruta: str, tipo_vehiculo: str) -> Optional[float]:
-    """
-    Obtiene la tarifa de fletes_rutas_fmc según ruta y tipo_vehículo.
-    Cada ruta es única, no se busca por centro_costo.
-
-    Args:
-        centro_costo: Centro de costo (ej: CO05) - NO USADO, solo por compatibilidad
-        ruta: Código de ruta (ej: BOG-MED)
-        tipo_vehiculo: Tipo de vehículo (CARRY, NHR, TURBO, NIES, SENCILLO, PATINETA, TRACTOMULA)
-
-    Returns:
-        Valor de la tarifa o None si no se encuentra
-    """
     try:
         tarifa = coleccion_tarifas.find_one({
             "ruta": ruta.upper()
@@ -869,6 +963,7 @@ async def guardar_solicitud(request: GuardarSolicitudRequest):
             "tarifa_calculada": request.tarifa_calculada,
             "tipo_vehiculo": request.tipo_vehiculo,
             "total_solicitado": request.total_solicitado,
+            "diferencia": request.total_solicitado - request.tarifa_calculada,
             "tarifa_base": request.tarifa_base,
             "requiere_descargue": request.requiere_descargue,
             "punto_adicional": request.punto_adicional,
@@ -927,6 +1022,7 @@ async def actualizar_solicitud(request: ActualizarSolicitudRequest):
             "tarifa_calculada": request.tarifa_calculada,
             "tipo_vehiculo": request.tipo_vehiculo,
             "total_solicitado": request.total_solicitado,
+            "diferencia": request.total_solicitado - request.tarifa_calculada,
             "tarifa_base": request.tarifa_base,
             "requiere_descargue": request.requiere_descargue,
             "punto_adicional": request.punto_adicional,
@@ -1025,16 +1121,7 @@ async def enviar_tramite(request: EnviarTramiteRequest):
 
 @router.post("/consultar-tarifa")
 async def consultar_tarifa(request: ConsultarTarifaRequest):
-    """
-    Consulta la tarifa de fletes_rutas_fmc según centro_costo, ruta y peso_real.
-    Determina el tipo de vehículo según el peso y devuelve la tarifa correspondiente.
 
-    Args:
-        request: Objeto con centro_costo, ruta y peso_real
-
-    Returns:
-        Diccionario con tipo_vehiculo y tarifa_calculada
-    """
     try:
         # Determinar tipo de vehículo según peso
         tipo_vehiculo = _determinar_tipo_vehiculo(request.peso_real)
@@ -1288,6 +1375,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "tarifa_calculada": resultado.get("tarifa_calculada", 0),
                 "tipo_vehiculo": resultado.get("tipo_vehiculo"),
                 "total_solicitado": resultado.get("total_solicitado", 0),
+                "diferencia": resultado.get("total_solicitado", 0) - resultado.get("tarifa_calculada", 0),
                 "cantidad_destinos": resultado.get("cantidad_destinos", 0),
                 "municipios_destino_lista": resultado.get("municipios_destino_lista", "-"),
                 "municipios_con_pedidos": resultado.get("municipios_con_pedidos", {}),
@@ -1599,6 +1687,10 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             }
             historial_cambios.append(nuevo_historial)
 
+        # Calcular diferencia: total_solicitado - tarifa_calculada (del documento existente)
+        tarifa_calculada_actual = doc_actual.get("tarifa_calculada", 0) or 0
+        diferencia = (request.total_solicitado or 0) - tarifa_calculada_actual
+
         # Campos a actualizar
         campos_actualizar = {
             "tarifa_base": request.tarifa_base,
@@ -1609,6 +1701,7 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "placa": request.placa,
             "tipo_veh_sicetac": request.tipo_veh_sicetac,
             "total_solicitado": request.total_solicitado,
+            "diferencia": diferencia,
             "causal": request.causal,
             # Trazabilidad de modificación
             "usuario_modificacion": request.usuario_modificacion,
@@ -1946,6 +2039,23 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         # Regional del usuario
         regional_usuario = request.centro_distribucion or "FUNZA"
 
+        # Pre-cargar divipolas para lookup de ubicación y dirección de descargue
+        divipolas_lookup = {}
+        for div_doc in coleccion_divipolas.find():
+            divipolas_lookup[div_doc.get("divipola", "")] = {
+                "ubicacion_descargue": div_doc.get("ubicacion_descargue", ""),
+                "direccion_descargue": div_doc.get("direccion_descargue", ""),
+            }
+        # También indexar por nombre de población (normalizado)
+        divipolas_por_poblacion = {}
+        for div_doc in coleccion_divipolas.find():
+            pob = div_doc.get("poblacion", "").strip().upper()
+            if pob and pob not in divipolas_por_poblacion:
+                divipolas_por_poblacion[pob] = {
+                    "ubicacion_descargue": div_doc.get("ubicacion_descargue", ""),
+                    "direccion_descargue": div_doc.get("direccion_descargue", ""),
+                }
+
         # Escribir datos NUEVO FORMATO
         row_num = 2
         for doc in planillas_db:
@@ -1970,7 +2080,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                 observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
 
                 # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
-                centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA{cliente_origen}"
+                centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
 
                 # Toneladas: Peso Real / 1000 con 1 decimal
                 try:
@@ -1987,10 +2097,38 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     valor_unitario = 0
 
                 # PUNTO ADICIONAL: si hay valor en punto_adicional
-                punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else ""
+                punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else 0
 
                 # CARGUE-DESCARGUE PER JURIDICA: si hay valor en requiere_descargue
-                cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else ""
+                cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else 0
+
+                # Buscar Ubicación y Dirección de Descargue desde la colección divipolas
+                # Usar municipio_destino (viene de "Municipio Principal" del Siscore)
+                ubicacion_descargue = ""
+                direccion_descargue = ""
+                if municipio_destino:
+                    # Buscar por código divipola primero, luego por nombre de población
+                    lookup = divipolas_lookup.get(municipio_destino.strip())
+                    if not lookup:
+                        lookup = divipolas_por_poblacion.get(municipio_destino.strip().upper())
+                    if lookup:
+                        ubicacion_descargue = lookup.get("ubicacion_descargue", "")
+                        direccion_descargue = lookup.get("direccion_descargue", "")
+
+                # Mapeo de regional a ubicación y dirección de cargue
+                _cargue_map = {
+                    "FUNZA":        ("FME_BODEGA_INTEGRA_FUNZA",       "PARQUE INDUSTRIAL SAN DIEGO"),
+                    "GIRARDOTA":    ("FME_BODEGA_INTEGRA_GIRARDOTA",   "parque industrial del norte bodega 119"),
+                    "BARRANQUILLA": ("FME_BODEGA_INTEGRA_GALAPA",      "GALAPA"),
+                    "CALI":         ("FME_BODEGA_INTEGRA_YUMBO",       "Carrera 31 a #15-320"),
+                    "BUCARAMANGA":  ("FME_BODEGA_INTEGRA_BUCARAMANGA", "Parque industrial provincia de soto 1"),
+                }
+                _cargue = _cargue_map.get(
+                    regional_doc.upper().strip(),
+                    ("FME_BODEGA_INTEGRA_FUNZA", "PARQUE INDUSTRIAL SAN DIEGO")
+                )
+                ubicacion_cargue = _cargue[0]
+                direccion_cargue = _cargue[1]
 
                 datos = [
                     consecutivo,                                      # Consecutivo
@@ -2004,10 +2142,10 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     codigo_pedido,                                    # Pedido cliente
                     codigo_pedido,                                    # Guía
                     centro_costo,                                     # CENTRO COSTO
-                    "",                                               # Ubicacion Cargue (vacío)
-                    "INTEGRA_FUNZA",                                  # Direccion cargue
-                    "",                                               # Ubicacion Descargue (vacío)
-                    "INTEGRA_FUNZA",                                  # Direccion Descargue
+                    ubicacion_cargue,                                 # Ubicacion Cargue (según regional)
+                    direccion_cargue,                                 # Direccion cargue (según regional)
+                    ubicacion_descargue,                              # Ubicacion Descargue (desde divipolas)
+                    direccion_descargue,                              # Direccion Descargue (desde divipolas)
                     "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",  # Producto
                     "NORMAL",                                         # Naturaleza
                     mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
@@ -2071,24 +2209,369 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         )
 
 
-@router.get("/obtener-resultados-recientes")
-async def obtener_resultados_recientes(limite: int = 100):
+# ============= ENDPOINTS HISTÓRICO PEDIDOS =============
+
+@router.get("/historico")
+async def obtener_historico(
+    fecha_inicio: str = "",
+    fecha_fin: str = "",
+    perfil: str = "",
+    centro_distribucion: str = ""
+):
     """
-    Obtiene todos los planillas de pedidos_medical (cada documento es una planilla).
-    Sin filtro por usuario, cualquiera puede consultar.
+    Obtiene planillas del historico (pedidos_medical_historico).
+    Por defecto muestra las de hoy. Filtra por rango de fechas si se proporcionan.
     """
     try:
-        logger.info(f"[OBTENER RESULTADOS] Limite: {limite}")
+        # Filtro de fechas
+        hoy = datetime.now().strftime("%Y-%m-%d")
+        f_inicio = fecha_inicio if fecha_inicio else hoy
+        f_fin = fecha_fin if fecha_fin else hoy
 
-        # Contar total de documentos (excluyendo fusionadas)
-        total_docs = coleccion_pedidos_medical.count_documents({"fusionada": {"$ne": True}})
-        logger.info(f"[OBTENER RESULTADOS] Total documentos en coleccion (excluyendo fusionadas): {total_docs}")
+        # Incluir todo el día final
+        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1)
+        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d")
 
-        # Traer todas las planillas (documentos independientes), ordenadas por fecha reciente
-        # EXCLUYENDO las planillas fusionadas (fusionada: true)
-        planillas = list(coleccion_pedidos_medical.find(
-            {"fusionada": {"$ne": True}}
-        ).sort("fecha_creacion", -1).limit(limite))
+        filtro = {
+            "fecha_movimiento_historico": {
+                "$gte": fecha_inicio_dt,
+                "$lt": fecha_fin_dt
+            }
+        }
+
+        # Filtrar por regional para operativos
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+        if perfil and perfil not in perfiles_globales and centro_distribucion:
+            regional_map = {
+                "BARRANQUILLA": "CO04", "CALI": "CO05", "BUCARAMANGA": "CO06",
+                "FUNZA": "CO07", "MEDELLIN": "CO09"
+            }
+            bodega = regional_map.get(centro_distribucion.upper(), "")
+            if bodega:
+                filtro["centro_costo"] = bodega
+
+        logger.info(f"[HISTORICO] Filtro: {filtro}")
+
+        docs = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
+
+        for doc in docs:
+            doc["_id"] = str(doc["_id"])
+
+        logger.info(f"[HISTORICO] Documentos encontrados: {len(docs)}")
+
+        return {
+            "planillas": docs,
+            "total": len(docs),
+            "fecha_inicio": f_inicio,
+            "fecha_fin": f_fin
+        }
+
+    except Exception as e:
+        logger.error(f"Error al obtener historico: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener historico: {str(e)}")
+
+
+class ExportarHistoricoExcelRequest(BaseModel):
+    """Modelo para exportar historico a Excel con filtros"""
+    fecha_inicio: str
+    fecha_fin: str
+    perfil: str
+    centro_distribucion: Optional[str] = None
+    busqueda: Optional[str] = None
+
+
+@router.post("/historico/exportar-excel")
+async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
+    """
+    Exporta planillas del historico a Excel con los datos directos de MongoDB.
+    Aplica los mismos filtros de fecha, perfil y regional que la vista.
+    """
+    try:
+        from fastapi.responses import Response
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        import io
+
+        logger.info(f"=== EXPORTAR HISTORICO EXCEL ===")
+        logger.info(f"Filtros: {request.fecha_inicio} a {request.fecha_fin}, perfil={request.perfil}, centro={request.centro_distribucion}")
+
+        # Construir filtro de fechas (igual que GET /historico)
+        hoy = datetime.now().strftime("%Y-%m-%d")
+        f_inicio = request.fecha_inicio if request.fecha_inicio else hoy
+        f_fin = request.fecha_fin if request.fecha_fin else hoy
+
+        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1)
+        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d")
+
+        filtro = {
+            "fecha_movimiento_historico": {
+                "$gte": fecha_inicio_dt,
+                "$lt": fecha_fin_dt
+            }
+        }
+
+        # Filtrar por regional para operativos
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+        if request.perfil and request.perfil not in perfiles_globales and request.centro_distribucion:
+            regional_map = {
+                "BARRANQUILLA": "CO04", "CALI": "CO05", "BUCARAMANGA": "CO06",
+                "FUNZA": "CO07", "MEDELLIN": "CO09"
+            }
+            bodega = regional_map.get(request.centro_distribucion.upper(), "")
+            if bodega:
+                filtro["centro_costo"] = bodega
+
+        planillas_db = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
+        logger.info(f"Planillas historico encontradas con filtros: {len(planillas_db)}")
+
+        # Filtro de búsqueda textual si viene
+        if request.busqueda and request.busqueda.strip():
+            termino = request.busqueda.strip().lower()
+            planillas_db = [
+                doc for doc in planillas_db
+                if termino in (doc.get("consecutivo") or "").lower()
+                or termino in (doc.get("planilla") or "").lower()
+                or termino in (doc.get("pedido_vulcano") or "").lower()
+                or termino in (doc.get("ruta") or "").lower()
+                or termino in (doc.get("municipio_destino") or "").lower()
+                or termino in (doc.get("regional") or "").lower()
+            ]
+            logger.info(f"Después de filtro búsqueda '{request.busqueda}': {len(planillas_db)} registros")
+
+        if not planillas_db:
+            raise HTTPException(status_code=404, detail="No se encontraron planillas en historico con los filtros indicados")
+
+        # --- Generar Excel limpio con datos directos de MongoDB ---
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Historico Pedidos"
+
+        columnas = [
+            "Pedido Vulcano", "Consecutivo", "Estado", "Regional", "Planilla", "Placa",
+            "Piezas", "Peso Real", "Cant. Pedidos", "Ruta", "Tipo Vehículo",
+            "Flete Teórico", "Flete Solicitado", "Vehículo SICETAC",
+            "Descargue", "Punto Adic.", "Desvío", "Aforo",
+            "Total Solicitado", "Diferencia", "Municipio Destino", "Cliente Origen",
+            "Cant. Destinos", "Código Pedido", "Observaciones", "Fecha Movimiento"
+        ]
+
+        # Estilos
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        data_alignment = Alignment(horizontal="left", vertical="center")
+        number_alignment = Alignment(horizontal="right", vertical="center")
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin')
+        )
+
+        # Anchos por columna
+        anchos = {
+            "Pedido Vulcano": 16, "Consecutivo": 22, "Estado": 18, "Regional": 16, "Planilla": 14,
+            "Placa": 12, "Piezas": 10, "Peso Real": 12, "Cant. Pedidos": 12, "Ruta": 18,
+            "Tipo Vehículo": 14, "Flete Teórico": 16, "Flete Solicitado": 16,
+            "Vehículo SICETAC": 16, "Descargue": 14, "Punto Adic.": 14,
+            "Desvío": 14, "Aforo": 14, "Total Solicitado": 16, "Diferencia": 16,
+            "Municipio Destino": 20, "Cliente Origen": 22,
+            "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25, "Fecha Movimiento": 20
+        }
+
+        # Cabeceras
+        for col_idx, columna in enumerate(columnas, 1):
+            cell = ws.cell(row=1, column=col_idx, value=columna)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+            ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else chr(64 + (col_idx - 1) // 26) + chr(65 + (col_idx - 1) % 26)].width = anchos.get(columna, 16)
+
+        # Colores para estados
+        estado_fills = {
+            "APROBADO": PatternFill(start_color="dcfce7", end_color="dcfce7", fill_type="solid"),
+            "REQUIERE_APROBACION_COORDINADOR": PatternFill(start_color="fef3c7", end_color="fef3c7", fill_type="solid"),
+            "REQUIERE_APROBACION_CONTROL": PatternFill(start_color="fee2e2", end_color="fee2e2", fill_type="solid"),
+            "PREAPROBADO": PatternFill(start_color="e0f2fe", end_color="e0f2fe", fill_type="solid"),
+        }
+        estado_fonts = {
+            "APROBADO": Font(bold=True, color="15803d", size=9),
+            "REQUIERE_APROBACION_COORDINADOR": Font(bold=True, color="b45309", size=9),
+            "REQUIERE_APROBACION_CONTROL": Font(bold=True, color="dc2626", size=9),
+            "PREAPROBADO": Font(bold=True, color="0369a1", size=9),
+        }
+        money_font = Font(bold=True, color="005f56", size=10)
+        diff_pos_font = Font(bold=True, color="b91c1c", size=10)
+        diff_neg_font = Font(bold=True, color="15803d", size=10)
+        even_fill = PatternFill(start_color="f8fffe", end_color="f8fffe", fill_type="solid")
+
+        def fmt_recargo(val, fallback=0):
+            if isinstance(val, (int, float)) and val != 0:
+                return val
+            if val is True or val == "SI":
+                return fallback
+            return 0
+
+        def fmt_fecha(val):
+            if not val:
+                return ""
+            if hasattr(val, "strftime"):
+                return val.strftime("%Y-%m-%d %H:%M")
+            return str(val)
+
+        # Datos
+        row_num = 2
+        for i, doc in enumerate(planillas_db):
+            try:
+                estado = doc.get("estado", "PREAPROBADO")
+                diferencia = doc.get("diferencia", 0) or 0
+
+                valores = [
+                    doc.get("pedido_vulcano", ""),
+                    doc.get("consecutivo", ""),
+                    estado,
+                    doc.get("regional", ""),
+                    doc.get("planilla", ""),
+                    doc.get("placa", ""),
+                    doc.get("piezas", 0),
+                    doc.get("peso_real", 0),
+                    doc.get("cantidad_pedidos", ""),
+                    doc.get("ruta", ""),
+                    doc.get("tipo_vehiculo", ""),
+                    doc.get("tarifa_calculada", 0),
+                    doc.get("tarifa_base") or doc.get("tarifa_calculada", 0),
+                    doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo", ""),
+                    fmt_recargo(doc.get("requiere_descargue"), 50000),
+                    fmt_recargo(doc.get("punto_adicional"), 80000),
+                    fmt_recargo(doc.get("desvio"), 100000),
+                    fmt_recargo(doc.get("aforo"), 0),
+                    doc.get("total_solicitado", 0),
+                    diferencia,
+                    doc.get("municipio_destino", ""),
+                    doc.get("cliente_origen", ""),
+                    doc.get("cantidad_destinos", ""),
+                    doc.get("codigo_pedido", ""),
+                    doc.get("causal", ""),
+                    fmt_fecha(doc.get("fecha_movimiento_historico")),
+                ]
+
+                row_fill = even_fill if i % 2 == 0 else None
+
+                for col_idx, valor in enumerate(valores, 1):
+                    cell = ws.cell(row=row_num, column=col_idx, value=valor)
+                    cell.border = thin_border
+
+                    if row_fill:
+                        cell.fill = row_fill
+
+                    col_name = columnas[col_idx - 1]
+
+                    # Columna Estado - badge
+                    if col_name == "Estado":
+                        cell.fill = estado_fills.get(estado, estado_fills["PREAPROBADO"])
+                        cell.font = estado_fonts.get(estado, estado_fonts["PREAPROBADO"])
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                        estado_label = {
+                            "REQUIERE_APROBACION_COORDINADOR": "COORDINADOR",
+                            "REQUIERE_APROBACION_CONTROL": "CONTROL",
+                        }.get(estado, estado)
+                        cell.value = estado_label
+
+                    # Columnas monetarias
+                    elif col_name in ("Flete Teórico", "Flete Solicitado", "Descargue", "Punto Adic.", "Desvío", "Aforo", "Total Solicitado"):
+                        cell.font = money_font if col_name == "Total Solicitado" else Font(size=10)
+                        cell.number_format = '$#,##0'
+                        cell.alignment = number_alignment
+
+                    # Columna Diferencia
+                    elif col_name == "Diferencia":
+                        if diferencia > 0:
+                            cell.font = diff_pos_font
+                        elif diferencia < 0:
+                            cell.font = diff_neg_font
+                        else:
+                            cell.font = Font(color="666666", size=10)
+                        cell.number_format = '$#,##0;[Red]-$#,##0;$0'
+                        cell.alignment = number_alignment
+
+                    # Columnas numéricas
+                    elif col_name in ("Piezas", "Peso Real", "Cant. Pedidos", "Cant. Destinos"):
+                        cell.alignment = number_alignment
+                        if col_name == "Peso Real":
+                            cell.number_format = '#,##0'
+
+                    else:
+                        cell.alignment = data_alignment
+
+                row_num += 1
+
+            except Exception as e:
+                logger.error(f"Error procesando historico {doc.get('planilla', '?')}: {str(e)}")
+                continue
+
+        # Auto-filtro
+        ws.auto_filter.ref = f"A1:{chr(64 + len(columnas)) if len(columnas) <= 26 else chr(64 + (len(columnas) - 1) // 26) + chr(65 + (len(columnas) - 1) % 26)}{row_num - 1}"
+
+        # Congelar primera fila
+        ws.freeze_panes = "A2"
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        logger.info(f"Excel historico generado: {row_num - 3} filas")
+
+        return Response(
+            content=output.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=historico_{f_inicio}_{f_fin}.xlsx"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al exportar historico Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al exportar historico: {str(e)}")
+
+
+@router.get("/obtener-resultados-recientes")
+async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", centro_distribucion: str = ""):
+    """
+    Obtiene todos los planillas de pedidos_medical (cada documento es una planilla).
+    Para operativos, filtra por su regional. Perfiles globales ven todas.
+    """
+    try:
+        logger.info(f"[OBTENER RESULTADOS] Limite: {limite}, Perfil: {perfil}, Centro: {centro_distribucion}")
+
+        # Construir filtro base
+        filtro = {"fusionada": {"$ne": True}}
+
+        # Perfiles globales ven todas las regionales
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+
+        if perfil and perfil not in perfiles_globales and centro_distribucion:
+            # Mapear nombre de regional a código de bodega
+            regional_map = {
+                "BARRANQUILLA": "CO04",
+                "CALI": "CO05",
+                "BUCARAMANGA": "CO06",
+                "FUNZA": "CO07",
+                "MEDELLIN": "CO09"
+            }
+            bodega = regional_map.get(centro_distribucion.upper(), "")
+            if bodega:
+                filtro["centro_costo"] = bodega
+            else:
+                filtro["regional"] = {"$regex": f"^{centro_distribucion}$", "$options": "i"}
+            logger.info(f"[OBTENER RESULTADOS] Filtro por regional: {filtro}")
+
+        # Contar total de documentos
+        total_docs = coleccion_pedidos_medical.count_documents(filtro)
+        logger.info(f"[OBTENER RESULTADOS] Total documentos con filtro: {total_docs}")
+
+        # Traer planillas filtradas
+        planillas = list(coleccion_pedidos_medical.find(filtro).sort("fecha_creacion", -1).limit(limite))
 
         # Convertir ObjectId a string
         for planilla in planillas:
