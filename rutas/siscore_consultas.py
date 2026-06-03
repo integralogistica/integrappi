@@ -1429,33 +1429,22 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
 
         logger.info(f"Total guardado: {len(request.resultados_consolidados)} planillas en pedidos_medical")
 
-        # MARCAR como fusionadas las planillas que se indicaron (en lugar de eliminarlas)
-        # Esto permite reservar sus consecutivos y recuperarlos al dividir
+        # ELIMINAR las planillas originales que fueron fusionadas
+        # Los datos originales se preservan en fusion_info de la planilla fusionada
         if request.planillas_a_eliminar and len(request.planillas_a_eliminar) > 0:
-            logger.info(f"Planillas a marcar como fusionadas: {request.planillas_a_eliminar}")
+            logger.info(f"Planillas a eliminar por fusión: {request.planillas_a_eliminar}")
 
-            # Buscar la planilla fusionada que contiene estas planillas
-            planilla_fusionada = None
-            for resultado, cons_info in todos_procesados:
-                if resultado.get("fusion_info", {}).get("es_fusionada"):
-                    planilla_fusionada = resultado
-                    fusion_consecutivo = cons_info.get("consecutivo", "")
-                    break
-
-            # Marcar las planillas originales como fusionadas
-            resultado_update = coleccion_pedidos_medical.update_many(
-                {"planilla": {"$in": request.planillas_a_eliminar}},
-                {"$set": {
-                    "fusionada": True,
-                    "fusionada_en": {
-                        "planilla_fusionada": planilla_fusionada.get("planilla") if planilla_fusionada else None,
-                        "consecutivo_fusionada": fusion_consecutivo if planilla_fusionada else None,
-                        "fecha_fusion": fecha_creacion,
-                        "usuario_fusion": request.usuario
-                    }
-                }}
+            # 1. Eliminar de pedidos_medical (si aún están ahí)
+            resultado_delete = coleccion_pedidos_medical.delete_many(
+                {"planilla": {"$in": request.planillas_a_eliminar}}
             )
-            logger.info(f"Marcadas {resultado_update.modified_count} planillas como fusionadas (reservando sus consecutivos)")
+            logger.info(f"Eliminadas {resultado_delete.deleted_count} planillas de pedidos_medical por fusión")
+
+            # 2. Eliminar de pedidos_medical_historico (si ya fueron movidas por Vulcano)
+            resultado_historico_delete = coleccion_historico.delete_many(
+                {"planilla": {"$in": request.planillas_a_eliminar}}
+            )
+            logger.info(f"Eliminadas {resultado_historico_delete.deleted_count} planillas de historico por fusión")
 
         # Crear mapeo de planilla → consecutivo para devolver al frontend
         planillas_consecutivos = {}
@@ -1491,10 +1480,11 @@ class DividirFusionRequest(BaseModel):
 @router.post("/dividir-fusion")
 async def dividir_fusion(request: DividirFusionRequest):
     """
-    Divide una planilla fusionada reactivando las planillas originales.
+    Divide una planilla fusionada reconstruyendo las planillas originales
+    desde fusion_info.datos_originales.
     """
     try:
-        logger.info(f"=== DIVIDIR FUSIÓN ===")
+        logger.info(f"=== DIVIDIR FUSION ===")
         logger.info(f"Planilla fusionada: {request.planilla_fusionada}")
         logger.info(f"Usuario: {request.usuario}")
 
@@ -1505,83 +1495,117 @@ async def dividir_fusion(request: DividirFusionRequest):
 
         fusion_info = fusionada.get("fusion_info", {})
         if not fusion_info.get("es_fusionada"):
-            raise HTTPException(status_code=400, detail="Esta planilla no es una fusión")
+            raise HTTPException(status_code=400, detail="Esta planilla no es una fusion")
 
-        planillas_originales = fusion_info.get("planillas_originales", [])
-        logger.info(f"Planillas originales a reactivar: {planillas_originales}")
+        datos_originales = fusion_info.get("datos_originales", [])
+        if not datos_originales:
+            raise HTTPException(status_code=400, detail="No hay datos originales para reconstruir")
 
-        # Reactivar las planillas originales (quitar marca de fusionada)
-        resultado_reactivar = coleccion_pedidos_medical.update_many(
-            {
-                "planilla": {"$in": planillas_originales},
-                "fusionada": True
-            },
-            {"$unset": {"fusionada": "", "fusionada_en": ""}}
-        )
-        logger.info(f"Reactivadas {resultado_reactivar.modified_count} planillas originales")
+        logger.info(f"Reconstruyendo {len(datos_originales)} planillas originales desde datos_originales")
 
-        # Obtener las planillas reactivadas para devolverlas al frontend
-        planillas_reactivadas = list(coleccion_pedidos_medical.find(
-            {"planilla": {"$in": planillas_originales}}
-        ))
+        # Reconstruir cada planilla original insertandola en pedidos_medical
+        resultados_frontend = []
+        planillas_consecutivos = {}
+
+        for datos in datos_originales:
+            planilla_num = datos.get("planilla")
+
+            # Crear documento para insertar
+            doc_insertar = {
+                "planilla": planilla_num,
+                "encontrada": datos.get("encontrada", True),
+                "piezas": datos.get("piezas", 0),
+                "peso_real": datos.get("peso_real", 0),
+                "ruta": datos.get("ruta", "-"),
+                "codigo_pedido": datos.get("codigo_pedido", "-"),
+                "cantidad_pedidos": datos.get("cantidad_pedidos", 0),
+                "cliente_origen": datos.get("cliente_origen", "-"),
+                "municipio_destino": datos.get("municipio_destino", "-"),
+                "departamento_destino": datos.get("departamento_destino", "-"),
+                "regional": datos.get("regional"),
+                "centro_costo": datos.get("centro_costo"),
+                "tarifa_calculada": datos.get("tarifa_calculada", 0),
+                "tipo_vehiculo": datos.get("tipo_vehiculo", "-"),
+                "total_solicitado": datos.get("total_solicitado", 0),
+                "tarifa_base": datos.get("tarifa_base"),
+                "requiere_descargue": datos.get("requiere_descargue", 0),
+                "punto_adicional": datos.get("punto_adicional", 0),
+                "desvio": datos.get("desvio", 0),
+                "aforo": datos.get("aforo", 0),
+                "placa": datos.get("placa", ""),
+                "tipo_veh_sicetac": datos.get("tipo_veh_sicetac"),
+                "causal": datos.get("causal", ""),
+                "cantidad_destinos": datos.get("cantidad_destinos", 0),
+                "municipios_destino_lista": datos.get("municipios_destino_lista", "-"),
+                "municipios_con_pedidos": datos.get("municipios_con_pedidos", {}),
+                "consecutivo": datos.get("consecutivo"),
+                "consecutivo_base": datos.get("consecutivo_base"),
+                "estado": datos.get("estado", "PREAPROBADO"),
+                "aprobado_por": datos.get("aprobado_por"),
+                "fecha_aprobacion": datos.get("fecha_aprobacion"),
+                "usuario": request.usuario,
+                "perfil": fusionada.get("perfil", ""),
+                "centro_distribucion": fusionada.get("centro_distribucion", ""),
+                "fecha_creacion": datetime.now()
+            }
+
+            # Insertar en pedidos_medical
+            coleccion_pedidos_medical.insert_one(doc_insertar)
+            logger.info(f"Reconstruida planilla original: {planilla_num} (consecutivo: {datos.get('consecutivo')})")
+
+            # Formato para el frontend
+            resultado = {
+                "planilla": planilla_num,
+                "encontrada": datos.get("encontrada", True),
+                "piezas": datos.get("piezas", 0),
+                "peso_real": datos.get("peso_real", 0),
+                "ruta": datos.get("ruta", "-"),
+                "codigo_pedido": datos.get("codigo_pedido", "-"),
+                "cantidad_pedidos": datos.get("cantidad_pedidos", 0),
+                "cliente_origen": datos.get("cliente_origen", "-"),
+                "municipio_destino": datos.get("municipio_destino", "-"),
+                "departamento_destino": datos.get("departamento_destino", "-"),
+                "regional": datos.get("regional"),
+                "centro_costo": datos.get("centro_costo"),
+                "tarifa_calculada": datos.get("tarifa_calculada", 0),
+                "tipo_vehiculo": datos.get("tipo_vehiculo", "-"),
+                "total_solicitado": datos.get("total_solicitado", 0),
+                "tarifa_base": datos.get("tarifa_base"),
+                "requiere_descargue": datos.get("requiere_descargue", 0),
+                "punto_adicional": datos.get("punto_adicional", 0),
+                "desvio": datos.get("desvio", 0),
+                "aforo": datos.get("aforo", 0),
+                "placa": datos.get("placa", ""),
+                "tipo_veh_sicetac": datos.get("tipo_veh_sicetac"),
+                "causal": datos.get("causal", ""),
+                "cantidad_destinos": datos.get("cantidad_destinos", 0),
+                "municipios_destino_lista": datos.get("municipios_destino_lista", "-"),
+                "municipios_con_pedidos": datos.get("municipios_con_pedidos", {}),
+                "fusion_info": None,
+                "estado": datos.get("estado", "PREAPROBADO"),
+                "aprobado_por": datos.get("aprobado_por"),
+                "fecha_aprobacion": datos.get("fecha_aprobacion"),
+                "consecutivo": datos.get("consecutivo"),
+                "consecutivo_base": datos.get("consecutivo_base"),
+                "guardado": True
+            }
+            resultados_frontend.append(resultado)
+
+            # Mapeo de consecutivos
+            if datos.get("consecutivo"):
+                planillas_consecutivos[planilla_num] = {
+                    "consecutivo": datos["consecutivo"],
+                    "consecutivo_base": datos["consecutivo_base"],
+                    "numero": int(datos["consecutivo"].split("-")[-1]) if datos["consecutivo"] else None,
+                    "letra": None,
+                    "es_fusionada": False
+                }
 
         # Eliminar la planilla fusionada
         coleccion_pedidos_medical.delete_one({"planilla": request.planilla_fusionada})
         logger.info(f"Eliminada planilla fusionada: {request.planilla_fusionada}")
 
-        # Convertir al formato que espera el frontend
-        resultados_frontend = []
-        for doc in planillas_reactivadas:
-            resultado = {
-                "planilla": doc.get("planilla"),
-                "encontrada": doc.get("encontrada", True),
-                "piezas": doc.get("piezas", 0),
-                "peso_real": doc.get("peso_real", 0),
-                "ruta": doc.get("ruta", "-"),
-                "codigo_pedido": doc.get("codigo_pedido", "-"),
-                "cantidad_pedidos": doc.get("cantidad_pedidos", 0),
-                "cliente_origen": doc.get("cliente_origen", "-"),
-                "municipio_destino": doc.get("municipio_destino", "-"),
-                "departamento_destino": doc.get("departamento_destino", "-"),
-                "regional": doc.get("regional"),
-                "centro_costo": doc.get("centro_costo"),
-                "tarifa_calculada": doc.get("tarifa_calculada", 0),
-                "tipo_vehiculo": doc.get("tipo_vehiculo", "-"),
-                "total_solicitado": doc.get("total_solicitado", 0),
-                "tarifa_base": doc.get("tarifa_base"),
-                "requiere_descargue": doc.get("requiere_descargue", 0),
-                "punto_adicional": doc.get("punto_adicional", False),
-                "desvio": doc.get("desvio", False),
-                "aforo": doc.get("aforo"),
-                "placa": doc.get("placa"),
-                "tipo_veh_sicetac": doc.get("tipo_veh_sicetac"),
-                "causal": doc.get("causal", ""),
-                "cantidad_destinos": doc.get("cantidad_destinos", 0),
-                "municipios_destino_lista": doc.get("municipios_destino_lista", "-"),
-                "municipios_con_pedidos": doc.get("municipios_con_pedidos", {}),
-                "fusion_info": None,  # Eliminar fusion_info
-                "estado": doc.get("estado", "PREAPROBADO"),
-                "aprobado_por": doc.get("aprobado_por"),
-                "fecha_aprobacion": doc.get("fecha_aprobacion"),
-                "consecutivo": doc.get("consecutivo"),
-                "consecutivo_base": doc.get("consecutivo_base"),
-                "guardado": True
-            }
-            resultados_frontend.append(resultado)
-
-        # Crear mapeo de consecutivos
-        planillas_consecutivos = {}
-        for resultado in resultados_frontend:
-            if resultado["consecutivo"]:
-                planillas_consecutivos[resultado["planilla"]] = {
-                    "consecutivo": resultado["consecutivo"],
-                    "consecutivo_base": resultado["consecutivo_base"],
-                    "numero": int(resultado["consecutivo"].split("-")[-1]) if resultado["consecutivo"] else None,
-                    "letra": None,
-                    "es_fusionada": False
-                }
-
-        logger.info(f"División completada: {len(resultados_frontend)} planillas reactivadas")
+        logger.info(f"Division completada: {len(resultados_frontend)} planillas reconstruidas")
 
         return {
             "mensaje": f"Se han restaurado {len(resultados_frontend)} planillas originales",
@@ -1592,8 +1616,8 @@ async def dividir_fusion(request: DividirFusionRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error al dividir fusión: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al dividir fusión: {str(e)}")
+        logger.error(f"Error al dividir fusion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al dividir fusion: {str(e)}")
 
 
 @router.put("/actualizar-planilla-pedidos")
