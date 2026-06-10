@@ -125,6 +125,7 @@ if bodega:
 - **`solicitud_veh_medical`** - Solicitudes de vehículos con estados de aprobación
 - **`pedidos_medical`** - Planillas consultadas en Siscore (documentos independientes)
 - **`causales`** - Causales para fusión de planillas
+- **`pedidos_medical_historico`** - Planillas movidas después de importación Vulcano (histórico)
 
 ## Tecnologías
 
@@ -269,6 +270,50 @@ if bodega:
 - **Fusión de planillas**: Las planillas originales se eliminan de MongoDB al fusionar
 - **División de planillas**: La planilla fusionada se elimina al dividir
 - **Endpoint `/guardar-busqueda`**: Recibe `planillas_a_eliminar` para borrar documentos
+
+## Actualizaciones Recientes (2026-06-03)
+
+### Fix: Fusión de planillas después de importación Vulcano
+
+**Problema**: Al fusionar planillas que ya habían sido movidas a `pedidos_medical_historico` por la importación Vulcano, las planillas originales seguían apareciendo en el histórico porque la fusión solo actualizaba `pedidos_medical`.
+
+**Solución**:
+
+1. **`guardar-busqueda` (fusión)**:
+   - Ahora ejecuta `delete_many` en **ambas** colecciones (`pedidos_medical` y `pedidos_medical_historico`)
+   - Elimina las planillas originales completamente, no las marca
+   - Los datos originales se preservan en `fusion_info.datos_originales` dentro de la planilla fusionada
+
+2. **`dividir-fusion` (división)**:
+   - Lee `fusion_info.datos_originales` de la planilla fusionada
+   - Reconstruye cada planilla original con `insert_one` en `pedidos_medical`
+   - Incluye todos los campos: consecutivo, tarifa, estado, etc.
+   - Elimina la planilla fusionada
+
+### Nuevo campo: `flete_cobrado_fmc`
+
+- **Cálculo**: `piezas × $20,000`
+- **Almacenado en**: `pedidos_medical` y `pedidos_medical_historico`
+- **Se incluye en**:
+  - `guardar-busqueda`: Almacenado como campo del documento
+  - `dividir-fusion`: Restaurado desde `datos_originales`
+
+**Estructura actualizada del documento**:
+```json
+{
+  "planilla": "824986",
+  "piezas": 15,
+  "peso_real": 396,
+  "flete_cobrado_fmc": 300000,
+  "total_solicitado": 500000,
+  "consecutivo": "FUNZA-20260603-1"
+}
+```
+
+### Endpoints de Histórico
+
+- `GET /siscore/historico`: Obtiene planillas de `pedidos_medical_historico` (las originales fusionadas ya no existen porque fueron eliminadas)
+- `POST /siscore/historico/exportar-excel`: Exporta a Excel (consistente con la vista)
 
 ### Recálculo de Estado
 
