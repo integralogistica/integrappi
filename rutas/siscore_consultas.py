@@ -161,13 +161,17 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
         df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
         logger.info(f"Columnas normalizadas: {list(df.columns)}")
 
+        # Mapear columnas alternativas
+        if "NO._PEDIDO" in df.columns and "PEDIDO" not in df.columns:
+            df.rename(columns={"NO._PEDIDO": "PEDIDO"}, inplace=True)
+
         # Validar columnas requeridas
         columnas_requeridas = {"CONSECUTIVO", "PEDIDO"}
         if not columnas_requeridas.issubset(df.columns):
             faltantes = columnas_requeridas - set(df.columns)
             raise HTTPException(
                 status_code=400,
-                detail=f"El archivo debe tener las columnas: CONSECUTIVO, PEDIDO. Faltan: {', '.join(sorted(faltantes))}"
+                detail=f"El archivo debe tener las columnas: CONSECUTIVO, PEDIDO (o No. Pedido). Faltan: {', '.join(sorted(faltantes))}"
             )
 
         # Limpiar datos
@@ -2021,7 +2025,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         columnas = [
             "Consecutivo", "Tipo de viaje", "Linea de negocio", "Estado", "Observacion",
             "Cliente", "Origen", "Destino", "Pedido cliente", "Guia", "CENTRO COSTO",
-            "Ubicacion Cargue", "Direccion cargue", "Ubicacion Descargue", "Direccion Descargue",
+            "Ubicación Cargue", "Direccion cargue", "Ubicación Descargue", "Direccion Descargue",
             "Producto", "Naturaleza", "Tipo de vehiculo", "unidad", "Cantidad", "Tipo embalaje",
             "Toneladas", "Flete unidad", "PUNTO ADICIONAL", "CARGUE-DESCARGUE PER JURIDICA",
             "SEGURO", "Tipo pago", "Tolerancia", "Vlr hora STBY", "Vlr Declar Mercancia",
@@ -2099,8 +2103,8 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                 punto_adicional_val = doc.get("punto_adicional", 0)
                 requiere_descargue_val = doc.get("requiere_descargue", 0)
 
-                # Tipo de viaje: Nacional si regional == municipio destino, sino Urbano
-                tipo_viaje = "NACIONAL" if regional_doc.upper() == municipio_destino.upper() else "URBANO"
+                # Tipo de viaje: Urbano si origen == destino, Nacional si son diferentes
+                tipo_viaje = "URBANO" if regional_doc.upper() == municipio_destino.upper() else "NACIONAL"
 
                 # Observación: DN + código pedido
                 observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
@@ -2162,7 +2166,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     "MASIVO",                                         # Linea de negocio
                     "PENDIENTE",                                      # Estado
                     observacion,                                      # Observación
-                    cliente_origen,                                   # Cliente
+                    "901689684" if cliente_origen.upper().strip() == "FRESENIUS MEDICAL CARE" else cliente_origen,  # Cliente
                     regional_doc,                                     # Origen
                     municipio_destino,                                # Destino
                     codigo_pedido,                                    # Pedido cliente
