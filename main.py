@@ -34,6 +34,7 @@ from rutas.cronograma_mc import router as ruta_cronograma_mc
 from rutas.siscore_consultas import router as ruta_siscore_consultas
 from rutas.divipolas import ruta_divipolas
 from rutas.banco import router as ruta_banco
+from rutas.indicadores_transporte import router as ruta_indicadores_transporte
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ app.include_router(ruta_cronograma_mc)
 app.include_router(ruta_siscore_consultas)
 app.include_router(ruta_divipolas)
 app.include_router(ruta_banco)
+app.include_router(ruta_indicadores_transporte)
 
 @app.get("/", tags=['Home'])
 async def root():
