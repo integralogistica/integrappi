@@ -139,10 +139,49 @@ def get_guias_indicadores(
             key=lambda x: x['total'], reverse=True,
         )
 
-        # 6) Listas de estados y clientes
+        # 6) Datos de cajas por cliente (suma piezas por cliente y estado)
+        cursor.execute(f"""
+            SELECT COALESCE(NULLIF(nombre_cliente, ''), 'Sin cliente') AS cliente, estado, COALESCE(SUM(CASE WHEN piezas ~ '^[0-9]+(\\.[0-9]+)?$' THEN piezas::numeric ELSE 0 END), 0) AS piezas
+            FROM informe_guias_tms {where}
+            GROUP BY COALESCE(NULLIF(nombre_cliente, ''), 'Sin cliente'), estado
+        """, params)
+        cajas_por_cliente = {}
+        for cli, est, pie in cursor.fetchall():
+            cajas_por_cliente.setdefault(cli, {})[est] = int(pie or 0)
+        datos_cajas_por_cliente = sorted(
+            [{"cliente": c, "total": sum(v.values()), **v} for c, v in cajas_por_cliente.items()],
+            key=lambda x: x['total'], reverse=True,
+        )
+
+        # 7) Listas de estados y clientes
         cursor.execute(f"SELECT DISTINCT estado FROM informe_guias_tms {where} AND estado IS NOT NULL", params)
         estados_lista = sorted([r[0] for r in cursor.fetchall() if r[0]])
-        cursor.execute(f"SELECT DISTINCT nombre_cliente FROM informe_guias_tms {where} AND nombre_cliente IS NOT NULL AND nombre_cliente <> ''", params)
+
+        # Para la lista de clientes, crear WHERE sin filtro de cliente (para que siempre muestre todos los disponibles)
+        where_sin_cliente = " WHERE fecha_emision IS NOT NULL"
+        params_sin_cliente: list = []
+        if fecha_inicio:
+            where_sin_cliente += " AND fecha_emision >= %s"
+            params_sin_cliente.append(fecha_inicio)
+        if fecha_fin:
+            where_sin_cliente += " AND fecha_emision <= %s"
+            params_sin_cliente.append(fecha_fin)
+        if anio:
+            rangos_sin = []
+            for a in anio:
+                rangos_sin.append("(fecha_emision >= %s AND fecha_emision < %s)")
+                params_sin_cliente.append(f"{int(a)}-01-01")
+                params_sin_cliente.append(f"{int(a)+1}-01-01")
+            where_sin_cliente += " AND (" + " OR ".join(rangos_sin) + ")"
+        if mes:
+            where_sin_cliente += " AND EXTRACT(MONTH FROM fecha_emision) IN (" + ','.join(['%s'] * len(mes)) + ")"
+            params_sin_cliente.extend(mes)
+        if estado:
+            where_sin_cliente += " AND estado = %s"
+            params_sin_cliente.append(estado)
+        # NOTA: No incluimos cliente en where_sin_cliente para que siempre muestre todos los clientes disponibles
+
+        cursor.execute(f"SELECT DISTINCT nombre_cliente FROM informe_guias_tms {where_sin_cliente} AND nombre_cliente IS NOT NULL AND nombre_cliente <> ''", params_sin_cliente)
         clientes_lista = sorted([r[0] for r in cursor.fetchall() if r[0]])
 
         cursor.close()
@@ -171,6 +210,7 @@ def get_guias_indicadores(
                 "datosGrafico": datos_grafico,
                 "datosCajas": datos_cajas,
                 "datosPorCliente": datos_por_cliente,
+                "datosCajasPorCliente": datos_cajas_por_cliente,
                 "estados": estados_lista,
                 "clientes": clientes_lista,
                 "anios": anios_disponibles,
