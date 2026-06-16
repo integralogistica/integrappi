@@ -2093,6 +2093,8 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                 # Obtener datos básicos
                 consecutivo = doc.get("consecutivo", "")
                 regional_doc = doc.get("regional", regional_usuario)
+                # Reemplazar Barranquilla por Galapa en el origen
+                origen = "GALAPA" if regional_doc.upper().strip() == "BARRANQUILLA" else regional_doc
                 municipio_destino = doc.get("municipio_destino", "")
                 codigo_pedido = doc.get("codigo_pedido", "")
                 cliente_origen = doc.get("cliente_origen", "")
@@ -2167,7 +2169,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     "PENDIENTE",                                      # Estado
                     observacion,                                      # Observación
                     "901689684" if cliente_origen.upper().strip() == "FRESENIUS MEDICAL CARE" else cliente_origen,  # Cliente
-                    regional_doc,                                     # Origen
+                    origen,                                           # Origen
                     municipio_destino,                                # Destino
                     codigo_pedido,                                    # Pedido cliente
                     codigo_pedido,                                    # Guía
@@ -2180,7 +2182,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     "NORMAL",                                         # Naturaleza
                     mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
                     "VEHICULOS",                                      # unidad
-                    piezas,                                           # Cantidad
+                    1,                                                # Cantidad (siempre 1)
                     "PAQUETES",                                       # Tipo embalaje
                     toneladas,                                        # Toneladas
                     total_solicitado,                                 # Flete unidad

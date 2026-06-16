@@ -10,6 +10,22 @@ router = APIRouter(
     tags=["Indicadores Transporte"],
 )
 
+# Clientes que se excluyen de los indicadores de transporte
+CLIENTES_EXCLUIDOS = [
+    "GESTION DE RECAUDO Y RENTAS",
+    "FAMISANAR",
+]
+
+def build_exclusion_clause(column: str = "nombre_cliente") -> tuple:
+    """Genera una cláusula SQL para excluir los clientes de CLIENTES_EXCLUIDOS.
+    Compara en mayúsculas para no depender de cómo venga el texto.
+    Retorna (sql_clause, params)."""
+    if not CLIENTES_EXCLUIDOS:
+        return ("", [])
+    conditions = [f"UPPER({column}) NOT LIKE %s" for _ in CLIENTES_EXCLUIDOS]
+    params = [f"%{c}%" for c in CLIENTES_EXCLUIDOS]
+    return (" AND " + " AND ".join(conditions), params)
+
 def get_pg_connection():
     return psycopg2.connect(
         host=os.environ.get("PG_HOST"),
@@ -47,6 +63,11 @@ def get_guias_indicadores(
             WHERE 1=1
         """
         params: list = []
+
+        # Excluir clientes no deseados
+        excl_sql, excl_params = build_exclusion_clause()
+        query += excl_sql
+        params.extend(excl_params)
 
         if fecha_inicio:
             query += " AND fecha_emision >= %s"
@@ -182,6 +203,11 @@ def get_detalle_dia(
             WHERE DATE(fecha_emision) = %s
         """
         params: list = [fecha]
+
+        # Excluir clientes no deseados
+        excl_sql, excl_params = build_exclusion_clause()
+        query += excl_sql
+        params.extend(excl_params)
 
         if cliente:
             conditions = ["nombre_cliente ILIKE %s" for _ in cliente]
