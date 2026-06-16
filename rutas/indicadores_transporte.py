@@ -29,103 +29,121 @@ def format_date(val):
 
 @router.get("/guias")
 def get_guias_indicadores(
-    fecha_inicio: str = Query(...),
-    fecha_fin: str = Query(...),
+    fecha_inicio: Optional[str] = Query(None),
+    fecha_fin: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     cliente: Optional[List[str]] = Query(None),
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
 ):
     try:
         conn = get_pg_connection()
         cursor = conn.cursor()
 
-        query = """
-            SELECT DISTINCT
-                guia, nombre_cliente, ciudad_destino, estado, novedad,
-                DATE(fecha_emision) as fecha_emision,
-                fecha_entrega, fecha_preferente, servicio, piezas, kilos, destinatario
-            FROM informe_guias_tms
-            WHERE 1=1
-        """
+        # Obtener todos los años disponibles para el selector (excluye fechas nulas)
+        cursor.execute("SELECT DISTINCT EXTRACT(YEAR FROM fecha_emision)::int AS anio FROM informe_guias_tms WHERE fecha_emision IS NOT NULL ORDER BY anio DESC")
+        anios_disponibles = [r[0] for r in cursor.fetchall() if r[0] is not None]
+
+        # Construir cláusula WHERE común para todos los filtros
+        where = " WHERE fecha_emision IS NOT NULL"
         params: list = []
 
         if fecha_inicio:
-            query += " AND fecha_emision >= %s"
+            where += " AND fecha_emision >= %s"
             params.append(fecha_inicio)
-
         if fecha_fin:
-            query += " AND fecha_emision <= %s"
+            where += " AND fecha_emision <= %s"
             params.append(fecha_fin)
-
+        if anio:
+            # Convertir años a rangos de fecha (sargable, permite usar índice de fecha)
+            rangos = []
+            for a in anio:
+                rangos.append("(fecha_emision >= %s AND fecha_emision < %s)")
+                params.append(f"{int(a)}-01-01")
+                params.append(f"{int(a)+1}-01-01")
+            where += " AND (" + " OR ".join(rangos) + ")"
+        if mes:
+            where += " AND EXTRACT(MONTH FROM fecha_emision) IN (" + ','.join(['%s'] * len(mes)) + ")"
+            params.extend(mes)
         if estado:
-            query += " AND estado = %s"
+            where += " AND estado = %s"
             params.append(estado)
-
         if cliente:
-            conditions = ["nombre_cliente ILIKE %s" for _ in cliente]
+            where += " AND (" + " OR ".join(["nombre_cliente ILIKE %s" for _ in cliente]) + ")"
             params.extend([f"%{c}%" for c in cliente])
-            query += f" AND ({' OR '.join(conditions)})"
 
-        query += " ORDER BY fecha_emision DESC"
+        # 1) KPIs (agregación total)
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE estado = 'ENTREGADO') AS entregados,
+                COUNT(*) FILTER (WHERE estado = 'PENDIENTE') AS pendientes,
+                COUNT(*) FILTER (WHERE estado = 'CON NOVEDAD') AS con_novedad,
+                COALESCE(SUM(CASE WHEN piezas ~ '^[0-9]+(\\.[0-9]+)?$' THEN piezas::numeric ELSE 0 END), 0) AS total_piezas,
+                COALESCE(SUM(CASE WHEN kilos ~ '^[0-9]+(\\.[0-9]+)?$' THEN kilos::numeric ELSE 0 END), 0) AS total_kilos
+            FROM informe_guias_tms {where}
+        """, params)
+        kpi_row = cursor.fetchone()
+        total_guias = kpi_row[0] or 0
+        entregados = kpi_row[1] or 0
+        pendientes = kpi_row[2] or 0
+        con_novedad = kpi_row[3] or 0
+        total_piezas = int(kpi_row[4] or 0)
+        total_kilos = float(kpi_row[5] or 0)
 
-        cursor.execute(query, params)
-        columns = [desc[0] for desc in cursor.description]
-        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        # 2) Conteo por estado
+        cursor.execute(f"""
+            SELECT estado, COUNT(*) AS cantidad
+            FROM informe_guias_tms {where}
+            GROUP BY estado
+        """, params)
+        conteo_por_estado = {r[0]: r[1] for r in cursor.fetchall() if r[0]}
 
-        for row in rows:
-            for key in ['fecha_emision', 'fecha_entrega', 'fecha_preferente']:
-                row[key] = format_date(row.get(key))
-
-        total_guias = len(rows)
-        entregados = sum(1 for r in rows if r['estado'] == 'ENTREGADO')
-        pendientes = sum(1 for r in rows if r['estado'] == 'PENDIENTE')
-        con_novedad = sum(1 for r in rows if r['estado'] == 'CON NOVEDAD')
-
-        total_piezas = sum(int(r.get('piezas') or 0) for r in rows)
-        total_kilos = sum(float(r.get('kilos') or 0) for r in rows)
-
-        conteo_por_estado = {}
-        for r in rows:
-            e = r['estado']
-            conteo_por_estado[e] = conteo_por_estado.get(e, 0) + 1
-
+        # 3) Datos para gráfico de pedidos (conteo por día y estado)
+        cursor.execute(f"""
+            SELECT DATE(fecha_emision) AS fecha, estado, COUNT(*) AS cantidad
+            FROM informe_guias_tms {where}
+            GROUP BY DATE(fecha_emision), estado
+            ORDER BY fecha
+        """, params)
         guias_por_dia = {}
+        for fecha, est, cant in cursor.fetchall():
+            clave = format_date(fecha)
+            guias_por_dia.setdefault(clave, {})[est] = cant
+        datos_grafico = [{"fecha": f, **d} for f, d in sorted(guias_por_dia.items())]
+
+        # 4) Datos para gráfico de cajas (suma piezas por día y estado)
+        cursor.execute(f"""
+            SELECT DATE(fecha_emision) AS fecha, estado, COALESCE(SUM(CASE WHEN piezas ~ '^[0-9]+(\\.[0-9]+)?$' THEN piezas::numeric ELSE 0 END), 0) AS piezas
+            FROM informe_guias_tms {where}
+            GROUP BY DATE(fecha_emision), estado
+            ORDER BY fecha
+        """, params)
         piezas_por_dia = {}
-        for r in rows:
-            fecha = r.get('fecha_emision')
-            if fecha:
-                if fecha not in guias_por_dia:
-                    guias_por_dia[fecha] = {}
-                    piezas_por_dia[fecha] = {}
-                e = r['estado']
-                guias_por_dia[fecha][e] = guias_por_dia[fecha].get(e, 0) + 1
-                piezas_por_dia[fecha][e] = piezas_por_dia[fecha].get(e, 0) + int(r.get('piezas') or 0)
+        for fecha, est, pie in cursor.fetchall():
+            clave = format_date(fecha)
+            piezas_por_dia.setdefault(clave, {})[est] = int(pie or 0)
+        datos_cajas = [{"fecha": f, **d} for f, d in sorted(piezas_por_dia.items())]
 
-        datos_grafico = [
-            {"fecha": f, **estados_data}
-            for f, estados_data in sorted(guias_por_dia.items())
-        ]
-
-        datos_cajas = [
-            {"fecha": f, **estados_data}
-            for f, estados_data in sorted(piezas_por_dia.items())
-        ]
-
+        # 5) Datos por cliente (conteo por cliente y estado)
+        cursor.execute(f"""
+            SELECT COALESCE(NULLIF(nombre_cliente, ''), 'Sin cliente') AS cliente, estado, COUNT(*) AS cantidad
+            FROM informe_guias_tms {where}
+            GROUP BY COALESCE(NULLIF(nombre_cliente, ''), 'Sin cliente'), estado
+        """, params)
         cliente_estados = {}
-        for r in rows:
-            c = r.get('nombre_cliente') or 'Sin cliente'
-            if c not in cliente_estados:
-                cliente_estados[c] = {}
-            e = r['estado']
-            cliente_estados[c][e] = cliente_estados[c].get(e, 0) + 1
-
+        for cli, est, cant in cursor.fetchall():
+            cliente_estados.setdefault(cli, {})[est] = cant
         datos_por_cliente = sorted(
             [{"cliente": c, "total": sum(v.values()), **v} for c, v in cliente_estados.items()],
-            key=lambda x: x['total'],
-            reverse=True,
+            key=lambda x: x['total'], reverse=True,
         )
 
-        estados_lista = sorted(set(r['estado'] for r in rows))
-        clientes_lista = sorted(set(r.get('nombre_cliente', '') for r in rows if r.get('nombre_cliente')))
+        # 6) Listas de estados y clientes
+        cursor.execute(f"SELECT DISTINCT estado FROM informe_guias_tms {where} AND estado IS NOT NULL", params)
+        estados_lista = sorted([r[0] for r in cursor.fetchall() if r[0]])
+        cursor.execute(f"SELECT DISTINCT nombre_cliente FROM informe_guias_tms {where} AND nombre_cliente IS NOT NULL AND nombre_cliente <> ''", params)
+        clientes_lista = sorted([r[0] for r in cursor.fetchall() if r[0]])
 
         cursor.close()
         conn.close()
@@ -155,6 +173,7 @@ def get_guias_indicadores(
                 "datosPorCliente": datos_por_cliente,
                 "estados": estados_lista,
                 "clientes": clientes_lista,
+                "anios": anios_disponibles,
             },
         }
     except Exception as e:
@@ -165,7 +184,9 @@ def get_guias_indicadores(
 
 @router.get("/guias/detalle")
 def get_detalle_dia(
-    fecha: str = Query(...),
+    fecha: str = Query(None),
+    fecha_inicio: Optional[str] = Query(None),
+    fecha_fin: Optional[str] = Query(None),
     estado: Optional[List[str]] = Query(None),
     cliente: Optional[List[str]] = Query(None),
 ):
@@ -179,9 +200,18 @@ def get_detalle_dia(
                 DATE(fecha_emision) as fecha_emision,
                 fecha_entrega, fecha_preferente, servicio, piezas, kilos, destinatario
             FROM informe_guias_tms
-            WHERE DATE(fecha_emision) = %s
+            WHERE fecha_emision IS NOT NULL
         """
-        params: list = [fecha]
+        params: list = []
+
+        # Si es un rango de fechas (para mes agrupado)
+        if fecha_inicio and fecha_fin:
+            query += " AND DATE(fecha_emision) >= %s AND DATE(fecha_emision) <= %s"
+            params.extend([fecha_inicio, fecha_fin])
+        elif fecha:
+            # Si es una fecha individual
+            query += " AND DATE(fecha_emision) = %s"
+            params.append(fecha)
 
         if cliente:
             conditions = ["nombre_cliente ILIKE %s" for _ in cliente]
