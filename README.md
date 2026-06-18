@@ -384,7 +384,8 @@ Endpoints para el dashboard de indicadores de transporte del frontend:
 
 - **`GET /indicadores-transporte/guias`**: Indicadores agregados (KPIs, gráficos, distribución por cliente)
   - Filtros: `fecha_inicio`, `fecha_fin`, `estado`, `cliente` (múltiple), `anio` (múltiple), `mes` (múltiple)
-  - Devuelve: KPIs (totales, conteo por estado, piezas, toneladas), `datosGrafico` (pedidos por día/estado), `datosCajas` (cajas por día/estado), `datosPorCliente`, listas de estados/clientes/años disponibles
+  - Devuelve: KPIs (totales, conteo por estado, piezas, toneladas), `datosGrafico` (pedidos por día/estado), `datosCajas` (cajas por día/estado), `datosPorCliente`, `datosCajasPorCliente` (cajas reales por cliente/estado), listas de estados/clientes/años disponibles
+  - **Filtro de cliente**: La lista de clientes (`clientes_lista`) SIEMPRE devuelve todos los disponibles (sin aplicar filtro de cliente), mientras que los datos sí se filtran por cliente
 - **`GET /indicadores-transporte/guias/detalle`**: Registros individuales de un día específico
   - Filtros: `fecha`, `cliente` (múltiple), `estado` (múltiple)
 
@@ -407,3 +408,67 @@ CREATE INDEX idx_guias_cliente_trgm ON informe_guias_tms USING gin (nombre_clien
 CREATE INDEX idx_guias_fecha ON informe_guias_tms (fecha_emision);
 CREATE INDEX idx_guias_fecha_cliente ON informe_guias_tms (fecha_emision, nombre_cliente);
 ```
+
+## Actualizaciones Recientes (2026-06-16)
+
+### Mejoras en el módulo de Indicadores de Transporte
+
+- **Nuevo campo `datosCajasPorCliente`**: Ahora el endpoint `/indicadores-transporte/guias` devuelve cajas reales por cliente y estado
+  - Antes: El frontend calculaba cajas por cliente usando proporciones basadas en conteo de guías (incorrecto)
+  - Ahora: El backend calcula directamente la suma de piezas por cliente y estado
+  - Query SQL: `SELECT cliente, estado, SUM(piezas) FROM informe_guias_tms GROUP BY cliente, estado`
+
+- **Corrección del filtro de clientes**: La lista de clientes ahora siempre muestra todos los disponibles
+  - **Problema**: Al seleccionar un cliente, el dropdown solo mostraba ese cliente, impidiendo selección múltiple
+  - **Solución**: Crear cláusula WHERE separada (`where_sin_cliente`) que excluye el filtro de cliente
+  - **Resultado**: `clientes_lista` siempre contiene todos los clientes, mientras que los datos sí se filtran
+
+- **Separación de consultas**:
+  - **Datos (KPIs, gráficos)**: Usan `where` con todos los filtros incluyendo cliente
+  - **Lista de clientes**: Usa `where_sin_cliente` sin filtro de cliente
+  - Ambas consultas comparten filtros de año, mes, estado, y rango de fechas
+
+### Impacto en el Frontend
+
+- **Gráfico "Cajas por Cliente"**: Ahora muestra valores correctos sin distorsión por proporción
+- **Filtro de Cliente**: Transformado en dropdown estilo Power BI con checkboxes
+  - Búsqueda interna dentro del dropdown
+  - Selección múltiple sin restricciones
+  - Visualización clara de clientes seleccionados
+- **Optimización móvil**: Lista interactiva de clientes en pantallas pequeñas (≤768px)
+  - Gráfico de pie oculto en móvil
+  - Lista touch-friendly con indicadores de color
+  - Panel de información del cliente seleccionado
+
+## Actualizaciones Recientes (2026-06-18)
+
+### Bot de scraping de Siscore (reemplazo del WS de planillas)
+
+El WS de Siscore V3 (`integra-wms.appsiscore.com/app/ws/informe_v3.php`) dejó de funcionar para la consulta de planillas. Se implementó un **bot con Playwright** que scrapea el portal `https://integra.appsiscore.com/app/index.php` y devuelve la misma estructura que consume el frontend.
+
+**Nuevos archivos:**
+- `Funciones/bot_siscore.py` — núcleo del bot: login, navegación del menú (SB Admin 2: GESTIÓN DE INFORMES → básica → Informes Mensajeros → Planilla de despacho), captura del popup, descarga del Excel por planilla y lectura. Incluye **`BotSessionManager`**: reúsa la sesión entre requests (mantiene el navegador logueado vivo sobre un `ProactorEventLoop` dedicado) para no loguearse en cada consulta y **evitar bloqueos del TMS** por exceso de logins; re-loguea solo al expirar (TTL configurable).
+- `Funciones/siscore_excel_mapper.py` — lee el Excel (que el portal entrega como **HTML disfrazado de `.xls`** vía `pd.read_html`), descarta la fila de pie de página, normaliza columnas, mapea al contrato del frontend y enriquece **Ruta/Departamento** desde la colección `divipolas`.
+
+**Nuevo endpoint:** `POST /siscore/consultar-planillas-bot`
+- Mismo request/response que `/siscore/consultar-planillas` (el endpoint viejo **se conserva intacto**).
+- Mapeo de campos del Excel: `Entidad`→Cliente Origen, `Guia`→Codigo Pedido, `Destino`→Municipio Destino, `Peso`→Peso Real, `Piezas`, `Placa`, `Manifiesto`.
+
+**Consideraciones técnicas:**
+- **Proxy autorizado**: el TMS solo admite IPs autorizadas. El tráfico sale por el proxy de Digital Ocean `64.227.95.70:3128` (var `SISCORE_BOT_PROXY_URL`) con **auth nativa de Playwright** (no requiere forwarder local, a diferencia de Chrome/Selenium crudo).
+- **Windows + uvicorn**: el loop de uvicorn es `SelectorEventLoop`, que no soporta `subprocess` (lanzar Chromium). El bot corre en un `ProactorEventLoop` dedicado (endpoint `def` síncrono + wrapper `consultar_planillas_via_bot_sync`). En Linux (Render) es no-op.
+- **Variables de entorno** (Render/local): `SISCORE_BOT_USER`, `SISCORE_BOT_PASS`, `SISCORE_BOT_PROXY_URL`, `SISCORE_BOT_HEADED`, `SISCORE_BOT_SESSION_TTL`, `SISCORE_BOT_REQUEST_TIMEOUT`, `SISCORE_BOT_DOWNLOAD_DIR`, y `MONGO_URI`.
+- **Dependencias** añadidas a `requirements.txt`: `playwright==1.49.0`, `lxml==5.3.0`.
+- **Deploy en Render**: `Dockerfile` (imagen oficial `mcr.microsoft.com/playwright/python:v1.49.0`, ya trae Chromium + deps), `render.yaml`, `.dockerignore`. `main.py` ahora respeta la variable `PORT`.
+
+### Prevención de colisión de consecutivos tras "Importar Vulcano"
+- **Problema**: `_generar_consecutivo` solo consultaba `pedidos_medical`; al moverse las planillas a `pedidos_medical_historico` (Vulcano), sus consecutivos dejaban de verse y se podían **reutilizar** el mismo día.
+- **Solución**: ahora consulta **también `pedidos_medical_historico`** al calcular el número máximo usado → los consecutivos históricos quedan **reservados**.
+- **Índice**: se crea un índice sobre `consecutivo` en ambas colecciones (idempotente, en el arranque del backend) para que la consulta por prefijo (`^REGIONAL-YYYYMMDD-`) sea rápida aunque el histórico crezca a miles/millones.
+
+### Regional guardada como bodega para OPERATIVO
+- Al guardar (`guardar-busqueda`), si el perfil es **OPERATIVO**, el campo `regional` se guarda como la **bodega de origen** (CALI→YUMBO, BARRANQUILLA→GALAPA, MEDELLIN→GIRARDOTA) mediante `regional_a_origen_bodega`. El consecutivo **no** se transforma (sigue con el nombre, ej: `CALI-...`). Solo aplica a OPERATIVO.
+
+### Exportación a Excel (`exportar-planillas-excel`)
+- **Origen**: `CALI` → `YUMBO` (junto al ya existente `BARRANQUILLA` → `GALAPA`).
+- **Cliente**: `FRESENIUS KABI` → `900402080` (junto al ya existente `FRESENIUS MEDICAL CARE` → `901689684`), vía diccionario `CLIENTE_A_NIT` (insensible a mayúsculas/espacios).

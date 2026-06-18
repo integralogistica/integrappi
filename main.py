@@ -3,7 +3,14 @@ load_dotenv()
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
+
+# Windows: Playwright necesita ProactorEventLoop para lanzar Chromium (subproceso).
+# Bajo uvicorn/asyncio puede caer en SelectorEventLoop, que NO soporta subprocess
+# y lanza NotImplementedError al crear el navegador. En Linux (Render) es no-op.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -188,5 +195,8 @@ async def root():
     return {"message": "Hello integra"}
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Render inyecta PORT; localmente se mantiene 8000 por defecto
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

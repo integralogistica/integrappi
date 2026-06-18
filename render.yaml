@@ -1,0 +1,34 @@
+# render.yaml — define el servicio web de integrappi en Render.
+# Despliegue: `render blueprint` o crear el servicio desde este archivo en el dashboard.
+#
+# IMPORTANTE: Chromium requiere RAM. Usar al menos el plan "starter" (de pago);
+# el free tier puede quedarse sin memoria o dormir entre requests (cold start lento).
+services:
+  - type: web
+    name: integrappi
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    # El bot (login + descarga por planilla) puede tardar 1-2 min. El frontend ya
+    # tolera esperas largas (modal de carga). Asegurar que el timeout del servicio
+    # web de Render sea >= 120s (configurable en el dashboard o soporte).
+    healthCheckPath: /
+    envVars:
+      # Configuración no sensible
+      - key: SISCORE_BOT_HEADED
+        value: "false"
+      - key: SISCORE_BOT_TIMEOUT_MS
+        value: "120000"
+      - key: SISCORE_BOT_DOWNLOAD_DIR
+        value: "/tmp/descargas_siscore"
+      # Secretos: definir en el dashboard de Render (no se commitean)
+      - key: MONGO_URI
+        sync: false
+      - key: SISCORE_BOT_USER
+        sync: false
+      - key: SISCORE_BOT_PASS
+        sync: false
+      - key: VULCANO_PROXY_URL
+        sync: false
+        # Solo si Siscore exige salir por IP específica; si no, se puede omitir.

@@ -1,0 +1,13 @@
+# Evitar copiar secretos y archivos locales innecesarios a la imagen de Render.
+# En Render las variables de entorno se definen en el dashboard, no en .env.
+.env
+.env.*
+descargas_siscore/
+**/__pycache__/
+**/*.pyc
+.git/
+.gitignore
+*.md
+docs/
+scripts/
+bd/

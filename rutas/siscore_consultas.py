@@ -26,6 +26,41 @@ coleccion_pedidos_medical = db["pedidos_medical"]
 coleccion_historico = db["pedidos_medical_historico"]
 coleccion_causales = db["causales"]
 
+# Índice sobre `consecutivo` en ambas colecciones. La generación de consecutivos
+# consulta por prefijo (regional+fecha) y, tras Importar Vulcano, también consulta
+# el histórico. SIN este índice, al crecer el histórico a miles/millones la consulta
+# se vuelve lenta (collation scan). CON índice, el regex con ancla '^' usa el índice
+# (barrido por prefijo) y queda rápido sin importar el tamaño. Es idempotente.
+for _col_idx in (coleccion_pedidos_medical, coleccion_historico):
+    try:
+        _col_idx.create_index([("consecutivo", 1)])
+    except Exception as _e:
+        logger.warning(f"[STARTUP] No se pudo crear/verificar índice 'consecutivo': {_e}")
+
+# Mapa regional -> municipio de la bodega de origen (para guardar en el campo
+# `regional` de Mongo cuando el perfil es OPERATIVO).
+REGIONAL_A_ORIGEN_BODEGA = {
+    "BARRANQUILLA": "GALAPA",
+    "CALI": "YUMBO",
+    "MEDELLIN": "GIRARDOTA",
+}
+
+
+def regional_a_origen_bodega(regional: Optional[str]) -> Optional[str]:
+    """Convierte la regional al municipio de la bodega de origen.
+    BARRANQUILLA->GALAPA, CALI->YUMBO, MEDELLIN->GIRARDOTA. Las demás se conservan."""
+    if not regional:
+        return regional
+    r = str(regional).upper().strip()
+    return REGIONAL_A_ORIGEN_BODEGA.get(r, r)
+
+
+# NIT por nombre de cliente para el Excel de autorizados (campo "Cliente").
+CLIENTE_A_NIT = {
+    "FRESENIUS MEDICAL CARE": "901689684",
+    "FRESENIUS KABI": "900402080",
+}
+
 # Configuración WS Siscore V3 (misma que en pedidos_v3)
 SISCORE_V3_ENDPOINT = "https://integra-wms.appsiscore.com/app/ws/informe_v3.php"
 SISCORE_V3_TOKEN = "n0ML0cFGhJwtq4lsAeUcMzrqkn94gX4TDaPuFbbXpoA"
@@ -290,12 +325,16 @@ def _generar_consecutivo(regional: str, fecha: datetime, es_fusion: bool = False
     prefijo = f"{regional}-{fecha_str}"
 
     # Buscar todos los consecutivos existentes para esta regional y fecha
-    # EXCLUYENDO planillas fusionadas (marcadas como fusionada: true)
+    # EXCLUYENDO planillas fusionadas (marcadas como fusionada: true).
+    # IMPORTANTE: se consulta TAMBIÉN el histórico (pedidos_medical_historico), porque
+    # "Importar Vulcano" mueve las planillas allí y las borra de pedidos_medical.
+    # Si no se considerara el histórico, al volver a cargar planillas el mismo día se
+    # reutilizarían consecutivos ya usados (colisión).
     regex_pattern = f"^{prefijo}-\\d+[A-Z]?$"
-    existentes = list(coleccion_pedidos_medical.find(
-        {"consecutivo": {"$regex": regex_pattern}, "fusionada": {"$ne": True}},
-        {"consecutivo": 1, "consecutivo_base": 1, "numero_consecutivo": 1, "letra_consecutivo": 1}
-    ))
+    _query = {"consecutivo": {"$regex": regex_pattern}, "fusionada": {"$ne": True}}
+    _projection = {"consecutivo": 1, "consecutivo_base": 1, "numero_consecutivo": 1, "letra_consecutivo": 1}
+    existentes = list(coleccion_pedidos_medical.find(_query, _projection)) \
+        + list(coleccion_historico.find(_query, _projection))
 
     # Extraer números y letras usadas
     numeros_usados = set()
@@ -869,6 +908,58 @@ async def consultar_planillas(request: ConsultaPlanillasRequest):
         )
 
 
+@router.post("/consultar-planillas-bot")
+def consultar_planillas_bot(request: ConsultaPlanillasRequest):
+    """
+    Consulta planillas vía el BOT de scraping del portal Siscore (Playwright).
+    Reemplaza la fuente del WS de planillas (que dejó de funcionar para este fin)
+    y devuelve la MISMA estructura que /siscore/consultar-planillas, de modo que
+    el frontend no cambia su lógica de parseo/agrupación/tarifa/guardado.
+    El endpoint viejo (/siscore/consultar-planillas) se conserva intacto.
+
+    Es `def` (NO async) a propósito: FastAPI lo ejecuta en el threadpool y así el
+    bot corre en su propio ProactorEventLoop (vía el wrapper síncrono), evitando
+    el NotImplementedError de subprocess bajo el loop Selector de uvicorn/Windows.
+    """
+    try:
+        # Import diferido: Playwright solo se carga si se invoca este endpoint,
+        # así el servidor arranca aunque la dependencia aún no esté instalada.
+        from Funciones import bot_siscore
+        from Funciones.siscore_excel_mapper import construir_lookup_divipolas
+
+        logger.info(f"=== CONSULTA PLANILLAS (BOT) ===")
+        logger.info(f"Planillas solicitadas: {request.planillas}")
+
+        planillas = [p.strip() for p in request.planillas if p and p.strip()]
+        if not planillas:
+            raise HTTPException(status_code=400, detail="No se recibieron planillas para consultar")
+
+        # Lookup de divipolas para enriquecer Ruta/Departamento desde el Destino
+        lookup_divipolas = construir_lookup_divipolas(coleccion_divipolas)
+
+        # Reuso de sesión: mantiene un navegador logueado vivo entre requests
+        # (evita bloqueos del TMS por exceso de logins).
+        resultado = bot_siscore.session_manager.consultar(
+            planillas,
+            lookup_divipolas=lookup_divipolas,
+        )
+
+        logger.info(
+            f"[BOT] Respuesta: {resultado.get('total_registros', 0)} registros, "
+            f"{len(resultado.get('errores', []))} errores"
+        )
+        return resultado
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en consulta de planillas (bot): {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar planillas (bot): {str(e)}"
+        )
+
+
 @router.get("/test-connection")
 async def test_connection():
     """
@@ -1356,6 +1447,11 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         # Combinar todos los resultados procesados
         todos_procesados = fusiones_procesadas + individuales_procesadas
 
+        # OPERATIVO: el campo `regional` se guarda como la bodega de origen
+        # (CALI->YUMBO, BARRANQUILLA->GALAPA, MEDELLIN->GIRARDOTA). El consecutivo
+        # NO se transforma (sigue con el nombre de la regional, ej. CALI-...).
+        es_operativo = str(request.perfil or "").upper() == "OPERATIVO"
+
         # Guardar cada resultado como un documento independiente
         for resultado, cons_info in todos_procesados:
             logger.info(f"Procesando planilla: {resultado.get('planilla')} con consecutivo: {cons_info['consecutivo']}")
@@ -1374,7 +1470,8 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "cliente_origen": resultado.get("cliente_origen", "-"),
                 "municipio_destino": resultado.get("municipio_destino", "-"),
                 "departamento_destino": resultado.get("departamento_destino", "-"),
-                "regional": resultado.get("regional_calculada"),  # Usar la regional calculada con fallback
+                "regional": (regional_a_origen_bodega(resultado.get("regional_calculada"))
+                             if es_operativo else resultado.get("regional_calculada")),  # Usar la regional calculada con fallback
                 "centro_costo": resultado.get("centro_costo"),
                 "tarifa_calculada": resultado.get("tarifa_calculada", 0),
                 "tipo_vehiculo": resultado.get("tipo_vehiculo"),
@@ -2093,8 +2190,13 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                 # Obtener datos básicos
                 consecutivo = doc.get("consecutivo", "")
                 regional_doc = doc.get("regional", regional_usuario)
-                # Reemplazar Barranquilla por Galapa en el origen
-                origen = "GALAPA" if regional_doc.upper().strip() == "BARRANQUILLA" else regional_doc
+                # Reemplazar la regional por el municipio real de la bodega de origen:
+                # Barranquilla -> Galapa, Cali -> Yumbo
+                _origen_map = {
+                    "BARRANQUILLA": "GALAPA",
+                    "CALI": "YUMBO",
+                }
+                origen = _origen_map.get(regional_doc.upper().strip(), regional_doc)
                 municipio_destino = doc.get("municipio_destino", "")
                 codigo_pedido = doc.get("codigo_pedido", "")
                 cliente_origen = doc.get("cliente_origen", "")
@@ -2168,7 +2270,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     "MASIVO",                                         # Linea de negocio
                     "PENDIENTE",                                      # Estado
                     observacion,                                      # Observación
-                    "901689684" if cliente_origen.upper().strip() == "FRESENIUS MEDICAL CARE" else cliente_origen,  # Cliente
+                    CLIENTE_A_NIT.get(cliente_origen.upper().strip(), cliente_origen),  # Cliente
                     origen,                                           # Origen
                     municipio_destino,                                # Destino
                     codigo_pedido,                                    # Pedido cliente

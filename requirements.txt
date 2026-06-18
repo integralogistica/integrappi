@@ -95,3 +95,7 @@ websocket-client==1.8.0
 websockets==15.0.1
 wsproto==1.2.0
 xlsxwriter==3.2.5
+# Bot de scraping del portal Siscore (reemplazo del WS de planillas)
+playwright==1.49.0
+# El portal descarga el Excel como HTML-disfrazado-de-.xls; read_html usa lxml
+lxml==5.3.0
