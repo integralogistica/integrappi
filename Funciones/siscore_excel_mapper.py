@@ -231,6 +231,17 @@ def mapear_fila_a_registro(
         "Guia": guia,
         "Nombre": _txt(fila.get("NOMBRE"), ""),
         "Direccion": _txt(fila.get("DIRECCION"), ""),
+        # ---- Campos detallados por guía (para auditoría en MongoDB) ----
+        "Cedula": _txt(fila.get("CEDULA"), ""),
+        "Origen": _txt(fila.get("ORIGEN"), ""),
+        "Producto": _txt(fila.get("PRODUCTO"), ""),
+        "Codigo": _txt(fila.get("CODIGO"), ""),
+        "Mensajero": _txt(fila.get("MENSAJERO"), ""),
+        "Usuario": _txt(fila.get("USUARIO"), ""),
+        "Conductor": _txt(fila.get("CONDUCTOR"), ""),
+        "Fecha": _txt(fila.get("FECHA"), ""),
+        "Estado": _txt(fila.get("ESTADO"), ""),
+        "Valor Declarado": _txt(fila.get("VALOR DECLARADO"), ""),
     }
     return registro
 

@@ -150,6 +150,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     aforo: Optional[float] = None            # Valor numérico del aforo
     placa: Optional[str] = None
     tipo_veh_sicetac: Optional[str] = None
+    ruta: Optional[str] = None  # Ruta asignada/editada manualmente
     total_solicitado: float
     causal: Optional[str] = None
     estado: Optional[str] = None  # 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
@@ -1214,6 +1215,17 @@ async def enviar_tramite(request: EnviarTramiteRequest):
         )
 
 
+@router.get("/rutas")
+async def listar_rutas():
+    """Lista las rutas que tienen tarifa (para el autocompletar al asignar ruta a una planilla)."""
+    try:
+        rutas = sorted(set(r for r in coleccion_tarifas.distinct("ruta") if r))
+        return {"rutas": rutas}
+    except Exception as e:
+        logger.error(f"Error al listar rutas: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al listar rutas: {str(e)}")
+
+
 @router.post("/consultar-tarifa")
 async def consultar_tarifa(request: ConsultarTarifaRequest):
 
@@ -1498,7 +1510,8 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "consecutivo_base": cons_info["consecutivo_base"],
                 "numero_consecutivo": cons_info["numero"],
                 "letra_consecutivo": cons_info["letra"],
-                "es_fusionada_consecutivo": cons_info["es_fusionada"]
+                "es_fusionada_consecutivo": cons_info["es_fusionada"],
+                "registros_detalle": resultado.get("registros_detalle", []),
             }
 
             # Verificar si ya existe un documento con esta planilla
@@ -1649,7 +1662,8 @@ async def dividir_fusion(request: DividirFusionRequest):
                 "usuario": request.usuario,
                 "perfil": fusionada.get("perfil", ""),
                 "centro_distribucion": fusionada.get("centro_distribucion", ""),
-                "fecha_creacion": datetime.now()
+                "fecha_creacion": datetime.now(),
+                "registros_detalle": datos.get("registros_detalle", []),
             }
 
             # Insertar en pedidos_medical
@@ -1721,6 +1735,314 @@ async def dividir_fusion(request: DividirFusionRequest):
     except Exception as e:
         logger.error(f"Error al dividir fusion: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error al dividir fusion: {str(e)}")
+
+
+# ============= DIVIDIR CONSECUTIVO (una planilla -> varios carros) =============
+
+def _generar_consecutivo_division(consecutivo_original: str, num_carros: int) -> list:
+    """
+    Genera los consecutivos con letra para dividir una planilla en varios carros.
+    Reutiliza el número base de la original y asigna las primeras letras libres.
+    Ej: "BARRANQUILLA-20260619-3", 2 carros ->
+        [{"consecutivo": "...-3A", "consecutivo_base": "...-3", "numero": 3, "letra": "A"},
+         {"consecutivo": "...-3B", ...}]
+    """
+    if not consecutivo_original:
+        raise HTTPException(status_code=400, detail="La planilla no tiene consecutivo para dividir")
+
+    parts = consecutivo_original.split("-")
+    if len(parts) < 3:
+        raise HTTPException(status_code=400, detail=f"Consecutivo inválido para dividir: {consecutivo_original}")
+
+    solo_digitos = "".join(ch for ch in parts[-1] if ch.isdigit())
+    if not solo_digitos:
+        raise HTTPException(status_code=400, detail=f"Consecutivo sin número base: {consecutivo_original}")
+    numero_base = int(solo_digitos)
+    prefijo = "-".join(parts[:-1])  # ej: "BARRANQUILLA-20260619"
+
+    # Letras ya usadas para este número base (en activos e histórico)
+    regex_pattern = f"^{prefijo}-{numero_base}[A-Z]?$"
+    _query = {"consecutivo": {"$regex": regex_pattern}}
+    _projection = {"letra_consecutivo": 1, "consecutivo": 1}
+    existentes = list(coleccion_pedidos_medical.find(_query, _projection)) \
+        + list(coleccion_historico.find(_query, _projection))
+
+    letras_usadas = set()
+    for doc in existentes:
+        letra = doc.get("letra_consecutivo")
+        if not letra:
+            ult = doc.get("consecutivo", "").split("-")[-1]
+            letra = "".join(ch for ch in ult if ch.isalpha())
+        if letra:
+            letras_usadas.add(str(letra).upper())
+
+    letras = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    consecutivos = []
+    letra_idx = 0
+    for _ in range(num_carros):
+        while letra_idx < len(letras) and letras[letra_idx] in letras_usadas:
+            letra_idx += 1
+        if letra_idx >= len(letras):
+            raise HTTPException(status_code=500, detail="No hay más letras disponibles para dividir")
+        letra = letras[letra_idx]
+        consecutivos.append({
+            "consecutivo": f"{prefijo}-{numero_base}{letra}",
+            "consecutivo_base": f"{prefijo}-{numero_base}",
+            "numero": numero_base,
+            "letra": letra,
+        })
+        letras_usadas.add(letra)
+        letra_idx += 1
+    return consecutivos
+
+
+class DividirConsecutivoRequest(BaseModel):
+    """Divide una planilla en varios carros. El frontend ya calculó tipo_vehiculo y tarifa por carro."""
+    planilla: str
+    usuario: Optional[str] = None
+    carros: List[dict]  # [{peso, tipo_vehiculo, tarifa_calculada, tarifa_base, total_solicitado}, ...]
+
+
+class UnirCarrosRequest(BaseModel):
+    """Revierte una división: elimina los carros y reconstruye la original."""
+    planilla: str
+    usuario: Optional[str] = None
+
+
+@router.post("/dividir-consecutivo")
+async def dividir_consecutivo(request: DividirConsecutivoRequest):
+    """
+    Divide una planilla en N 'carros' (mismo consecutivo base con letra A/B/C/D).
+    Valida que la suma de pesos == peso total de la original, duplica los datos de la
+    original en cada carro (solo cambian peso/tipo/flete) y elimina la original.
+    """
+    try:
+        original = coleccion_pedidos_medical.find_one({"planilla": request.planilla})
+        if not original:
+            raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada")
+
+        carros = request.carros or []
+        if len(carros) < 2 or len(carros) > 4:
+            raise HTTPException(status_code=400, detail="Debe dividir entre 2 y 4 carros")
+
+        # Validar suma de pesos == peso total (tolerancia ±1 kg)
+        try:
+            peso_total_original = float(original.get("peso_real", 0) or 0)
+        except (TypeError, ValueError):
+            peso_total_original = 0
+        suma_pesos = 0.0
+        for c in carros:
+            try:
+                suma_pesos += float(c.get("peso", 0) or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Los pesos deben ser numéricos")
+        if abs(suma_pesos - peso_total_original) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La suma de pesos ({suma_pesos}) no coincide con el peso total de la planilla ({peso_total_original})"
+            )
+
+        # Generar consecutivos con letra (3A, 3B, ...)
+        consecutivos = _generar_consecutivo_division(original.get("consecutivo", ""), len(carros))
+
+        # Snapshot de la original para poder revertir (unir)
+        snapshot_campos = [
+            "planilla", "piezas", "peso_real", "ruta", "codigo_pedido", "cantidad_pedidos",
+            "cliente_origen", "municipio_destino", "departamento_destino", "regional",
+            "centro_costo", "tarifa_calculada", "tipo_vehiculo", "total_solicitado",
+            "tarifa_base", "requiere_descargue", "punto_adicional", "desvio", "aforo",
+            "placa", "tipo_veh_sicetac", "cantidad_destinos", "municipios_destino_lista",
+            "municipios_con_pedidos", "consecutivo", "consecutivo_base", "numero_consecutivo",
+            "flete_cobrado_fmc", "estado", "aprobado_por", "fecha_aprobacion", "registros_detalle",
+        ]
+        datos_original = {k: original.get(k) for k in snapshot_campos if k in original}
+
+        fecha_now = datetime.now()
+        carros_creados = []   # [{planilla, letra, peso}] para division_info
+        docs_a_insertar = []
+
+        for i, carro in enumerate(carros):
+            cons = consecutivos[i]
+            peso_carro = float(carro.get("peso", 0) or 0)
+            tarifa = float(carro.get("tarifa_calculada", 0) or 0)
+            tarifa_base = carro.get("tarifa_base")
+            if tarifa_base is None:
+                tarifa_base = tarifa
+            tarifa_base = float(tarifa_base or 0)
+            total_solicitado = float(carro.get("total_solicitado", 0) or 0)
+            tipo_veh = carro.get("tipo_vehiculo") or original.get("tipo_vehiculo", "")
+
+            planilla_carro = f"{request.planilla}-{cons['letra']}"
+
+            doc = {
+                "usuario_registro": request.usuario or original.get("usuario_registro"),
+                "perfil": original.get("perfil"),
+                "centro_distribucion": original.get("centro_distribucion"),
+                "planilla": planilla_carro,
+                "encontrada": True,
+                "piezas": original.get("piezas", 0),
+                "peso_real": peso_carro,
+                "ruta": original.get("ruta", "-"),
+                "codigo_pedido": original.get("codigo_pedido", "-"),
+                "cantidad_pedidos": original.get("cantidad_pedidos", 0),
+                "cliente_origen": original.get("cliente_origen", "-"),
+                "municipio_destino": original.get("municipio_destino", "-"),
+                "departamento_destino": original.get("departamento_destino", "-"),
+                "regional": original.get("regional"),
+                "centro_costo": original.get("centro_costo"),
+                "tarifa_calculada": tarifa,
+                "tipo_vehiculo": tipo_veh,
+                "total_solicitado": total_solicitado,
+                "diferencia": total_solicitado - tarifa,
+                "flete_cobrado_fmc": original.get("flete_cobrado_fmc", 0),
+                "cantidad_destinos": original.get("cantidad_destinos", 0),
+                "municipios_destino_lista": original.get("municipios_destino_lista", "-"),
+                "municipios_con_pedidos": original.get("municipios_con_pedidos", {}),
+                "fusion_info": None,
+                "tarifa_base": tarifa_base,
+                "requiere_descargue": original.get("requiere_descargue", 0),
+                "punto_adicional": original.get("punto_adicional", 0),
+                "desvio": original.get("desvio", 0),
+                "aforo": original.get("aforo"),
+                "placa": original.get("placa"),
+                "tipo_veh_sicetac": original.get("tipo_veh_sicetac"),
+                "fecha_creacion": fecha_now,
+                "estado": "PREAPROBADO",
+                "aprobado_por": None,
+                "fecha_aprobacion": None,
+                "consecutivo": cons["consecutivo"],
+                "consecutivo_base": cons["consecutivo_base"],
+                "numero_consecutivo": cons["numero"],
+                "letra_consecutivo": cons["letra"],
+                "es_fusionada_consecutivo": True,
+                "registros_detalle": original.get("registros_detalle", []),
+                "division_info": {
+                    "es_dividida": True,
+                    "planilla_original": request.planilla,
+                    "consecutivo_original": original.get("consecutivo"),
+                    "datos_original": datos_original,
+                    "carros": [],  # se rellena abajo con todos los carros
+                    "fecha_division": fecha_now,
+                    "usuario": request.usuario,
+                },
+            }
+            carros_creados.append({"planilla": planilla_carro, "letra": cons["letra"], "peso": peso_carro})
+            docs_a_insertar.append(doc)
+
+        # Rellenar la lista de carros en el division_info de cada uno
+        for doc in docs_a_insertar:
+            doc["division_info"]["carros"] = carros_creados
+
+        # Insertar carros y eliminar la original
+        for doc in docs_a_insertar:
+            coleccion_pedidos_medical.insert_one(doc)
+        coleccion_pedidos_medical.delete_one({"planilla": request.planilla})
+
+        consecutivos_map = {
+            d["planilla"]: {"consecutivo": d["consecutivo"], "consecutivo_base": d["consecutivo_base"]}
+            for d in docs_a_insertar
+        }
+        logger.info(
+            f"[DIVIDIR CONSECUTIVO] {request.planilla} -> {len(docs_a_insertar)} carros: "
+            f"{[c['planilla'] for c in carros_creados]}"
+        )
+
+        return {
+            "mensaje": f"Planilla dividida en {len(docs_a_insertar)} carros",
+            "carros": [dict({k: v for k, v in d.items() if k != "_id"}, guardado=True, encontrada=True) for d in docs_a_insertar],
+            "consecutivos": consecutivos_map,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al dividir consecutivo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al dividir consecutivo: {str(e)}")
+
+
+@router.post("/unir-carros")
+async def unir_carros(request: UnirCarrosRequest):
+    """
+    Revierte una división de consecutivo: elimina todos los carros y reconstruye
+    la planilla original desde division_info.datos_original.
+    """
+    try:
+        carro = coleccion_pedidos_medical.find_one({"planilla": request.planilla})
+        if not carro:
+            raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada")
+
+        division_info = carro.get("division_info") or {}
+        if not division_info.get("es_dividida"):
+            raise HTTPException(status_code=400, detail="Esta planilla no es un carro dividido")
+
+        planillas_carros = [c.get("planilla") for c in (division_info.get("carros") or []) if c.get("planilla")]
+        if request.planilla not in planillas_carros:
+            planillas_carros.append(request.planilla)
+
+        # Eliminar todos los carros (activos e histórico)
+        if planillas_carros:
+            coleccion_pedidos_medical.delete_many({"planilla": {"$in": planillas_carros}})
+            coleccion_historico.delete_many({"planilla": {"$in": planillas_carros}})
+
+        # Reconstruir la original desde el snapshot
+        d = division_info.get("datos_original") or {}
+        original_restaurada = {
+            "usuario_registro": request.usuario or carro.get("usuario_registro"),
+            "perfil": carro.get("perfil"),
+            "centro_distribucion": carro.get("centro_distribucion"),
+            "planilla": division_info.get("planilla_original") or d.get("planilla"),
+            "encontrada": True,
+            "piezas": d.get("piezas", 0),
+            "peso_real": d.get("peso_real", 0),
+            "ruta": d.get("ruta", "-"),
+            "codigo_pedido": d.get("codigo_pedido", "-"),
+            "cantidad_pedidos": d.get("cantidad_pedidos", 0),
+            "cliente_origen": d.get("cliente_origen", "-"),
+            "municipio_destino": d.get("municipio_destino", "-"),
+            "departamento_destino": d.get("departamento_destino", "-"),
+            "regional": d.get("regional"),
+            "centro_costo": d.get("centro_costo"),
+            "tarifa_calculada": d.get("tarifa_calculada", 0),
+            "tipo_vehiculo": d.get("tipo_vehiculo", "-"),
+            "total_solicitado": d.get("total_solicitado", 0),
+            "diferencia": (d.get("total_solicitado", 0) or 0) - (d.get("tarifa_calculada", 0) or 0),
+            "flete_cobrado_fmc": d.get("flete_cobrado_fmc", 0),
+            "cantidad_destinos": d.get("cantidad_destinos", 0),
+            "municipios_destino_lista": d.get("municipios_destino_lista", "-"),
+            "municipios_con_pedidos": d.get("municipios_con_pedidos", {}),
+            "fusion_info": None,
+            "tarifa_base": d.get("tarifa_base"),
+            "requiere_descargue": d.get("requiere_descargue", 0),
+            "punto_adicional": d.get("punto_adicional", 0),
+            "desvio": d.get("desvio", 0),
+            "aforo": d.get("aforo"),
+            "placa": d.get("placa"),
+            "tipo_veh_sicetac": d.get("tipo_veh_sicetac"),
+            "fecha_creacion": datetime.now(),
+            "estado": d.get("estado", "PREAPROBADO"),
+            "aprobado_por": d.get("aprobado_por"),
+            "fecha_aprobacion": d.get("fecha_aprobacion"),
+            "consecutivo": d.get("consecutivo"),
+            "consecutivo_base": d.get("consecutivo_base"),
+            "numero_consecutivo": d.get("numero_consecutivo"),
+            "letra_consecutivo": None,
+            "es_fusionada_consecutivo": False,
+            "registros_detalle": d.get("registros_detalle", []),
+            "division_info": None,
+        }
+        coleccion_pedidos_medical.insert_one(original_restaurada)
+        logger.info(f"[UNIR CARROS] Restaurada original {original_restaurada['planilla']} desde división")
+
+        return {
+            "mensaje": f"Carros unidos; restaurada planilla {original_restaurada['planilla']}",
+            "planilla": dict({k: v for k, v in original_restaurada.items() if k != "_id"}, guardado=True, encontrada=True),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al unir carros: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al unir carros: {str(e)}")
 
 
 @router.put("/actualizar-planilla-pedidos")
@@ -1835,6 +2157,10 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "fecha_modificacion": fecha_actual,
             "historial_cambios": historial_cambios
         }
+
+        # Si se envía ruta (edición de ruta), actualizarla
+        if request.ruta is not None:
+            campos_actualizar["ruta"] = request.ruta
 
         # Si se envía estado, actualizarlo
         if request.estado is not None:
@@ -2046,6 +2372,349 @@ async def eliminar_planilla(request: EliminarPlanillaRequest):
         )
 
 
+def _mapear_tipo_vehiculo(tipo_vehiculo: str) -> str:
+    """Mapea el tipo de vehículo interno al formato esperado por el sistema de transporte."""
+    tipo_upper = tipo_vehiculo.upper() if tipo_vehiculo else ""
+    if tipo_upper == "CARRY":
+        return "CARRY"
+    elif tipo_upper == "NHR":
+        return "CAMIONETA"
+    elif tipo_upper == "TURBO":
+        return "TURBO"
+    elif tipo_upper in {"NIES", "SENCILLO"}:
+        return "SENCILLO"
+    elif tipo_upper == "PATINETA":
+        return "TRACTOCAMION"
+    return tipo_vehiculo
+
+
+def _repartir_flete(total_solicitado, piezas_list):
+    """
+    Reparte 'total_solicitado' entre las filas en proporción a sus piezas (cajas),
+    usando división entera. La última fila absorbe el residuo de redondeo para que
+    la suma de las partes sea EXACTAMENTE igual al total.
+    Devuelve una lista de enteros del mismo len que piezas_list.
+    """
+    n = len(piezas_list)
+    if n == 0:
+        return []
+
+    try:
+        total = int(round(float(total_solicitado or 0)))
+    except (TypeError, ValueError):
+        total = 0
+
+    piezas_int = []
+    for p in piezas_list:
+        try:
+            piezas_int.append(int(round(float(p or 0))))
+        except (TypeError, ValueError):
+            piezas_int.append(0)
+
+    total_piezas = sum(piezas_int)
+
+    # Si no hay piezas para repartir, distribución equitativa con residuo en la última
+    if total_piezas <= 0:
+        base = total // n
+        reparto = [base] * n
+        reparto[-1] = total - base * (n - 1)
+        return reparto
+
+    reparto = []
+    acumulado = 0
+    for i in range(n - 1):
+        parte = total * piezas_int[i] // total_piezas
+        reparto.append(parte)
+        acumulado += parte
+    # La última fila absorbe el residuo para garantizar suma exacta
+    reparto.append(total - acumulado)
+    return reparto
+
+
+def _consecutivo_original(datos_original, indice, consecutivo_fusionado):
+    """
+    Resuelve el consecutivo de una planilla original para la fila del Excel.
+    1) datos_original['consecutivo'] si existe y no es vacío.
+    2) Si no, deriva del consecutivo fusionado incrementando el sufijo alfabético
+       por el índice (FUNZA-20260618-1A -> A=0, B=1, C=2...).
+    3) Si el fusionado no termina en letra, lo usa tal cual y loggea warning.
+    """
+    cons = (datos_original or {}).get("consecutivo")
+    if cons and str(cons).strip():
+        return cons
+
+    import re
+    if consecutivo_fusionado:
+        match = re.match(r"^(.*?)([A-Za-z]+)$", consecutivo_fusionado)
+        if match:
+            base = match.group(1)
+            letra_base = match.group(2)[-1].upper()
+            nueva_letra = chr(ord(letra_base) + indice)
+            return f"{base}{nueva_letra}"
+        logger.warning(
+            f"Consecutivo fusionado '{consecutivo_fusionado}' sin sufijo alfabético; "
+            f"se usará el mismo consecutivo para todas las filas de la fusión."
+        )
+    return consecutivo_fusionado or ""
+
+
+def _normalizar_texto_simple(s):
+    """Mayúsculas, sin tildes y espacios colapsados (para comparar nombres de cliente)."""
+    import unicodedata
+    if not s:
+        return ""
+    s = str(s).strip().upper()
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    return " ".join(s.split())
+
+
+def _es_cliente_kabi(cliente_origen):
+    """True si el cliente origen corresponde a FRESENIUS KABI (robusto a mayúsculas/tildes)."""
+    return _normalizar_texto_simple(cliente_origen) == "FRESENIUS KABI"
+
+
+def _expandir_fila_kabi(fila):
+    """
+    Para FRESENIUS KABI con registros_detalle: devuelve la fila normal + un duplicado por cada
+    Nombre único de destinatario, donde 'Ubicación Descargue' = 'FKC_<Nombre>_<Cedula>'.
+    Para otros clientes (p.ej. FRESENIUS MEDICAL CARE) o sin detalle: devuelve [fila] sin cambios.
+    Consume (pop) 'registros_detalle' de la fila para que no llegue al writer de Excel.
+    """
+    detalle = fila.pop("registros_detalle", None)
+    if not _es_cliente_kabi(fila.get("cliente_origen")) or not detalle:
+        return [fila]
+
+    # La primera fila conserva todo como hoy (Ubicación Descargue por divipolas).
+    filas = [fila]
+    vistos = set()
+    duplicados = 0
+    for item in detalle:
+        nombre = (item.get("Nombre") or "").strip() if isinstance(item, dict) else ""
+        if not nombre or nombre in vistos:
+            continue
+        vistos.add(nombre)
+        cedula = (item.get("Cedula") or "").strip() if isinstance(item, dict) else ""
+        duplicada = dict(fila)
+        duplicada["ubicacion_descargue_override"] = f"FKC_{nombre}_{cedula}"
+        filas.append(duplicada)
+        duplicados += 1
+
+    logger.info(
+        f"[EXPORTAR] KABI {fila.get('consecutivo', '')}: 1 fila normal + "
+        f"{duplicados} duplicadas por destinatario"
+    )
+    return filas
+
+
+def _expandir_doc_a_filas(doc):
+    """
+    Convierte un documento de pedidos_medical en una lista de 'filas lógicas' para el Excel.
+    - Planilla NO fusionada (o sin datos_originales): devuelve 1 fila con los campos del doc.
+    - Planilla fusionada: devuelve N filas (una por planilla original), con el Flete unidad
+      (total_solicitado del doc fusionado) repartido proporcionalmente por piezas.
+    Cada fila es un dict con los campos que _escribir_fila_planilla espera (kwargs).
+    """
+    fusion_info = doc.get("fusion_info") or {}
+    es_fusionada = fusion_info.get("es_fusionada") is True
+    datos_originales = fusion_info.get("datos_originales") or []
+
+    # Caso normal: una sola fila con los datos del documento (comportamiento histórico)
+    if not es_fusionada or not datos_originales:
+        if es_fusionada and not datos_originales:
+            logger.warning(
+                f"Planilla {doc.get('planilla')} marcada como fusionada pero sin "
+                f"datos_originales; se exporta como una sola fila."
+            )
+        return [{
+            "consecutivo": doc.get("consecutivo", ""),
+            "regional_doc": doc.get("regional"),
+            "municipio_destino": doc.get("municipio_destino", ""),
+            "codigo_pedido": doc.get("codigo_pedido", ""),
+            "cliente_origen": doc.get("cliente_origen", ""),
+            "tipo_vehiculo": doc.get("tipo_vehiculo", ""),
+            "piezas": doc.get("piezas", 0),
+            "peso_real": doc.get("peso_real", 0),
+            "flete_unidad": doc.get("total_solicitado", 0),
+            "punto_adicional_val": doc.get("punto_adicional", 0),
+            "requiere_descargue_val": doc.get("requiere_descargue", 0),
+            "registros_detalle": doc.get("registros_detalle", []),
+        }]
+
+    # Caso fusionado: repartir el flete total proporcionalmente por piezas (cajas)
+    consecutivo_fusionado = doc.get("consecutivo", "")
+    total_flete = doc.get("total_solicitado", 0)
+
+    piezas_list = []
+    for d in datos_originales:
+        try:
+            piezas_list.append(int(round(float(d.get("piezas", 0) or 0))))
+        except (TypeError, ValueError):
+            piezas_list.append(0)
+
+    reparto = _repartir_flete(total_flete, piezas_list)
+
+    logger.info(
+        f"[EXPORTAR] Planilla fusionada {doc.get('planilla')} -> {len(datos_originales)} filas, "
+        f"flete total {total_flete} repartido {reparto} según piezas {piezas_list}"
+    )
+
+    filas = []
+    for i, d in enumerate(datos_originales):
+        # tipo_vehiculo y placa se replican del doc fusionado si el original no los trae
+        tipo_veh = d.get("tipo_vehiculo") or doc.get("tipo_vehiculo", "")
+        placa_val = d.get("placa")
+        if placa_val is None:
+            placa_val = doc.get("placa", "")
+        filas.append({
+            "consecutivo": _consecutivo_original(d, i, consecutivo_fusionado),
+            "regional_doc": d.get("regional") or doc.get("regional"),
+            "municipio_destino": d.get("municipio_destino", ""),
+            "codigo_pedido": d.get("codigo_pedido", ""),
+            "cliente_origen": d.get("cliente_origen", ""),
+            "tipo_vehiculo": tipo_veh,
+            "piezas": d.get("piezas", 0),
+            "peso_real": d.get("peso_real", 0),
+            "flete_unidad": reparto[i] if i < len(reparto) else 0,
+            "punto_adicional_val": d.get("punto_adicional", 0),
+            "requiere_descargue_val": d.get("requiere_descargue", 0),
+            "registros_detalle": d.get("registros_detalle", []),
+        })
+    return filas
+
+
+def _escribir_fila_planilla(
+    ws, row_num, *,
+    consecutivo, regional_doc, municipio_destino, codigo_pedido,
+    cliente_origen, tipo_vehiculo, piezas, peso_real,
+    flete_unidad, punto_adicional_val, requiere_descargue_val,
+    regional_usuario, divipolas_lookup, divipolas_por_poblacion,
+    mapear_tipo_vehiculo, thin_border,
+    ubicacion_descargue_override=None,
+):
+    """
+    Escribe una fila de planilla en la hoja Excel y devuelve row_num + 1.
+    Recibe los campos ya resueltos (de un doc normal o de un datos_original expandido).
+    """
+    # Regional del documento con fallback a la regional del usuario
+    regional_doc = regional_doc or regional_usuario
+
+    # Origen: reemplazar la regional por el municipio real de la bodega de origen
+    _origen_map = {
+        "BARRANQUILLA": "GALAPA",
+        "CALI": "YUMBO",
+    }
+    origen = _origen_map.get(str(regional_doc).upper().strip(), regional_doc)
+
+    # Tipo de viaje: Urbano si origen == destino, Nacional si son diferentes
+    tipo_viaje = "URBANO" if str(regional_doc).upper() == str(municipio_destino).upper() else "NACIONAL"
+
+    # Observación: DN + código pedido
+    observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
+
+    # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
+    centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
+
+    # Toneladas: Peso Real / 1000 con 1 decimal
+    try:
+        peso_num = float(peso_real) if peso_real else 0
+        toneladas = round(peso_num / 1000, 1)
+    except (TypeError, ValueError):
+        toneladas = 0
+
+    # Valor unitario: Piezas * 20000
+    try:
+        piezas_num = int(piezas) if piezas else 0
+        valor_unitario = piezas_num * 20000
+    except (TypeError, ValueError):
+        valor_unitario = 0
+
+    # PUNTO ADICIONAL / CARGUE-DESCARGUE (banderas informativas)
+    punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else 0
+    cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else 0
+
+    # Ubicación y dirección de descargue desde la colección divipolas.
+    # Si hay override (filas duplicadas de FRESENIUS KABI), 'Ubicación Descargue' toma ese valor;
+    # 'Direccion Descargue' siempre es el lookup divipolas (igual en todas las filas).
+    ubicacion_lookup = ""
+    direccion_lookup = ""
+    if municipio_destino:
+        lookup = divipolas_lookup.get(str(municipio_destino).strip())
+        if not lookup:
+            lookup = divipolas_por_poblacion.get(str(municipio_destino).strip().upper())
+        if lookup:
+            ubicacion_lookup = lookup.get("ubicacion_descargue", "")
+            direccion_lookup = lookup.get("direccion_descargue", "")
+    ubicacion_descargue = ubicacion_descargue_override if ubicacion_descargue_override else ubicacion_lookup
+    direccion_descargue = direccion_lookup
+
+    # Ubicación y dirección de cargue según regional
+    _cargue_map = {
+        "FUNZA":        ("INTEGRA_EL ROSAL",       "EL ROSAL"),
+        "GIRARDOTA":    ("INTEGRA_GIRARDOTA",   "parque industrial del norte bodega 119"),
+        "BARRANQUILLA": ("INTEGRA_GALAPA",      "GALAPA"),
+        "CALI":         ("INTEGRA_YUMBO",       "Carrera 31 a #15-320"),
+        "BUCARAMANGA":  ("INTEGRA_BUCARAMANGA", "Parque industrial provincia de soto 1"),
+    }
+    _cargue = _cargue_map.get(
+        str(regional_doc).upper().strip(),
+        ("FME_BODEGA_INTEGRA_FUNZA", "PARQUE INDUSTRIAL SAN DIEGO")
+    )
+    ubicacion_cargue = _cargue[0]
+    direccion_cargue = _cargue[1]
+
+    datos = [
+        consecutivo,                                      # Consecutivo
+        tipo_viaje,                                       # Tipo de viaje
+        "MASIVO",                                         # Linea de negocio
+        "PENDIENTE",                                      # Estado
+        observacion,                                      # Observación
+        CLIENTE_A_NIT.get(str(cliente_origen).upper().strip(), cliente_origen),  # Cliente
+        origen,                                           # Origen
+        municipio_destino,                                # Destino
+        codigo_pedido,                                    # Pedido cliente
+        codigo_pedido,                                    # Guía
+        centro_costo,                                     # CENTRO COSTO
+        ubicacion_cargue,                                 # Ubicacion Cargue
+        direccion_cargue,                                 # Direccion cargue
+        ubicacion_descargue,                              # Ubicacion Descargue
+        direccion_descargue,                              # Direccion Descargue
+        "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",  # Producto
+        "NORMAL",                                         # Naturaleza
+        mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
+        "VEHICULOS",                                      # unidad
+        1,                                                # Cantidad (siempre 1)
+        "PAQUETES",                                       # Tipo embalaje
+        toneladas,                                        # Toneladas
+        flete_unidad,                                     # Flete unidad
+        punto_adicional,                                  # PUNTO ADICIONAL
+        cargue_descargue,                                 # CARGUE-DESCARGUE PER JURIDICA
+        0,                                                # SEGURO
+        "CUPO",                                           # Tipo pago
+        0,                                                # Tolerancia
+        0,                                                # Vlr hora STBY
+        0,                                                # Vlr Declar Mercancia
+        1,                                                # Aprobar Poliza
+        "CUPO",                                           # Flete por
+        valor_unitario,                                   # Valor unitario
+        1,                                                # Aprobar cupo credito
+        1,                                                # Aprobar rentabilidad
+        "FURGON",                                         # Otras caracteristicas
+        1,                                                # REMESAS
+        1,                                                # REMISION DEL CLIENTE
+        1,                                                # GUIA DE TRANSPORTE
+        1                                                 # MANIFIESTO
+    ]
+
+    for col_idx, valor in enumerate(datos, 1):
+        cell = ws.cell(row=row_num, column=col_idx, value=valor)
+        cell.border = thin_border
+
+    return row_num + 1
+
+
 class ExportarPlanillasExcelRequest(BaseModel):
     """Modelo para exportar planillas a Excel"""
     planillas: List[str]
@@ -2097,21 +2766,6 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
 
         if not planillas_db:
             raise HTTPException(status_code=404, detail="No se encontraron planillas para exportar")
-
-        # Función para mapear tipo de vehículo
-        def mapear_tipo_vehiculo(tipo_vehiculo: str) -> str:
-            tipo_upper = tipo_vehiculo.upper() if tipo_vehiculo else ""
-            if tipo_upper == "CARRY":
-                return "CARRY"
-            elif tipo_upper == "NHR":
-                return "CAMIONETA"
-            elif tipo_upper == "TURBO":
-                return "TURBO"
-            elif tipo_upper in {"NIES", "SENCILLO"}:
-                return "SENCILLO"
-            elif tipo_upper == "PATINETA":
-                return "TRACTOCAMION"
-            return tipo_vehiculo
 
         # Crear workbook y worksheet
         wb = Workbook()
@@ -2187,132 +2841,21 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         row_num = 2
         for doc in planillas_db:
             try:
-                # Obtener datos básicos
-                consecutivo = doc.get("consecutivo", "")
-                regional_doc = doc.get("regional", regional_usuario)
-                # Reemplazar la regional por el municipio real de la bodega de origen:
-                # Barranquilla -> Galapa, Cali -> Yumbo
-                _origen_map = {
-                    "BARRANQUILLA": "GALAPA",
-                    "CALI": "YUMBO",
-                }
-                origen = _origen_map.get(regional_doc.upper().strip(), regional_doc)
-                municipio_destino = doc.get("municipio_destino", "")
-                codigo_pedido = doc.get("codigo_pedido", "")
-                cliente_origen = doc.get("cliente_origen", "")
-                tipo_vehiculo = doc.get("tipo_vehiculo", "")
-                piezas = doc.get("piezas", 0)
-                peso_real = doc.get("peso_real", 0)
-                total_solicitado = doc.get("total_solicitado", 0)
-                punto_adicional_val = doc.get("punto_adicional", 0)
-                requiere_descargue_val = doc.get("requiere_descargue", 0)
-
-                # Tipo de viaje: Urbano si origen == destino, Nacional si son diferentes
-                tipo_viaje = "URBANO" if regional_doc.upper() == municipio_destino.upper() else "NACIONAL"
-
-                # Observación: DN + código pedido
-                observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
-
-                # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
-                centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
-
-                # Toneladas: Peso Real / 1000 con 1 decimal
-                try:
-                    peso_num = float(peso_real) if peso_real else 0
-                    toneladas = round(peso_num / 1000, 1)
-                except:
-                    toneladas = 0
-
-                # Valor unitario: Piezas * 20000
-                try:
-                    piezas_num = int(piezas) if piezas else 0
-                    valor_unitario = piezas_num * 20000
-                except:
-                    valor_unitario = 0
-
-                # PUNTO ADICIONAL: si hay valor en punto_adicional
-                punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else 0
-
-                # CARGUE-DESCARGUE PER JURIDICA: si hay valor en requiere_descargue
-                cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else 0
-
-                # Buscar Ubicación y Dirección de Descargue desde la colección divipolas
-                # Usar municipio_destino (viene de "Municipio Principal" del Siscore)
-                ubicacion_descargue = ""
-                direccion_descargue = ""
-                if municipio_destino:
-                    # Buscar por código divipola primero, luego por nombre de población
-                    lookup = divipolas_lookup.get(municipio_destino.strip())
-                    if not lookup:
-                        lookup = divipolas_por_poblacion.get(municipio_destino.strip().upper())
-                    if lookup:
-                        ubicacion_descargue = lookup.get("ubicacion_descargue", "")
-                        direccion_descargue = lookup.get("direccion_descargue", "")
-
-                # Mapeo de regional a ubicación y dirección de cargue
-                _cargue_map = {
-                    "FUNZA":        ("FME_BODEGA_INTEGRA_FUNZA",       "PARQUE INDUSTRIAL SAN DIEGO"),
-                    "GIRARDOTA":    ("FME_BODEGA_INTEGRA_GIRARDOTA",   "parque industrial del norte bodega 119"),
-                    "BARRANQUILLA": ("FME_BODEGA_INTEGRA_GALAPA",      "GALAPA"),
-                    "CALI":         ("FME_BODEGA_INTEGRA_YUMBO",       "Carrera 31 a #15-320"),
-                    "BUCARAMANGA":  ("FME_BODEGA_INTEGRA_BUCARAMANGA", "Parque industrial provincia de soto 1"),
-                }
-                _cargue = _cargue_map.get(
-                    regional_doc.upper().strip(),
-                    ("FME_BODEGA_INTEGRA_FUNZA", "PARQUE INDUSTRIAL SAN DIEGO")
-                )
-                ubicacion_cargue = _cargue[0]
-                direccion_cargue = _cargue[1]
-
-                datos = [
-                    consecutivo,                                      # Consecutivo
-                    tipo_viaje,                                       # Tipo de viaje
-                    "MASIVO",                                         # Linea de negocio
-                    "PENDIENTE",                                      # Estado
-                    observacion,                                      # Observación
-                    CLIENTE_A_NIT.get(cliente_origen.upper().strip(), cliente_origen),  # Cliente
-                    origen,                                           # Origen
-                    municipio_destino,                                # Destino
-                    codigo_pedido,                                    # Pedido cliente
-                    codigo_pedido,                                    # Guía
-                    centro_costo,                                     # CENTRO COSTO
-                    ubicacion_cargue,                                 # Ubicacion Cargue (según regional)
-                    direccion_cargue,                                 # Direccion cargue (según regional)
-                    ubicacion_descargue,                              # Ubicacion Descargue (desde divipolas)
-                    direccion_descargue,                              # Direccion Descargue (desde divipolas)
-                    "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",  # Producto
-                    "NORMAL",                                         # Naturaleza
-                    mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
-                    "VEHICULOS",                                      # unidad
-                    1,                                                # Cantidad (siempre 1)
-                    "PAQUETES",                                       # Tipo embalaje
-                    toneladas,                                        # Toneladas
-                    total_solicitado,                                 # Flete unidad
-                    punto_adicional,                                  # PUNTO ADICIONAL
-                    cargue_descargue,                                 # CARGUE-DESCARGUE PER JURIDICA
-                    0,                                                # SEGURO
-                    "CUPO",                                           # Tipo pago
-                    0,                                                # Tolerancia
-                    0,                                                # Vlr hora STBY
-                    0,                                                # Vlr Declar Mercancia
-                    1,                                                # Aprobar Poliza
-                    "CUPO",                                           # Flete por
-                    valor_unitario,                                   # Valor unitario
-                    1,                                                # Aprobar cupo credito
-                    1,                                                # Aprobar rentabilidad
-                    "FURGON",                                         # Otras caracteristicas
-                    1,                                                # REMESAS
-                    1,                                                # REMISION DEL CLIENTE
-                    1,                                                # GUIA DE TRANSPORTE
-                    1                                                 # MANIFIESTO
-                ]
-
-                for col_idx, valor in enumerate(datos, 1):
-                    cell = ws.cell(row=row_num, column=col_idx, value=valor)
-                    cell.border = thin_border
-
-                row_num += 1
-
+                # Una planilla FUSIONADA se "expande" en N filas (una por planilla original),
+                # repartiendo el Flete unidad (total_solicitado) proporcionalmente por piezas.
+                # Una planilla normal produce 1 fila (comportamiento histórico).
+                for fila_base in _expandir_doc_a_filas(doc):
+                    # FRESENIUS KABI: además, duplica filas por destinatario (FKC_Nombre_Cedula)
+                    for fila in _expandir_fila_kabi(fila_base):
+                        row_num = _escribir_fila_planilla(
+                            ws, row_num,
+                            regional_usuario=regional_usuario,
+                            divipolas_lookup=divipolas_lookup,
+                            divipolas_por_poblacion=divipolas_por_poblacion,
+                            mapear_tipo_vehiculo=_mapear_tipo_vehiculo,
+                            thin_border=thin_border,
+                            **fila,
+                        )
             except Exception as e:
                 logger.error(f"Error procesando planilla {doc.get('planilla', 'desconocido')}: {str(e)}")
                 continue  # Saltar esta fila y continuar con la siguiente
@@ -2704,8 +3247,8 @@ async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", cent
         total_docs = coleccion_pedidos_medical.count_documents(filtro)
         logger.info(f"[OBTENER RESULTADOS] Total documentos con filtro: {total_docs}")
 
-        # Traer planillas filtradas
-        planillas = list(coleccion_pedidos_medical.find(filtro).sort("fecha_creacion", -1).limit(limite))
+        # Traer planillas filtradas (excluye registros_detalle: pesado y no se usa en la tabla)
+        planillas = list(coleccion_pedidos_medical.find(filtro, {"registros_detalle": 0}).sort("fecha_creacion", -1).limit(limite))
 
         # Convertir ObjectId a string
         for planilla in planillas:
