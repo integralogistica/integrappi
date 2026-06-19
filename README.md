@@ -472,3 +472,23 @@ El WS de Siscore V3 (`integra-wms.appsiscore.com/app/ws/informe_v3.php`) dejó d
 ### Exportación a Excel (`exportar-planillas-excel`)
 - **Origen**: `CALI` → `YUMBO` (junto al ya existente `BARRANQUILLA` → `GALAPA`).
 - **Cliente**: `FRESENIUS KABI` → `900402080` (junto al ya existente `FRESENIUS MEDICAL CARE` → `901689684`), vía diccionario `CLIENTE_A_NIT` (insensible a mayúsculas/espacios).
+
+## Actualizaciones Recientes (2026-06-19)
+
+### Exportación a Excel — planillas fusionadas y KABI (`/siscore/exportar-planillas-excel`)
+- **Planillas fusionadas → filas separadas**: una planilla fusionada ya no se exporta como una sola fila. Se generan **N filas** (una por cada planilla original en `fusion_info.datos_originales`), cada una con su **consecutivo original** y sus datos propios (cliente, destino, piezas, peso). El campo **"Flete unidad"** (`total_solicitado`) se **reparte proporcionalmente por piezas** (división entera; la última fila absorbe el residuo → suma exacta). Helpers: `_repartir_flete`, `_expandir_doc_a_filas`, `_consecutivo_original`, `_escribir_fila_planilla`, `_mapear_tipo_vehiculo`.
+- **FRESENIUS KABI → filas duplicadas por destinatario**: para KABI, además de la fila normal, se genera **una fila por cada Nombre único** de `registros_detalle` (todas con el mismo consecutivo y datos), donde **"Ubicación Descargue"** = `FKC_<Nombre>_<Cedula>`. FRESENIUS MEDICAL CARE sigue con una sola fila. Helpers: `_es_cliente_kabi`, `_expandir_fila_kabi`.
+
+### Detalle por guía en MongoDB (`guardar-busqueda`)
+- Nuevo campo **`registros_detalle`** en cada documento de `pedidos_medical`: array con un item por guía/fila del Excel del portal, incluyendo **`Cedula`**, `Nombre`, `Direccion`, `Producto`, `Valor Declarado`, etc. (para auditoría).
+- `dividir-fusion` reconstruye `registros_detalle` desde `datos_originales`.
+- `obtener-resultados-recientes` lo excluye con projection `{"registros_detalle": 0}` para no inflar la carga de la tabla.
+- Mapper (`Funciones/siscore_excel_mapper.py`): `mapear_fila_a_registro` ahora expone todos los campos reconocidos del Excel (`Cedula`, `Origen`, `Producto`, `Codigo`, `Mensajero`, `Usuario`, `Conductor`, `Fecha`, `Estado`, `Valor Declarado`).
+
+### División de consecutivo en carros (NUEVO)
+- **`POST /siscore/dividir-consecutivo`**: divide una planilla en hasta **4 carros** (consecutivo con letra: `3A`, `3B`, `3C`, `3D`). El frontend envía el peso de cada carro; el backend valida que la **suma de pesos == peso total** (±1 kg), duplica los datos de la original en cada carro con su peso/tipo/flete propios, guarda `division_info` (snapshot de la original) en cada carro y elimina la original. Helper: `_generar_consecutivo_division`.
+- **`POST /siscore/unir-carros`**: revierte la división (elimina los carros y reconstruye la original desde `division_info.datos_original`).
+
+### Rutas: listado y asignación manual (NUEVO)
+- **`GET /siscore/rutas`**: devuelve las rutas con tarifa (`distinct("ruta")` sobre `fletes_rutas_fmc`), para el autocompletar del frontend.
+- **`actualizar-planilla-pedidos`**: ahora persiste el campo `ruta` (edición de ruta desde el modal). `guardar-busqueda` ya persistía `ruta`; el frontend ahora la asigna obligatoriamente antes de guardar.
