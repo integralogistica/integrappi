@@ -93,16 +93,16 @@ def _aplicar_filtro_regional_operativo(filtro: dict, centro_distribucion: str) -
 
 # ----------------------------------------------------------------------------
 # Notificación WhatsApp: aviso al operativo de que se creó su pedido.
-# Plantilla temporal "prueba" (Meta), texto:
-#   Hi {{1}}, your delivery address has been successfully updated to {{2}}.
-#   Contact {{3}} for any inquiries.
-# Mapeo de variables (hasta tener una plantilla específica):
+# Plantilla "confirmacion_pedido_creado" (Meta, es_CO), texto:
+#   Hola {{1}}, te confirmamos que el pedido {{2}} fue creado exitosamente
+#   para la planilla {{3}}. Ya puedes continuar con el trámite en Integrapp.
+# Mapeo de variables:
 #   {{1}} = nombre del operativo que montó la planilla
 #   {{2}} = número de pedido (pedido_vulcano)
-#   {{3}} = consecutivo de la planilla
+#   {{3}} = número de planilla
 # ----------------------------------------------------------------------------
-PLANTILLA_PEDIDO_CREADO_NOMBRE = "prueba"
-PLANTILLA_PEDIDO_CREADO_IDIOMA = "en_US"
+PLANTILLA_PEDIDO_CREADO_NOMBRE = "confirmacion_pedido_creado"
+PLANTILLA_PEDIDO_CREADO_IDIOMA = "es_CO"
 
 
 def _normalizar_celular_co(celular: Optional[str]) -> Optional[str]:
@@ -140,16 +140,16 @@ def _notificar_pedido_creado_whatsapp(doc: dict, pedido: str):
             return
 
         nombre = (usuario_doc.get("nombre") or usuario_registro).strip()
-        consecutivo = doc.get("consecutivo") or doc.get("planilla") or ""
+        planilla = doc.get("planilla") or doc.get("consecutivo") or ""
 
         res = enviar_template_sync(
             to=celular,
             template_name=PLANTILLA_PEDIDO_CREADO_NOMBRE,
             language_code=PLANTILLA_PEDIDO_CREADO_IDIOMA,
-            body_params=[nombre, str(pedido), str(consecutivo)],
+            body_params=[nombre, str(pedido), str(planilla)],
         )
         if res:
-            logger.info(f"[NOTIF PEDIDO] WhatsApp OK -> {celular} ({nombre}) | pedido={pedido} consecutivo={consecutivo}")
+            logger.info(f"[NOTIF PEDIDO] WhatsApp OK -> {celular} ({nombre}) | pedido={pedido} planilla={planilla}")
         else:
             logger.warning(f"[NOTIF PEDIDO] WhatsApp NO enviado a {celular} ({nombre}) — revisar tokens o idioma de la plantilla '{PLANTILLA_PEDIDO_CREADO_NOMBRE}'.")
     except Exception as e:
