@@ -274,6 +274,71 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
 
 
+class AsignarPedidoManualRequest(BaseModel):
+    consecutivo: str
+    pedido: str
+    usuario: Optional[str] = None
+
+
+@router.post("/asignar-pedido-manual")
+async def asignar_pedido_manual(request: AsignarPedidoManualRequest):
+    """
+    Asigna manualmente el número de pedido Vulcano a una planilla (por consecutivo).
+    Replica exactamente lo que hace 'importar-vulcano' para una sola fila:
+    agrega pedido_vulcano, mueve el documento a pedidos_medical_historico y lo
+    elimina de pedidos_medical. Pensado para el botón por planilla (ADMIN/ANALISTA).
+    """
+    try:
+        consecutivo = (request.consecutivo or "").strip()
+        pedido = (request.pedido or "").strip()
+
+        if not consecutivo or not pedido:
+            raise HTTPException(status_code=400, detail="consecutivo y pedido son obligatorios")
+
+        logger.info(f"=== ASIGNAR PEDIDO MANUAL === consecutivo={consecutivo}, pedido={pedido}, usuario={request.usuario}")
+
+        # Buscar planilla por consecutivo (igual que el import del Excel)
+        doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"No se encontró planilla con consecutivo {consecutivo}")
+
+        # Solo se puede asignar pedido a planillas APROBADAS
+        if doc.get("estado") != "APROBADO":
+            raise HTTPException(
+                status_code=400,
+                detail=f"La planilla con consecutivo {consecutivo} no está APROBADA (estado actual: {doc.get('estado')}). Solo se puede asignar el pedido a planillas aprobadas."
+            )
+
+        # Replicar lógica de una fila de importar-vulcano
+        doc["pedido_vulcano"] = pedido
+        doc["fecha_movimiento_historico"] = datetime.now()
+        if request.usuario:
+            doc["usuario_pedido_vulcano"] = request.usuario
+
+        # Mover a histórico (delete-first idempotente por si el _id ya existiera ahí)
+        coleccion_historico.delete_one({"_id": doc["_id"]})
+        coleccion_historico.insert_one(doc)
+
+        # Eliminar de pedidos_medical
+        coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+
+        logger.info(f"Pedido manual asignado: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+
+        return {
+            "mensaje": f"Pedido {pedido} asignado a consecutivo {consecutivo} y movido a histórico.",
+            "exitoso": True,
+            "consecutivo": consecutivo,
+            "pedido": pedido,
+            "planilla": doc.get("planilla")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al asignar pedido manual: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al asignar pedido: {str(e)}")
+
+
 # Modelos para gestión de causales
 class CausalRequest(BaseModel):
     """Modelo para crear/actualizar una causal"""
@@ -2573,8 +2638,10 @@ def _expandir_doc_a_filas(doc):
 
     filas = []
     for i, d in enumerate(datos_originales):
-        # tipo_vehiculo y placa se replican del doc fusionado si el original no los trae
-        tipo_veh = d.get("tipo_vehiculo") or doc.get("tipo_vehiculo", "")
+        # tipo_vehiculo: TODAS las filas del fusionado usan el tipo del vehículo fusionado
+        # (el real del camión); solo cae al tipo del original si el doc fusionado no lo trae.
+        # placa: se replica del doc fusionado si el original no la trae.
+        tipo_veh = doc.get("tipo_vehiculo") or d.get("tipo_vehiculo", "")
         placa_val = d.get("placa")
         if placa_val is None:
             placa_val = doc.get("placa", "")
