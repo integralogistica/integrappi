@@ -1263,6 +1263,15 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         logger.info(f"Planillas buscadas: {request.planillas_buscadas}")
         logger.info(f"Cantidad de resultados: {len(request.resultados_consolidados)}")
 
+        # Filtrar planillas NO encontradas: no se guardan en base porque son registros
+        # vacíos (piezas=0, peso=0, ruta="-", etc.). Así tampoco se desperdician
+        # números de consecutivo para planillas sin información real.
+        resultados_a_guardar = [r for r in request.resultados_consolidados if r.get("encontrada")]
+        omitidas = len(request.resultados_consolidados) - len(resultados_a_guardar)
+        if omitidas:
+            planillas_omitidas = [r.get("planilla") for r in request.resultados_consolidados if not r.get("encontrada")]
+            logger.info(f"Omitiendo {omitidas} planilla(s) no encontrada(s) — no se guardan en base: {planillas_omitidas}")
+
         # VERIFICAR si alguna de las planillas buscadas está fusionada
         planillas_fusionadas_detectadas = []
         for planilla_num in request.planillas_buscadas:
@@ -1284,7 +1293,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         resultados_por_regional = {}
         fusiones_por_regional = {}  # {regional: [resultados_fusionados]}
 
-        for resultado in request.resultados_consolidados:
+        for resultado in resultados_a_guardar:
             # Obtener regional prioritizando:
             # 1. Regional del resultado (que no sea '-' ni 'TODOS' ni vacía)
             # 2. Centro de distribución del resultado (que no sea '-' ni 'TODOS' ni vacío)
@@ -1542,7 +1551,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 coleccion_pedidos_medical.insert_one(planilla_doc)
                 logger.info(f"Planilla {resultado.get('planilla')}: guardada con consecutivo {planilla_doc['consecutivo']}")
 
-        logger.info(f"Total guardado: {len(request.resultados_consolidados)} planillas en pedidos_medical")
+        logger.info(f"Total guardado: {len(resultados_a_guardar)} planillas en pedidos_medical ({omitidas} omitida(s) por no encontrada(s))")
 
         # ELIMINAR las planillas originales que fueron fusionadas
         # Los datos originales se preservan en fusion_info de la planilla fusionada
@@ -1573,8 +1582,9 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
             }
 
         return {
-            "mensaje": f"Se guardaron/actualizaron {len(request.resultados_consolidados)} planillas",
-            "total": len(request.resultados_consolidados),
+            "mensaje": f"Se guardaron/actualizaron {len(resultados_a_guardar)} planillas" + (f" ({omitidas} omitida(s) por no encontrada(s))" if omitidas else ""),
+            "total": len(resultados_a_guardar),
+            "omitidas_no_encontradas": omitidas,
             "consecutivos": planillas_consecutivos,
             "planillas_fusionadas_detectadas": planillas_fusionadas_detectadas
         }
