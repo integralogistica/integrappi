@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 from pymongo import MongoClient
+from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 load_dotenv()
 
@@ -25,6 +26,7 @@ coleccion_divipolas = db["divipolas"]
 coleccion_pedidos_medical = db["pedidos_medical"]
 coleccion_historico = db["pedidos_medical_historico"]
 coleccion_causales = db["causales"]
+coleccion_baseusuarios = db["baseusuarios"]
 
 # Índice sobre `consecutivo` en ambas colecciones. La generación de consecutivos
 # consulta por prefijo (regional+fecha) y, tras Importar Vulcano, también consulta
@@ -53,6 +55,105 @@ def regional_a_origen_bodega(regional: Optional[str]) -> Optional[str]:
         return regional
     r = str(regional).upper().strip()
     return REGIONAL_A_ORIGEN_BODEGA.get(r, r)
+
+
+def _aplicar_filtro_regional_operativo(filtro: dict, centro_distribucion: str) -> None:
+    """
+    Agrega a `filtro` (dict de consulta Mongo) las condiciones para que un perfil
+    OPERATIVO vea solo las planillas de su regional.
+
+    Cubre las distintas formas en que la regional queda almacenada, porque
+    `centro_costo` suele guardarse como 'FMC' (no como código de bodega):
+      - centro_costo = código de bodega (CO05)         -> cuando Siscore sí lo trae
+      - regional = nombre de bodega (YUMBO/GALAPA/...) -> como se guarda para OPERATIVO
+      - regional = nombre de la regional (CALI)         -> si se guardó sin conversión
+    """
+    cd = (centro_distribucion or "").upper().strip()
+    if not cd:
+        return
+    regional_map = {
+        "BARRANQUILLA": "CO04", "CALI": "CO05", "BUCARAMANGA": "CO06",
+        "FUNZA": "CO07", "MEDELLIN": "CO09",
+    }
+    bodega_codigo = regional_map.get(cd, "")
+    bodega_nombre = regional_a_origen_bodega(cd) or cd
+
+    condiciones = []
+    if bodega_codigo:
+        condiciones.append({"centro_costo": bodega_codigo})
+    if bodega_nombre and bodega_nombre != cd:
+        condiciones.append({"regional": bodega_nombre})
+    condiciones.append({"regional": cd})
+
+    if len(condiciones) == 1:
+        filtro.update(condiciones[0])
+    else:
+        filtro["$or"] = condiciones
+
+
+# ----------------------------------------------------------------------------
+# Notificación WhatsApp: aviso al operativo de que se creó su pedido.
+# Plantilla temporal "prueba" (Meta), texto:
+#   Hi {{1}}, your delivery address has been successfully updated to {{2}}.
+#   Contact {{3}} for any inquiries.
+# Mapeo de variables (hasta tener una plantilla específica):
+#   {{1}} = nombre del operativo que montó la planilla
+#   {{2}} = número de pedido (pedido_vulcano)
+#   {{3}} = consecutivo de la planilla
+# ----------------------------------------------------------------------------
+PLANTILLA_PEDIDO_CREADO_NOMBRE = "prueba"
+PLANTILLA_PEDIDO_CREADO_IDIOMA = "en_US"
+
+
+def _normalizar_celular_co(celular: Optional[str]) -> Optional[str]:
+    """Convierte un celular a formato internacional Colombia: solo dígitos con prefijo 57."""
+    if not celular:
+        return None
+    limpio = "".join(c for c in str(celular) if c.isdigit())
+    if not limpio:
+        return None
+    if not limpio.startswith("57"):
+        limpio = "57" + limpio
+    return limpio
+
+
+def _notificar_pedido_creado_whatsapp(doc: dict, pedido: str):
+    """
+    Envía WhatsApp al operativo que registró la planilla (usuario_registro) para
+    avisar que se creó el pedido. Resuelve celular y nombre en baseusuarios.
+    Es a prueba de fallos: si algo falla solo queda en log (no rompe la asignación).
+    """
+    try:
+        usuario_registro = (doc.get("usuario_registro") or "").strip()
+        if not usuario_registro:
+            logger.info("[NOTIF PEDIDO] Doc sin usuario_registro; no se notifica.")
+            return
+
+        usuario_doc = coleccion_baseusuarios.find_one({"usuario": usuario_registro.upper()})
+        if not usuario_doc:
+            logger.info(f"[NOTIF PEDIDO] Usuario '{usuario_registro}' no está en baseusuarios; no se notifica.")
+            return
+
+        celular = _normalizar_celular_co(usuario_doc.get("celular"))
+        if not celular:
+            logger.info(f"[NOTIF PEDIDO] Usuario '{usuario_registro}' sin celular válido; no se notifica.")
+            return
+
+        nombre = (usuario_doc.get("nombre") or usuario_registro).strip()
+        consecutivo = doc.get("consecutivo") or doc.get("planilla") or ""
+
+        res = enviar_template_sync(
+            to=celular,
+            template_name=PLANTILLA_PEDIDO_CREADO_NOMBRE,
+            language_code=PLANTILLA_PEDIDO_CREADO_IDIOMA,
+            body_params=[nombre, str(pedido), str(consecutivo)],
+        )
+        if res:
+            logger.info(f"[NOTIF PEDIDO] WhatsApp OK -> {celular} ({nombre}) | pedido={pedido} consecutivo={consecutivo}")
+        else:
+            logger.warning(f"[NOTIF PEDIDO] WhatsApp NO enviado a {celular} ({nombre}) — revisar tokens o idioma de la plantilla '{PLANTILLA_PEDIDO_CREADO_NOMBRE}'.")
+    except Exception as e:
+        logger.error(f"[NOTIF PEDIDO] Error inesperado: {e}")
 
 
 # NIT por nombre de cliente para el Excel de autorizados (campo "Cliente").
@@ -150,6 +251,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     aforo: Optional[float] = None            # Valor numérico del aforo
     placa: Optional[str] = None
     tipo_veh_sicetac: Optional[str] = None
+    peso_sicetac: Optional[float] = None  # Peso operacional editable (default = peso_real); se usa para trámites
     ruta: Optional[str] = None  # Ruta asignada/editada manualmente
     total_solicitado: float
     causal: Optional[str] = None
@@ -247,6 +349,8 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
                 coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
 
                 exitosos += 1
+                # Avisar por WhatsApp al operativo que montó la planilla
+                _notificar_pedido_creado_whatsapp(doc, pedido)
                 logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
 
             except Exception as e:
@@ -321,6 +425,9 @@ async def asignar_pedido_manual(request: AsignarPedidoManualRequest):
 
         # Eliminar de pedidos_medical
         coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+
+        # Avisar por WhatsApp al operativo que montó la planilla
+        _notificar_pedido_creado_whatsapp(doc, pedido)
 
         logger.info(f"Pedido manual asignado: consecutivo={consecutivo}, pedido_vulcano={pedido}")
 
@@ -1550,6 +1657,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "encontrada": resultado.get("encontrada", False),
                 "piezas": resultado.get("piezas", 0),
                 "peso_real": resultado.get("peso_real", 0),
+                "peso_sicetac": resultado.get("peso_sicetac", resultado.get("peso_real", 0)),
                 "ruta": resultado.get("ruta", "-"),
                 "codigo_pedido": resultado.get("codigo_pedido", "-"),
                 "cantidad_pedidos": resultado.get("cantidad_pedidos", 0),
@@ -2224,6 +2332,7 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "aforo": request.aforo,
             "placa": request.placa,
             "tipo_veh_sicetac": request.tipo_veh_sicetac,
+            "peso_sicetac": request.peso_sicetac,
             "total_solicitado": request.total_solicitado,
             "diferencia": diferencia,
             "causal": request.causal,
@@ -2825,17 +2934,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
 
         # Si es OPERATIVO, filtrar por regional
         if request.perfil == "OPERATIVO" and request.centro_distribucion:
-            # Mapear centro de distribución a códigos de bodega
-            regional_map = {
-                "BARRANQUILLA": "CO04",
-                "CALI": "CO05",
-                "BUCARAMANGA": "CO06",
-                "FUNZA": "CO07",
-                "MEDELLIN": "CO09"
-            }
-            bodega = regional_map.get(request.centro_distribucion, "")
-            if bodega:
-                consulta["centro_costo"] = bodega
+            _aplicar_filtro_regional_operativo(consulta, request.centro_distribucion)
 
         planillas_db = list(coleccion_pedidos_medical.find(consulta))
 
@@ -2996,13 +3095,7 @@ async def obtener_historico(
         # Filtrar por regional para operativos
         perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
         if perfil and perfil not in perfiles_globales and centro_distribucion:
-            regional_map = {
-                "BARRANQUILLA": "CO04", "CALI": "CO05", "BUCARAMANGA": "CO06",
-                "FUNZA": "CO07", "MEDELLIN": "CO09"
-            }
-            bodega = regional_map.get(centro_distribucion.upper(), "")
-            if bodega:
-                filtro["centro_costo"] = bodega
+            _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
 
         logger.info(f"[HISTORICO] Filtro: {filtro}")
 
@@ -3067,13 +3160,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         # Filtrar por regional para operativos
         perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
         if request.perfil and request.perfil not in perfiles_globales and request.centro_distribucion:
-            regional_map = {
-                "BARRANQUILLA": "CO04", "CALI": "CO05", "BUCARAMANGA": "CO06",
-                "FUNZA": "CO07", "MEDELLIN": "CO09"
-            }
-            bodega = regional_map.get(request.centro_distribucion.upper(), "")
-            if bodega:
-                filtro["centro_costo"] = bodega
+            _aplicar_filtro_regional_operativo(filtro, request.centro_distribucion)
 
         planillas_db = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
         logger.info(f"Planillas historico encontradas con filtros: {len(planillas_db)}")
@@ -3305,20 +3392,8 @@ async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", cent
         perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
 
         if perfil and perfil not in perfiles_globales and centro_distribucion:
-            # Mapear nombre de regional a código de bodega
-            regional_map = {
-                "BARRANQUILLA": "CO04",
-                "CALI": "CO05",
-                "BUCARAMANGA": "CO06",
-                "FUNZA": "CO07",
-                "MEDELLIN": "CO09"
-            }
-            bodega = regional_map.get(centro_distribucion.upper(), "")
-            if bodega:
-                filtro["centro_costo"] = bodega
-            else:
-                filtro["regional"] = {"$regex": f"^{centro_distribucion}$", "$options": "i"}
-            logger.info(f"[OBTENER RESULTADOS] Filtro por regional: {filtro}")
+            _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
+            logger.info(f"[OBTENER RESULTADOS] Filtro por regional (OPERATIVO): {filtro}")
 
         # Contar total de documentos
         total_docs = coleccion_pedidos_medical.count_documents(filtro)
