@@ -1645,6 +1645,11 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         # NO se transforma (sigue con el nombre de la regional, ej. CALI-...).
         es_operativo = str(request.perfil or "").upper() == "OPERATIVO"
 
+        # Estado inicial: las planillas creadas por OPERATIVO nacen en CREADO (borrador
+        # visible solo para el creador y ADMIN hasta pasarlas a PREAPROBADO). Los demás
+        # perfiles siguen naciendo en PREAPROBADO.
+        estado_inicial = "CREADO" if es_operativo else "PREAPROBADO"
+
         # Guardar cada resultado como un documento independiente
         for resultado, cons_info in todos_procesados:
             logger.info(f"Procesando planilla: {resultado.get('planilla')} con consecutivo: {cons_info['consecutivo']}")
@@ -1684,7 +1689,8 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "placa": resultado.get("placa"),
                 "tipo_veh_sicetac": resultado.get("tipo_veh_sicetac"),
                 "fecha_creacion": fecha_creacion,
-                "estado": resultado.get("estado", "PREAPROBADO"),  # Estado por defecto (puede ser PREAPROBADO, REQUIERE_APROBACION_COORDINADOR, REQUIERE_APROBACION_CONTROL o APROBADO)
+                "fecha_preaprobado": fecha_creacion if estado_inicial == "PREAPROBADO" else None,  # Visible para todos desde la creación (no operativo)
+                "estado": resultado.get("estado", estado_inicial),  # CREADO (operativo) / PREAPROBADO (otros); puede ser REQUIERE_APROBACION_* o APROBADO
                 "aprobado_por": resultado.get("aprobado_por"),
                 "fecha_aprobacion": resultado.get("fecha_aprobacion"),
                 # Campos de consecutivo
@@ -1701,6 +1707,11 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
 
             if existente:
                 # Actualizar el existente (conservar el consecutivo si ya tiene uno)
+                # Preservar el estado y la fecha de preaprobado: una re-consulta no debe
+                # rebajar una planilla que ya pasó a PREAPROBADO/APROBADO ni pisar su
+                # fecha de visibilidad.
+                planilla_doc["estado"] = existente.get("estado") or estado_inicial
+                planilla_doc["fecha_preaprobado"] = existente.get("fecha_preaprobado") or planilla_doc.get("fecha_preaprobado")
                 if existente.get("consecutivo"):
                     # Mantener el consecutivo existente y ACTUALIZAR cons_info para devolver al frontend
                     planilla_doc["consecutivo"] = existente.get("consecutivo")
@@ -1840,6 +1851,8 @@ async def dividir_fusion(request: DividirFusionRequest):
                 "consecutivo_base": datos.get("consecutivo_base"),
                 "flete_cobrado_fmc": datos.get("flete_cobrado_fmc", 0),
                 "estado": datos.get("estado", "PREAPROBADO"),
+                "fecha_preaprobado": (datos.get("fecha_preaprobado") or datetime.now())
+                    if (datos.get("estado", "PREAPROBADO") == "PREAPROBADO") else datos.get("fecha_preaprobado"),
                 "aprobado_por": datos.get("aprobado_por"),
                 "fecha_aprobacion": datos.get("fecha_aprobacion"),
                 "usuario": request.usuario,
@@ -2349,6 +2362,10 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
         # Si se envía estado, actualizarlo
         if request.estado is not None:
             campos_actualizar["estado"] = request.estado
+            # Registrar la fecha en que dejó de ser CREADO (visible para todos) la primera
+            # vez que ocurre; no sobreescribir si ya existía.
+            if doc_actual.get("estado") == "CREADO" and request.estado != "CREADO" and not doc_actual.get("fecha_preaprobado"):
+                campos_actualizar["fecha_preaprobado"] = fecha_actual
             if request.estado == "REQUIERE_APROBACION" and estado_anterior != "REQUIERE_APROBACION":
                 # Si cambia a REQUIERE_APROBACION, registrar quién solicitó autorización
                 campos_actualizar["usuario_solicitud_autorizacion"] = request.usuario_modificacion
@@ -2445,6 +2462,12 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             "fecha_aprobacion": datetime.now() if request.estado == "APROBADO" else None,
             "historial_cambios": historial_cambios
         }
+
+        # Registrar la fecha en que dejó de ser CREADO (visible para todos), sea cual sea
+        # el estado destino (PREAPROBADO, REQUIERE_APROBACION_* o APROBADO). En otros
+        # movimientos (p.ej. entre estados ya visibles) se conserva la existente.
+        if doc_actual.get("estado") == "CREADO" and request.estado != "CREADO":
+            campos_actualizar["fecha_preaprobado"] = datetime.now()
 
         # Actualizar el documento
         resultado = coleccion_pedidos_medical.update_one(
@@ -2718,9 +2741,10 @@ def _expandir_doc_a_filas(doc):
             "municipio_destino": doc.get("municipio_destino", ""),
             "codigo_pedido": doc.get("codigo_pedido", ""),
             "cliente_origen": doc.get("cliente_origen", ""),
-            "tipo_vehiculo": doc.get("tipo_vehiculo", ""),
+            "tipo_vehiculo": doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo", ""),
             "piezas": doc.get("piezas", 0),
             "peso_real": doc.get("peso_real", 0),
+            "peso_sicetac": doc.get("peso_sicetac", doc.get("peso_real", 0)),
             "flete_unidad": doc.get("total_solicitado", 0),
             "punto_adicional_val": doc.get("punto_adicional", 0),
             "requiere_descargue_val": doc.get("requiere_descargue", 0),
@@ -2747,10 +2771,11 @@ def _expandir_doc_a_filas(doc):
 
     filas = []
     for i, d in enumerate(datos_originales):
-        # tipo_vehiculo: TODAS las filas del fusionado usan el tipo del vehículo fusionado
-        # (el real del camión); solo cae al tipo del original si el doc fusionado no lo trae.
+        # tipo_vehiculo: TODAS las filas del fusionado usan el tipo SICETAC del vehículo
+        # fusionado (el real del camión); cae al original y luego al tipo interno si faltan.
         # placa: se replica del doc fusionado si el original no la trae.
-        tipo_veh = doc.get("tipo_vehiculo") or d.get("tipo_vehiculo", "")
+        tipo_veh = (doc.get("tipo_veh_sicetac") or d.get("tipo_veh_sicetac")
+                    or doc.get("tipo_vehiculo") or d.get("tipo_vehiculo", ""))
         placa_val = d.get("placa")
         if placa_val is None:
             placa_val = doc.get("placa", "")
@@ -2763,6 +2788,7 @@ def _expandir_doc_a_filas(doc):
             "tipo_vehiculo": tipo_veh,
             "piezas": d.get("piezas", 0),
             "peso_real": d.get("peso_real", 0),
+            "peso_sicetac": d.get("peso_sicetac", d.get("peso_real", 0)),
             "flete_unidad": reparto[i] if i < len(reparto) else 0,
             "punto_adicional_val": d.get("punto_adicional", 0),
             "requiere_descargue_val": d.get("requiere_descargue", 0),
@@ -2778,7 +2804,7 @@ def _escribir_fila_planilla(
     flete_unidad, punto_adicional_val, requiere_descargue_val,
     regional_usuario, divipolas_lookup, divipolas_por_poblacion,
     mapear_tipo_vehiculo, thin_border,
-    ubicacion_descargue_override=None,
+    ubicacion_descargue_override=None, peso_sicetac=None,
 ):
     """
     Escribe una fila de planilla en la hoja Excel y devuelve row_num + 1.
@@ -2803,22 +2829,31 @@ def _escribir_fila_planilla(
     # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
     centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
 
-    # Toneladas: Peso Real / 1000 con 1 decimal
+    # Toneladas: Peso SICETAC / 1000 con 1 decimal (con fallback a peso real)
+    peso_para_toneladas = peso_sicetac if peso_sicetac else peso_real
     try:
-        peso_num = float(peso_real) if peso_real else 0
+        peso_num = float(peso_para_toneladas) if peso_para_toneladas else 0
         toneladas = round(peso_num / 1000, 1)
     except (TypeError, ValueError):
         toneladas = 0
 
-    # Valor unitario: Piezas * 20000
+    # Valor unitario:
+    # - FRESENIUS MEDICAL CARE: Piezas * 17000
+    # - Otros clientes: Flete unidad / 0.7 (el flete representa el 70% del valor unitario)
+    es_fmc = _normalizar_texto_simple(cliente_origen) == "FRESENIUS MEDICAL CARE"
     try:
-        piezas_num = int(piezas) if piezas else 0
-        valor_unitario = piezas_num * 20000
+        if es_fmc:
+            piezas_num = int(piezas) if piezas else 0
+            valor_unitario = piezas_num * 17000
+        else:
+            flete_num = float(flete_unidad) if flete_unidad else 0
+            valor_unitario = round(flete_num / 0.7) if flete_num else 0
     except (TypeError, ValueError):
         valor_unitario = 0
 
     # PUNTO ADICIONAL / CARGUE-DESCARGUE (banderas informativas)
-    punto_adicional = "X" if punto_adicional_val and punto_adicional_val != 0 else 0
+    # PUNTO ADICIONAL siempre va en 0 en el Excel (por definición del formato de carga).
+    punto_adicional = 0
     cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else 0
 
     # Ubicación y dirección de descargue desde la colección divipolas.
@@ -2946,7 +2981,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         # Crear workbook y worksheet
         wb = Workbook()
         ws = wb.active
-        ws.title = "Planillas"
+        ws.title = "plantilla"
 
         # Definir columnas NUEVO FORMATO
         columnas = [
@@ -3377,13 +3412,15 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
 
 
 @router.get("/obtener-resultados-recientes")
-async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", centro_distribucion: str = ""):
+async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", centro_distribucion: str = "", usuario: str = ""):
     """
     Obtiene todos los planillas de pedidos_medical (cada documento es una planilla).
     Para operativos, filtra por su regional. Perfiles globales ven todas.
+    Las planillas en estado CREADO (borrador del operativo) solo las ve el ADMIN y el
+    propio operativo creador; el resto de perfiles no las ve hasta que pasen a PREAPROBADO.
     """
     try:
-        logger.info(f"[OBTENER RESULTADOS] Limite: {limite}, Perfil: {perfil}, Centro: {centro_distribucion}")
+        logger.info(f"[OBTENER RESULTADOS] Limite: {limite}, Perfil: {perfil}, Centro: {centro_distribucion}, Usuario: {usuario}")
 
         # Construir filtro base
         filtro = {"fusionada": {"$ne": True}}
@@ -3394,6 +3431,28 @@ async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", cent
         if perfil and perfil not in perfiles_globales and centro_distribucion:
             _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
             logger.info(f"[OBTENER RESULTADOS] Filtro por regional (OPERATIVO): {filtro}")
+
+        # Visibilidad del estado CREADO (borrador): ocultarlo salvo para ADMIN y para el
+        # operativo creador. Se compone con el posible $or del filtro regional envolviéndolo
+        # en un $and para evitar colisión de la clave "$or".
+        condiciones_and = []
+        if perfil != "ADMIN":
+            if perfil == "OPERATIVO" and usuario:
+                condiciones_and.append({"$or": [
+                    {"estado": {"$ne": "CREADO"}},
+                    {"estado": "CREADO", "usuario_registro": usuario},
+                ]})
+            else:
+                condiciones_and.append({"estado": {"$ne": "CREADO"}})
+        if condiciones_and:
+            if "$or" in filtro:
+                existente = dict(filtro)
+                filtro.clear()
+                filtro["$and"] = [existente] + condiciones_and
+            else:
+                for cond in condiciones_and:
+                    filtro.update(cond)
+            logger.info(f"[OBTENER RESULTADOS] Filtro visibilidad CREADO aplicado: {filtro}")
 
         # Contar total de documentos
         total_docs = coleccion_pedidos_medical.count_documents(filtro)
