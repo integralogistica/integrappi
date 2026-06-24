@@ -245,6 +245,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     """Modelo para actualizar una planilla en pedidos_medical"""
     planilla: str
     tarifa_base: Optional[float] = None
+    tarifa_calculada: Optional[float] = None
     requiere_descargue: Optional[float] = 0  # Valor numérico del descargue
     punto_adicional: Optional[float] = 0     # Valor numérico del punto adicional
     desvio: Optional[float] = 0              # Valor numérico del desvío
@@ -2269,6 +2270,12 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
                 "valor_anterior": doc_actual.get("tarifa_base"),
                 "valor_nuevo": request.tarifa_base
             })
+        if request.tarifa_calculada is not None and request.tarifa_calculada != doc_actual.get("tarifa_calculada"):
+            campos_modificados.append({
+                "campo": "tarifa_calculada",
+                "valor_anterior": doc_actual.get("tarifa_calculada"),
+                "valor_nuevo": request.tarifa_calculada
+            })
         if request.requiere_descargue != doc_actual.get("requiere_descargue"):
             campos_modificados.append({
                 "campo": "requiere_descargue",
@@ -2332,13 +2339,18 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             }
             historial_cambios.append(nuevo_historial)
 
-        # Calcular diferencia: total_solicitado - tarifa_calculada (del documento existente)
-        tarifa_calculada_actual = doc_actual.get("tarifa_calculada", 0) or 0
-        diferencia = (request.total_solicitado or 0) - tarifa_calculada_actual
+        # Calcular diferencia contra la tarifa teórica que queda guardada.
+        tarifa_calculada_final = (
+            request.tarifa_calculada
+            if request.tarifa_calculada is not None
+            else (doc_actual.get("tarifa_calculada", 0) or 0)
+        )
+        diferencia = (request.total_solicitado or 0) - tarifa_calculada_final
 
         # Campos a actualizar
         campos_actualizar = {
             "tarifa_base": request.tarifa_base,
+            "tarifa_calculada": tarifa_calculada_final,
             "requiere_descargue": request.requiere_descargue,
             "punto_adicional": request.punto_adicional,
             "desvio": request.desvio,
@@ -3223,12 +3235,13 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         ws.title = "Historico Pedidos"
 
         columnas = [
-            "Pedido Vulcano", "Consecutivo", "Estado", "Regional", "Planilla", "Placa",
-            "Piezas", "Peso Real", "Cant. Pedidos", "Ruta", "Tipo Vehículo",
-            "Flete Teórico", "Flete Solicitado", "Vehículo SICETAC",
+            "Consecutivo", "Planilla", "Pedido Vulcano", "Fecha Preaprobado", "Estado",
+            "Total Solicitado", "Diferencia", "Regional", "Placa", "Piezas",
+            "Peso Real", "Peso SICETAC", "Cant. Pedidos", "Ruta", "Tipo Vehículo",
+            "Vehículo SICETAC", "Flete Teórico", "Flete Solicitado",
             "Descargue", "Punto Adic.", "Desvío", "Aforo",
-            "Total Solicitado", "Diferencia", "Municipio Destino", "Cliente Origen",
-            "Cant. Destinos", "Código Pedido", "Observaciones", "Fecha Movimiento"
+            "Municipio Principal", "Cliente Origen", "Cant. Destinos",
+            "Código Pedido", "Observaciones"
         ]
 
         # Estilos
@@ -3244,13 +3257,14 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
 
         # Anchos por columna
         anchos = {
-            "Pedido Vulcano": 16, "Consecutivo": 22, "Estado": 18, "Regional": 16, "Planilla": 14,
-            "Placa": 12, "Piezas": 10, "Peso Real": 12, "Cant. Pedidos": 12, "Ruta": 18,
-            "Tipo Vehículo": 14, "Flete Teórico": 16, "Flete Solicitado": 16,
-            "Vehículo SICETAC": 16, "Descargue": 14, "Punto Adic.": 14,
-            "Desvío": 14, "Aforo": 14, "Total Solicitado": 16, "Diferencia": 16,
-            "Municipio Destino": 20, "Cliente Origen": 22,
-            "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25, "Fecha Movimiento": 20
+            "Consecutivo": 22, "Planilla": 14, "Pedido Vulcano": 16, "Fecha Preaprobado": 20,
+            "Estado": 18, "Total Solicitado": 16, "Diferencia": 16, "Regional": 16,
+            "Placa": 12, "Piezas": 10, "Peso Real": 12, "Peso SICETAC": 14,
+            "Cant. Pedidos": 12, "Ruta": 18, "Tipo Vehículo": 14,
+            "Vehículo SICETAC": 16, "Flete Teórico": 16, "Flete Solicitado": 16,
+            "Descargue": 14, "Punto Adic.": 14, "Desvío": 14, "Aforo": 14,
+            "Municipio Principal": 20, "Cliente Origen": 22,
+            "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25
         }
 
         # Cabeceras
@@ -3294,40 +3308,51 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                 return val.strftime("%Y-%m-%d %H:%M")
             return str(val)
 
+        def num(val, default=0):
+            try:
+                if val is None or val == "":
+                    return default
+                return float(val)
+            except (TypeError, ValueError):
+                return default
+
         # Datos
         row_num = 2
         for i, doc in enumerate(planillas_db):
             try:
                 estado = doc.get("estado", "PREAPROBADO")
-                diferencia = doc.get("diferencia", 0) or 0
+                total_solicitado = num(doc.get("total_solicitado"))
+                flete_teorico = num(doc.get("tarifa_calculada"))
+                diferencia = num(doc.get("diferencia"), total_solicitado - flete_teorico)
 
                 valores = [
-                    doc.get("pedido_vulcano", ""),
                     doc.get("consecutivo", ""),
-                    estado,
-                    doc.get("regional", ""),
                     doc.get("planilla", ""),
+                    doc.get("pedido_vulcano", ""),
+                    fmt_fecha(doc.get("fecha_preaprobado") or doc.get("fecha_creacion")),
+                    estado,
+                    total_solicitado,
+                    diferencia,
+                    doc.get("regional", ""),
                     doc.get("placa", ""),
                     doc.get("piezas", 0),
                     doc.get("peso_real", 0),
+                    doc.get("peso_sicetac", doc.get("peso_real", 0)),
                     doc.get("cantidad_pedidos", ""),
                     doc.get("ruta", ""),
                     doc.get("tipo_vehiculo", ""),
-                    doc.get("tarifa_calculada", 0),
-                    doc.get("tarifa_base") or doc.get("tarifa_calculada", 0),
                     doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo", ""),
+                    flete_teorico,
+                    doc.get("tarifa_base") or doc.get("tarifa_calculada", 0),
                     fmt_recargo(doc.get("requiere_descargue"), 50000),
                     fmt_recargo(doc.get("punto_adicional"), 80000),
                     fmt_recargo(doc.get("desvio"), 100000),
                     fmt_recargo(doc.get("aforo"), 0),
-                    doc.get("total_solicitado", 0),
-                    diferencia,
                     doc.get("municipio_destino", ""),
                     doc.get("cliente_origen", ""),
                     doc.get("cantidad_destinos", ""),
                     doc.get("codigo_pedido", ""),
                     doc.get("causal", ""),
-                    fmt_fecha(doc.get("fecha_movimiento_historico")),
                 ]
 
                 row_fill = even_fill if i % 2 == 0 else None
@@ -3370,9 +3395,9 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                         cell.alignment = number_alignment
 
                     # Columnas numéricas
-                    elif col_name in ("Piezas", "Peso Real", "Cant. Pedidos", "Cant. Destinos"):
+                    elif col_name in ("Piezas", "Peso Real", "Peso SICETAC", "Cant. Pedidos", "Cant. Destinos"):
                         cell.alignment = number_alignment
-                        if col_name == "Peso Real":
+                        if col_name in ("Peso Real", "Peso SICETAC"):
                             cell.number_format = '#,##0'
 
                     else:

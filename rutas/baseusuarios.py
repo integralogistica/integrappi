@@ -107,10 +107,23 @@ def modelo_usuario(u) -> dict:
         "celular": u.get("celular"),
         "perfil": u["perfil"],
         "usuario": u["usuario"],
-        "clientes": u.get("clientes") or ["KABI"],
+        "clientes": u["clientes"] if isinstance(u.get("clientes"), list) else ["KABI"],
         "activo": u.get("activo", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
     }
+
+def normalizar_clientes(clientes: Optional[List[str]]) -> List[str]:
+    clientes_validos = {"KABI", "MEDICAL_CARE"}
+    clientes_normalizados = []
+    for cliente in clientes or ["KABI"]:
+        cliente_norm = str(cliente).upper().strip()
+        if cliente_norm not in clientes_validos:
+            raise HTTPException(status_code=400, detail=f"Cliente no reconocido: {cliente}")
+        if cliente_norm not in clientes_normalizados:
+            clientes_normalizados.append(cliente_norm)
+    if not clientes_normalizados:
+        raise HTTPException(status_code=400, detail="Debe seleccionar al menos un cliente")
+    return clientes_normalizados
 
 def enviar_correo_codigo(destinatario: str, codigo: str):
     """Envía el código de verificación usando Resend de forma silenciosa."""
@@ -283,6 +296,7 @@ async def crear_baseusuario(data: BaseUsuario):
         "perfil": data.perfil.upper(),
         "usuario": data.usuario.upper(),     
         "clave": data.clave.strip(),         
+        "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
 
     id_insertado = coleccion_usuarios.insert_one(nuevo).inserted_id
@@ -342,6 +356,7 @@ async def actualizar_baseusuario(usuario_id: str, data: BaseUsuario):
         "perfil": data.perfil.upper(),
         "usuario": data.usuario.upper(),
         "clave": data.clave.strip(),
+        "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
     
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
@@ -473,19 +488,16 @@ async def actualizar_clientes_usuario(id: str, data: ActualizarClientesInput):
     except Exception:
         raise HTTPException(status_code=400, detail="ID inválido")
 
-    clientes_validos = {"KABI", "MEDICAL_CARE"}
-    for c in data.clientes:
-        if c not in clientes_validos:
-            raise HTTPException(status_code=400, detail=f"Cliente no reconocido: {c}")
+    clientes = normalizar_clientes(data.clientes)
 
     result = coleccion_usuarios.update_one(
         {"_id": oid},
-        {"$set": {"clientes": data.clientes}}
+        {"$set": {"clientes": clientes}}
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    return {"mensaje": "Clientes actualizados", "clientes": data.clientes}
+    return {"mensaje": "Clientes actualizados", "clientes": clientes}
 
 
 class ActualizarPerfilInput(BaseModel):
