@@ -104,6 +104,35 @@ def _aplicar_filtro_regional_operativo(filtro: dict, centro_distribucion: str) -
 PLANTILLA_PEDIDO_CREADO_NOMBRE = "confirmacion_pedido_creado"
 PLANTILLA_PEDIDO_CREADO_IDIOMA = "es_CO"
 
+# Notificación WhatsApp: aviso a analistas cuando planilla cambia de estado CREADO a visible.
+# Plantilla "notificacion_analistas_pedidos" (Meta, es_CO), texto:
+#   Hola {{1}}, la planilla {{2}} ha sido creada con el consecutivo {{3}}.
+#   Regional: {{4}}
+#   Creado por: {{5}}
+#   Fecha: {{6}}
+#   Por favor tramitala en *integrApp*.
+# Mapeo de variables:
+#   {{1}} = nombre del analista (o "Equipo de Analistas")
+#   {{2}} = número de planilla
+#   {{3}} = consecutivo completo
+#   {{4}} = regional
+#   {{5}} = usuario que creó la planilla
+#   {{6}} = fecha de creación (formato dd/MM/yyyy)
+# ----------------------------------------------------------------------------
+PLANTILLA_ANALISTAS_PEDIDOS_NOMBRE = "notificacion_analistas_pedidos"
+PLANTILLA_ANALISTAS_PEDIDOS_IDIOMA = "es_CO"
+
+# Notificación WhatsApp: solicitud de autorización a coordinadores/control.
+# Plantilla "solicitud_autorizacion" (Meta, es_CO), texto:
+#   Hola {{1}}
+#   La planilla {{2}} requiere tu autorización, por favor tramitala en *integrApp*.
+# Mapeo de variables:
+#   {{1}} = nombre del destinatario (coordinador/control)
+#   {{2}} = número de planilla o consecutivo
+# ----------------------------------------------------------------------------
+PLANTILLA_SOLICITUD_AUTORIZACION_NOMBRE = "solicitud_autorizacion"
+PLANTILLA_SOLICITUD_AUTORIZACION_IDIOMA = "es_CO"
+
 
 def _normalizar_celular_co(celular: Optional[str]) -> Optional[str]:
     """Convierte un celular a formato internacional Colombia: solo dígitos con prefijo 57."""
@@ -154,6 +183,171 @@ def _notificar_pedido_creado_whatsapp(doc: dict, pedido: str):
             logger.warning(f"[NOTIF PEDIDO] WhatsApp NO enviado a {celular} ({nombre}) — revisar tokens o idioma de la plantilla '{PLANTILLA_PEDIDO_CREADO_NOMBRE}'.")
     except Exception as e:
         logger.error(f"[NOTIF PEDIDO] Error inesperado: {e}")
+
+
+def _notificar_analistas_cambio_estado(doc: dict, estado_anterior: str, estado_nuevo: str):
+    """
+    Envía WhatsApp a todos los usuarios con perfil ANALISTA para avisar que una planilla
+    cambió de estado CREADO a PREAPROBADO (u otro estado visible).
+
+    Usa la plantilla "notificacion_analistas_pedidos" (Meta, es_CO).
+    Es a prueba de fallos: si algo falla solo queda en log (no rompe el cambio de estado).
+
+    Variables de la plantilla "notificacion_analistas_pedidos":
+      {{1}} = nombre del analista
+      {{2}} = número de planilla
+      {{3}} = consecutivo completo
+      {{4}} = regional
+      {{5}} = usuario que creó la planilla
+      {{6}} = fecha de creación (dd/MM/yyyy)
+    """
+    try:
+        # Solo notificar si el cambio fue de CREADO a otro estado visible
+        if estado_anterior != "CREADO":
+            logger.info(f"[NOTIF ANALISTAS] No se notifica: cambio de {estado_anterior} a {estado_nuevo} (no es CREADO→visible)")
+            return
+
+        logger.info(f"[NOTIF ANALISTAS] Planilla pasó de CREADO a {estado_nuevo}, notificando analistas...")
+
+        # Buscar todos los usuarios con perfil ANALISTA
+        analistas = list(coleccion_baseusuarios.find({"perfil": "ANALISTA"}))
+
+        if not analistas:
+            logger.info("[NOTIF ANALISTAS] No hay usuarios con perfil ANALISTA en baseusuarios; no se notifica.")
+            return
+
+        planilla = doc.get("planilla") or ""
+        consecutivo = doc.get("consecutivo") or planilla
+        estado_legible = estado_nuevo.replace("_", " ")
+        regional = doc.get("regional") or doc.get("centro_distribucion") or "N/A"
+        usuario_registro = doc.get("usuario_registro") or "N/A"
+
+        # Formatear fecha actual para la notificación
+        from datetime import datetime
+        fecha_actual = datetime.now().strftime("%d/%m/%Y")
+
+        notificaciones_enviadas = 0
+        errores = 0
+
+        for analista in analistas:
+            try:
+                celular = _normalizar_celular_co(analista.get("celular"))
+                if not celular:
+                    logger.info(f"[NOTIF ANALISTAS] Analista {analista.get('usuario')} sin celular válido; se saltea.")
+                    continue
+
+                # Obtener nombre del analista
+                nombre_analista = (analista.get("nombre") or analista.get("usuario") or "Analista").strip()
+
+                # Usar la nueva plantilla específica para analistas
+                # {{1}} = nombre analista, {{2}} = planilla, {{3}} = consecutivo
+                # {{4}} = regional, {{5}} = usuario registro, {{6}} = fecha
+                res = enviar_template_sync(
+                    to=celular,
+                    template_name=PLANTILLA_ANALISTAS_PEDIDOS_NOMBRE,
+                    language_code=PLANTILLA_ANALISTAS_PEDIDOS_IDIOMA,
+                    body_params=[
+                        nombre_analista,
+                        str(planilla),
+                        str(consecutivo),
+                        regional,
+                        usuario_registro,
+                        fecha_actual
+                    ],
+                )
+
+                if res:
+                    notificaciones_enviadas += 1
+                    logger.info(f"[NOTIF ANALISTAS] WhatsApp OK -> {celular} ({nombre_analista}) | planilla={consecutivo} estado={estado_legible}")
+                else:
+                    logger.warning(f"[NOTIF ANALISTAS] WhatsApp NO enviado a {celular} ({nombre_analista})")
+                    errores += 1
+
+            except Exception as e:
+                logger.error(f"[NOTIF ANALISTAS] Error al notificar a {analista.get('usuario')}: {e}")
+                errores += 1
+
+        logger.info(f"[NOTIF ANALISTAS] Resumen: {notificaciones_enviadas} enviadas, {errores} errores, {len(analistas)} analistas totales")
+
+    except Exception as e:
+        logger.error(f"[NOTIF ANALISTAS] Error en la función principal: {e}")
+
+
+def _notificar_solicitud_autorizacion(doc: dict, estado_nuevo: str):
+    """
+    Envía WhatsApp a los perfiles correspondientes (COORDINADOR o CONTROL) cuando una planilla
+    requiere su autorización después de pasar de CREADO a estados que requieren aprobación.
+
+    Lógica de notificación:
+    - Si estado_nuevo == "REQUIERE_APROBACION_COORDINADOR" → notificar solo a COORDINADOR
+    - Si estado_nuevo == "REQUIERE_APROBACION_CONTROL" → notificar solo a CONTROL
+
+    Usa la plantilla "solicitud_autorizacion" (Meta, es_CO).
+    Es a prueba de fallos: si algo falla solo queda en log (no rompe el cambio de estado).
+
+    Variables de la plantilla "solicitud_autorizacion":
+      {{1}} = nombre del destinatario (coordinador/control)
+      {{2}} = número de planilla o consecutivo
+    """
+    try:
+        # Determinar perfil objetivo según el estado
+        if estado_nuevo == "REQUIERE_APROBACION_COORDINADOR":
+            perfil_objetivo = "COORDINADOR"
+            logger.info(f"[NOTIF AUTORIZACIÓN] Planilla requiere aprobación COORDINADOR, notificando...")
+        elif estado_nuevo == "REQUIERE_APROBACION_CONTROL":
+            perfil_objetivo = "CONTROL"
+            logger.info(f"[NOTIF AUTORIZACIÓN] Planilla requiere aprobación CONTROL, notificando...")
+        else:
+            logger.info(f"[NOTIF AUTORIZACIÓN] No se notifica: estado {estado_nuevo} no requiere autorización específica")
+            return
+
+        # Buscar usuarios con el perfil objetivo
+        usuarios_perfil = list(coleccion_baseusuarios.find({"perfil": perfil_objetivo}))
+
+        if not usuarios_perfil:
+            logger.info(f"[NOTIF AUTORIZACIÓN] No hay usuarios con perfil {perfil_objetivo} en baseusuarios; no se notifica.")
+            return
+
+        planilla = doc.get("planilla") or ""
+        consecutivo = doc.get("consecutivo") or planilla
+
+        notificaciones_enviadas = 0
+        errores = 0
+
+        for usuario in usuarios_perfil:
+            try:
+                celular = _normalizar_celular_co(usuario.get("celular"))
+                if not celular:
+                    logger.info(f"[NOTIF AUTORIZACIÓN] {perfil_objetivo} {usuario.get('usuario')} sin celular válido; se saltea.")
+                    continue
+
+                # Obtener nombre del usuario
+                nombre_usuario = (usuario.get("nombre") or usuario.get("usuario") or "Usuario").strip()
+
+                # Usar la plantilla de solicitud de autorización
+                # {{1}} = nombre usuario, {{2}} = planilla/consecutivo
+                res = enviar_template_sync(
+                    to=celular,
+                    template_name=PLANTILLA_SOLICITUD_AUTORIZACION_NOMBRE,
+                    language_code=PLANTILLA_SOLICITUD_AUTORIZACION_IDIOMA,
+                    body_params=[nombre_usuario, str(consecutivo)],
+                )
+
+                if res:
+                    notificaciones_enviadas += 1
+                    logger.info(f"[NOTIF AUTORIZACIÓN] WhatsApp OK -> {celular} ({nombre_usuario}) | planilla={consecutivo} perfil={perfil_objetivo}")
+                else:
+                    logger.warning(f"[NOTIF AUTORIZACIÓN] WhatsApp NO enviado a {celular} ({nombre_usuario})")
+                    errores += 1
+
+            except Exception as e:
+                logger.error(f"[NOTIF AUTORIZACIÓN] Error al notificar a {usuario.get('usuario')}: {e}")
+                errores += 1
+
+        logger.info(f"[NOTIF AUTORIZACIÓN] Resumen: {notificaciones_enviadas} enviadas, {errores} errores, {len(usuarios_perfil)} {perfil_objetivo} totales")
+
+    except Exception as e:
+        logger.error(f"[NOTIF AUTORIZACIÓN] Error en la función principal: {e}")
 
 
 # NIT por nombre de cliente para el Excel de autorizados (campo "Cliente").
@@ -2466,6 +2660,12 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             historial_cambios.append(nuevo_historial)
 
             logger.info(f"[TRAZABILIDAD] Cambio de estado: {estado_anterior} → {request.estado} por {request.aprobado_por}")
+
+            # Notificar a analistas si el cambio fue de CREADO a estado visible
+            _notificar_analistas_cambio_estado(doc_actual, estado_anterior, request.estado)
+
+            # Notificar a coordinadores/control si requiere su autorización
+            _notificar_solicitud_autorizacion(doc_actual, request.estado)
 
         # Campos a actualizar
         campos_actualizar = {
