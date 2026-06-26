@@ -3,7 +3,12 @@ from pydantic import BaseModel
 from typing import List, Optional
 import httpx
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# Colombia = UTC-5 (sin horario de verano). El servidor corre en UTC y Mongo guarda
+# los datetime como instantes UTC, por lo que los filtros por "día" deben alinearse
+# al día Colombia sumando estas 5 h a los límites (que Mongo interpreta como UTC).
+_OFFSET_COLOMBIA = timedelta(hours=5)
 from dotenv import load_dotenv
 import os
 import pandas as pd
@@ -660,6 +665,8 @@ class ConsultarTarifaRequest(BaseModel):
     centro_costo: str
     ruta: str
     peso_real: float
+    tipo_vehiculo: Optional[str] = None  # Si viene, la tarifa se busca por este tipo (p.ej. tipo_veh_sicetac);
+                                         # si no, se deriva del peso (comportamiento histórico).
 
 
 class GuardarBusquedaRequest(BaseModel):
@@ -1597,13 +1604,14 @@ async def listar_rutas():
 async def consultar_tarifa(request: ConsultarTarifaRequest):
 
     try:
-        # Determinar tipo de vehículo según peso
-        tipo_vehiculo = _determinar_tipo_vehiculo(request.peso_real)
+        # Tipo de vehículo: si viene explícito (tipo_veh_sicetac elegido por el usuario),
+        # se usa ESE para tarifar; si no, se deriva del peso (comportamiento histórico).
+        tipo_vehiculo = (request.tipo_vehiculo or "").strip().upper() or _determinar_tipo_vehiculo(request.peso_real)
 
         # Obtener tarifa de fletes_rutas_fmc
         tarifa_calculada = _obtener_tarifa_ruta(request.centro_costo, request.ruta, tipo_vehiculo)
 
-        logger.info(f"Tarifa consultada: ruta={request.ruta}, peso={request.peso_real}kg, tipo={tipo_vehiculo}, tarifa={tarifa_calculada}")
+        logger.info(f"Tarifa consultada: ruta={request.ruta}, peso={request.peso_real}kg, tipo={tipo_vehiculo} (override={bool(request.tipo_vehiculo)}), tarifa={tarifa_calculada}")
 
         return {
             "tipo_vehiculo": tipo_vehiculo,
@@ -3009,6 +3017,22 @@ def _expandir_doc_a_filas(doc):
     return filas
 
 
+# Homologación de destinos para el Excel de aprobados (hoja "plantilla").
+# Si el municipio de destino coincide con una clave (comparación en MAYÚSCULAS y sin
+# espacios de más) se reemplaza por el valor al escribir la columna "Destino".
+# Agregar aquí los renombrados que se vayan requiriendo homologar.
+DESTINOS_RENOMBRAR_EXCEL = {
+    "SANTIAGO DE CALI": "CALI",
+}
+
+
+def _renombrar_destino_excel(destino):
+    """Reemplaza el nombre del destino por su forma homologada para el Excel de aprobados."""
+    if not destino:
+        return destino
+    return DESTINOS_RENOMBRAR_EXCEL.get(str(destino).strip().upper(), destino)
+
+
 def _escribir_fila_planilla(
     ws, row_num, *,
     consecutivo, regional_doc, municipio_destino, codigo_pedido,
@@ -3085,11 +3109,14 @@ def _escribir_fila_planilla(
 
     # Ubicación y dirección de cargue según regional
     _cargue_map = {
-        "FUNZA":        ("INTEGRA_EL ROSAL",       "EL ROSAL"),
-        "GIRARDOTA":    ("INTEGRA_GIRARDOTA",   "parque industrial del norte bodega 119"),
-        "BARRANQUILLA": ("INTEGRA_GALAPA",      "GALAPA"),
-        "CALI":         ("INTEGRA_YUMBO",       "Carrera 31 a #15-320"),
-        "BUCARAMANGA":  ("INTEGRA_BUCARAMANGA", "Parque industrial provincia de soto 1"),
+        "FUNZA":        ("BODEGA INTEGRA EL ROSAL",    "EL ROSAL"),
+        "GIRARDOTA":    ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),
+        "MEDELLIN":     ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),  # alias bodega GIRARDOTA (analista guarda 'MEDELLIN')
+        "BARRANQUILLA": ("BODEGA INTEGRA GALAPA",      "GALAPA"),
+        "GALAPA":       ("BODEGA INTEGRA GALAPA",      "GALAPA"),      # alias bodega (operativo guarda 'GALAPA')
+        "CALI":         ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),
+        "YUMBO":        ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),  # alias bodega (operativo guarda 'YUMBO')
+        "BUCARAMANGA":  ("BODEGA INTEGRA BUCARAMANGA", "Parque industrial provincia de soto 1"),
     }
     _cargue = _cargue_map.get(
         str(regional_doc).upper().strip(),
@@ -3106,7 +3133,7 @@ def _escribir_fila_planilla(
         observacion,                                      # Observación
         CLIENTE_A_NIT.get(str(cliente_origen).upper().strip(), cliente_origen),  # Cliente
         origen,                                           # Origen
-        municipio_destino,                                # Destino
+        _renombrar_destino_excel(municipio_destino),      # Destino (homologado, ej. SANTIAGO DE CALI -> CALI)
         codigo_pedido,                                    # Pedido cliente
         codigo_pedido,                                    # Guía
         centro_costo,                                     # CENTRO COSTO
@@ -3323,14 +3350,16 @@ async def obtener_historico(
     Por defecto muestra las de hoy. Filtra por rango de fechas si se proporcionan.
     """
     try:
-        # Filtro de fechas
-        hoy = datetime.now().strftime("%Y-%m-%d")
+        # Filtro de fechas (día Colombia). El servidor corre en UTC, así que "hoy" y los
+        # límites se calculan en zona America/Bogota (UTC-5).
+        hoy = (datetime.now(timezone.utc) - _OFFSET_COLOMBIA).strftime("%Y-%m-%d")
         f_inicio = fecha_inicio if fecha_inicio else hoy
         f_fin = fecha_fin if fecha_fin else hoy
 
-        # Incluir todo el día final
-        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1)
-        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d")
+        # Ventana del día Colombia expresada como instantes UTC (Mongo guarda
+        # fecha_movimiento_historico en UTC). Las +5 h alinean 00:00 Colombia con 05:00 UTC.
+        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d") + _OFFSET_COLOMBIA
+        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1) + _OFFSET_COLOMBIA
 
         filtro = {
             "fecha_movimiento_historico": {
@@ -3389,13 +3418,13 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         logger.info(f"=== EXPORTAR HISTORICO EXCEL ===")
         logger.info(f"Filtros: {request.fecha_inicio} a {request.fecha_fin}, perfil={request.perfil}, centro={request.centro_distribucion}")
 
-        # Construir filtro de fechas (igual que GET /historico)
-        hoy = datetime.now().strftime("%Y-%m-%d")
+        # Construir filtro de fechas (día Colombia, igual que GET /historico)
+        hoy = (datetime.now(timezone.utc) - _OFFSET_COLOMBIA).strftime("%Y-%m-%d")
         f_inicio = request.fecha_inicio if request.fecha_inicio else hoy
         f_fin = request.fecha_fin if request.fecha_fin else hoy
 
-        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1)
-        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d")
+        fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d") + _OFFSET_COLOMBIA
+        fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1) + _OFFSET_COLOMBIA
 
         filtro = {
             "fecha_movimiento_historico": {
