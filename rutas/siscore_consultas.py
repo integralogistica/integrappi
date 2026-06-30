@@ -44,6 +44,19 @@ for _col_idx in (coleccion_pedidos_medical, coleccion_historico):
     except Exception as _e:
         logger.warning(f"[STARTUP] No se pudo crear/verificar índice 'consecutivo': {_e}")
 
+# Índice sobre fusion_info.datos_originales.consecutivo (solo docs fusionados).
+# Importar Vulcano resuelve consecutivos que viven dentro de los originales de una
+# fusión; sin este índice esa consulta es un collscan por cada fila del Excel.
+# partialFilterExpression limita el índice a documentos fusionados (más chico). Idempotente.
+try:
+    coleccion_pedidos_medical.create_index(
+        [("fusion_info.datos_originales.consecutivo", 1)],
+        name="idx_datos_originales_consecutivo",
+        partialFilterExpression={"fusion_info.es_fusionada": True},
+    )
+except Exception as _e:
+    logger.warning(f"[STARTUP] No se pudo crear/verificar índice 'datos_originales.consecutivo': {_e}")
+
 # Mapa regional -> municipio de la bodega de origen (para guardar en el campo
 # `regional` de Mongo cuando el perfil es OPERATIVO).
 REGIONAL_A_ORIGEN_BODEGA = {
@@ -359,6 +372,8 @@ def _notificar_solicitud_autorizacion(doc: dict, estado_nuevo: str):
 CLIENTE_A_NIT = {
     "FRESENIUS MEDICAL CARE": "901689684",
     "FRESENIUS KABI": "900402080",
+    "DAVITA": "901689684",
+    "CONGRUPO": "800146643",
 }
 
 # Configuración WS Siscore V3 (misma que en pedidos_v3)
@@ -520,6 +535,12 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
         no_encontrados = 0
         errores = 0
         detalles_no_encontrados = []
+        # Soporte para fusiones: un pedido puede corresponder a una planilla original
+        # embebida en fusion_info.datos_originales. La fusión pasa al histórico SOLO
+        # cuando TODOS sus originales tienen pedido_vulcano.
+        asignados_parciales = 0    # pedidos guardados en originales cuya fusión sigue activa
+        fusiones_movidas = 0       # fusiones que pasaron al histórico
+        parciales_por_fusion = {}  # {fusion_id: n} para descontar al completar una fusión
 
         for _, row in df.iterrows():
             consecutivo = row["CONSECUTIVO"]
@@ -528,42 +549,122 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
             if not consecutivo or consecutivo == 'nan' or consecutivo == '':
                 continue
 
-            # Buscar planilla por consecutivo
-            doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
-
-            if not doc:
-                no_encontrados += 1
-                detalles_no_encontrados.append(consecutivo)
-                logger.warning(f"Consecutivo no encontrado: {consecutivo}")
-                continue
-
             try:
-                # Agregar campo pedido_vulcano
-                doc["pedido_vulcano"] = pedido
-                doc["fecha_movimiento_historico"] = datetime.now()
+                # --- Búsqueda en cascada ---
+                # 1) Doc por consecutivo raíz (planilla normal, carro dividido o la fusión raíz).
+                doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
+                es_no_fusion = bool(doc) and not (doc.get("fusion_info") or {}).get("es_fusionada")
 
-                # Copiar a historico
-                coleccion_historico.insert_one(doc)
+                # 2) Si no es un doc no-fusionado, buscar dentro de los originales de una fusión.
+                doc_fusion = None
+                if not es_no_fusion:
+                    doc_fusion = coleccion_pedidos_medical.find_one({
+                        "fusion_info.es_fusionada": True,
+                        "fusion_info.datos_originales.consecutivo": consecutivo,
+                    })
 
-                # Eliminar de pedidos_medical
-                coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+                if doc_fusion:
+                    # --- Ruta de fusión: asignar el pedido a un original ---
+                    originales = doc_fusion.get("fusion_info", {}).get("datos_originales", []) or []
+                    idx = next((i for i, o in enumerate(originales) if o.get("consecutivo") == consecutivo), None)
+                    if idx is None:
+                        no_encontrados += 1
+                        detalles_no_encontrados.append(consecutivo)
+                        logger.warning(f"[VULCANO-FUSION] Original no encontrado tras match (C={consecutivo})")
+                        continue
 
-                exitosos += 1
-                # Avisar por WhatsApp al operativo que montó la planilla
-                _notificar_pedido_creado_whatsapp(doc, pedido)
-                logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+                    # Asignación atómica al original (idempotente: sobreescribe, no duplica).
+                    coleccion_pedidos_medical.update_one(
+                        {"_id": doc_fusion["_id"], "fusion_info.datos_originales.consecutivo": consecutivo},
+                        {"$set": {
+                            "fusion_info.datos_originales.$[elem].pedido_vulcano": pedido,
+                            "fusion_info.datos_originales.$[elem].fecha_pedido_vulcano": datetime.now(),
+                        }},
+                        arrayFilters=[{"elem.consecutivo": consecutivo}],
+                    )
+
+                    # Re-leer y evaluar completitud.
+                    doc_actualizado = coleccion_pedidos_medical.find_one({"_id": doc_fusion["_id"]})
+                    if doc_actualizado is None:
+                        # Race condition: la fusión ya no existe (procesada por otro lado).
+                        exitosos += 1
+                        continue
+
+                    originales_act = doc_actualizado.get("fusion_info", {}).get("datos_originales", []) or []
+                    todos_con_pedido = bool(originales_act) and all(
+                        o.get("consecutivo") and o.get("pedido_vulcano") for o in originales_act
+                    )
+
+                    if not todos_con_pedido:
+                        # Éxito parcial: la fusión sigue activa esperando el resto de pedidos.
+                        exitosos += 1
+                        asignados_parciales += 1
+                        parciales_por_fusion[doc_actualizado["_id"]] = \
+                            parciales_por_fusion.get(doc_actualizado["_id"], 0) + 1
+                        logger.info(
+                            f"[VULCANO-FUSION] Pedido {pedido} asignado al original {consecutivo} "
+                            f"(fusión {doc_actualizado.get('consecutivo')}) — pendiente completar"
+                        )
+                        continue
+
+                    # Fusión completa: mover al histórico con todos sus pedidos.
+                    doc_actualizado["fecha_movimiento_historico"] = datetime.now()
+                    coleccion_historico.insert_one(doc_actualizado)
+                    coleccion_pedidos_medical.delete_one({"_id": doc_actualizado["_id"]})
+
+                    # Notificar por cada original (usuario_registro viene de la fusión, no del original).
+                    usuario_registro_fusion = (doc_actualizado.get("usuario_registro") or "").strip()
+                    for o in originales_act:
+                        _notificar_pedido_creado_whatsapp(
+                            {
+                                "usuario_registro": usuario_registro_fusion,
+                                "planilla": o.get("planilla"),
+                                "consecutivo": o.get("consecutivo"),
+                            },
+                            o.get("pedido_vulcano"),
+                        )
+
+                    exitosos += 1
+                    fusiones_movidas += 1
+                    # Estos parciales ya completaron su fusión: dejar de contarlos como pendientes.
+                    asignados_parciales -= parciales_por_fusion.pop(doc_actualizado["_id"], 0)
+                    logger.info(
+                        f"[VULCANO-FUSION] Fusión {doc_actualizado.get('consecutivo')} completada "
+                        f"({len(originales_act)} originales) → histórico"
+                    )
+
+                elif doc:
+                    # --- Doc no-fusionado: flujo histórico (mover al histórico) ---
+                    doc["pedido_vulcano"] = pedido
+                    doc["fecha_movimiento_historico"] = datetime.now()
+                    coleccion_historico.insert_one(doc)
+                    coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+                    exitosos += 1
+                    _notificar_pedido_creado_whatsapp(doc, pedido)
+                    logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+
+                else:
+                    no_encontrados += 1
+                    detalles_no_encontrados.append(consecutivo)
+                    logger.warning(f"Consecutivo no encontrado: {consecutivo}")
+                    continue
 
             except Exception as e:
                 errores += 1
                 logger.error(f"Error procesando consecutivo {consecutivo}: {str(e)}")
 
-        logger.info(f"Importación Vulcano finalizada: {exitosos} exitosos, {no_encontrados} no encontrados, {errores} errores")
+        logger.info(
+            f"Importación Vulcano finalizada: {exitosos} exitosos ({asignados_parciales} parciales), "
+            f"{fusiones_movidas} fusiones movidas, {no_encontrados} no encontrados, {errores} errores"
+        )
 
         resultado = {
-            "mensaje": f"Importación completada. {exitosos} planillas movidas a histórico.",
+            "mensaje": f"Importación completada. {exitosos} pedido(s) asignado(s), {fusiones_movidas} fusión(es) movida(s) a histórico.",
             "exitosos": exitosos,
+            "asignados_parciales": asignados_parciales,
+            "fusiones_movidas": fusiones_movidas,
             "no_encontrados": no_encontrados,
-            "errores": errores
+            "errores": errores,
         }
 
         if detalles_no_encontrados:
@@ -2905,8 +3006,11 @@ def _es_cliente_kabi(cliente_origen):
 
 def _expandir_fila_kabi(fila):
     """
-    Para FRESENIUS KABI con registros_detalle: devuelve la fila normal + un duplicado por cada
-    Nombre único de destinatario, donde 'Ubicación Descargue' = 'FKC_<Nombre>_<Cedula>'.
+    Para FRESENIUS KABI con registros_detalle: devuelve una SOLA fila (la original), con
+    'Ubicación Descargue' = 'FKC_<Nombre>_<Cedula>' del PRIMER destinatario del detalle.
+    Antes se generaba una fila por destinatario; ahora se colapsa a una sola fila para no
+    repetir líneas en el Excel.
+    Si ningún destinatario trae Nombre, la fila queda con Ubicación Descargue por divipolas.
     Para otros clientes (p.ej. FRESENIUS MEDICAL CARE) o sin detalle: devuelve [fila] sin cambios.
     Consume (pop) 'registros_detalle' de la fila para que no llegue al writer de Excel.
     """
@@ -2914,26 +3018,29 @@ def _expandir_fila_kabi(fila):
     if not _es_cliente_kabi(fila.get("cliente_origen")) or not detalle:
         return [fila]
 
-    # La primera fila conserva todo como hoy (Ubicación Descargue por divipolas).
-    filas = [fila]
-    vistos = set()
-    duplicados = 0
+    # Tomar el primer destinatario con Nombre no vacío.
+    primer = None
     for item in detalle:
         nombre = (item.get("Nombre") or "").strip() if isinstance(item, dict) else ""
-        if not nombre or nombre in vistos:
-            continue
-        vistos.add(nombre)
-        cedula = (item.get("Cedula") or "").strip() if isinstance(item, dict) else ""
-        duplicada = dict(fila)
-        duplicada["ubicacion_descargue_override"] = f"FKC_{nombre}_{cedula}"
-        filas.append(duplicada)
-        duplicados += 1
+        if nombre:
+            primer = item
+            break
 
-    logger.info(
-        f"[EXPORTAR] KABI {fila.get('consecutivo', '')}: 1 fila normal + "
-        f"{duplicados} duplicadas por destinatario"
-    )
-    return filas
+    if primer is not None:
+        nombre = (primer.get("Nombre") or "").strip()
+        cedula = (primer.get("Cedula") or "").strip()
+        fila["ubicacion_descargue_override"] = f"FKC_{nombre}_{cedula}"
+        logger.info(
+            f"[EXPORTAR] KABI {fila.get('consecutivo', '')}: 1 fila con "
+            f"Ubicación Descargue = FKC_{nombre}_{cedula} (primer destinatario)"
+        )
+    else:
+        logger.info(
+            f"[EXPORTAR] KABI {fila.get('consecutivo', '')}: 1 fila sin destinatario "
+            f"con Nombre; Ubicación Descargue por divipolas."
+        )
+
+    return [fila]
 
 
 def _expandir_doc_a_filas(doc):
@@ -3023,6 +3130,7 @@ def _expandir_doc_a_filas(doc):
 # Agregar aquí los renombrados que se vayan requiriendo homologar.
 DESTINOS_RENOMBRAR_EXCEL = {
     "SANTIAGO DE CALI": "CALI",
+    "LA UNION": "LA UNION ANT.",
 }
 
 
@@ -3065,11 +3173,11 @@ def _escribir_fila_planilla(
     # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
     centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
 
-    # Toneladas: Peso SICETAC / 1000 con 1 decimal (con fallback a peso real)
+    # Toneladas: Peso SICETAC / 1000 con 2 decimales (con fallback a peso real)
     peso_para_toneladas = peso_sicetac if peso_sicetac else peso_real
     try:
         peso_num = float(peso_para_toneladas) if peso_para_toneladas else 0
-        toneladas = round(peso_num / 1000, 1)
+        toneladas = round(peso_num / 1000, 2)
     except (TypeError, ValueError):
         toneladas = 0
 
@@ -3087,10 +3195,17 @@ def _escribir_fila_planilla(
     except (TypeError, ValueError):
         valor_unitario = 0
 
+    # Producto: MEDICAMENTOS... para FRESENIUS MEDICAL CARE y FRESENIUS KABI; VARIOS para los demás.
+    producto = (
+        "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30"
+        if (es_fmc or _es_cliente_kabi(cliente_origen))
+        else "VARIOS"
+    )
+
     # PUNTO ADICIONAL / CARGUE-DESCARGUE (banderas informativas)
-    # PUNTO ADICIONAL siempre va en 0 en el Excel (por definición del formato de carga).
+    # Ambos van siempre en 0 en el Excel (por definición del formato de carga).
     punto_adicional = 0
-    cargue_descargue = "X" if requiere_descargue_val and requiere_descargue_val != 0 else 0
+    cargue_descargue = 0
 
     # Ubicación y dirección de descargue desde la colección divipolas.
     # Si hay override (filas duplicadas de FRESENIUS KABI), 'Ubicación Descargue' toma ese valor;
@@ -3125,6 +3240,9 @@ def _escribir_fila_planilla(
     ubicacion_cargue = _cargue[0]
     direccion_cargue = _cargue[1]
 
+    # SEGURO: solo FRESENIUS KABI lleva 6000; el resto de clientes va en 0.
+    seguro = 6000 if _es_cliente_kabi(cliente_origen) else 0
+
     datos = [
         consecutivo,                                      # Consecutivo
         tipo_viaje,                                       # Tipo de viaje
@@ -3141,7 +3259,7 @@ def _escribir_fila_planilla(
         direccion_cargue,                                 # Direccion cargue
         ubicacion_descargue,                              # Ubicacion Descargue
         direccion_descargue,                              # Direccion Descargue
-        "MEDICAMENTOS (CON EXCLUSION DE LOS PRODUCTOS DE LAS PARTIDAS 3002;  30",  # Producto
+        producto,                                        # Producto
         "NORMAL",                                         # Naturaleza
         mapear_tipo_vehiculo(tipo_vehiculo),              # Tipo de vehiculo
         "VEHICULOS",                                      # unidad
@@ -3151,7 +3269,7 @@ def _escribir_fila_planilla(
         flete_unidad,                                     # Flete unidad
         punto_adicional,                                  # PUNTO ADICIONAL
         cargue_descargue,                                 # CARGUE-DESCARGUE PER JURIDICA
-        0,                                                # SEGURO
+        seguro,                                           # SEGURO
         "CUPO",                                           # Tipo pago
         0,                                                # Tolerancia
         0,                                                # Vlr hora STBY
@@ -3168,9 +3286,15 @@ def _escribir_fila_planilla(
         1                                                 # MANIFIESTO
     ]
 
+    # Formatos numéricos por columna (índice 1-based dentro de `datos`).
+    # 22 = Toneladas: siempre 2 decimales (ej. 5.00, 12.30). Si se reordena `datos`,
+    # ajustar este índice (coincide con la posición de "Toneladas" en el header `columnas`).
+    formatos_columna = {22: '0.00'}
     for col_idx, valor in enumerate(datos, 1):
         cell = ws.cell(row=row_num, column=col_idx, value=valor)
         cell.border = thin_border
+        if col_idx in formatos_columna:
+            cell.number_format = formatos_columna[col_idx]
 
     return row_num + 1
 
