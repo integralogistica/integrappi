@@ -75,6 +75,26 @@ def regional_a_origen_bodega(regional: Optional[str]) -> Optional[str]:
     return REGIONAL_A_ORIGEN_BODEGA.get(r, r)
 
 
+# Mapeo inverso: bodega -> nombre de la regional (para filtros que reciben la bodega).
+BODEGA_A_REGIONAL = {v: k for k, v in REGIONAL_A_ORIGEN_BODEGA.items()}
+
+
+def _aplicar_filtro_regional_dropdown(filtro: dict, valor: str) -> None:
+    """
+    Filtra por una regional elegida en un dropdown de la UI (formato bodega:
+    GALAPA/YUMBO/GIRARDOTA/BUCARAMANGA/FUNZA). Cubre todas las formas en que
+    `regional`/`centro_costo` pudo quedar guardado (bodega, nombre de regional o código
+    CEDI), porque conviven docs viejos y nuevos. También acepta el nombre de regional
+    directamente (CALI/BARRANQUILLA/...).
+    """
+    v = (valor or "").upper().strip()
+    if not v:
+        return
+    # Normalizar a nombre de regional; _aplicar_filtro_regional_operativo arma el $or.
+    regional_nombre = BODEGA_A_REGIONAL.get(v, v)
+    _aplicar_filtro_regional_operativo(filtro, regional_nombre)
+
+
 def _aplicar_filtro_regional_operativo(filtro: dict, centro_distribucion: str) -> None:
     """
     Agrega a `filtro` (dict de consulta Mongo) las condiciones para que un perfil
@@ -3467,7 +3487,8 @@ async def obtener_historico(
     fecha_inicio: str = "",
     fecha_fin: str = "",
     perfil: str = "",
-    centro_distribucion: str = ""
+    centro_distribucion: str = "",
+    regional: str = ""
 ):
     """
     Obtiene planillas del historico (pedidos_medical_historico).
@@ -3497,6 +3518,10 @@ async def obtener_historico(
         if perfil and perfil not in perfiles_globales and centro_distribucion:
             _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
 
+        # Filtro de regional elegido manualmente en el dropdown (perfiles globales).
+        if regional:
+            _aplicar_filtro_regional_dropdown(filtro, regional)
+
         logger.info(f"[HISTORICO] Filtro: {filtro}")
 
         docs = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
@@ -3524,6 +3549,7 @@ class ExportarHistoricoExcelRequest(BaseModel):
     fecha_fin: str
     perfil: str
     centro_distribucion: Optional[str] = None
+    regional: Optional[str] = None
     busqueda: Optional[str] = None
 
 
@@ -3561,6 +3587,10 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
         if request.perfil and request.perfil not in perfiles_globales and request.centro_distribucion:
             _aplicar_filtro_regional_operativo(filtro, request.centro_distribucion)
+
+        # Filtro de regional elegido manualmente en el dropdown (perfiles globales).
+        if request.regional:
+            _aplicar_filtro_regional_dropdown(filtro, request.regional)
 
         planillas_db = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
         logger.info(f"Planillas historico encontradas con filtros: {len(planillas_db)}")
