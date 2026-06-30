@@ -600,7 +600,7 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
                             "fusion_info.datos_originales.$[elem].pedido_vulcano": pedido,
                             "fusion_info.datos_originales.$[elem].fecha_pedido_vulcano": datetime.now(),
                         }},
-                        arrayFilters=[{"elem.consecutivo": consecutivo}],
+                        array_filters=[{"elem.consecutivo": consecutivo}],
                     )
 
                     # Re-leer y evaluar completitud.
@@ -2790,11 +2790,14 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
 
             logger.info(f"[TRAZABILIDAD] Cambio de estado: {estado_anterior} → {request.estado} por {request.aprobado_por}")
 
-            # Notificar a analistas si el cambio fue de CREADO a estado visible
-            _notificar_analistas_cambio_estado(doc_actual, estado_anterior, request.estado)
+            # Volver a CREADO es una reapertura de edición (analista/admin): no avisa a
+            # analistas ni solicita autorización (esos avisos son solo al salir de CREADO).
+            if request.estado != "CREADO":
+                # Notificar a analistas si el cambio fue de CREADO a estado visible
+                _notificar_analistas_cambio_estado(doc_actual, estado_anterior, request.estado)
 
-            # Notificar a coordinadores/control si requiere su autorización
-            _notificar_solicitud_autorizacion(doc_actual, request.estado)
+                # Notificar a coordinadores/control si requiere su autorización
+                _notificar_solicitud_autorizacion(doc_actual, request.estado)
 
         # Campos a actualizar
         campos_actualizar = {
@@ -2809,6 +2812,10 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         # movimientos (p.ej. entre estados ya visibles) se conserva la existente.
         if doc_actual.get("estado") == "CREADO" and request.estado != "CREADO":
             campos_actualizar["fecha_preaprobado"] = datetime.now()
+        elif request.estado == "CREADO":
+            # Reapertura: la planilla vuelve a ser borrador del operativo (deja de ser
+            # visible para todos), así que se limpia su fecha de visibilidad.
+            campos_actualizar["fecha_preaprobado"] = None
 
         # Actualizar el documento
         resultado = coleccion_pedidos_medical.update_one(
