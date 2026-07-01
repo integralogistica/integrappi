@@ -20,6 +20,53 @@ load_dotenv()
 router = APIRouter(prefix="/siscore", tags=["Siscore"])
 logger = logging.getLogger(__name__)
 
+# ── Hora confiable desde internet ────────────────────────────────────────────
+# Hay PCs/servidores con el reloj desfasado. Para registrar fechas exactas (envío,
+# aprobación, etc.) se obtiene la hora UTC real del header 'Date' de servidores
+# confiables, cacheando el offset frente al reloj local (re-sync cada 10 min) y
+# cayendo al reloj local si no hay internet. El sistema guarda fechas como UTC
+# naive; la zona Colombia (UTC-5) se aplica al mostrarlas.
+_HORA_CACHE = {'offset': None, 'ultima_sync': None}  # offset = hora_internet_utc - hora_local
+_SERVIDORES_HORA = [
+    'https://www.google.com/generate_204',
+    'https://www.gstatic.com/generate_204',
+    'https://cloudflare.com/cdn-cgi/trace',
+]
+
+
+def _leer_hora_internet_utc() -> Optional[datetime]:
+    """Lee la hora GMT/UTC exacta del header 'Date' de un servidor confiable (o None)."""
+    from email.utils import parsedate_to_datetime
+    for url in _SERVIDORES_HORA:
+        try:
+            r = httpx.get(url, timeout=2.5, follow_redirects=True)
+            date_header = r.headers.get('date')
+            if date_header:
+                dt = parsedate_to_datetime(date_header)  # aware (GMT)
+                return dt.astimezone(timezone.utc).replace(tzinfo=None)  # naive UTC
+        except Exception:
+            continue
+    return None
+
+
+def _hora_confiable_utc() -> datetime:
+    """Hora UTC actual confiable (internet con cache del offset; fallback reloj local)."""
+    ahora_local = datetime.now()
+    cache = _HORA_CACHE
+    necesita_sync = (
+        cache['offset'] is None
+        or cache['ultima_sync'] is None
+        or (ahora_local - cache['ultima_sync']).total_seconds() > 600
+    )
+    if necesita_sync:
+        hora_internet = _leer_hora_internet_utc()
+        if hora_internet is not None:
+            cache['offset'] = hora_internet - datetime.now()
+            cache['ultima_sync'] = datetime.now()
+    if cache['offset'] is not None:
+        return datetime.now() + cache['offset']
+    return datetime.now()
+
 # Conexión MongoDB
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
@@ -767,6 +814,121 @@ async def asignar_pedido_manual(request: AsignarPedidoManualRequest):
         raise HTTPException(status_code=500, detail=f"Error al asignar pedido: {str(e)}")
 
 
+class RetrocederASolicitudRequest(BaseModel):
+    """Modelo para devolver una planilla del histórico a SolicitudVehiculos."""
+    planilla: str
+    usuario: Optional[str] = None  # Para trazabilidad
+    motivo: Optional[str] = None   # Razón del retroceso
+
+
+@router.post("/retroceder-a-solicitud")
+async def retroceder_a_solicitud(request: RetrocederASolicitudRequest):
+    """
+    Operación inversa de 'importar-vulcano' / 'asignar-pedido-manual':
+    devuelve una planilla de pedidos_medical_historico a pedidos_medical para que
+    reaparezca en SolicitudVehiculos. Quita el pedido_vulcano y la fecha de
+    movimiento, y deja el estado en APROBADO (lista para reasignar el pedido).
+    Solo ADMIN (validar en frontend).
+    """
+    try:
+        planilla = (request.planilla or "").strip()
+        if not planilla:
+            raise HTTPException(status_code=400, detail="planilla es obligatoria")
+
+        logger.info(
+            f"=== RETROCEDER A SOLICITUD === planilla={planilla}, "
+            f"usuario={request.usuario}, motivo={request.motivo}"
+        )
+
+        # 1. Buscar en el histórico por planilla.
+        doc = coleccion_historico.find_one({"planilla": planilla})
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró la planilla {planilla} en el histórico"
+            )
+
+        # 2. Anti-duplicado: si ya existe en pedidos_medical, abortar.
+        existente = coleccion_pedidos_medical.find_one({
+            "$or": [
+                {"_id": doc["_id"]},
+                {"consecutivo": doc.get("consecutivo")},
+                {"planilla": doc.get("planilla")},
+            ]
+        })
+        if existente:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"La planilla {planilla} ya existe en SolicitudVehiculos "
+                    f"(pedidos_medical). No se puede retroceder para evitar duplicados."
+                )
+            )
+
+        # 3. Trazabilidad del retroceso en historial_cambios.
+        pedido_vulcano_previo = doc.get("pedido_vulcano")
+        fecha_actual = datetime.now()
+        historial_cambios = doc.get("historial_cambios", []) or []
+        historial_cambios.append({
+            "fecha": fecha_actual,
+            "usuario": request.usuario,
+            "accion": "retroceso_historico",
+            "campos_modificados": [
+                {"campo": "pedido_vulcano", "valor_anterior": pedido_vulcano_previo, "valor_nuevo": None},
+                {"campo": "fecha_movimiento_historico", "valor_anterior": doc.get("fecha_movimiento_historico"), "valor_nuevo": None},
+                {"campo": "estado", "valor_anterior": doc.get("estado"), "valor_nuevo": "APROBADO"},
+            ],
+            "motivo": request.motivo,
+        })
+
+        # 4. Limpiar campos del movimiento al histórico y dejar APROBADO.
+        doc["estado"] = "APROBADO"
+        doc["fecha_aprobacion"] = fecha_actual
+        doc["fecha_modificacion"] = fecha_actual
+        if request.usuario:
+            doc["usuario_modificacion"] = request.usuario
+        doc["historial_cambios"] = historial_cambios
+
+        doc.pop("pedido_vulcano", None)
+        doc.pop("fecha_movimiento_historico", None)
+        doc.pop("usuario_pedido_vulcano", None)
+
+        # En fusiones, limpiar también los pedidos embebidos en cada original.
+        fusion_info = doc.get("fusion_info") or {}
+        if fusion_info.get("es_fusionada") and fusion_info.get("datos_originales"):
+            for original in fusion_info["datos_originales"]:
+                original.pop("pedido_vulcano", None)
+                original.pop("fecha_pedido_vulcano", None)
+
+        # 5. Mover: delete-first idempotente + insert en activo + delete del histórico.
+        coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+        coleccion_pedidos_medical.insert_one(doc)
+        coleccion_historico.delete_one({"_id": doc["_id"]})
+
+        logger.info(
+            f"Planilla retrocedida del histórico a SolicitudVehiculos: "
+            f"planilla={planilla}, consecutivo={doc.get('consecutivo')}, "
+            f"pedido_vulcano_previo={pedido_vulcano_previo}"
+        )
+
+        return {
+            "mensaje": (
+                f"Planilla {planilla} devuelta a SolicitudVehiculos "
+                f"(estado APROBADO, sin pedido Vulcano)."
+            ),
+            "exitoso": True,
+            "planilla": planilla,
+            "consecutivo": doc.get("consecutivo"),
+            "pedido_vulcano_previo": pedido_vulcano_previo,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al retroceder planilla del histórico: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al retroceder la planilla: {str(e)}")
+
+
 # Modelos para gestión de causales
 class CausalRequest(BaseModel):
     """Modelo para crear/actualizar una causal"""
@@ -799,6 +961,21 @@ class GuardarBusquedaRequest(BaseModel):
     fecha_inicio: str
     fecha_fin: str
     planillas_a_eliminar: Optional[List[str]] = None  # Planillas a eliminar (para fusión)
+
+
+def _numero_de_consecutivo(cons: str) -> Optional[int]:
+    """Extrae la parte numérica de un consecutivo con formato REGIONAL-FECHA-N[L].
+    Ej: 'FUNZA-20260701-1' -> 1 ; 'FUNZA-20260701-2B' -> 2. None si no parsea."""
+    if not cons:
+        return None
+    parts = cons.split("-")
+    if len(parts) < 3:
+        return None
+    numero_letra = parts[2]
+    for i, char in enumerate(numero_letra):
+        if char.isalpha():
+            return int(numero_letra[:i]) if i > 0 else None
+    return int(numero_letra) if numero_letra.isdigit() else None
 
 
 def _generar_consecutivo(regional: str, fecha: datetime, es_fusion: bool = False, num_fusion: int = 1, fusion_id: Optional[str] = None, numeros_planillas_a_fusionar: Optional[List[int]] = None) -> dict:
@@ -870,6 +1047,22 @@ def _generar_consecutivo(regional: str, fecha: datetime, es_fusion: bool = False
             else:
                 # Es una planilla individual
                 numeros_usados.add(numero)
+
+    # Considerar también los consecutivos EMBEBIDOS en fusiones (datos_originales).
+    # Al fusionar p.ej. FUNZA-...-1 y FUNZA-...-2 en FUNZA-...-1A, los originales
+    # dejan de ser documentos top-level (quedan dentro de fusion_info.datos_originales)
+    # pero sus números SIGUEN ocupados. Sin este bloque, la próxima planilla individual
+    # recibiría FUNZA-...-2 y colisionaría con el original embebido (bug de duplicado).
+    # Hay índice idx_datos_originales_consecutivo que sostiene esta consulta.
+    for _col in (coleccion_pedidos_medical, coleccion_historico):
+        for _doc in _col.find(
+            {"fusion_info.datos_originales.consecutivo": {"$regex": regex_pattern}},
+            {"fusion_info.datos_originales.consecutivo": 1},
+        ):
+            for _original in (_doc.get("fusion_info") or {}).get("datos_originales", []) or []:
+                _n = _numero_de_consecutivo(_original.get("consecutivo", ""))
+                if _n is not None:
+                    numeros_usados.add(_n)
 
     logger.info(f"[CONSECUTIVO] Regional: {regional}, Fecha: {fecha_str}")
     logger.info(f"[CONSECUTIVO] Números usados (individuales): {sorted(numeros_usados)}")
@@ -1258,14 +1451,22 @@ async def verificar_planillas_fusionadas(request: VerificarFusionadasRequest):
 
         planillas_fusionadas = []
         for planilla_num in request.planillas:
-            doc_fusionada = coleccion_pedidos_medical.find_one({
-                "planilla": planilla_num,
-                "fusionada": True
-            })
-            if doc_fusionada:
-                fusion_info = doc_fusionada.get("fusionada_en", {})
-                planilla_fusionada = fusion_info.get("planilla_fusionada", "")
-                consecutivo_fusionada = fusion_info.get("consecutivo_fusionada", "")
+            # Al fusionar, los originales se ELIMINAN como docs propios y se embeben en
+            # fusion_info (planillas_originales / datos_originales) del documento fusionado.
+            # Por eso se detecta buscando si esta planilla es ORIGINAL de alguna fusión,
+            # en activos o en el histórico (por si la fusión ya fue despachada a Vulcano).
+            query_fusion = {
+                "fusion_info.es_fusionada": True,
+                "$or": [
+                    {"fusion_info.planillas_originales": planilla_num},
+                    {"fusion_info.datos_originales.planilla": planilla_num},
+                ],
+            }
+            doc_fusion = coleccion_pedidos_medical.find_one(query_fusion) \
+                or coleccion_historico.find_one(query_fusion)
+            if doc_fusion:
+                planilla_fusionada = doc_fusion.get("planilla") or ""
+                consecutivo_fusionada = doc_fusion.get("consecutivo") or ""
                 planillas_fusionadas.append({
                     "planilla": planilla_num,
                     "fusionada_en": planilla_fusionada,
@@ -1768,14 +1969,23 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
             planillas_omitidas = [r.get("planilla") for r in request.resultados_consolidados if not r.get("encontrada")]
             logger.info(f"Omitiendo {omitidas} planilla(s) no encontrada(s) — no se guardan en base: {planillas_omitidas}")
 
-        # VERIFICAR si alguna de las planillas buscadas está fusionada
+        # VERIFICAR si alguna de las planillas buscadas está fusionada.
+        # Los originales fusionados se eliminan y se embeben en fusion_info del doc fusionado,
+        # así que se detecta buscando si la planilla es original de una fusión (activos o histórico).
         planillas_fusionadas_detectadas = []
         for planilla_num in request.planillas_buscadas:
-            doc_fusionada = coleccion_pedidos_medical.find_one({"planilla": planilla_num, "fusionada": True})
-            if doc_fusionada:
-                fusion_info = doc_fusionada.get("fusionada_en", {})
-                planilla_fusionada = fusion_info.get("planilla_fusionada", "")
-                consecutivo_fusionada = fusion_info.get("consecutivo_fusionada", "")
+            query_fusion = {
+                "fusion_info.es_fusionada": True,
+                "$or": [
+                    {"fusion_info.planillas_originales": planilla_num},
+                    {"fusion_info.datos_originales.planilla": planilla_num},
+                ],
+            }
+            doc_fusion = coleccion_pedidos_medical.find_one(query_fusion) \
+                or coleccion_historico.find_one(query_fusion)
+            if doc_fusion:
+                planilla_fusionada = doc_fusion.get("planilla") or ""
+                consecutivo_fusionada = doc_fusion.get("consecutivo") or ""
                 planillas_fusionadas_detectadas.append({
                     "planilla": planilla_num,
                     "fusionada_en": planilla_fusionada,
@@ -2766,7 +2976,7 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             logger.warning(f"[ACTUALIZAR ESTADO PLANILLA] No se encontró planilla: {request.planilla}")
             raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada en pedidos_medical")
 
-        fecha_actual = datetime.now()
+        fecha_actual = _hora_confiable_utc()
         estado_anterior = doc_actual.get("estado", "PREAPROBADO")
 
         # Obtener historial existente
@@ -2803,7 +3013,7 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         campos_actualizar = {
             "estado": request.estado,
             "aprobado_por": request.aprobado_por,
-            "fecha_aprobacion": datetime.now() if request.estado == "APROBADO" else None,
+            "fecha_aprobacion": fecha_actual if request.estado == "APROBADO" else None,
             "historial_cambios": historial_cambios
         }
 
@@ -2811,7 +3021,7 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         # el estado destino (PREAPROBADO, REQUIERE_APROBACION_* o APROBADO). En otros
         # movimientos (p.ej. entre estados ya visibles) se conserva la existente.
         if doc_actual.get("estado") == "CREADO" and request.estado != "CREADO":
-            campos_actualizar["fecha_preaprobado"] = datetime.now()
+            campos_actualizar["fecha_preaprobado"] = fecha_actual
         elif request.estado == "CREADO":
             # Reapertura: la planilla vuelve a ser borrador del operativo (deja de ser
             # visible para todos), así que se limpia su fecha de visibilidad.
@@ -3485,6 +3695,195 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
             status_code=500,
             detail=f"Error al exportar Excel: {str(e)}"
         )
+
+
+class ExportarDetalleRequest(BaseModel):
+    """Modelo para exportar el DETALLE completo de planillas a Excel (una fila por planilla)."""
+    planillas: List[str]
+    perfil: str
+    centro_distribucion: Optional[str] = None
+
+
+def _fmt_fecha_col(fecha) -> str:
+    """Formatea una fecha Mongo (datetime UTC naive) a hora Colombia (UTC-5) 'YYYY-MM-DD HH:MM'."""
+    if not fecha:
+        return ""
+    try:
+        if isinstance(fecha, datetime):
+            return (fecha - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
+        return str(fecha)
+    except Exception:
+        return str(fecha)
+
+
+def _val_recargo_detalle(v, fallback: int):
+    """Normaliza un recargo: número tal cual; booleano/string legacy -> fallback; resto 0."""
+    if isinstance(v, bool):
+        return fallback if v else 0
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str) and v.strip().upper() in ("SI", "TRUE", "1", "YES"):
+        return fallback
+    return 0
+
+
+def _valores_detalle(obj: dict, fusion_consecutivo: Optional[str] = None, total_override: Optional[float] = None) -> list:
+    """Arma la lista de valores (en orden de cabeceras) para una fila de detalle.
+    Funciona igual para un doc top-level o para un original embebido en una fusión
+    (los campos que el embebido no tenga quedarán vacíos). Si se pasa total_override,
+    se usa ese valor para 'Total solicitado' (prorrateo de la fusión por cajas)."""
+    total_sol = total_override if total_override is not None else (obj.get("total_solicitado") or 0)
+
+    def _num(campo):
+        v = obj.get(campo)
+        return v if isinstance(v, (int, float)) else ("" if v is None else v)
+
+    return [
+        fusion_consecutivo or "",
+        obj.get("consecutivo") or "",
+        obj.get("consecutivo_base") or "",
+        obj.get("planilla") or "",
+        obj.get("regional") or "",
+        obj.get("cliente_origen") or "",
+        obj.get("ruta") or "",
+        obj.get("municipio_destino") or "",
+        obj.get("departamento_destino") or "",
+        obj.get("municipios_destino_lista") or "",
+        obj.get("codigo_pedido") or "",
+        _num("cantidad_pedidos"),
+        _num("piezas"),
+        _num("peso_real"),
+        _num("peso_sicetac"),
+        obj.get("tipo_veh_sicetac") or "",
+        obj.get("placa") or "",
+        total_sol,
+    ]
+
+
+@router.post("/exportar-planillas-detalle-excel")
+async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
+    """
+    Exporta un Excel de DETALLE completo de las planillas indicadas: una fila por
+    planilla/consecutivo con TODOS los campos disponibles (operación, carga, tarifas,
+    recargos, fechas, trazabilidad, fusión/división). A diferencia de exportar-planillas-excel
+    (formato del sistema de transporte, solo aprobadas), este NO filtra por estado: exporta
+    lo que se ve en SolicitudVehiculos. Solo ADMIN/ANALISTA (validar en frontend).
+    """
+    try:
+        if not request.planillas:
+            raise HTTPException(status_code=400, detail="planillas es obligatorio")
+
+        consulta = {"planilla": {"$in": request.planillas}}
+        if request.perfil == "OPERATIVO" and request.centro_distribucion:
+            _aplicar_filtro_regional_operativo(consulta, request.centro_distribucion)
+
+        docs = list(coleccion_pedidos_medical.find(consulta).sort("fecha_creacion", -1))
+        if not docs:
+            raise HTTPException(
+                status_code=404,
+                detail="No se encontraron planillas con los criterios indicados"
+            )
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        from fastapi.responses import Response
+        import io
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Detalle Planillas"
+
+        cabeceras = [
+            "Fusión (consecutivo)",
+            "Consecutivo", "Consecutivo base", "Planilla",
+            "Regional", "Cliente origen", "Ruta",
+            "Municipio principal", "Departamento destino",
+            "Todos los municipios", "Códigos pedido", "Cant. pedidos",
+            "Piezas", "Peso real (kg)", "Peso SICETAC (kg)",
+            "Vehículo SICETAC", "Placa",
+            "Total solicitado",
+        ]
+
+        header_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=10)
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin = Side(style="thin", color="CCCCCC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for col_idx, header in enumerate(cabeceras, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+            cell.border = border
+
+        fila = 2
+        for doc in docs:
+            fusion_info = doc.get("fusion_info") or {}
+            originales = fusion_info.get("datos_originales") or []
+            if fusion_info.get("es_fusionada") and originales:
+                # DIVIDIR la fusión: una fila por cada planilla original, indicando a
+                # qué consecutivo de fusión pertenece (para no perder la trazabilidad).
+                consecutivo_fusion = doc.get("consecutivo") or doc.get("planilla") or ""
+                # Prorratear el Total solicitado de la fusión entre los originales según
+                # sus cajas (piezas). La última parte absorbe el remanente para que la
+                # suma de las partes coincida exactamente con el total de la fusión.
+                total_fusion = doc.get("total_solicitado") or 0
+                piezas_orig = [ (o.get("piezas") or 0) for o in originales ]
+                suma_piezas = sum(piezas_orig)
+                objetos = []
+                acumulado = 0
+                for i, o in enumerate(originales):
+                    if suma_piezas > 0 and i < len(originales) - 1:
+                        parte = round(total_fusion * piezas_orig[i] / suma_piezas)
+                        acumulado += parte
+                    elif suma_piezas > 0:
+                        parte = total_fusion - acumulado  # última parte: remanente exacto
+                    else:
+                        parte = 0
+                    objetos.append((o, consecutivo_fusion, parte))
+            else:
+                objetos = [(doc, None, None)]  # None = usar el total del propio documento
+
+            for obj, consecutivo_fusion, total_override in objetos:
+                valores = _valores_detalle(obj, fusion_consecutivo=consecutivo_fusion, total_override=total_override)
+                for col_idx, valor in enumerate(valores, 1):
+                    cell = ws.cell(row=fila, column=col_idx, value=valor)
+                    cell.border = border
+                    cell.alignment = Alignment(vertical="top", wrap_text=False)
+                fila += 1
+
+        # Anchos de columna auto-ajustados (topeados) para legibilidad.
+        for col_idx in range(1, len(cabeceras) + 1):
+            max_len = len(str(cabeceras[col_idx - 1]))
+            for r in range(2, fila):
+                v = ws.cell(row=r, column=col_idx).value
+                if v is not None:
+                    max_len = max(max_len, min(len(str(v)), 55))
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 2, 52)
+
+        ws.freeze_panes = "A2"  # Congelar la fila de cabeceras.
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        logger.info(f"[DETALLE EXCEL] Generado con {fila - 2} planillas")
+
+        return Response(
+            content=output.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=detalle_planillas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al exportar Excel de detalle: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al exportar Excel de detalle: {str(e)}")
 
 
 # ============= ENDPOINTS HISTÓRICO PEDIDOS =============
