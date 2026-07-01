@@ -3765,15 +3765,18 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
     """
     Exporta un Excel de DETALLE completo de las planillas indicadas: una fila por
     planilla/consecutivo con TODOS los campos disponibles (operación, carga, tarifas,
-    recargos, fechas, trazabilidad, fusión/división). A diferencia de exportar-planillas-excel
-    (formato del sistema de transporte, solo aprobadas), este NO filtra por estado: exporta
-    lo que se ve en SolicitudVehiculos. Solo ADMIN/ANALISTA (validar en frontend).
+    recargos, fechas, trazabilidad, fusión/división). Al igual que exportar-planillas-excel,
+    SOLO exporta las planillas con estado APROBADO. Solo ADMIN/ANALISTA (validar en frontend).
     """
     try:
         if not request.planillas:
             raise HTTPException(status_code=400, detail="planillas es obligatorio")
 
-        consulta = {"planilla": {"$in": request.planillas}}
+        # Consultar planillas de MongoDB - SOLO APROBADAS (igual que exportar-planillas-excel)
+        consulta = {
+            "planilla": {"$in": request.planillas},
+            "estado": "APROBADO"
+        }
         if request.perfil == "OPERATIVO" and request.centro_distribucion:
             _aplicar_filtro_regional_operativo(consulta, request.centro_distribucion)
 
