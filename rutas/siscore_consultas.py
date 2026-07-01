@@ -3585,7 +3585,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
 
         # Definir columnas NUEVO FORMATO
         columnas = [
-            "Consecutivo", "Tipo de viaje", "Linea de negocio", "Estado", "Observacion",
+            "Consecutivo", "Tipo de viaje", "Linea de negocio", "Estado", "Observación",
             "Cliente", "Origen", "Destino", "Pedido cliente", "Guia", "CENTRO COSTO",
             "Ubicación Cargue", "Direccion cargue", "Ubicación Descargue", "Direccion Descargue",
             "Producto", "Naturaleza", "Tipo de vehiculo", "unidad", "Cantidad", "Tipo embalaje",
