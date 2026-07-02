@@ -540,6 +540,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     estado: Optional[str] = None  # 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
     aprobado_por: Optional[str] = None
     fecha_aprobacion: Optional[str] = None
+    municipio_destino: Optional[str] = None  # Municipio principal elegido manualmente
     usuario_modificacion: str  # Usuario que está editando (trazabilidad)
 
 
@@ -2903,6 +2904,17 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
         # Si se envía ruta (edición de ruta), actualizarla
         if request.ruta is not None:
             campos_actualizar["ruta"] = request.ruta
+
+        # Si se envía municipio_destino (cambio manual del municipio principal), actualizarlo.
+        # Es un cambio puramente de etiqueta: NO afecta tarifa, total, estado ni la lista de municipios.
+        if request.municipio_destino is not None:
+            campos_actualizar["municipio_destino"] = request.municipio_destino
+            if request.municipio_destino != doc_actual.get("municipio_destino"):
+                campos_modificados.append({
+                    "campo": "municipio_destino",
+                    "valor_anterior": doc_actual.get("municipio_destino"),
+                    "valor_nuevo": request.municipio_destino
+                })
 
         # Si se envía estado, actualizarlo
         if request.estado is not None:
