@@ -439,7 +439,7 @@ def _notificar_solicitud_autorizacion(doc: dict, estado_nuevo: str):
 CLIENTE_A_NIT = {
     "FRESENIUS MEDICAL CARE": "901689684",
     "FRESENIUS KABI": "900402080",
-    "DAVITA": "901689684",
+    "DAVITA": "830007355",
     "CONGRUPO": "800146643",
 }
 
