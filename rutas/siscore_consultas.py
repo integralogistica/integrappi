@@ -3380,7 +3380,7 @@ def _expandir_doc_a_filas(doc):
 DESTINOS_RENOMBRAR_EXCEL = {
     "SANTIAGO DE CALI": "CALI",
     "LA UNION": "LA UNION ANT.",
-    "BOGOTA": "BOGOTA D.C",
+    "BOGOTA": "BOGOTA D.C.",
 }
 
 
