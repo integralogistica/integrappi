@@ -3419,6 +3419,12 @@ def _escribir_fila_planilla(
     # Observación: DN + código pedido
     observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
 
+    # Límites de longitud del formato de carga: cortar al máximo permitido por columna.
+    #   - Observación: 300 caracteres
+    #   - Pedido cliente y Guía: 100 caracteres
+    observacion = observacion[:300]
+    pedido_cliente = str(codigo_pedido)[:100] if codigo_pedido else codigo_pedido
+
     # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
     centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
 
@@ -3501,8 +3507,8 @@ def _escribir_fila_planilla(
         CLIENTE_A_NIT.get(str(cliente_origen).upper().strip(), cliente_origen),  # Cliente
         origen,                                           # Origen
         _renombrar_destino_excel(municipio_destino),      # Destino (homologado, ej. SANTIAGO DE CALI -> CALI)
-        codigo_pedido,                                    # Pedido cliente
-        codigo_pedido,                                    # Guía
+        pedido_cliente,                                   # Pedido cliente (máx. 100)
+        pedido_cliente,                                   # Guía (máx. 100)
         centro_costo,                                     # CENTRO COSTO
         ubicacion_cargue,                                 # Ubicacion Cargue
         direccion_cargue,                                 # Direccion cargue
