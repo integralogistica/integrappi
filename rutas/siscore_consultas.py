@@ -3480,7 +3480,7 @@ def _escribir_fila_planilla(
 
     # Ubicación y dirección de cargue según regional
     _cargue_map = {
-        "FUNZA":        ("BODEGA INTEGRA EL ROSAL",    "EL ROSAL"),
+        "FUNZA":        ("BODEGA INTEGRA FUNZA",    "FUNZA"),
         "GIRARDOTA":    ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),
         "MEDELLIN":     ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),  # alias bodega GIRARDOTA (analista guarda 'MEDELLIN')
         "BARRANQUILLA": ("BODEGA INTEGRA GALAPA",      "GALAPA"),
