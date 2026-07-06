@@ -4297,8 +4297,9 @@ async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", cent
         total_docs = coleccion_pedidos_medical.count_documents(filtro)
         logger.info(f"[OBTENER RESULTADOS] Total documentos con filtro: {total_docs}")
 
-        # Traer planillas filtradas (excluye registros_detalle: pesado y no se usa en la tabla)
-        planillas = list(coleccion_pedidos_medical.find(filtro, {"registros_detalle": 0}).sort("fecha_creacion", -1).limit(limite))
+        # Traer planillas filtradas. Se INCLUYE registros_detalle para que el frontend
+        # pueda expandir cada planilla y mostrar el listado de pedidos (decisión 2026-07-06).
+        planillas = list(coleccion_pedidos_medical.find(filtro).sort("fecha_creacion", -1).limit(limite))
 
         # Convertir ObjectId a string
         for planilla in planillas:
