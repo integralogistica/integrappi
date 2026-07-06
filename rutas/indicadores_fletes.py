@@ -70,6 +70,7 @@ def _id_no_vacio(field: str, default: str = "Sin dato") -> dict:
 def _construir_filtro(
     anio: Optional[List[int]] = None,
     mes: Optional[List[int]] = None,
+    dia: Optional[List[int]] = None,
     cliente: Optional[List[str]] = None,
     regional: Optional[str] = None,
 ) -> dict:
@@ -77,6 +78,7 @@ def _construir_filtro(
     Construye el dict de $match para /resumen y /detalle.
     Año → rangos UTC alineados a día Colombia (igual que /siscore/historico).
     Mes → mes de la fecha Colombia (restando 5 h antes de $month).
+    Día → día del mes de la fecha Colombia (restando 5 h antes de $dayOfMonth).
     Cliente → coincide exacto sobre cliente_origen.
     Regional → helper dropdown (cubre bodega / nombre regional / código CEDI).
     """
@@ -102,8 +104,28 @@ def _construir_filtro(
             }
         })
 
+    if dia:
+        dias = [int(d) for d in dia]
+        conds.append({
+            "$expr": {
+                "$in": [
+                    {"$dayOfMonth": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]}},
+                    dias,
+                ]
+            }
+        })
+
     if cliente:
-        conds.append({"$or": [{"cliente_origen": c} for c in cliente]})
+        # El cliente puede estar a nivel top-level O embebido en una planilla
+        # fusionada (fusion_info.datos_originales[].cliente_origen). Hay que
+        # atrapar ambos sitios para que el filtro funcione con fusionadas
+        # multi-cliente; si no, una fusionada cuyo cliente solo vive en los
+        # originales nunca se filtraría.
+        clientes_in = list(cliente)
+        conds.append({"$or": [
+            {"cliente_origen": {"$in": clientes_in}},
+            {"fusion_info.datos_originales.cliente_origen": {"$in": clientes_in}},
+        ]})
 
     filtro = {"$and": conds} if len(conds) > 1 else conds[0]
 
@@ -113,23 +135,108 @@ def _construir_filtro(
     return filtro
 
 
-def _normalizar_por_regional(lista: list) -> list:
+def _normalizar_por_regional(lista: list, valor_key: str = "flete") -> list:
     """Une variantes de regional (bodega YUMBO / nombre CALI / código CEDI) en una
-    sola bucket por bodega de origen, sumando flete y despachos."""
+    sola bucket por bodega de origen, sumando el valor (`valor_key`) y despachos."""
     out = {}
     for item in lista:
         nombre = regional_a_origen_bodega(item.get("regional")) or item.get("regional") or ""
         nombre = str(nombre).strip().upper() or "SIN REGIONAL"
-        bucket = out.setdefault(nombre, {"regional": nombre, "flete": 0.0, "despachos": 0})
-        bucket["flete"] += float(item.get("flete") or 0)
+        bucket = out.setdefault(nombre, {"regional": nombre, valor_key: 0.0, "despachos": 0})
+        bucket[valor_key] += float(item.get(valor_key) or 0)
         bucket["despachos"] += int(item.get("despachos") or 0)
-    return sorted(out.values(), key=lambda x: x["flete"], reverse=True)
+    return sorted(out.values(), key=lambda x: x.get(valor_key, 0), reverse=True)
+
+
+def _expr_clientes_expandidos() -> dict:
+    """
+    Expresión de aggregation que, por cada documento del histórico, devuelve un
+    ARRAY de sub-docs ``{cliente, flete, sobrecosto}`` para alimentar group-by
+    por cliente tras expandir las planillas fusionadas:
+
+    - **Doc fusionado** con ``fusion_info.datos_originales`` no vacío: un sub-doc
+      por cada planilla original, con el ``cliente_origen`` del original y el
+      ``total_solicitado`` (flete) y la ``diferencia`` (sobrecosto) del doc
+      fusionado **repartidos proporcionalmente por piezas (cajas)**. Es la misma
+      política con la que se facturan los Excel de aprobados/gastos
+      (``_repartir_flete``); aquí sin residuo exacto porque a nivel indicador la
+      pérdida de redondeo (unos COP) es despreciable frente a cifras en millones.
+    - **Doc normal**: un único sub-doc con los valores top-level.
+
+    Pensado para usarse como ``{"$project": {"_exp": _expr_clientes_expandidos()}}``
+    seguido de ``$unwind`` + ``$group`` por ``$_exp.cliente``.
+    """
+    da = "$fusion_info.datos_originales"  # atajo de lectura
+    piezas_o = {"$convert": {"input": "$$o.piezas", "to": "double", "onError": 0, "onNull": 0}}
+    total_piezas = {
+        # Suma de piezas de los originales (como double, tolerando strings).
+        "$sum": {
+            "$map": {
+                "input": {"$ifNull": [da, []]},
+                "as": "x",
+                "in": {"$convert": {"input": "$$x.piezas", "to": "double", "onError": 0, "onNull": 0}},
+            }
+        }
+    }
+    # factor de reparto por piezas (protegido por $cond en su uso). Si total_piezas
+    # es 0, se reparte equitativamente (1/n), igual que _repartir_flete del Excel.
+    factor_piezas = {"$divide": [piezas_o, "$$tp"]}
+    factor_eq = {"$divide": [1, "$$n"]}
+    return {
+        "$cond": [
+            {  # ¿es fusionada con originales?
+                "$and": [
+                    {"$eq": [{"$ifNull": ["$fusion_info.es_fusionada", False]}, True]},
+                    {"$gt": [{"$size": {"$ifNull": [da, []]}}, 0]},
+                ]
+            },
+            {  # rama fusionada: repartir flete y sobrecosto por piezas
+                "$let": {
+                    "vars": {
+                        "tp": total_piezas,
+                        "n": {"$size": {"$ifNull": [da, []]}},
+                    },
+                    "in": {
+                        "$map": {
+                            "input": {"$ifNull": [da, []]},
+                            "as": "o",
+                            "in": {
+                                "cliente": {"$ifNull": ["$$o.cliente_origen", "Sin cliente"]},
+                                "flete": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        {"$multiply": [_num("total_solicitado"), factor_piezas]},
+                                        {"$multiply": [_num("total_solicitado"), factor_eq]},
+                                    ]
+                                },
+                                "sobrecosto": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        {"$multiply": [_num("diferencia"), factor_piezas]},
+                                        {"$multiply": [_num("diferencia"), factor_eq]},
+                                    ]
+                                },
+                            },
+                        }
+                    },
+                }
+            },
+            {  # rama no fusionada: un sub-doc con los valores top-level
+                "$cond": [
+                    {"$in": [{"$ifNull": ["$cliente_origen", ""]}, [None, "", " "]]},
+                    [{"cliente": "Sin cliente", "flete": _num("total_solicitado"), "sobrecosto": _num("diferencia")}],
+                    [{"cliente": "$cliente_origen", "flete": _num("total_solicitado"), "sobrecosto": _num("diferencia")}],
+                ]
+            },
+        ]
+    }
 
 
 @router.get("/resumen")
 def get_resumen_fletes(
     anio: Optional[List[int]] = Query(None),
     mes: Optional[List[int]] = Query(None),
+    dia: Optional[List[int]] = Query(None),
     cliente: Optional[List[str]] = Query(None),
     regional: Optional[str] = Query(None),
 ):
@@ -138,7 +245,34 @@ def get_resumen_fletes(
     desgloses en una sola pasada.
     """
     try:
-        filtro = _construir_filtro(anio, mes, cliente, regional)
+        filtro = _construir_filtro(anio, mes, dia, cliente, regional)
+
+        # porCliente expande las fusionadas (un sub-doc por planilla original con
+        # flete/sobrecosto repartidos por piezas). Si hay filtro de cliente, tras
+        # expandir se descartan los compañeros de fusión NO elegidos, así el gráfico
+        # "Flete por cliente" muestra solo el/los cliente(s) seleccionado(s) (con su
+        # porción atribuida en fusionadas multi-cliente). Las series/KPIs siguen a
+        # nivel planilla, así que su total puede diferir del de este gráfico cuando
+        # hay fusionadas multi-cliente (decisión de producto 2026-07-06).
+        por_cliente_stages = [
+            {"$project": {"_exp": _expr_clientes_expandidos()}},
+            {"$unwind": "$_exp"},
+        ]
+        if cliente:
+            por_cliente_stages.append(
+                {"$match": {"_exp.cliente": {"$in": [str(c) for c in cliente]}}}
+            )
+        por_cliente_stages += [
+            {"$group": {
+                "_id": "$_exp.cliente",
+                "flete": {"$sum": "$_exp.flete"},
+                "sobrecosto": {"$sum": "$_exp.sobrecosto"},
+                "despachos": {"$sum": 1},
+            }},
+            {"$sort": {"sobrecosto": -1}},
+            {"$limit": 12},
+            {"$project": {"_id": 0, "cliente": "$_id", "flete": 1, "sobrecosto": 1, "despachos": 1}},
+        ]
 
         pipeline = [
             {"$match": filtro},
@@ -178,27 +312,39 @@ def get_resumen_fletes(
                     {"$sort": {"_id": 1}},
                     {"$project": {"_id": 0, "mes": "$_id", "cobrado": 1, "teorico": 1, "despachos": 1}},
                 ],
-                # --- Flete por cliente (top 12) ---
-                "porCliente": [
+                # --- Serie diaria: flete cobrado vs teórico (día Colombia) ---
+                # Para el gráfico "Flete facturado" en vista diaria (sobrecosto/ahorro).
+                "serieDiaria": [
                     {"$group": {
-                        "_id": _id_no_vacio("cliente_origen", "Sin cliente"),
-                        "flete": {"$sum": _num("total_solicitado")},
+                        "_id": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%d",
+                                "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+                            }
+                        },
+                        "cobrado": {"$sum": _num("total_solicitado")},
+                        "teorico": {"$sum": _num("tarifa_calculada")},
                         "despachos": {"$sum": 1},
                     }},
-                    {"$sort": {"flete": -1}},
-                    {"$limit": 12},
-                    {"$project": {"_id": 0, "cliente": "$_id", "flete": 1, "despachos": 1}},
+                    {"$sort": {"_id": 1}},
+                    {"$project": {"_id": 0, "fecha": "$_id", "cobrado": 1, "teorico": 1, "despachos": 1}},
                 ],
-                # --- Flete por ruta (top 10) ---
+                # --- Flete y sobrecosto por cliente (top 12) ---
+                # Stages construidos arriba (por_cliente_stages): expande fusionadas
+                # repartiendo por piezas y, si hay filtro de cliente, deja solo los
+                # clientes elegidos (descarta compañeros de fusión no seleccionados).
+                "porCliente": por_cliente_stages,
+                # --- Sobrecosto por ruta (top 10, solo planillas con diferencia > 0) ---
                 "porRuta": [
+                    {"$match": {"$expr": {"$gt": [_num("diferencia"), 0]}}},
                     {"$group": {
                         "_id": _id_no_vacio("ruta", "Sin ruta"),
-                        "flete": {"$sum": _num("total_solicitado")},
+                        "sobrecosto": {"$sum": _num("diferencia")},
                         "despachos": {"$sum": 1},
                     }},
-                    {"$sort": {"flete": -1}},
+                    {"$sort": {"sobrecosto": -1}},
                     {"$limit": 10},
-                    {"$project": {"_id": 0, "ruta": "$_id", "flete": 1, "despachos": 1}},
+                    {"$project": {"_id": 0, "ruta": "$_id", "sobrecosto": 1, "despachos": 1}},
                 ],
                 # --- Flete por tipo de vehículo (tipo_veh_sicetac con fallback tipo_vehiculo) ---
                 "porTipoVeh": [
@@ -219,6 +365,32 @@ def get_resumen_fletes(
                         "despachos": {"$sum": 1},
                     }},
                     {"$project": {"_id": 0, "regional": "$_id", "flete": 1, "despachos": 1}},
+                ],
+                # --- Sobrecosto por regional (solo planillas con diferencia > 0) ---
+                "sobrecostoPorRegionalRaw": [
+                    {"$match": {"$expr": {"$gt": [_num("diferencia"), 0]}}},
+                    {"$group": {
+                        "_id": _id_no_vacio("regional", "Sin regional"),
+                        "sobrecosto": {"$sum": _num("diferencia")},
+                        "despachos": {"$sum": 1},
+                    }},
+                    {"$project": {"_id": 0, "regional": "$_id", "sobrecosto": 1, "despachos": 1}},
+                ],
+                # --- Causales de sobrecosto: group-by del campo `causal` (texto que se
+                # registra al derivar a Coordinador/Control) sobre planillas con diferencia>0
+                # y causal no vacío. Sub-pipeline con su propio $match (válido en $facet).
+                "causalesSobrecosto": [
+                    {"$match": {"$and": [
+                        {"$expr": {"$gt": [_num("diferencia"), 0]}},
+                        {"causal": {"$exists": True, "$nin": [None, "", " "]}},
+                    ]}},
+                    {"$group": {
+                        "_id": "$causal",
+                        "cantidad": {"$sum": 1},
+                        "sobrecosto": {"$sum": _num("diferencia")},
+                    }},
+                    {"$sort": {"sobrecosto": -1}},
+                    {"$project": {"_id": 0, "causal": "$_id", "cantidad": 1, "sobrecosto": 1}},
                 ],
             }},
         ]
@@ -267,18 +439,57 @@ def get_resumen_fletes(
             reverse=True,
         )
 
-        # Clientes disponibles: respeta año/mes/regional pero NO el filtro de cliente.
-        filtro_sin_cliente = _construir_filtro(anio, mes, None, regional)
+        # Clientes disponibles: respeta año/mes/regional pero NO el filtro de
+        # cliente. Se construye sobre la MISMA expansión de fusionadas para que
+        # cada cliente sea único (sin comas) aun cuando varias planillas hayan
+        # sido fusionadas bajo un mismo consecutivo.
+        filtro_sin_cliente = _construir_filtro(anio, mes, dia, None, regional)
         clientes_doc = coleccion_historico.aggregate([
             {"$match": filtro_sin_cliente},
-            {"$group": {"_id": "$cliente_origen"}},
+            {"$project": {"_exp": _expr_clientes_expandidos()}},
+            {"$unwind": "$_exp"},
+            {"$group": {"_id": "$_exp.cliente"}},
         ])
-        clientes_disponibles = sorted(
-            (d["_id"] for d in clientes_doc if d.get("_id")),
-        )
+        _clientes = set()
+        for d in clientes_doc:
+            nombre = d.get("_id")
+            if not nombre:
+                continue
+            nombre = str(nombre).strip()
+            if nombre and nombre.upper() != "SIN CLIENTE":
+                _clientes.add(nombre)
+        clientes_disponibles = sorted(_clientes)
 
         # Normalizar regional (une variantes bodega/nombre/código)
         por_regional = _normalizar_por_regional(res.get("porRegionalRaw", []))
+
+        # Sobrecosto por regional (mismo normalizado, sumando sobrecosto en vez de flete)
+        sobrecosto_por_regional = _normalizar_por_regional(res.get("sobrecostoPorRegionalRaw", []), valor_key="sobrecosto")
+        for r in sobrecosto_por_regional:
+            r["sobrecosto"] = round(r.get("sobrecosto") or 0)
+
+        # Causales de sobrecosto: agrupadas por el campo `causal` (motivo registrado al
+        # derivar la planilla a Coordinador/Control). Solo planillas con diferencia>0.
+        causales_sobrecosto = [
+            {
+                "causal": c.get("causal") or "Sin causal",
+                "cantidad": int(c.get("cantidad") or 0),
+                "sobrecosto": round(c.get("sobrecosto") or 0),
+            }
+            for c in res.get("causalesSobrecosto", [])
+        ]
+
+        # porCliente: redondear flete/sobrecosto a enteros COP (vienen repartidos
+        # por piezas desde la agregación).
+        por_cliente = [
+            {
+                "cliente": c.get("cliente") or "Sin cliente",
+                "flete": round(c.get("flete") or 0),
+                "sobrecosto": round(c.get("sobrecosto") or 0),
+                "despachos": int(c.get("despachos") or 0),
+            }
+            for c in res.get("porCliente", [])
+        ]
 
         return {
             "success": True,
@@ -286,10 +497,13 @@ def get_resumen_fletes(
                 "kpis": kpi,
                 "recargos": recargos,
                 "serieMensual": res.get("serieMensual", []),
-                "porCliente": res.get("porCliente", []),
+                "serieDiaria": res.get("serieDiaria", []),
+                "porCliente": por_cliente,
                 "porRuta": res.get("porRuta", []),
                 "porTipoVeh": res.get("porTipoVeh", []),
                 "porRegional": por_regional,
+                "sobrecostoPorRegional": sobrecosto_por_regional,
+                "causalesSobrecosto": causales_sobrecosto,
                 "anios": anios_disponibles,
                 "clientes": clientes_disponibles,
             },
@@ -317,6 +531,7 @@ def _id_no_vacio_tipo_veh() -> dict:
 def get_detalle_fletes(
     anio: Optional[List[int]] = Query(None),
     mes: Optional[List[int]] = Query(None),
+    dia: Optional[List[int]] = Query(None),
     cliente: Optional[List[str]] = Query(None),
     regional: Optional[str] = Query(None),
 ):
@@ -325,7 +540,7 @@ def get_detalle_fletes(
     detalle al hacer clic en un mes del gráfico 'teórico vs cobrado'.
     """
     try:
-        filtro = _construir_filtro(anio, mes, cliente, regional)
+        filtro = _construir_filtro(anio, mes, dia, cliente, regional)
 
         docs = list(coleccion_historico.find(
             filtro,
