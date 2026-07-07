@@ -329,6 +329,44 @@ def get_resumen_fletes(
                     {"$sort": {"_id": 1}},
                     {"$project": {"_id": 0, "fecha": "$_id", "cobrado": 1, "teorico": 1, "despachos": 1}},
                 ],
+                # --- Costo por caja mensual: total_solicitado / piezas (promedio ponderado) ---
+                # Para el gráfico "Costo por caja" en vista mensual. costo = sum(cobrado)/sum(piezas)
+                # del bucket (promedio ponderado, NO promedio de ratios), con división protegida.
+                "costoPorCajaMensual": [
+                    {"$group": {
+                        "_id": {
+                            "$dateToString": {
+                                "format": "%Y-%m",
+                                "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+                            }
+                        },
+                        "cobrado": {"$sum": _num("total_solicitado")},
+                        "piezas": {"$sum": _num("piezas")},
+                    }},
+                    {"$sort": {"_id": 1}},
+                    {"$project": {
+                        "_id": 0, "mes": "$_id", "cobrado": 1, "piezas": 1,
+                        "costo": {"$cond": [{"$eq": ["$piezas", 0]}, 0, {"$divide": ["$cobrado", "$piezas"]}]},
+                    }},
+                ],
+                # --- Costo por caja diario (mismo cálculo, agrupado por día Colombia) ---
+                "costoPorCajaDiaria": [
+                    {"$group": {
+                        "_id": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%d",
+                                "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+                            }
+                        },
+                        "cobrado": {"$sum": _num("total_solicitado")},
+                        "piezas": {"$sum": _num("piezas")},
+                    }},
+                    {"$sort": {"_id": 1}},
+                    {"$project": {
+                        "_id": 0, "fecha": "$_id", "cobrado": 1, "piezas": 1,
+                        "costo": {"$cond": [{"$eq": ["$piezas", 0]}, 0, {"$divide": ["$cobrado", "$piezas"]}]},
+                    }},
+                ],
                 # --- Flete y sobrecosto por cliente (top 12) ---
                 # Stages construidos arriba (por_cliente_stages): expande fusionadas
                 # repartiendo por piezas y, si hay filtro de cliente, deja solo los
@@ -460,6 +498,27 @@ def get_resumen_fletes(
                 _clientes.add(nombre)
         clientes_disponibles = sorted(_clientes)
 
+        # --- Costo por caja YTD: promedio ponderado del año calendario Colombia en curso ---
+        # Consulta APARTE del $facet: el facet hereda el $match del usuario (mes/día/año),
+        # pero la línea YTD debe ignorar esos filtros temporales y usar SIEMPRE el año
+        # calendario actual. Solo respeta cliente y regional (mismo scope que las barras).
+        anio_ytd = (datetime.utcnow() - _OFFSET_COLOMBIA).year
+        filtro_ytd = _construir_filtro(
+            anio=[anio_ytd], mes=None, dia=None, cliente=cliente, regional=regional
+        )
+        ytd_doc = list(coleccion_historico.aggregate([
+            {"$match": filtro_ytd},
+            {"$group": {
+                "_id": None,
+                "cobrado": {"$sum": _num("total_solicitado")},
+                "piezas": {"$sum": _num("piezas")},
+            }},
+        ]))
+        ytd = ytd_doc[0] if ytd_doc else {}
+        _ytd_cobrado = ytd.get("cobrado") or 0
+        _ytd_piezas = ytd.get("piezas") or 0
+        costo_por_caja_ytd = round(_ytd_cobrado / _ytd_piezas) if _ytd_piezas else 0
+
         # Normalizar regional (une variantes bodega/nombre/código)
         por_regional = _normalizar_por_regional(res.get("porRegionalRaw", []))
 
@@ -491,6 +550,27 @@ def get_resumen_fletes(
             for c in res.get("porCliente", [])
         ]
 
+        # Costo por caja: redondear cobrado/piezas/costo a enteros COP (vienen como double
+        # desde la agregación). costo ya viene dividido y protegido (0 si piezas=0).
+        costo_por_caja_mensual = [
+            {
+                "mes": d.get("mes"),
+                "cobrado": round(d.get("cobrado") or 0),
+                "piezas": round(d.get("piezas") or 0),
+                "costo": round(d.get("costo") or 0),
+            }
+            for d in res.get("costoPorCajaMensual", [])
+        ]
+        costo_por_caja_diaria = [
+            {
+                "fecha": d.get("fecha"),
+                "cobrado": round(d.get("cobrado") or 0),
+                "piezas": round(d.get("piezas") or 0),
+                "costo": round(d.get("costo") or 0),
+            }
+            for d in res.get("costoPorCajaDiaria", [])
+        ]
+
         return {
             "success": True,
             "data": {
@@ -498,6 +578,10 @@ def get_resumen_fletes(
                 "recargos": recargos,
                 "serieMensual": res.get("serieMensual", []),
                 "serieDiaria": res.get("serieDiaria", []),
+                "costoPorCajaMensual": costo_por_caja_mensual,
+                "costoPorCajaDiaria": costo_por_caja_diaria,
+                "costoPorCajaYTD": costo_por_caja_ytd,
+                "anioYTD": anio_ytd,
                 "porCliente": por_cliente,
                 "porRuta": res.get("porRuta", []),
                 "porTipoVeh": res.get("porTipoVeh", []),
