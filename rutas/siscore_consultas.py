@@ -3428,7 +3428,7 @@ def _escribir_fila_planilla(
     flete_unidad, punto_adicional_val, requiere_descargue_val,
     regional_usuario, divipolas_lookup, divipolas_por_poblacion,
     mapear_tipo_vehiculo, thin_border,
-    ubicacion_descargue_override=None, peso_sicetac=None,
+    ubicacion_descargue_override=None, peso_sicetac=None, fill=None,
 ):
     """
     Escribe una fila de planilla en la hoja Excel y devuelve row_num + 1.
@@ -3589,6 +3589,8 @@ def _escribir_fila_planilla(
     for col_idx, valor in enumerate(datos, 1):
         cell = ws.cell(row=row_num, column=col_idx, value=valor)
         cell.border = thin_border
+        if fill is not None:
+            cell.fill = fill
         if col_idx in formatos_columna:
             cell.number_format = formatos_columna[col_idx]
 
@@ -3707,9 +3709,23 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                     "direccion_descargue": div_doc.get("direccion_descargue", ""),
                 }
 
+        # Paleta ÚNICA de colores: CADA planilla (o fusión completa) recibe su propio
+        # color; todas las filas que genera (las expandidas de una fusión y las
+        # duplicadas por destinatario de FRESENIUS KABI) comparten ese mismo color.
+        # Tonos pastel para mantener legible el texto en negro.
+        _fills_grupo = [
+            PatternFill(start_color=c, end_color=c, fill_type="solid")
+            for c in ("FFF2CC", "E2EFDA", "DDEBF7", "FCE4D6",
+                      "E6E0F0", "D9F2E6", "D6EAF8", "FDE9D9")
+        ]
+        idx_grupo = 0  # avanza por cada planilla/fusión
+
         # Escribir datos NUEVO FORMATO
         row_num = 2
         for doc in planillas_db:
+            # Un color por planilla (toda la fusión y sus filas derivadas lo comparten).
+            fill_grupo = _fills_grupo[idx_grupo % len(_fills_grupo)]
+            idx_grupo += 1
             try:
                 # Una planilla FUSIONADA se "expande" en N filas (una por planilla original),
                 # repartiendo el Flete unidad (total_solicitado) proporcionalmente por piezas.
@@ -3724,6 +3740,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
                             divipolas_por_poblacion=divipolas_por_poblacion,
                             mapear_tipo_vehiculo=_mapear_tipo_vehiculo,
                             thin_border=thin_border,
+                            fill=fill_grupo,
                             **fila,
                         )
             except Exception as e:
@@ -3784,6 +3801,47 @@ def _val_recargo_detalle(v, fallback: int):
     if isinstance(v, str) and v.strip().upper() in ("SI", "TRUE", "1", "YES"):
         return fallback
     return 0
+
+
+def _prorratear_total_multiplos_50(total, piezas: list) -> list:
+    """Reparte 'total' entre las partes según el peso de 'piezas' (proporcional),
+    de modo que cada parte sea MÚLTIPLO DE 50 en lo posible y la suma de todas
+    sea EXACTAMENTE 'total'.
+
+    Método del mayor resto sobre múltiplos de 50:
+      1. Parte cruda proporcional de cada original.
+      2. Se baja cada parte al múltiplo de 50 inmediatamente inferior.
+      3. El remanente se reparte en bloques de 50 a los originales con mayor
+         resto fraccionario (uno por cabeza hasta agotar los bloques enteros).
+      4. Si 'total' no es múltiplo de 50, queda un resto < 50 imposible de
+         repartir como múltiplo; se suma a UNA sola parte para que la suma sea
+         exacta (ese único valor no será múltiplo de 50). La prioridad es que la
+         suma coincida con el total.
+
+    Si no hay piezas para repartir (suma 0), devuelve ceros (no se puede prorratear).
+    """
+    n = len(piezas)
+    if not total or n == 0:
+        return [0] * n
+    suma_piezas = sum(piezas)
+    if suma_piezas <= 0:
+        return [0] * n
+
+    raw = [total * p / suma_piezas for p in piezas]                 # 1) crudo proporcional
+    base = [(int(r) // 50) * 50 for r in raw]                       # 2) múltiplo de 50 inferior
+    resto = [r - b for r, b in zip(raw, base)]                      # 3) resto fraccionario
+
+    remaining = total - sum(base)
+    orden = sorted(range(n), key=lambda i: resto[i], reverse=True)  # mayor resto primero
+    k = 0
+    while remaining >= 50:                                          # repartir bloques de 50
+        base[orden[k % n]] += 50
+        remaining -= 50
+        k += 1
+    if remaining > 0:                                               # 4) resto no múltiplo de 50
+        base[orden[0]] += remaining
+
+    return base
 
 
 def _valores_detalle(obj: dict, fusion_consecutivo: Optional[str] = None, total_override: Optional[float] = None) -> list:
@@ -3880,11 +3938,23 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
             cell.alignment = header_align
             cell.border = border
 
+        # Paleta ÚNICA de colores: CADA planilla (o fusión completa) recibe su
+        # propio color. Las filas de una misma fusión comparten ese color; los
+        # grupos alternan tonos para que dos consecutivos nunca se confundan.
+        # Tonos pastel para mantener legible el texto en negro.
+        _fills_grupo = [
+            PatternFill(start_color=c, end_color=c, fill_type="solid")
+            for c in ("FFF2CC", "E2EFDA", "DDEBF7", "FCE4D6",
+                      "E6E0F0", "D9F2E6", "D6EAF8", "FDE9D9")
+        ]
+        idx_grupo = 0  # avanza por cada grupo (planilla individual o fusión completa)
+
         fila = 2
         for doc in docs:
             fusion_info = doc.get("fusion_info") or {}
             originales = fusion_info.get("datos_originales") or []
-            if fusion_info.get("es_fusionada") and originales:
+            es_fusion = bool(fusion_info.get("es_fusionada") and originales)
+            if es_fusion:
                 # DIVIDIR la fusión: una fila por cada planilla original, indicando a
                 # qué consecutivo de fusión pertenece (para no perder la trazabilidad).
                 consecutivo_fusion = doc.get("consecutivo") or doc.get("planilla") or ""
@@ -3892,21 +3962,18 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
                 # sus cajas (piezas). La última parte absorbe el remanente para que la
                 # suma de las partes coincida exactamente con el total de la fusión.
                 total_fusion = doc.get("total_solicitado") or 0
-                piezas_orig = [ (o.get("piezas") or 0) for o in originales ]
-                suma_piezas = sum(piezas_orig)
-                objetos = []
-                acumulado = 0
-                for i, o in enumerate(originales):
-                    if suma_piezas > 0 and i < len(originales) - 1:
-                        parte = round(total_fusion * piezas_orig[i] / suma_piezas)
-                        acumulado += parte
-                    elif suma_piezas > 0:
-                        parte = total_fusion - acumulado  # última parte: remanente exacto
-                    else:
-                        parte = 0
-                    objetos.append((o, consecutivo_fusion, parte))
+                piezas_orig = [(o.get("piezas") or 0) for o in originales]
+                # Prorratear el Total solicitado de la fusión entre los originales
+                # según sus cajas (piezas), en MÚLTIPLOS DE 50, de modo que la suma
+                # de las partes coincida EXACTAMENTE con el total de la fusión.
+                partes = _prorratear_total_multiplos_50(total_fusion, piezas_orig)
+                objetos = [(o, consecutivo_fusion, parte)
+                           for o, parte in zip(originales, partes)]
             else:
                 objetos = [(doc, None, None)]  # None = usar el total del propio documento
+            # Un color por grupo: todas las filas de la planilla o de la fusión lo comparten.
+            fill_grupo = _fills_grupo[idx_grupo % len(_fills_grupo)]
+            idx_grupo += 1
 
             for obj, consecutivo_fusion, total_override in objetos:
                 valores = _valores_detalle(obj, fusion_consecutivo=consecutivo_fusion, total_override=total_override)
@@ -3914,6 +3981,7 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
                     cell = ws.cell(row=fila, column=col_idx, value=valor)
                     cell.border = border
                     cell.alignment = Alignment(vertical="top", wrap_text=False)
+                    cell.fill = fill_grupo
                 fila += 1
 
         # Anchos de columna auto-ajustados (topeados) para legibilidad.
