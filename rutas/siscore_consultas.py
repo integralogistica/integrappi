@@ -3405,6 +3405,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "BRUSELAS": "BRUSELAS PITALITO HUILA",
     "SANTA BARBARA": "SANTA BARBARA ANT.",
     "EL PEÑON": "EL PEÑON C/MARCA",
+    "CALDAS": "CALDAS ANT.",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
