@@ -467,10 +467,10 @@ El WS de Siscore V3 (`integra-wms.appsiscore.com/app/ws/informe_v3.php`) dejó d
 - **Índice**: se crea un índice sobre `consecutivo` en ambas colecciones (idempotente, en el arranque del backend) para que la consulta por prefijo (`^REGIONAL-YYYYMMDD-`) sea rápida aunque el histórico crezca a miles/millones.
 
 ### Regional guardada como bodega para OPERATIVO
-- Al guardar (`guardar-busqueda`), si el perfil es **OPERATIVO**, el campo `regional` se guarda como la **bodega de origen** (CALI→YUMBO, BARRANQUILLA→GALAPA, MEDELLIN→GIRARDOTA) mediante `regional_a_origen_bodega`. El consecutivo **no** se transforma (sigue con el nombre, ej: `CALI-...`). Solo aplica a OPERATIVO.
+- Al guardar (`guardar-busqueda`), si el perfil es **OPERATIVO**, el campo `regional` se guarda como la **bodega de origen** (CALI→YUMBO, BARRANQUILLA→JUAN MINA, MEDELLIN→GIRARDOTA) mediante `regional_a_origen_bodega`. El consecutivo **no** se transforma (sigue con el nombre, ej: `CALI-...`). Solo aplica a OPERATIVO.
 
 ### Exportación a Excel (`exportar-planillas-excel`)
-- **Origen**: `CALI` → `YUMBO` (junto al ya existente `BARRANQUILLA` → `GALAPA`).
+- **Origen**: `CALI` → `YUMBO` (junto al ya existente `BARRANQUILLA` → `JUAN MINA`).
 - **Cliente**: `FRESENIUS KABI` → `900402080` (junto al ya existente `FRESENIUS MEDICAL CARE` → `901689684`), vía diccionario `CLIENTE_A_NIT` (insensible a mayúsculas/espacios).
 
 ## Actualizaciones Recientes (2026-06-19)

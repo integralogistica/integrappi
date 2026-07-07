@@ -107,7 +107,7 @@ except Exception as _e:
 # Mapa regional -> municipio de la bodega de origen (para guardar en el campo
 # `regional` de Mongo cuando el perfil es OPERATIVO).
 REGIONAL_A_ORIGEN_BODEGA = {
-    "BARRANQUILLA": "GALAPA",
+    "BARRANQUILLA": "JUAN MINA",
     "CALI": "YUMBO",
     "MEDELLIN": "GIRARDOTA",
 }
@@ -115,7 +115,7 @@ REGIONAL_A_ORIGEN_BODEGA = {
 
 def regional_a_origen_bodega(regional: Optional[str]) -> Optional[str]:
     """Convierte la regional al municipio de la bodega de origen.
-    BARRANQUILLA->GALAPA, CALI->YUMBO, MEDELLIN->GIRARDOTA. Las demás se conservan."""
+    BARRANQUILLA->JUAN MINA, CALI->YUMBO, MEDELLIN->GIRARDOTA. Las demás se conservan."""
     if not regional:
         return regional
     r = str(regional).upper().strip()
@@ -129,7 +129,7 @@ BODEGA_A_REGIONAL = {v: k for k, v in REGIONAL_A_ORIGEN_BODEGA.items()}
 def _aplicar_filtro_regional_dropdown(filtro: dict, valor: str) -> None:
     """
     Filtra por una regional elegida en un dropdown de la UI (formato bodega:
-    GALAPA/YUMBO/GIRARDOTA/BUCARAMANGA/FUNZA). Cubre todas las formas en que
+    JUAN MINA/YUMBO/GIRARDOTA/BUCARAMANGA/FUNZA). Cubre todas las formas en que
     `regional`/`centro_costo` pudo quedar guardado (bodega, nombre de regional o código
     CEDI), porque conviven docs viejos y nuevos. También acepta el nombre de regional
     directamente (CALI/BARRANQUILLA/...).
@@ -150,7 +150,7 @@ def _aplicar_filtro_regional_operativo(filtro: dict, centro_distribucion: str) -
     Cubre las distintas formas en que la regional queda almacenada, porque
     `centro_costo` suele guardarse como 'FMC' (no como código de bodega):
       - centro_costo = código de bodega (CO05)         -> cuando Siscore sí lo trae
-      - regional = nombre de bodega (YUMBO/GALAPA/...) -> como se guarda para OPERATIVO
+      - regional = nombre de bodega (YUMBO/JUAN MINA/...) -> como se guarda para OPERATIVO
       - regional = nombre de la regional (CALI)         -> si se guardó sin conversión
     """
     cd = (centro_distribucion or "").upper().strip()
@@ -2176,7 +2176,7 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         todos_procesados = fusiones_procesadas + individuales_procesadas
 
         # OPERATIVO: el campo `regional` se guarda como la bodega de origen
-        # (CALI->YUMBO, BARRANQUILLA->GALAPA, MEDELLIN->GIRARDOTA). El consecutivo
+        # (CALI->YUMBO, BARRANQUILLA->JUAN MINA, MEDELLIN->GIRARDOTA). El consecutivo
         # NO se transforma (sigue con el nombre de la regional, ej. CALI-...).
         es_operativo = str(request.perfil or "").upper() == "OPERATIVO"
 
@@ -3373,9 +3373,29 @@ def _expandir_doc_a_filas(doc):
     return filas
 
 
+def _norm_clave_destino(s):
+    """Normaliza un texto a MAYÚSCULAS ASCII para comparación robusta a encoding/mojibake.
+    Quita Ñ/ñ y secuencias corruptas (U+FFFD, 'ï¿½') de forma CONSISTENTE, y conserva la
+    base de las vocales con tilde (Á->A, É->E), para que 'EL PEÑON', 'EL PE�ON' y
+    'EL PEï¿½ON' coincidan con la misma clave."""
+    import unicodedata
+    if not s:
+        return ""
+    s = str(s)
+    # Quitar Ñ/ñ y mojibake típicos de Ñ para que coincidan entre sí (sin dejar 'N').
+    for _bad in ("Ñ", "ñ", "�", "ï¿½"):
+        s = s.replace(_bad, "")
+    # Las tildes de vocales sí se conservan como base (Á->A, É->E).
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return " ".join(s.split()).upper()
+
+
 # Homologación de destinos para el Excel de aprobados (hoja "plantilla").
-# Si el municipio de destino coincide con una clave (comparación en MAYÚSCULAS y sin
-# espacios de más) se reemplaza por el valor al escribir la columna "Destino".
+# Si el municipio de destino coincide con una clave se reemplaza por el valor al escribir
+# la columna "Destino". La comparación es ROBUSTA a encoding/mojibake: se normaliza a
+# ASCII (sin tildes, Ñ ni caracteres corruptos) antes de buscar, así "EL PEÑON",
+# "EL PEï¿½ON" o cualquier variante con la Ñ dañada coinciden con la misma clave.
 # Agregar aquí los renombrados que se vayan requiriendo homologar.
 DESTINOS_RENOMBRAR_EXCEL = {
     "SANTIAGO DE CALI": "CALI",
@@ -3384,6 +3404,12 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "IBAGUE": "IBAGUE TOLIMA",
     "BRUSELAS": "BRUSELAS PITALITO HUILA",
     "SANTA BARBARA": "SANTA BARBARA ANT.",
+    "EL PEÑON": "EL PEÑON C/MARCA",
+}
+
+# Versión del mapa con claves normalizadas a ASCII para el lookup.
+DESTINOS_RENOMBRAR_EXCEL_NORM = {
+    _norm_clave_destino(k): v for k, v in DESTINOS_RENOMBRAR_EXCEL.items()
 }
 
 
@@ -3391,7 +3417,7 @@ def _renombrar_destino_excel(destino):
     """Reemplaza el nombre del destino por su forma homologada para el Excel de aprobados."""
     if not destino:
         return destino
-    return DESTINOS_RENOMBRAR_EXCEL.get(str(destino).strip().upper(), destino)
+    return DESTINOS_RENOMBRAR_EXCEL_NORM.get(_norm_clave_destino(destino), destino)
 
 
 def _escribir_fila_planilla(
@@ -3410,10 +3436,14 @@ def _escribir_fila_planilla(
     # Regional del documento con fallback a la regional del usuario
     regional_doc = regional_doc or regional_usuario
 
-    # Origen: reemplazar la regional por el municipio real de la bodega de origen
+    # Origen: reemplazar la regional por el municipio real de la bodega de origen.
+    # OJO: `regional` se guarda en Mongo como nombre de bodega (JUAN MINA/YUMBO/...),
+    # no como nombre de regional, por eso se mapean ambas formas (docs nuevos y viejos).
     _origen_map = {
-        "BARRANQUILLA": "GALAPA",
+        "BARRANQUILLA": "JUAN MINA BARRANQUILLA ATLANTICO",
+        "JUAN MINA": "JUAN MINA BARRANQUILLA ATLANTICO",
         "CALI": "YUMBO",
+        "YUMBO": "YUMBO",
     }
     origen = _origen_map.get(str(regional_doc).upper().strip(), regional_doc)
 
@@ -3429,8 +3459,14 @@ def _escribir_fila_planilla(
     observacion = observacion[:300]
     pedido_cliente = str(codigo_pedido)[:100] if codigo_pedido else codigo_pedido
 
-    # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen
-    centro_costo = f"{regional_doc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
+    # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen.
+    # Como `regional` se guarda como bodega (JUAN MINA), se normaliza al nombre de la
+    # regional (BARRANQUILLA) para que el centro de costo salga con la ciudad.
+    _regional_cc_map = {
+        "JUAN MINA": "BARRANQUILLA",
+    }
+    regional_cc = _regional_cc_map.get(str(regional_doc).upper().strip(), regional_doc)
+    centro_costo = f"{regional_cc} CARGA MASIVA OPERACIONES CARGA {cliente_origen}"
 
     # Toneladas: Peso SICETAC / 1000 con 2 decimales (con fallback a peso real)
     peso_para_toneladas = peso_sicetac if peso_sicetac else peso_real
@@ -3486,8 +3522,8 @@ def _escribir_fila_planilla(
         "FUNZA":        ("BODEGA INTEGRA FUNZA",    "FUNZA"),
         "GIRARDOTA":    ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),
         "MEDELLIN":     ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),  # alias bodega GIRARDOTA (analista guarda 'MEDELLIN')
-        "BARRANQUILLA": ("BODEGA INTEGRA GALAPA",      "GALAPA"),
-        "GALAPA":       ("BODEGA INTEGRA GALAPA",      "GALAPA"),      # alias bodega (operativo guarda 'GALAPA')
+        "BARRANQUILLA": ("INTEGRA JUAN MINA",      "JUAN MINA"),
+        "JUAN MINA":       ("INTEGRA JUAN MINA",      "JUAN MINA"),      # alias bodega (operativo guarda 'JUAN MINA')
         "CALI":         ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),
         "YUMBO":        ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),  # alias bodega (operativo guarda 'YUMBO')
         "BUCARAMANGA":  ("BODEGA INTEGRA BUCARAMANGA", "Parque industrial provincia de soto 1"),
