@@ -1606,6 +1606,46 @@ async def consultar_planillas(request: ConsultaPlanillasRequest):
         )
 
 
+def _planillas_ya_tramitadas(planillas: list) -> set:
+    """Devuelve el subconjunto de 'planillas' que ya fueron tramitadas (movidas
+    al histórico) HOY o AYER (zona Colombia). Incluye planillas que existen como
+    doc top-level o como original embebido en una fusión tramitada.
+
+    Una sola consulta con $in (no N find_one). Se usa para:
+      - consultar-planillas-bot: omitirlas ANTES de consultar Siscore.
+      - guardar-busqueda: revalidar antes de insertar (red de seguridad).
+    """
+    planillas = [p for p in (planillas or []) if p]
+    if not planillas:
+        return set()
+    _ahora_col = datetime.now(timezone.utc) - _OFFSET_COLOMBIA
+    _hoy_col = _ahora_col.strftime("%Y-%m-%d")
+    _ayer_col = (_ahora_col - timedelta(days=1)).strftime("%Y-%m-%d")
+    _filtro_fecha = {
+        "$gte": datetime.strptime(_ayer_col, "%Y-%m-%d") + _OFFSET_COLOMBIA,               # ayer 00:00 Col
+        "$lt":  datetime.strptime(_hoy_col,  "%Y-%m-%d") + timedelta(days=1) + _OFFSET_COLOMBIA,  # mañana 00:00 Col
+    }
+    docs = coleccion_historico.find(
+        {
+            "fecha_movimiento_historico": _filtro_fecha,
+            "$or": [
+                {"planilla": {"$in": planillas}},
+                {"fusion_info.es_fusionada": True,
+                 "fusion_info.datos_originales.planilla": {"$in": planillas}},
+            ],
+        },
+        {"planilla": 1, "fusion_info.datos_originales.planilla": 1},
+    )
+    tramitadas = set()
+    for d in docs:
+        if d.get("planilla") in planillas:
+            tramitadas.add(d["planilla"])
+        for orig in ((d.get("fusion_info") or {}).get("datos_originales") or []):
+            if orig.get("planilla") in planillas:
+                tramitadas.add(orig["planilla"])
+    return tramitadas
+
+
 @router.post("/consultar-planillas-bot")
 def consultar_planillas_bot(request: ConsultaPlanillasRequest):
     """
@@ -1632,6 +1672,27 @@ def consultar_planillas_bot(request: ConsultaPlanillasRequest):
         if not planillas:
             raise HTTPException(status_code=400, detail="No se recibieron planillas para consultar")
 
+        # PRE-FILTRO: omitir las planillas ya tramitadas (en histórico de
+        # hoy/ayes) ANTES de consultar Siscore, para no hacer trabajar al bot
+        # innecesariamente. Se devuelven para que el frontend avise al usuario.
+        omitidas_ya_tramitadas = sorted(_planillas_ya_tramitadas(planillas))
+        if omitidas_ya_tramitadas:
+            _omit_set = set(omitidas_ya_tramitadas)
+            logger.info(
+                f"[BOT] Pre-filtro: {len(_omit_set)} planilla(s) ya tramitadas, "
+                f"se omiten de la consulta a Siscore: {omitidas_ya_tramitadas}"
+            )
+            planillas = [p for p in planillas if p not in _omit_set]
+
+        if not planillas:
+            logger.info("[BOT] Todas las planillas solicitadas ya están tramitadas (hoy/ayes).")
+            return {
+                "registros": [],
+                "total_registros": 0,
+                "omitidas_ya_tramitadas": omitidas_ya_tramitadas,
+                "mensaje": "Todas las planillas solicitadas ya están tramitadas (hoy/ayes).",
+            }
+
         # Lookup de divipolas para enriquecer Ruta/Departamento desde el Destino
         lookup_divipolas = construir_lookup_divipolas(coleccion_divipolas)
 
@@ -1641,10 +1702,12 @@ def consultar_planillas_bot(request: ConsultaPlanillasRequest):
             planillas,
             lookup_divipolas=lookup_divipolas,
         )
+        resultado["omitidas_ya_tramitadas"] = omitidas_ya_tramitadas
 
         logger.info(
             f"[BOT] Respuesta: {resultado.get('total_registros', 0)} registros, "
-            f"{len(resultado.get('errores', []))} errores"
+            f"{len(resultado.get('errores', []))} errores, "
+            f"{len(omitidas_ya_tramitadas)} omitida(s) por ya tramitada(s)"
         )
         return resultado
 
@@ -2185,6 +2248,14 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
         # perfiles siguen naciendo en PREAPROBADO.
         estado_inicial = "CREADO" if es_operativo else "PREAPROBADO"
 
+        # Planillas ya tramitadas (en histórico de hoy/ayes): se omiten al guardar.
+        # Red de seguridad: normalmente ya se filtraron al consultar Siscore, pero
+        # se revalida aquí por si el estado cambió entre la consulta y el guardado.
+        _tramitadas_set = _planillas_ya_tramitadas(
+            [resultado.get("planilla") for resultado, _ in todos_procesados]
+        )
+        omitidas_ya_tramitadas = []
+
         # Guardar cada resultado como un documento independiente
         for resultado, cons_info in todos_procesados:
             logger.info(f"Procesando planilla: {resultado.get('planilla')} con consecutivo: {cons_info['consecutivo']}")
@@ -2266,9 +2337,15 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 )
                 logger.info(f"Planilla {resultado.get('planilla')}: actualizada con consecutivo {planilla_doc['consecutivo']}")
             else:
+                # Si ya fue tramitada (en histórico de hoy/ayes), omitirla.
+                _planilla = resultado.get("planilla")
+                if _planilla in _tramitadas_set:
+                    omitidas_ya_tramitadas.append(_planilla)
+                    logger.info(f"Planilla {_planilla}: omitida al guardar, ya tramitada (en histórico de hoy/ayes)")
+                    continue
                 # Insertar nuevo
                 coleccion_pedidos_medical.insert_one(planilla_doc)
-                logger.info(f"Planilla {resultado.get('planilla')}: guardada con consecutivo {planilla_doc['consecutivo']}")
+                logger.info(f"Planilla {_planilla}: guardada con consecutivo {planilla_doc['consecutivo']}")
 
         logger.info(f"Total guardado: {len(resultados_a_guardar)} planillas en pedidos_medical ({omitidas} omitida(s) por no encontrada(s))")
 
@@ -2301,9 +2378,12 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
             }
 
         return {
-            "mensaje": f"Se guardaron/actualizaron {len(resultados_a_guardar)} planillas" + (f" ({omitidas} omitida(s) por no encontrada(s))" if omitidas else ""),
-            "total": len(resultados_a_guardar),
+            "mensaje": f"Se guardaron/actualizaron {len(resultados_a_guardar) - len(omitidas_ya_tramitadas)} planillas"
+                       + (f" ({len(omitidas_ya_tramitadas)} omitida(s) por ya tramitada(s))" if omitidas_ya_tramitadas else "")
+                       + (f" ({omitidas} omitida(s) por no encontrada(s))" if omitidas else ""),
+            "total": len(resultados_a_guardar) - len(omitidas_ya_tramitadas),
             "omitidas_no_encontradas": omitidas,
+            "omitidas_ya_tramitadas": omitidas_ya_tramitadas,
             "consecutivos": planillas_consecutivos,
             "planillas_fusionadas_detectadas": planillas_fusionadas_detectadas
         }
@@ -3409,6 +3489,8 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "DISTRITO ESPECIAL, INDUST": "BARRANQUILLA",
     "DISTRITO TURISTICO Y CULTURAL": "CARTAGENA",
     "DISTRITO TURISTICO,CULTURAL E": "SANTA MARTA",
+    "FLORIDABLANCA": "FLORIDA BLANCA",
+    "DOSQUEBRADAS": "DOS QUEBRADAS",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
@@ -4163,7 +4245,8 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             "Vehículo SICETAC", "Flete Teórico", "Flete Solicitado",
             "Descargue", "Punto Adic.", "Desvío", "Aforo",
             "Municipio Principal", "Cliente Origen", "Cant. Destinos",
-            "Código Pedido", "Observaciones"
+            "Código Pedido", "Observaciones",
+            "Operativo", "Analista(s)", "Aprobador", "Asignó Pedido Vulcano"
         ]
 
         # Estilos
@@ -4186,7 +4269,8 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             "Vehículo SICETAC": 16, "Flete Teórico": 16, "Flete Solicitado": 16,
             "Descargue": 14, "Punto Adic.": 14, "Desvío": 14, "Aforo": 14,
             "Municipio Principal": 20, "Cliente Origen": 22,
-            "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25
+            "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25,
+            "Operativo": 26, "Analista(s)": 30, "Aprobador": 26, "Asignó Pedido Vulcano": 28
         }
 
         # Cabeceras
@@ -4238,6 +4322,73 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             except (TypeError, ValueError):
                 return default
 
+        # ── Usuarios por rol ─────────────────────────────────────────────
+        # Para cada planilla se arma una columna por rol participante:
+        #   - Operativo             → quien registró la planilla (usuario_registro).
+        #   - Analista(s)           → quienes editaron/tramitaron (historial_cambios)
+        #                             con perfil ANALISTA en baseusuarios.
+        #   - Aprobador             → quien aprobó (aprobado_por).
+        #   - Asignó Pedido Vulcano → quien asignó el pedido (usuario_pedido_vulcano).
+        # Los usernames se resuelven a nombre legible desde baseusuarios en una sola
+        # consulta $in (cache por export); si no aparecen, se deja el username tal cual.
+        _todos_usuarios = set()
+        for _doc in planillas_db:
+            for _k in ("usuario_registro", "usuario_modificacion", "aprobado_por",
+                       "usuario_pedido_vulcano", "usuario_solicitud_autorizacion"):
+                _u = (_doc.get(_k) or "").strip()
+                if _u:
+                    _todos_usuarios.add(_u)
+            for _h in (_doc.get("historial_cambios") or []):
+                if isinstance(_h, dict):
+                    _u = (_h.get("usuario") or "").strip()
+                    if _u:
+                        _todos_usuarios.add(_u)
+        _lookup_upper = [u.upper() for u in _todos_usuarios]
+        info_map = {}  # {USUARIO_UPPER: {"nombre": str, "perfil": str}}
+        if _lookup_upper:
+            for _udoc in coleccion_baseusuarios.find(
+                {"usuario": {"$in": _lookup_upper}},
+                {"usuario": 1, "nombre": 1, "perfil": 1, "_id": 0},
+            ):
+                _usr = str(_udoc.get("usuario", "")).upper()
+                if _usr:
+                    info_map[_usr] = {
+                        "nombre": (_udoc.get("nombre") or "").strip(),
+                        "perfil": (_udoc.get("perfil") or "").strip(),
+                    }
+
+        def _roles_usuarios(doc, imap):
+            """Devuelve dict {rol: nombre(s)} de quienes participaron en la planilla."""
+            def _nombre(u):
+                if not u:
+                    return ""
+                us = str(u).strip()
+                if not us:
+                    return ""
+                info = imap.get(us.upper()) or {}
+                return info.get("nombre") or us
+
+            # Analistas: usuarios del historial_cambios con perfil ANALISTA, sin duplicar.
+            analistas = []
+            vistos = set()
+            for _h in (doc.get("historial_cambios") or []):
+                if not isinstance(_h, dict):
+                    continue
+                _u = (_h.get("usuario") or "").strip()
+                if not _u or _u.lower() in vistos:
+                    continue
+                _info = imap.get(_u.upper()) or {}
+                if (_info.get("perfil") or "").upper() == "ANALISTA":
+                    vistos.add(_u.lower())
+                    analistas.append(_info.get("nombre") or _u)
+
+            return {
+                "Operativo": _nombre(doc.get("usuario_registro")),
+                "Analista(s)": "; ".join(analistas),
+                "Aprobador": _nombre(doc.get("aprobado_por")),
+                "Asignó Pedido Vulcano": _nombre(doc.get("usuario_pedido_vulcano")),
+            }
+
         # Datos
         row_num = 2
         for i, doc in enumerate(planillas_db):
@@ -4246,6 +4397,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                 total_solicitado = num(doc.get("total_solicitado"))
                 flete_teorico = num(doc.get("tarifa_calculada"))
                 diferencia = num(doc.get("diferencia"), total_solicitado - flete_teorico)
+                roles = _roles_usuarios(doc, info_map)
 
                 valores = [
                     doc.get("consecutivo", ""),
@@ -4275,6 +4427,10 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                     doc.get("cantidad_destinos", ""),
                     doc.get("codigo_pedido", ""),
                     doc.get("causal", ""),
+                    roles["Operativo"],
+                    roles["Analista(s)"],
+                    roles["Aprobador"],
+                    roles["Asignó Pedido Vulcano"],
                 ]
 
                 row_fill = even_fill if i % 2 == 0 else None
@@ -4321,6 +4477,10 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                         cell.alignment = number_alignment
                         if col_name in ("Peso Real", "Peso SICETAC"):
                             cell.number_format = '#,##0'
+
+                    # Columnas de usuarios por rol (pueden tener varios nombres)
+                    elif col_name in ("Operativo", "Analista(s)", "Aprobador", "Asignó Pedido Vulcano"):
+                        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
                     else:
                         cell.alignment = data_alignment
