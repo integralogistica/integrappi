@@ -676,6 +676,17 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
                         continue
 
                     # Fusión completa: mover al histórico con todos sus pedidos.
+                    # Concatenar los pedido_vulcano de TODOS los originales, separados por coma,
+                    # en el campo raíz pedido_vulcano. Así la planilla fusionada viaja a
+                    # HistoricoPedidos igual que una planilla normal (columna "Pedido Vulcano"
+                    # y Excel). Sin esto, ese campo queda vacío: los pedidos solo viven dentro
+                    # de fusion_info.datos_originales[].pedido_vulcano y /historico no los expone.
+                    pedidos_fusion = [
+                        (o.get("pedido_vulcano") or "").strip()
+                        for o in originales_act
+                        if (o.get("pedido_vulcano") or "").strip()
+                    ]
+                    doc_actualizado["pedido_vulcano"] = ", ".join(pedidos_fusion)
                     doc_actualizado["fecha_movimiento_historico"] = datetime.now()
                     coleccion_historico.insert_one(doc_actualizado)
                     coleccion_pedidos_medical.delete_one({"_id": doc_actualizado["_id"]})
