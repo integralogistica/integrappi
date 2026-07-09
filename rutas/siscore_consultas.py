@@ -3502,6 +3502,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "DISTRITO TURISTICO,CULTURAL E": "SANTA MARTA",
     "FLORIDABLANCA": "FLORIDA BLANCA",
     "DOSQUEBRADAS": "DOS QUEBRADAS",
+    "SOACHA": "SOACHA CUND",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
