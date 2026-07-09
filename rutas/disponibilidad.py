@@ -232,7 +232,7 @@ def bolsa(
                 "cedula": veh.get("condCedulaCiudadania")
             },
             "vehiculo": {
-                "marca": veh.get("vehMarca"),
+                "linea": veh.get("vehLinea"),
                 "tipo_veh_sicetac": tipo_veh or None,
                 "toneladas": veh.get("vehCapacidadToneladas") or veh.get("toneladas") or veh.get("vehTonelaje")
             }

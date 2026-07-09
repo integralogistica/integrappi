@@ -44,6 +44,7 @@ from rutas.banco import router as ruta_banco
 from rutas.indicadores_transporte import router as ruta_indicadores_transporte
 from rutas.indicadores_fletes import router as ruta_indicadores_fletes
 from rutas.disponibilidad import ruta_disponibilidad
+from rutas.conductores import ruta_conductores
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,7 @@ app.include_router(ruta_banco)
 app.include_router(ruta_indicadores_transporte)
 app.include_router(ruta_indicadores_fletes)
 app.include_router(ruta_disponibilidad)
+app.include_router(ruta_conductores)
 
 @app.get("/", tags=['Home'])
 async def root():
