@@ -3490,6 +3490,7 @@ def _norm_clave_destino(s):
 # Agregar aquí los renombrados que se vayan requiriendo homologar.
 DESTINOS_RENOMBRAR_EXCEL = {
     "SANTIAGO DE CALI": "CALI",
+    "RIONEGRO": "RIONEGRO ANT.",
     "LA UNION": "LA UNION ANT.",
     "BOGOTA": "BOGOTA D.C.",
     "IBAGUE": "IBAGUE TOLIMA",
