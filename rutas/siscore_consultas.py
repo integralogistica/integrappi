@@ -3503,6 +3503,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "FLORIDABLANCA": "FLORIDA BLANCA",
     "DOSQUEBRADAS": "DOS QUEBRADAS",
     "SOACHA": "SOACHA CUND",
+    "UBATE": "VILLA DE SAN DIEGO DE UBATE"
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
