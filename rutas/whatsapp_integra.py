@@ -1,4 +1,15 @@
 # rutas/whatsapp_integra.py
+#
+# Webhook de WhatsApp Cloud API (Meta) para Integra.
+# Máquina de estados conversacional con 3 flujos:
+#   1) TRANSPORTADOR (🚚): autenticación/registro por cédula + consulta de
+#      manifiestos (Vulcano rpt_id=26) cruzada con pagos de saldo (MongoDB).
+#   2) EMPLEADO    (🧑‍💼): certificado laboral (con/sin salario) enviado por correo.
+#   3) CLIENTE     (🧾): consulta de guía vía SOAP Siscore (en background).
+#
+# Persistencia de estado en chat_state_integra (MongoDB). Sesiones de auth
+# separadas del state (is_authenticated / is_cliente_authenticated).
+# Todo responde 200 rápido para que Meta NO reintente (evita spam duplicados).
 import os
 import re
 import asyncio
@@ -44,20 +55,22 @@ PAGOS_ENDPOINT = os.getenv(
     "PAGOS_TENEDOR_URL",
     "https://integrappi-dvmh.onrender.com/manifiestos/tenedor/{cedula}",
 )
+# Endpoint interno que devuelve los pagos de saldo programados por cédula de tenedor.
 
-# Regex
+# Regex de validación de entradas del usuario
 CEDULA_REGEX = re.compile(r"^\d{5,15}$")
 GUIA_REGEX = re.compile(r"^[A-Za-z0-9\-]+$")
 YEAR_REGEX = re.compile(r"^(19|20)\d{2}$")
 MANIFIESTO_REGEX = re.compile(r"^[A-Za-z0-9]{5,20}$")
 
-# TTL estado
+# TTL estado: si el usuario no responde en 60 min, la sesión expira y vuelve a START.
 STATE_TTL_MINUTES = 60
 
-# Dedup
+# Dedup: guardamos hasta 30 msg_id procesados para no responder duplicados
+# cuando Meta reenvía el mismo mensaje (reintentos).
 PROCESSED_IDS_MAX = 30
 
-# Defaults Transportador
+# Default Transportador: año de consulta por defecto (Vulcano rpt_id=26).
 TRANSP_DEFAULT_YEAR = "2025"
 
 ruta_whatsapp_integra = APIRouter(
@@ -421,6 +434,12 @@ async def webhook_no_slash(request: Request, background_tasks: BackgroundTasks):
 
 @ruta_whatsapp_integra.post("/")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
+    # Orquestador principal: recibe el mensaje, recupera el estado del usuario y
+    # hace dispatch por `state` (START, TRANSPORTADOR_*, EMPLOYEE_*, CLIENTE_*).
+    # Patrón en cada estado: set_state_with_ts(...) -> enviar_texto(...) -> return 200.
+    # Los `ctx` preservan solo `processed_msg_ids` (dedup) al cambiar de estado
+    # para no arrastrar contexto viejo de pantallas anteriores.
+
     # 1) Lee JSON (si falla, responde 200 para que Meta NO reintente)
     try:
         data = await request.json()
@@ -732,6 +751,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         # -------------------------
         # TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO
+        # Inicia el flujo de registro de nuevo transportador:
+        #   NOMBRE -> EMAIL -> TELEFONO -> CLAVE -> CONFIRMAR_CLAVE -> VERIFICAR
+        #   (código por correo). Al confirmar, autentica y consulta automáticamente.
         # -------------------------
         if state == "TRANSPORTADOR_AUTH_PREGUNTAR_REGISTRO":
             if texto_lower == "1":
@@ -1072,6 +1094,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         # -------------------------
         # TRANSPORTADOR_RESUMEN
+        # Menú dinámico: `opcion_map` mapea el número que el usuario escribió
+        # a una acción (pagos, consultar_manifiesto, estado_<X>, menu_principal...).
+        # Es dinámico porque las opciones dependen de cuántos estados de manifiesto
+        # haya (cada estado generado por Vulcano queda como una opción propia).
         # -------------------------
         if state == "TRANSPORTADOR_RESUMEN":
             opcion_map = (context or {}).get("opcion_map") or {}
