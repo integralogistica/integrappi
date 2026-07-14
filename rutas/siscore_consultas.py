@@ -69,7 +69,8 @@ def _hora_confiable_utc() -> datetime:
 
 # Conexión MongoDB
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-client = MongoClient(MONGO_URI)
+from bd.bd_cliente import bd_cliente
+client = bd_cliente
 db = client["integra"]
 coleccion_solicitudes = db["solicitud_veh_medical"]
 coleccion_tramites = db["tramite_fmc"]

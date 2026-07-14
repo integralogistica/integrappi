@@ -10,7 +10,8 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 
 mongo_uri = os.getenv("MONGO_URI")
-client = MongoClient(mongo_uri)
+from bd.bd_cliente import bd_cliente
+client = bd_cliente
 db = client["integra"]
 
 ruta_whatsapp_report = APIRouter(prefix="/whatsapp-report", tags=["whatsapp-report"])

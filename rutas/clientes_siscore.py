@@ -12,7 +12,8 @@ import pandas as pd
 # 🔗 Conexión MongoDB
 # ------------------------------
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-client = MongoClient(MONGO_URI)
+from bd.bd_cliente import bd_cliente
+client = bd_cliente
 db = client["integra"]
 coleccion_clientes_siscore = db["clientes_siscore"]
 

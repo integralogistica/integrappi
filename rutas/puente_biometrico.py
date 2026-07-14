@@ -23,7 +23,8 @@ BUCKET_NAME = os.getenv("BUCKET_NAME", "integrapp")  # Ajusta si tu bucket se ll
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
 
 # ─── MONGO ─────────────────────────────────────────────────────────────────────
-client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+from bd.bd_cliente import bd_cliente
+client = bd_cliente
 db = client["integra"]
 collection = db["biometria"]
 

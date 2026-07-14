@@ -46,7 +46,7 @@ else:
 # ==========================================
 # Configuración base de datos
 # ==========================================
-bd_cliente = MongoClient(MONGO_URI)
+from bd.bd_cliente import bd_cliente
 bd = bd_cliente['integra']
 
 # --- COLECCIONES ---

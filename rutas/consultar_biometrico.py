@@ -16,7 +16,8 @@ mongo_uri = os.getenv("MONGO_URI")
 if not mongo_uri:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
 
-cliente = MongoClient(mongo_uri)
+from bd.bd_cliente import bd_cliente
+cliente = bd_cliente
 bd = cliente["integra"]
 coleccion_verificacion = bd["biometria"]
 

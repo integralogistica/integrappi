@@ -12,7 +12,8 @@ import re
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-ConexionMongo = MongoClient(MONGO_URI)
+from bd.bd_cliente import bd_cliente
+ConexionMongo = bd_cliente
 base_datos = ConexionMongo["integra"]
 coleccion_usuarios = base_datos["baseusuarios"]
 

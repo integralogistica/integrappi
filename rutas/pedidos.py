@@ -19,7 +19,8 @@ from fastapi import Request
 # 🔗 Conexión MongoDB
 # ------------------------------
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-client = MongoClient(MONGO_URI)
+from bd.bd_cliente import bd_cliente
+client = bd_cliente
 db = client["integra"]
 coleccion_pedidos  = db["pedidos"]
 coleccion_pedidos_completados = db["pedidos_completados"]
