@@ -3508,7 +3508,9 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "VILLA DE LEYVA": "VILLA DE LEIVA",
     "UBATE": "VILLA DE SAN DIEGO DE UBATE",
     "PUERTO BERRIO": "PTO. BERRIO",
-    "PUERTO BOYACA": "PTO. BOYACA"
+    "PUERTO BOYACA": "PTO. BOYACA",
+    "SAN ANDRES DE CUERQUIA": "SAN ANDRES DE Q.",
+    
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
