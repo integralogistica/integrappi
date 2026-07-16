@@ -3510,7 +3510,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "PUERTO BERRIO": "PTO. BERRIO",
     "PUERTO BOYACA": "PTO. BOYACA",
     "SAN ANDRES DE CUERQUIA": "SAN ANDRES DE Q.",
-    
+    "FLORENCIA": "FLORENCIA CAQUETA",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
