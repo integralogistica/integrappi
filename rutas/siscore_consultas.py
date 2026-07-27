@@ -78,6 +78,7 @@ coleccion_tarifas = db["fletes_rutas_fmc"]
 coleccion_divipolas = db["divipolas"]
 coleccion_pedidos_medical = db["pedidos_medical"]
 coleccion_historico = db["pedidos_medical_historico"]
+coleccion_anulados = db["pedidos_anulados"]
 coleccion_causales = db["causales"]
 coleccion_baseusuarios = db["baseusuarios"]
 
@@ -940,6 +941,112 @@ async def retroceder_a_solicitud(request: RetrocederASolicitudRequest):
     except Exception as e:
         logger.error(f"Error al retroceder planilla del histórico: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error al retroceder la planilla: {str(e)}")
+
+
+class AnularPlanillaRequest(BaseModel):
+    """Modelo para anular una planilla del histórico y moverla a pedidos_anulados."""
+    planilla: str
+    usuario: Optional[str] = None  # quién anula (trazabilidad)
+    causal: str                    # motivo de la anulación (obligatorio)
+
+
+@router.post("/anular-planilla")
+async def anular_planilla(request: AnularPlanillaRequest):
+    """
+    Anula una planilla de pedidos_medical_historico: la mueve a la colección
+    pedidos_anulados conservando TODA la información original, y registra el
+    causal, el usuario que anula y la fecha. Operación definitiva (no vuelve
+    al flujo operativo). Solo ADMIN (validar en frontend).
+    """
+    try:
+        planilla = (request.planilla or "").strip()
+        causal = (request.causal or "").strip()
+        if not planilla:
+            raise HTTPException(status_code=400, detail="planilla es obligatoria")
+        if not causal:
+            raise HTTPException(status_code=400, detail="causal es obligatorio")
+
+        logger.info(
+            f"=== ANULAR PLANILLA === planilla={planilla}, "
+            f"usuario={request.usuario}, causal={causal}"
+        )
+
+        # 1. Buscar en el histórico por planilla.
+        doc = coleccion_historico.find_one({"planilla": planilla})
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró la planilla {planilla} en el histórico"
+            )
+
+        # 2. Anti-duplicado: si ya existe en pedidos_anulados, abortar.
+        ya_anulada = coleccion_anulados.find_one({
+            "$or": [
+                {"_id": doc["_id"]},
+                {"consecutivo": doc.get("consecutivo")},
+                {"planilla": doc.get("planilla")},
+            ]
+        })
+        if ya_anulada:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"La planilla {planilla} ya está anulada "
+                    f"(en pedidos_anulados). No se puede anular dos veces."
+                )
+            )
+
+        # 3. Trazabilidad de la anulación en historial_cambios.
+        estado_previo = doc.get("estado")
+        fecha_actual = datetime.now()
+        historial_cambios = doc.get("historial_cambios", []) or []
+        historial_cambios.append({
+            "fecha": fecha_actual,
+            "usuario": request.usuario,
+            "accion": "anulacion",
+            "campos_modificados": [
+                {"campo": "estado", "valor_anterior": estado_previo, "valor_nuevo": "ANULADO"},
+            ],
+            "causal": causal,
+        })
+
+        # 4. Agregar campos de anulación sin tocar el resto del documento
+        #    (se conserva fusion_info, pedido_vulcano, valores, recargos, etc.).
+        doc["estado"] = "ANULADO"
+        doc["causal_anulacion"] = causal
+        doc["anulado_por"] = request.usuario
+        doc["fecha_anulacion"] = fecha_actual
+        doc["fecha_modificacion"] = fecha_actual
+        if request.usuario:
+            doc["usuario_modificacion"] = request.usuario
+        doc["historial_cambios"] = historial_cambios
+
+        # 5. Mover: delete-first idempotente + insert en anulados + delete del histórico.
+        coleccion_anulados.delete_one({"_id": doc["_id"]})
+        coleccion_anulados.insert_one(doc)
+        coleccion_historico.delete_one({"_id": doc["_id"]})
+
+        logger.info(
+            f"Planilla anulada y movida a pedidos_anulados: "
+            f"planilla={planilla}, consecutivo={doc.get('consecutivo')}, "
+            f"estado_previo={estado_previo}, usuario={request.usuario}"
+        )
+
+        return {
+            "mensaje": (
+                f"Planilla {planilla} anulada y movida a Pedidos Anulados."
+            ),
+            "exitoso": True,
+            "planilla": planilla,
+            "consecutivo": doc.get("consecutivo"),
+            "causal": causal,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al anular planilla del histórico: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al anular la planilla: {str(e)}")
 
 
 # Modelos para gestión de causales
@@ -3511,6 +3618,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "PUERTO BOYACA": "PTO. BOYACA",
     "SAN ANDRES DE CUERQUIA": "SAN ANDRES DE Q.",
     "FLORENCIA": "FLORENCIA CAQUETA",
+    "SAN JOSE DE CUTUTA": "CUTUTA",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
@@ -4182,6 +4290,65 @@ async def obtener_historico(
     except Exception as e:
         logger.error(f"Error al obtener historico: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error al obtener historico: {str(e)}")
+
+
+@router.get("/anulados")
+async def obtener_anulados(
+    fecha_inicio: str = "",
+    fecha_fin: str = "",
+    perfil: str = "",
+    centro_distribucion: str = "",
+    regional: str = ""
+):
+    """
+    Obtiene planillas anuladas (pedidos_anulados).
+    Si no se indican fechas, devuelve TODAS ordenadas por fecha_anulacion desc
+    (los anulados se acumulan en el tiempo). Si se indican, filtra por rango en
+    zona Colombia (UTC-5), igual que /historico pero sobre fecha_anulacion.
+    """
+    try:
+        filtro = {}
+
+        # Filtro opcional por rango de fechas (día Colombia) sobre fecha_anulacion.
+        if fecha_inicio or fecha_fin:
+            f_inicio = fecha_inicio if fecha_inicio else "1970-01-01"
+            # Si solo viene fecha_inicio, tomar hasta 'hoy Colombia'.
+            if fecha_fin:
+                f_fin = fecha_fin
+            else:
+                f_fin = (datetime.now(timezone.utc) - _OFFSET_COLOMBIA).strftime("%Y-%m-%d")
+            fecha_inicio_dt = datetime.strptime(f_inicio, "%Y-%m-%d") + _OFFSET_COLOMBIA
+            fecha_fin_dt = datetime.strptime(f_fin, "%Y-%m-%d") + timedelta(days=1) + _OFFSET_COLOMBIA
+            filtro["fecha_anulacion"] = {"$gte": fecha_inicio_dt, "$lt": fecha_fin_dt}
+
+        # Filtrar por regional para operativos
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+        if perfil and perfil not in perfiles_globales and centro_distribucion:
+            _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
+
+        # Filtro de regional elegido manualmente en el dropdown (perfiles globales).
+        if regional:
+            _aplicar_filtro_regional_dropdown(filtro, regional)
+
+        logger.info(f"[ANULADOS] Filtro: {filtro}")
+
+        docs = list(coleccion_anulados.find(filtro).sort("fecha_anulacion", -1))
+
+        for doc in docs:
+            doc["_id"] = str(doc["_id"])
+
+        logger.info(f"[ANULADOS] Documentos encontrados: {len(docs)}")
+
+        return {
+            "planillas": docs,
+            "total": len(docs),
+            "fecha_inicio": fecha_inicio or None,
+            "fecha_fin": fecha_fin or None
+        }
+
+    except Exception as e:
+        logger.error(f"Error al obtener anulados: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener anulados: {str(e)}")
 
 
 class ExportarHistoricoExcelRequest(BaseModel):
