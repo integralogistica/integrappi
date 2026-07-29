@@ -15,7 +15,12 @@ from bd.bd_cliente import bd_cliente
 client = bd_cliente
 db = client["integra"]
 coleccion_fletes = db["tarifas"]
-coleccion_otros_costos = db["otros_costos"]
+# ⚠️ Esta colección guarda la TABLA DE CONFIGURACIÓN de costos por tipo de
+# vehículo (punto adicional, cargue/descargue), NO las solicitudes del módulo
+# «Otros Costos» (esas viven en `otros_costos`). Antes compartían nombre y se
+# borraban mutuamente (cargar-otros-costos hacía delete_many({}) sobre la misma
+# colección donde caían las solicitudes). Colección propia desde 2026-07-29.
+coleccion_otros_costos = db["config_otros_costos"]
 
 # ------------------------------
 # 🚦 Configuración Router

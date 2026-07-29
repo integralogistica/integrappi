@@ -126,6 +126,9 @@ if bodega:
 - **`pedidos_medical`** - Planillas consultadas en Siscore (documentos independientes)
 - **`causales`** - Causales para fusión de planillas
 - **`pedidos_medical_historico`** - Planillas movidas después de importación Vulcano (histórico)
+- **`otros_costos`** - Solicitudes de otros costos (ciclo activo)
+- **`historico_otros_costos`** - Solicitudes de otros costos pagadas
+- **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
 
 ## Tecnologías
 
@@ -492,3 +495,39 @@ El WS de Siscore V3 (`integra-wms.appsiscore.com/app/ws/informe_v3.php`) dejó d
 ### Rutas: listado y asignación manual (NUEVO)
 - **`GET /siscore/rutas`**: devuelve las rutas con tarifa (`distinct("ruta")` sobre `fletes_rutas_fmc`), para el autocompletar del frontend.
 - **`actualizar-planilla-pedidos`**: ahora persiste el campo `ruta` (edición de ruta desde el modal). `guardar-busqueda` ya persistía `ruta`; el frontend ahora la asigna obligatoriamente antes de guardar.
+
+## Actualizaciones Recientes (2026-07-28)
+
+### Nuevo módulo: Otros Costos (`rutas/otros_costos.py`)
+
+Gestión de costos adicionales posteriores al servicio (parqueadero, peaje, cargue, horas extra, etc.) asociados a pedidos de Vulcano del histórico. Router `/otros-costos`, registrado en `main.py`.
+
+**Colecciones**: `otros_costos` (activo), `historico_otros_costos` (pagadas), `anulados_otros_costos` (anuladas). Lookup en `pedidos_medical_historico`. Movimientos entre colecciones con patrón delete-first + insert idempotente.
+
+**Seguridad**: el perfil NO se confía del frontend. Cada endpoint recibe `usuario` y lo resuelve en `baseusuarios` (`_resolver_usuario`) para autorizar con el perfil real. Umbral coordinador `LIMITE_COORDINADOR = 500000`.
+
+**Endpoints**:
+- `GET /otros-costos/tipos-costo`, `GET /otros-costos/bancos`, `GET /otros-costos/tipos-cuenta` — enums para dropdowns
+- `POST /otros-costos/buscar-pedidos` — busca en `pedidos_medical_historico` (tolerante a ceros a la izquierda y separadores)
+- `POST /otros-costos/verificar-duplicado` — advertencia de duplicados (no bloquea)
+- `POST /otros-costos/crear` — crea en `borrador` o `pendiente_aprobacion`
+- `PUT /otros-costos/editar` — sólo si no está aprobada/pagada/anulada
+- `POST /otros-costos/enviar-aprobacion`, `/aprobar`, `/devolver`, `/rechazar`, `/registrar-pago`, `/anular`
+- `GET /otros-costos/` — listado paginado con filtros (scope por perfil)
+- `GET /otros-costos/{consecutivo}` — detalle + trazabilidad
+- `GET /otros-costos/historico` y `/historico/{consecutivo}`
+- `POST /otros-costos/exportar-excel`
+
+**Permisos por perfil**:
+| Acción | Perfiles |
+|--------|----------|
+| Crear / editar (propias, pre-aprobación) | OPERATIVO, ADMIN |
+| Aprobar ≤ $160.000 | COORDINADOR, CONTROL, ADMIN |
+| Aprobar > $160.000 | CONTROL, ADMIN |
+| Devolver / Rechazar | COORDINADOR, CONTROL, ADMIN |
+| Registrar pago | FINANCIERO, ADMIN |
+| Anular | ADMIN |
+
+**Trazabilidad**: cada acción agrega a `historial_movimientos` `{accion, estado_anterior, estado_nuevo, usuario, nombre_usuario, rol, fecha(UTC), observacion, ip}`. Datos bancarios (`numero_cuenta`, `cedula_titular`) enmascarados en las respuestas salvo FINANCIERO/ADMIN. **Sin soportes/archivos** (solo valores).
+
+**Perfil FINANCIERO** agregado a `PERFILES_VALIDOS` en `baseusuarios.py`. Consecutivo `OC-AAAAMMDD-NNNN` (índice unique + reintento ante colisión).

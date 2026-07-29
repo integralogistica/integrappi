@@ -311,7 +311,7 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():

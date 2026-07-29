@@ -1,0 +1,644 @@
+Necesito desarrollar un nuevo módulo dentro de **Integrapp** para gestionar los costos adicionales que algunos vehículos generan después de prestar un servicio. Estos valores se conocen internamente como **“otros costos”**.
+
+## 1. Contexto del sistema
+
+Actualmente existe un histórico de pedidos en:
+
+`http://localhost:3000/integrapp/HistoricoPedidos/`
+
+La información de este histórico está almacenada en MongoDB.
+
+También existe un flujo de solicitudes y aprobaciones en:
+
+`http://localhost:3000/integrapp/SolicitudVehiculos/`
+
+El nuevo módulo de “otros costos” debe seguir una estructura visual, técnica y funcional similar al módulo de **Solicitud de Vehículos**, reutilizando sus componentes, permisos, estilos, servicios, modelos y flujo de aprobación cuando sea posible.
+
+No se debe afectar el funcionamiento de las rutas actuales.
+
+---
+
+# 2. Objetivo del nuevo módulo
+
+Crear una nueva ruta para que el equipo operativo pueda registrar solicitudes de otros costos asociados a uno o varios pedidos de Vulcano.
+
+Ruta sugerida:
+
+`http://localhost:3000/integrapp/OtrosCostos/`
+
+También debe existir una vista histórica:
+
+`http://localhost:3000/integrapp/HistoricoOtrosCostos/`
+
+El flujo general será:
+
+1. El perfil operativo registra la solicitud.
+2. El sistema consulta los pedidos relacionados en el histórico.
+3. El usuario completa la información del costo y los datos bancarios.
+4. La solicitud queda pendiente de aprobación.
+5. El coordinador o el perfil de control aprueba según el valor.
+6. El perfil financiero visualiza las solicitudes aprobadas y gestiona el pago.
+7. Cada acción queda registrada con usuario, fecha y hora.
+8. Una vez finalizado el proceso, el registro pasa al histórico de otros costos.
+
+---
+
+# 3. Roles y permisos
+
+## Perfil operativo
+
+Puede:
+
+* Ingresar al módulo de otros costos.
+* Crear solicitudes.
+* Consultar los pedidos de Vulcano.
+* Completar los datos requeridos.
+* Consultar las solicitudes que haya creado.
+* Editar una solicitud mientras esté en estado borrador, devuelta o pendiente, siempre que todavía no haya sido aprobada.
+* Corregir solicitudes devueltas.
+
+No puede aprobar solicitudes.
+
+## Perfil coordinador
+
+Puede:
+
+* Consultar solicitudes pendientes.
+* Aprobar solicitudes cuyo valor total sea de hasta **$160.000**, inclusive.
+* Rechazar o devolver solicitudes para corrección.
+* Agregar observaciones durante la aprobación.
+
+No puede aprobar solicitudes superiores a $160.000.
+
+Cuando una solicitud supere este valor, el botón de aprobación debe aparecer deshabilitado o no mostrarse, indicando que requiere aprobación del perfil de control.
+
+## Perfil control
+
+Puede:
+
+* Consultar todas las solicitudes.
+* Aprobar solicitudes superiores a **$160.000**.
+* Aprobar también solicitudes de valores inferiores cuando sea necesario.
+* Rechazar o devolver solicitudes.
+* Agregar observaciones de aprobación o rechazo.
+
+## Perfil financiero
+
+Este perfil debe tener acceso únicamente a:
+
+* La ruta de otros costos.
+* La ruta del histórico de otros costos.
+* Las solicitudes que ya hayan sido aprobadas.
+* La información necesaria para realizar el pago.
+* La opción para registrar la ejecución del pago.
+
+Debe poder registrar:
+
+* Estado del pago.
+* Fecha del pago.
+* Referencia o comprobante de pago.
+* Observaciones financieras.
+* Usuario que procesó el pago.
+
+No debe tener acceso a los demás módulos de Integrapp, salvo que el usuario también tenga otro rol autorizado.
+
+## Perfil administrador
+
+Puede:
+
+* Ver todas las rutas.
+* Crear solicitudes.
+* Editar solicitudes.
+* Aprobar cualquier monto.
+* Rechazar o devolver solicitudes.
+* Procesar pagos.
+* Consultar el histórico.
+* Administrar el flujo completo sin restricciones por monto.
+
+Todos los permisos deben validarse tanto en el frontend como en el backend. No debe depender únicamente de ocultar botones en la interfaz.
+
+---
+
+# 4. Consulta del pedido de Vulcano
+
+El formulario debe incluir un campo llamado:
+
+`pedido_vulcano`
+
+Este campo debe permitir ingresar uno o varios números de pedido.
+
+Los valores pueden encontrarse con diferentes formatos, por ejemplo:
+
+* `00120795`
+* `120795`
+* `00122784,00120795`
+* `00122784, 00120795`
+* `00122784 - 120795`
+* `00122784-00120795`
+
+El sistema debe normalizar automáticamente los valores antes de realizar la búsqueda.
+
+## Reglas de normalización
+
+El sistema debe:
+
+1. Separar los pedidos cuando estén delimitados por comas o guiones.
+2. Eliminar espacios innecesarios.
+3. Eliminar caracteres no válidos.
+4. Comparar los pedidos sin depender de los ceros a la izquierda.
+5. Evitar pedidos duplicados.
+6. Mantener el valor original digitado para efectos de auditoría.
+7. Mostrar claramente cuáles pedidos fueron encontrados y cuáles no.
+
+Por ejemplo, los siguientes valores deben considerarse equivalentes:
+
+* `00120795`
+* `120795`
+
+La búsqueda debe contemplar que en MongoDB el campo `pedido_vulcano` también puede contener varios pedidos dentro de un mismo texto separados por comas o guiones.
+
+No debe realizarse únicamente una comparación exacta del texto completo.
+
+---
+
+# 5. Información que debe recuperar el sistema
+
+Cuando el pedido sea encontrado en el histórico, el sistema debe recuperar automáticamente la información disponible, incluyendo como mínimo:
+
+* `pedido_vulcano`
+* Cliente
+* Piezas
+* Peso real
+* Centro de distribución
+* Tipo de vehículo
+* Municipio de destino
+* Departamento de destino
+* Total solicitado
+* Placa, cuando exista
+* Fecha del servicio
+* Regional u operación
+* Nombre del transportador o proveedor, cuando exista
+* Estado del pedido
+* Identificador original del registro en MongoDB
+
+Cuando se ingresen varios pedidos, la interfaz debe mostrar:
+
+* La información individual de cada pedido.
+* Los totales consolidados de piezas y peso.
+* Los datos comunes entre los pedidos.
+* Las diferencias encontradas entre cliente, destino, placa o vehículo.
+* Una advertencia cuando los pedidos parezcan pertenecer a servicios diferentes.
+
+El usuario debe poder seleccionar cuáles resultados encontrados desea asociar a la solicitud.
+
+---
+
+# 6. Pedidos no encontrados
+
+Puede haber casos en los que el pedido no exista en el histórico.
+
+Cuando esto ocurra:
+
+* El sistema no debe bloquear automáticamente la creación de la solicitud.
+* Debe mostrar una advertencia indicando que el pedido no fue encontrado.
+* El usuario operativo debe diligenciar manualmente los campos obligatorios.
+* El registro debe quedar marcado con un indicador como:
+
+`pedido_encontrado: false`
+
+También debe almacenarse el motivo por el cual se continúa sin encontrar el pedido.
+
+Cuando el pedido sí exista:
+
+`pedido_encontrado: true`
+
+---
+
+# 7. Formulario de solicitud
+
+El formulario debe incluir como mínimo los siguientes campos.
+
+## Información del pedido y servicio
+
+* Pedido o pedidos de Vulcano.
+* Cliente.
+* Centro de distribución.
+* Fecha del servicio.
+* Piezas.
+* Peso real.
+* Tipo de vehículo.
+* Placa.
+* Municipio de destino.
+* Departamento de destino.
+* Transportador o proveedor.
+* Manifiesto.
+
+## Información del otro costo
+
+* Tipo de costo.
+* Concepto del costo.
+* Descripción detallada.
+* Valor solicitado.
+* Motivo por el cual el costo se conoció después del servicio.
+* Fecha en la que se generó o conoció el costo.
+* Observaciones.
+* Soporte o comprobante, cuando aplique.
+
+El campo `tipo_costo` puede manejar inicialmente opciones como:
+
+* Parqueadero.
+* Peaje.
+* Cargue.
+* Descargue.
+* Stand by.
+* Horas adicionales.
+* Ayudante.
+* Devolución.
+* Reexpedición.
+* Reparación.
+* Alimentación.
+* Hospedaje.
+* Otro.
+
+Cuando se seleccione “Otro”, debe ser obligatorio indicar el concepto.
+
+## Información bancaria
+
+* Banco.
+* Tipo de cuenta.
+* Número de cuenta.
+* Cédula del titular.
+* Nombre del titular de la cuenta.
+* Nombre del conductor.
+* Teléfono del conductor, cuando aplique.
+
+El campo banco debe ser una lista desplegable con estas opciones:
+
+* NEQUI
+* BANCO DE BOGOTÁ
+* BANCOLOMBIA
+* DAVIVIENDA
+* DAVIPLATA
+* CMR FALABELLA
+* BANCO CAJA SOCIAL
+* BANCO AV VILLAS
+* COLPATRIA
+
+El campo `tipo_cuenta` debe permitir:
+
+* Ahorros.
+* Corriente.
+
+Para Nequi y Daviplata se puede mostrar el tipo de cuenta como depósito electrónico o no exigir la selección de ahorros/corriente, según la lógica definida en el sistema.
+
+El nombre correcto del campo debe ser `numero_cuenta`, no `cuenta_cuenta`.
+
+---
+
+# 8. Validaciones
+
+Implementar como mínimo las siguientes validaciones:
+
+* El valor solicitado debe ser mayor que cero.
+* El pedido de Vulcano es obligatorio, incluso cuando no sea encontrado.
+* La placa es obligatoria si no se encuentra en el histórico.
+* El manifiesto es obligatorio.
+* El tipo de costo es obligatorio.
+* El concepto y la descripción son obligatorios.
+* El banco es obligatorio.
+* El número de cuenta es obligatorio.
+* La cédula debe contener únicamente valores válidos.
+* El nombre del titular de la cuenta es obligatorio.
+* El nombre del conductor es obligatorio.
+* Las solicitudes superiores a $160.000 no pueden ser aprobadas por un coordinador.
+* Una solicitud aprobada no puede editarse directamente.
+* Una solicitud pagada no puede volver a aprobarse ni modificarse.
+* No se debe permitir aprobar dos veces la misma solicitud.
+* Las acciones deben ser seguras frente a solicitudes simultáneas.
+* Antes de crear una posible solicitud duplicada, se debe advertir cuando coincidan pedido, manifiesto, tipo de costo y valor.
+
+---
+
+# 9. Estados del proceso
+
+Utilizar estados claros y controlados, por ejemplo:
+
+* `borrador`
+* `pendiente_aprobacion`
+* `devuelto`
+* `rechazado`
+* `aprobado`
+* `pendiente_pago`
+* `pagado`
+* `anulado`
+
+Flujo recomendado:
+
+`borrador → pendiente_aprobacion → aprobado → pendiente_pago → pagado`
+
+Flujos alternos:
+
+`pendiente_aprobacion → devuelto → pendiente_aprobacion`
+
+`pendiente_aprobacion → rechazado`
+
+`aprobado → anulado`
+
+Una solicitud devuelta debe conservar todas las observaciones y movimientos anteriores.
+
+---
+
+# 10. Regla de aprobación por monto
+
+La autorización debe funcionar así:
+
+* Hasta **$160.000**, inclusive: puede aprobar el coordinador, control o administrador.
+* Más de **$160.000**: únicamente puede aprobar control o administrador.
+
+La validación debe realizarse con el valor total de la solicitud.
+
+Si una solicitud contiene varios conceptos de costo, debe utilizarse la suma de todos los conceptos.
+
+No se debe permitir dividir artificialmente una solicitud para evitar el nivel de aprobación. El sistema debe advertir cuando existan varias solicitudes relacionadas con el mismo pedido, manifiesto o vehículo en un periodo cercano.
+
+---
+
+# 11. Trazabilidad y auditoría
+
+Cada solicitud debe tener un historial de movimientos.
+
+Cada movimiento debe registrar:
+
+* Tipo de acción.
+* Estado anterior.
+* Estado nuevo.
+* Usuario.
+* Nombre del usuario.
+* Rol utilizado.
+* Fecha.
+* Hora.
+* Observación.
+* Dirección IP o información de sesión, si la arquitectura actual lo permite.
+
+Acciones que deben quedar registradas:
+
+* Creación.
+* Edición.
+* Envío a aprobación.
+* Devolución.
+* Rechazo.
+* Aprobación.
+* Registro de pago.
+* Modificación de datos bancarios.
+* Anulación.
+* Paso al histórico.
+
+Las fechas deben almacenarse en formato UTC en MongoDB y mostrarse en la zona horaria utilizada por la aplicación.
+
+---
+
+# 12. Persistencia en MongoDB
+
+Las solicitudes activas deben almacenarse en una colección llamada:
+
+`otros_costos`
+
+Cuando el proceso finalice y la solicitud quede pagada, debe pasar a:
+
+`historico_otros_costos`
+
+Antes de mover el registro al histórico se debe conservar toda la información, incluyendo:
+
+* Datos del pedido.
+* Datos ingresados manualmente.
+* Datos bancarios.
+* Información del costo.
+* Estado final.
+* Aprobaciones.
+* Pago.
+* Historial completo de movimientos.
+* Fechas.
+* Usuarios involucrados.
+* Referencias a los registros originales del histórico de pedidos.
+
+El traslado al histórico debe ser seguro y evitar que el registro se duplique o se pierda.
+
+Preferiblemente debe utilizarse una transacción de MongoDB. Si la infraestructura actual no permite transacciones, implementar un mecanismo idempotente que garantice que el registro no quede simultáneamente incompleto, duplicado o eliminado.
+
+No se deben eliminar registros definitivamente desde la interfaz. Las anulaciones deben conservarse para auditoría.
+
+Si en el proyecto se utiliza el término “base” para referirse a una colección, mantener estas colecciones dentro de la base de datos actual de Integrapp. Solo crear bases de datos independientes si la arquitectura actual lo requiere expresamente.
+
+---
+
+# 13. Estructura sugerida del documento
+
+Cada solicitud puede guardar una estructura similar a la siguiente:
+
+```json
+{
+  "_id": "ObjectId",
+  "consecutivo": "OC-20260728-0001",
+  "pedido_vulcano_original": "00122784 - 120795",
+  "pedidos_normalizados": ["122784", "120795"],
+  "pedidos_encontrados": [],
+  "pedidos_no_encontrados": [],
+  "pedido_encontrado": true,
+  "datos_servicio": {
+    "cliente": "",
+    "centro_distribucion": "",
+    "fecha_servicio": null,
+    "piezas": 0,
+    "peso_real": 0,
+    "tipo_vehiculo": "",
+    "placa": "",
+    "municipio_destino": "",
+    "departamento_destino": "",
+    "transportador": "",
+    "manifiesto": ""
+  },
+  "costos": [
+    {
+      "tipo_costo": "",
+      "concepto": "",
+      "descripcion": "",
+      "valor": 0
+    }
+  ],
+  "valor_total": 0,
+  "datos_bancarios": {
+    "banco": "",
+    "tipo_cuenta": "",
+    "numero_cuenta": "",
+    "cedula_titular": "",
+    "nombre_titular": ""
+  },
+  "conductor": {
+    "nombre": "",
+    "telefono": ""
+  },
+  "observaciones": "",
+  "soportes": [],
+  "estado": "pendiente_aprobacion",
+  "requiere_aprobacion_control": false,
+  "creado_por": {},
+  "aprobacion": {},
+  "pago": {},
+  "historial_movimientos": [],
+  "created_at": "Date",
+  "updated_at": "Date"
+}
+```
+
+Adaptar esta estructura a los patrones, modelos y convenciones que ya utiliza el proyecto.
+
+---
+
+# 14. Consecutivo
+
+Cada solicitud debe tener un consecutivo único y legible.
+
+Formato sugerido:
+
+`OC-AAAAMMDD-NNNN`
+
+Ejemplo:
+
+`OC-20260728-0001`
+
+El consecutivo debe generarse de forma segura para evitar duplicados cuando varios usuarios creen solicitudes simultáneamente.
+
+---
+
+# 15. Interfaz
+
+La nueva interfaz debe conservar la identidad visual de Integrapp.
+
+Debe incluir:
+
+* Formulario dividido por secciones.
+* Buscador de pedidos.
+* Indicador de pedidos encontrados y no encontrados.
+* Resumen de los datos recuperados.
+* Resumen del valor total.
+* Estado actual de la solicitud.
+* Línea de tiempo con los movimientos.
+* Botones disponibles según el rol y estado.
+* Tabla de solicitudes.
+* Filtros por estado, fecha, pedido, placa, manifiesto, cliente, usuario y aprobador.
+* Paginación.
+* Ordenamiento.
+* Exportación a Excel, si el proyecto ya cuenta con esta funcionalidad.
+* Diseño responsive.
+* Mensajes claros de validación y error.
+* Confirmación antes de aprobar, rechazar, devolver, pagar o anular.
+
+Los datos bancarios sensibles deben mostrarse parcialmente ocultos a los perfiles que no necesiten verlos.
+
+---
+
+# 16. Histórico de otros costos
+
+La ruta de histórico debe permitir consultar los registros finalizados.
+
+Debe mostrar como mínimo:
+
+* Consecutivo.
+* Pedido o pedidos de Vulcano.
+* Cliente.
+* Placa.
+* Manifiesto.
+* Tipo de costo.
+* Valor total.
+* Usuario que creó la solicitud.
+* Usuario que aprobó.
+* Rol que aprobó.
+* Usuario financiero que procesó el pago.
+* Estado final.
+* Fecha de creación.
+* Fecha de aprobación.
+* Fecha de pago.
+
+Al abrir un registro se debe visualizar toda la trazabilidad.
+
+---
+
+# 17. Backend y seguridad
+
+Crear o adaptar los endpoints necesarios para:
+
+* Buscar pedidos.
+* Crear solicitud.
+* Editar solicitud.
+* Enviar a aprobación.
+* Aprobar.
+* Rechazar.
+* Devolver.
+* Registrar pago.
+* Anular.
+* Consultar solicitudes activas.
+* Consultar histórico.
+* Consultar detalle y trazabilidad.
+
+Requisitos técnicos:
+
+* Validar autenticación en todos los endpoints.
+* Validar roles y montos desde el backend.
+* Sanitizar los datos ingresados.
+* Evitar inyecciones o búsquedas inseguras en MongoDB.
+* Utilizar índices para pedido, placa, manifiesto, estado, fechas y consecutivo.
+* Mantener compatibilidad con la arquitectura actual.
+* Reutilizar los servicios de autenticación y autorización existentes.
+* Implementar manejo de errores.
+* Evitar registros duplicados.
+* No exponer información bancaria innecesaria en las respuestas de la API.
+
+---
+
+# 18. Entregables esperados
+
+Antes de modificar el proyecto:
+
+1. Analiza cómo funcionan actualmente `HistoricoPedidos` y `SolicitudVehiculos`.
+2. Identifica los componentes, modelos, servicios, rutas, permisos y endpoints reutilizables.
+3. Explica brevemente la solución propuesta.
+4. Indica qué archivos se crearán o modificarán.
+
+Después, implementa:
+
+* Modelos de MongoDB.
+* Servicios y endpoints.
+* Validación de roles.
+* Normalización y búsqueda de pedidos.
+* Formulario de creación.
+* Bandeja de aprobación.
+* Gestión financiera.
+* Histórico.
+* Trazabilidad.
+* Validaciones.
+* Manejo de errores.
+* Índices necesarios.
+
+No reemplaces archivos completos de manera innecesaria. Conserva las funcionalidades existentes y realiza cambios modulares.
+
+---
+
+# 19. Criterios de aceptación
+
+La funcionalidad estará completa cuando se cumpla lo siguiente:
+
+1. Un operativo puede crear una solicitud con uno o varios pedidos.
+2. Los pedidos se encuentran aunque tengan ceros a la izquierda o separadores diferentes.
+3. Se muestran los pedidos encontrados y no encontrados.
+4. Se puede continuar manualmente cuando un pedido no exista.
+5. Un coordinador puede aprobar solicitudes de hasta $160.000.
+6. Un coordinador no puede aprobar solicitudes superiores a $160.000.
+7. Control y administrador pueden aprobar solicitudes superiores a $160.000.
+8. Financiero solo accede a las rutas autorizadas y puede registrar el pago.
+9. Todos los movimientos registran usuario, fecha y hora.
+10. Una solicitud pagada queda disponible en el histórico.
+11. La trazabilidad completa se conserva después de pasar al histórico.
+12. Los permisos se validan en frontend y backend.
+13. No se generan consecutivos duplicados.
+14. No se pierde ni duplica información al pasar al histórico.
+15. La nueva funcionalidad mantiene el diseño y arquitectura actuales de Integrapp.

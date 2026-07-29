@@ -316,7 +316,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
 
     # 4) Procesar cada fila
     tarifas_col = db["tarifas"]
-    otros_col = db["otros_costos"]
+    otros_col = db["config_otros_costos"]
     clientes_col = db["clientes"]
     pedidos_col = db["pedidos"]
 
@@ -763,7 +763,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
                 continue
             tbase = float(tf["tarifas"][tipo_vehiculo_sicetac])
 
-            otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_vehiculo_sicetac}) or {}
+            otros = db["config_otros_costos"].find_one({"tipo_vehiculo": tipo_vehiculo_sicetac}) or {}
             val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
             cargue_cfg = float(otros.get("cargue_descargue", 0) or 0)
 
@@ -786,7 +786,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
                 cargue_descargue_teorico = float(doc0.get("cargue_descargue_teorico", 0) or 0)
             else:
                 tbase = float(tf_doc["tarifas"].get(tipo_vehiculo_sicetac, doc0.get("valor_flete_sistema", 0.0)) or 0.0)
-                otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_vehiculo_sicetac}) or {}
+                otros = db["config_otros_costos"].find_one({"tipo_vehiculo": tipo_vehiculo_sicetac}) or {}
                 val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
                 cargue_cfg = float(otros.get("cargue_descargue", 0) or 0)
                 paga_cd = str(tf_doc.get("pago_cargue_desc", "")).strip().upper() in YES
@@ -2023,7 +2023,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             )
         tbase = float(tf["tarifas"][tipo_sic])
 
-        otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
+        otros = db["config_otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
         if not otros:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
@@ -2342,7 +2342,7 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay tarifa para {origen_tarifa}→{destino_unico} con tipo '{tipo_sic}'")
         tbase = float(tf["tarifas"][tipo_sic])
 
-        otros = db["otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
+        otros = db["config_otros_costos"].find_one({"tipo_vehiculo": tipo_sic})
         if not otros:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No hay configuración de 'otros_costos' para '{tipo_sic}'")
         val_pto_cfg = float(otros.get("valor_punto_adicional", 0) or 0)
