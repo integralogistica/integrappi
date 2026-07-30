@@ -3618,7 +3618,8 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "PUERTO BOYACA": "PTO. BOYACA",
     "SAN ANDRES DE CUERQUIA": "SAN ANDRES DE Q.",
     "FLORENCIA": "FLORENCIA CAQUETA",
-    "SAN JOSE DE CUTUTA": "CUTUTA",
+    "SAN JOSE DE CUCUTA": "CUCUTA",
+    "CONCORDIA": "CONCORDIA ANT.",
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.

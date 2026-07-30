@@ -126,9 +126,12 @@ if bodega:
 - **`pedidos_medical`** - Planillas consultadas en Siscore (documentos independientes)
 - **`causales`** - Causales para fusión de planillas
 - **`pedidos_medical_historico`** - Planillas movidas después de importación Vulcano (histórico)
-- **`otros_costos`** - Solicitudes de otros costos (ciclo activo)
+- **`config_otros_costos`** - ⚠️ Tabla de **configuración** de costos por `tipo_vehiculo` (`valor_punto_adicional`, `cargue_descargue`, `max_puntos` y versiones `_cliente`). La carga `POST /fletes/cargar-otros-costos` (`rutas/fletes.py`) y la leen los recálculos de `rutas/pedidos.py` (fusión `/pedidos/fusionar-vehiculos` y cálculo masivo). **No es** lo mismo que las solicitudes de Otros Costos.
+- **`otros_costos`** - Solicitudes del módulo Otros Costos (ciclo activo). **No es** la configuración de arriba.
 - **`historico_otros_costos`** - Solicitudes de otros costos pagadas
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
+
+> **⚠️ REGLA DE ORO — una colección = un propósito.** Nunca reuses el nombre de una colección existente para un módulo/ruta nuevo. Hasta el 2026-07-29 la configuración de Pedidos y las solicitudes de Otros Costos **compartían** `otros_costos`: cada recarga del Excel hacía `delete_many({})` y borraba las solicitudes, y la configuración terminó vacía (rompió la fusión con *"No hay configuración de 'otros_costos' para el tipo 'TRACTOMULA'"*). Antes de crear un módulo: (1) revisa los nombres de colección ya usados en esta lista y con `grep 'db\["' rutas/`; (2) antes de cualquier `delete_many({})`, confirma que la colección sea de **un único propósito**; (3) si necesitas una tabla de configuración/parámetros, usa su propia colección (`config_*`), nunca la de las solicitudes.
 
 ## Tecnologías
 
@@ -503,6 +506,8 @@ El WS de Siscore V3 (`integra-wms.appsiscore.com/app/ws/informe_v3.php`) dejó d
 Gestión de costos adicionales posteriores al servicio (parqueadero, peaje, cargue, horas extra, etc.) asociados a pedidos de Vulcano del histórico. Router `/otros-costos`, registrado en `main.py`.
 
 **Colecciones**: `otros_costos` (activo), `historico_otros_costos` (pagadas), `anulados_otros_costos` (anuladas). Lookup en `pedidos_medical_historico`. Movimientos entre colecciones con patrón delete-first + insert idempotente.
+
+> **⚠️ No confundir con `config_otros_costos`.** Esa es la tabla de configuración de Pedidos (`valor_punto_adicional`/`cargue_descargue` por `tipo_vehiculo`, cargada por `POST /fletes/cargar-otros-costos` en `rutas/fletes.py`). Hasta 2026-07-29 **ambas compartían la colección `otros_costos`** y se borraban mutuamente (la recarga del Excel hacía `delete_many({})` sobre las solicitudes, y la configuración terminó vacía). Desde entonces están separadas: este módulo es el **único** dueño de `otros_costos`; la configuración vive en `config_otros_costos`.
 
 **Seguridad**: el perfil NO se confía del frontend. Cada endpoint recibe `usuario` y lo resuelve en `baseusuarios` (`_resolver_usuario`) para autorizar con el perfil real. Umbral coordinador `LIMITE_COORDINADOR = 500000`.
 
