@@ -19,7 +19,7 @@ lo resuelve contra `baseusuarios` para autorizar con el perfil real.
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -47,6 +47,19 @@ BANCOS = [
     "CMR FALABELLA", "BANCO CAJA SOCIAL", "BANCO AV VILLAS", "COLPATRIA",
 ]
 TIPOS_CUENTA = ["Ahorros", "Corriente", "Depósito electrónico"]
+# Catálogo por defecto de clientes para el formulario (se siembra en `clientes_otros_costos`).
+# Editable directamente en Mongo: si la colección tiene documentos, se usa tal cual.
+CLIENTES_OTROS_COSTOS_DEFAULT = [
+    "FRESENIUS MEDICAL CARE",
+    "CONGRUPO",
+    "FRESENIUS KABI",
+    "DAVITA",
+    "FK SERVICIO TECNICO",
+    "ORTOPEDICOS FUTURO COLOMBIA",
+    "DISTRIBUIDORA COMTEK S.A.S.",
+    "QUIMICA AVANZADA SAS",
+    "MINISO COLOMBIA SAS",
+]
 ESTADOS_VALIDOS = [
     "borrador", "pendiente_aprobacion", "devuelto", "rechazado",
     "aprobado", "pagado", "anulado",
@@ -60,6 +73,7 @@ col_historico = db["historico_otros_costos"]
 col_anulados = db["anulados_otros_costos"]
 col_historico_pedidos = db["pedidos_medical_historico"]   # solo lectura (lookup)
 col_usuarios = db["baseusuarios"]                          # resolución de identidad
+col_clientes = db["clientes_otros_costos"]                 # catálogo de clientes (formulario)
 
 # Índices (idempotentes al importar, igual patrón que siscore_consultas.py).
 # `consecutivo` unique en activos → anti-colisión en la generación del consecutivo.
@@ -416,6 +430,9 @@ def _scope_lectura(filtro: dict, info: dict):
     perfil = info["perfil"]
     if perfil == "FINANCIERO":
         filtro["estado"] = "aprobado"
+        filtro["tramite_vulcano"] = "ok"   # solo lo listo para pagar
+    elif perfil == "ANALISTA":
+        filtro["estado"] = "aprobado"      # su bandeja: aprobados para tramitar
     elif perfil == "OPERATIVO":
         filtro["usuario_registro"] = info["usuario"]
     # COORDINADOR / CONTROL / ADMIN: sin restricción
@@ -497,6 +514,13 @@ class AccionConObservacionRequest(BaseModel):
     observacion: str = ""
 
 
+class MarcarTramiteVulcanoRequest(BaseModel):
+    consecutivo: str
+    usuario: str
+    tramite_vulcano: Literal["ok", "pendiente"]
+    observacion: str = ""
+
+
 class RegistrarPagoRequest(BaseModel):
     consecutivo: str
     usuario: str
@@ -548,6 +572,21 @@ async def bancos():
 @router.get("/tipos-cuenta")
 async def tipos_cuenta():
     return TIPOS_CUENTA
+
+
+@router.get("/clientes")
+async def clientes():
+    """Clientes sugeridos para el campo Cliente del formulario de Otros Costos.
+    Auto-siembra la colección `clientes_otros_costos` con el listado por defecto
+    la primera vez (si está vacía); desde entonces es editable directamente en Mongo."""
+    if col_clientes.count_documents({}) == 0:
+        col_clientes.insert_many([{"nombre": c} for c in CLIENTES_OTROS_COSTOS_DEFAULT])
+        logger.info(
+            "[CLIENTES OTROS COSTOS] Colección sembrada con %d clientes por defecto.",
+            len(CLIENTES_OTROS_COSTOS_DEFAULT),
+        )
+    docs = list(col_clientes.find({}, {"_id": 0, "nombre": 1}))
+    return [d.get("nombre", "") for d in docs if d.get("nombre")]
 
 
 @router.post("/buscar-pedidos")
@@ -774,12 +813,42 @@ async def aprobar_solicitud(req: AccionConObservacionRequest, request: Request):
     mov = _nuevo_movimiento("aprobacion", doc.get("estado"), "aprobado", info, req.observacion, _ip(request))
     res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": "pendiente_aprobacion"},
-        {"$set": {"estado": "aprobado", "aprobacion": aprobacion, "updated_at": ahora},
+        {"$set": {"estado": "aprobado", "aprobacion": aprobacion, "tramite_vulcano": "pendiente", "updated_at": ahora},
          "$push": {"historial_movimientos": mov}},
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
     return {"mensaje": "Solicitud aprobada", "estado": "aprobado"}
+
+
+@router.post("/marcar-tramite-vulcano")
+async def marcar_tramite_vulcano(req: MarcarTramiteVulcanoRequest, request: Request):
+    """El ANALISTA confirma que el costo fue tramitado en Vulcano.
+    Permite avanzar (pendiente→ok) y revertir (ok→pendiente). Solo sobre aprobados."""
+    info = _resolver_usuario(req.usuario)
+    _requiere(info, {"ANALISTA", "ADMIN"}, "marcar el trámite Vulcano")
+
+    doc = col_activos.find_one({"consecutivo": req.consecutivo})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
+    if doc.get("estado") != "aprobado":
+        raise HTTPException(status_code=422, detail="Solo se tramita en Vulcano una solicitud aprobada.")
+
+    ahora = _ahora_utc()
+    tramite_info = {
+        "usuario": info["usuario"], "nombre": info["nombre"], "rol": info["perfil"],
+        "fecha": ahora, "observacion": req.observacion or "",
+    }
+    mov = _nuevo_movimiento("tramite_vulcano", None, req.tramite_vulcano, info, req.observacion, _ip(request))
+    # Guardar atómicamente SOLO si sigue aprobado (anti-carrera).
+    res = col_activos.update_one(
+        {"consecutivo": req.consecutivo, "estado": "aprobado"},
+        {"$set": {"tramite_vulcano": req.tramite_vulcano, "tramite_vulcano_info": tramite_info, "updated_at": ahora},
+         "$push": {"historial_movimientos": mov}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
+    return {"mensaje": f"Trámite Vulcano marcado como {req.tramite_vulcano}", "tramite_vulcano": req.tramite_vulcano}
 
 
 @router.post("/devolver")
@@ -842,6 +911,8 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
         raise HTTPException(status_code=409, detail="La solicitud ya está pagada.")
     if doc.get("estado") != "aprobado":
         raise HTTPException(status_code=422, detail="Solo se puede pagar una solicitud aprobada.")
+    if doc.get("tramite_vulcano") != "ok":
+        raise HTTPException(status_code=422, detail="La solicitud aún no ha sido tramitada en Vulcano.")
 
     ahora = _ahora_utc()
     estado_prev = doc.get("estado")
@@ -856,7 +927,7 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
     mov_pago = _nuevo_movimiento("registro_pago", estado_prev, "pagado", info, req.observaciones, _ip(request))
     # Guardar atómicamente el pago SOLO si sigue aprobada (anti-doble-pago).
     res = col_activos.update_one(
-        {"consecutivo": req.consecutivo, "estado": "aprobado"},
+        {"consecutivo": req.consecutivo, "estado": "aprobado", "tramite_vulcano": "ok"},
         {"$set": {"estado": "pagado", "pago": pago, "updated_at": ahora},
          "$push": {"historial_movimientos": mov_pago}},
     )

@@ -543,6 +543,8 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     aprobado_por: Optional[str] = None
     fecha_aprobacion: Optional[str] = None
     municipio_destino: Optional[str] = None  # Municipio principal elegido manualmente
+    ahorro: Optional[float] = None  # Ahorro operativo generado (máx. $5.000.000)
+    observacion: Optional[str] = None  # Observación textual que explica el ahorro
     usuario_modificacion: str  # Usuario que está editando (trazabilidad)
 
 
@@ -554,6 +556,115 @@ class ActualizarEstadoPlanillaRequest(BaseModel):
 
 
 # ============= ENDPOINT IMPORTAR VULCANO =============
+
+def _procesar_pedido_vulcano(consecutivo: str, pedido: str, usuario: Optional[str] = None,
+                             requiere_aprobado: bool = False) -> dict:
+    """
+    Asigna un pedido Vulcano a un consecutivo, con la MISMA cascada de fusiones que
+    históricamente vivía dentro del loop de 'importar-vulcano'. No lanza HTTPException:
+    devuelve un dict para que 'importar-vulcano' (masivo) y 'asignar-pedido-manual'
+    (unitario) lo interpreten cada uno a su manera.
+
+    Devuelve {'tipo': ...} donde tipo es:
+      - 'normal'           : doc no fusionado → pedido en raíz y movido al histórico.
+      - 'fusion_parcial'   : original de una fusión; la fusión sigue activa (faltan pedidos).
+      - 'fusion_completa'  : original que completó la fusión → concatenada y movida al histórico.
+      - 'no_encontrado'    : el consecutivo no existe (ni raíz ni original embebido).
+      - 'no_aprobado'      : solo cuando requiere_aprobado=True y el doc no está APROBADO.
+    """
+    # 1) Doc por consecutivo raíz (planilla normal, carro dividido o la fusión raíz).
+    doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
+    es_no_fusion = bool(doc) and not (doc.get("fusion_info") or {}).get("es_fusionada")
+
+    # 2) Si no es un doc no-fusionado, buscar dentro de los originales de una fusión.
+    doc_fusion = None
+    if not es_no_fusion:
+        doc_fusion = coleccion_pedidos_medical.find_one({
+            "fusion_info.es_fusionada": True,
+            "fusion_info.datos_originales.consecutivo": consecutivo,
+        })
+
+    # Validación de estado (solo la pide el flujo manual).
+    doc_estado = (doc_fusion or doc or {}).get("estado")
+    if requiere_aprobado and doc_estado != "APROBADO":
+        return {"tipo": "no_aprobado", "consecutivo": consecutivo, "estado": doc_estado}
+
+    if doc_fusion:
+        originales = doc_fusion.get("fusion_info", {}).get("datos_originales", []) or []
+        idx = next((i for i, o in enumerate(originales) if o.get("consecutivo") == consecutivo), None)
+        if idx is None:
+            return {"tipo": "no_encontrado", "consecutivo": consecutivo}
+
+        # Asignación atómica al original (idempotente: sobreescribe, no duplica).
+        coleccion_pedidos_medical.update_one(
+            {"_id": doc_fusion["_id"], "fusion_info.datos_originales.consecutivo": consecutivo},
+            {"$set": {
+                "fusion_info.datos_originales.$[elem].pedido_vulcano": pedido,
+                "fusion_info.datos_originales.$[elem].fecha_pedido_vulcano": datetime.now(),
+            }},
+            array_filters=[{"elem.consecutivo": consecutivo}],
+        )
+
+        doc_actualizado = coleccion_pedidos_medical.find_one({"_id": doc_fusion["_id"]})
+        if doc_actualizado is None:
+            # Race condition: la fusión ya no existe (procesada por otro lado).
+            return {"tipo": "fusion_parcial", "consecutivo": consecutivo, "pedido": pedido,
+                    "fusion_id": str(doc_fusion["_id"]), "fusion_consecutivo": doc_fusion.get("consecutivo"),
+                    "faltantes": None}
+
+        originales_act = doc_actualizado.get("fusion_info", {}).get("datos_originales", []) or []
+        faltantes = [o.get("consecutivo") for o in originales_act
+                     if not (o.get("pedido_vulcano") or "").strip()]
+        todos_con_pedido = bool(originales_act) and not faltantes
+
+        if not todos_con_pedido:
+            return {"tipo": "fusion_parcial", "consecutivo": consecutivo, "pedido": pedido,
+                    "fusion_id": str(doc_actualizado["_id"]),
+                    "fusion_consecutivo": doc_actualizado.get("consecutivo"),
+                    "faltantes": len(faltantes)}
+
+        # Fusión completa: concatenar los pedidos en el raíz y mover al histórico.
+        pedidos_fusion = [
+            (o.get("pedido_vulcano") or "").strip()
+            for o in originales_act
+            if (o.get("pedido_vulcano") or "").strip()
+        ]
+        doc_actualizado["pedido_vulcano"] = ", ".join(pedidos_fusion)
+        doc_actualizado["fecha_movimiento_historico"] = datetime.now()
+        coleccion_historico.insert_one(doc_actualizado)
+        coleccion_pedidos_medical.delete_one({"_id": doc_actualizado["_id"]})
+
+        usuario_registro_fusion = (doc_actualizado.get("usuario_registro") or "").strip()
+        for o in originales_act:
+            _notificar_pedido_creado_whatsapp(
+                {
+                    "usuario_registro": usuario_registro_fusion,
+                    "planilla": o.get("planilla"),
+                    "consecutivo": o.get("consecutivo"),
+                },
+                o.get("pedido_vulcano"),
+            )
+
+        return {"tipo": "fusion_completa", "consecutivo": consecutivo, "pedido": pedido,
+                "fusion_id": str(doc_actualizado["_id"]),
+                "fusion_consecutivo": doc_actualizado.get("consecutivo"),
+                "planilla": doc_actualizado.get("planilla")}
+
+    if doc:
+        # Doc no-fusionado: flujo histórico (delete-first idempotente).
+        doc["pedido_vulcano"] = pedido
+        doc["fecha_movimiento_historico"] = datetime.now()
+        if usuario:
+            doc["usuario_pedido_vulcano"] = usuario
+        coleccion_historico.delete_one({"_id": doc["_id"]})
+        coleccion_historico.insert_one(doc)
+        coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+        _notificar_pedido_creado_whatsapp(doc, pedido)
+        return {"tipo": "normal", "consecutivo": consecutivo, "pedido": pedido,
+                "planilla": doc.get("planilla")}
+
+    return {"tipo": "no_encontrado", "consecutivo": consecutivo}
+
 
 @router.post("/importar-vulcano")
 async def importar_vulcano(archivo: UploadFile = File(...)):
@@ -620,111 +731,30 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
                 continue
 
             try:
-                # --- Búsqueda en cascada ---
-                # 1) Doc por consecutivo raíz (planilla normal, carro dividido o la fusión raíz).
-                doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
-                es_no_fusion = bool(doc) and not (doc.get("fusion_info") or {}).get("es_fusionada")
+                r = _procesar_pedido_vulcano(consecutivo, pedido)
+                tipo = r.get("tipo")
 
-                # 2) Si no es un doc no-fusionado, buscar dentro de los originales de una fusión.
-                doc_fusion = None
-                if not es_no_fusion:
-                    doc_fusion = coleccion_pedidos_medical.find_one({
-                        "fusion_info.es_fusionada": True,
-                        "fusion_info.datos_originales.consecutivo": consecutivo,
-                    })
-
-                if doc_fusion:
-                    # --- Ruta de fusión: asignar el pedido a un original ---
-                    originales = doc_fusion.get("fusion_info", {}).get("datos_originales", []) or []
-                    idx = next((i for i, o in enumerate(originales) if o.get("consecutivo") == consecutivo), None)
-                    if idx is None:
-                        no_encontrados += 1
-                        detalles_no_encontrados.append(consecutivo)
-                        logger.warning(f"[VULCANO-FUSION] Original no encontrado tras match (C={consecutivo})")
-                        continue
-
-                    # Asignación atómica al original (idempotente: sobreescribe, no duplica).
-                    coleccion_pedidos_medical.update_one(
-                        {"_id": doc_fusion["_id"], "fusion_info.datos_originales.consecutivo": consecutivo},
-                        {"$set": {
-                            "fusion_info.datos_originales.$[elem].pedido_vulcano": pedido,
-                            "fusion_info.datos_originales.$[elem].fecha_pedido_vulcano": datetime.now(),
-                        }},
-                        array_filters=[{"elem.consecutivo": consecutivo}],
-                    )
-
-                    # Re-leer y evaluar completitud.
-                    doc_actualizado = coleccion_pedidos_medical.find_one({"_id": doc_fusion["_id"]})
-                    if doc_actualizado is None:
-                        # Race condition: la fusión ya no existe (procesada por otro lado).
-                        exitosos += 1
-                        continue
-
-                    originales_act = doc_actualizado.get("fusion_info", {}).get("datos_originales", []) or []
-                    todos_con_pedido = bool(originales_act) and all(
-                        o.get("consecutivo") and o.get("pedido_vulcano") for o in originales_act
-                    )
-
-                    if not todos_con_pedido:
-                        # Éxito parcial: la fusión sigue activa esperando el resto de pedidos.
-                        exitosos += 1
-                        asignados_parciales += 1
-                        parciales_por_fusion[doc_actualizado["_id"]] = \
-                            parciales_por_fusion.get(doc_actualizado["_id"], 0) + 1
-                        logger.info(
-                            f"[VULCANO-FUSION] Pedido {pedido} asignado al original {consecutivo} "
-                            f"(fusión {doc_actualizado.get('consecutivo')}) — pendiente completar"
-                        )
-                        continue
-
-                    # Fusión completa: mover al histórico con todos sus pedidos.
-                    # Concatenar los pedido_vulcano de TODOS los originales, separados por coma,
-                    # en el campo raíz pedido_vulcano. Así la planilla fusionada viaja a
-                    # HistoricoPedidos igual que una planilla normal (columna "Pedido Vulcano"
-                    # y Excel). Sin esto, ese campo queda vacío: los pedidos solo viven dentro
-                    # de fusion_info.datos_originales[].pedido_vulcano y /historico no los expone.
-                    pedidos_fusion = [
-                        (o.get("pedido_vulcano") or "").strip()
-                        for o in originales_act
-                        if (o.get("pedido_vulcano") or "").strip()
-                    ]
-                    doc_actualizado["pedido_vulcano"] = ", ".join(pedidos_fusion)
-                    doc_actualizado["fecha_movimiento_historico"] = datetime.now()
-                    coleccion_historico.insert_one(doc_actualizado)
-                    coleccion_pedidos_medical.delete_one({"_id": doc_actualizado["_id"]})
-
-                    # Notificar por cada original (usuario_registro viene de la fusión, no del original).
-                    usuario_registro_fusion = (doc_actualizado.get("usuario_registro") or "").strip()
-                    for o in originales_act:
-                        _notificar_pedido_creado_whatsapp(
-                            {
-                                "usuario_registro": usuario_registro_fusion,
-                                "planilla": o.get("planilla"),
-                                "consecutivo": o.get("consecutivo"),
-                            },
-                            o.get("pedido_vulcano"),
-                        )
-
+                if tipo == "normal":
+                    exitosos += 1
+                    logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+                elif tipo == "fusion_completa":
                     exitosos += 1
                     fusiones_movidas += 1
                     # Estos parciales ya completaron su fusión: dejar de contarlos como pendientes.
-                    asignados_parciales -= parciales_por_fusion.pop(doc_actualizado["_id"], 0)
+                    asignados_parciales -= parciales_por_fusion.pop(str(r.get("fusion_id")), 0)
                     logger.info(
-                        f"[VULCANO-FUSION] Fusión {doc_actualizado.get('consecutivo')} completada "
-                        f"({len(originales_act)} originales) → histórico"
+                        f"[VULCANO-FUSION] Fusión {r.get('fusion_consecutivo')} completada → histórico"
                     )
-
-                elif doc:
-                    # --- Doc no-fusionado: flujo histórico (mover al histórico) ---
-                    doc["pedido_vulcano"] = pedido
-                    doc["fecha_movimiento_historico"] = datetime.now()
-                    coleccion_historico.insert_one(doc)
-                    coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
+                elif tipo == "fusion_parcial":
                     exitosos += 1
-                    _notificar_pedido_creado_whatsapp(doc, pedido)
-                    logger.info(f"Planilla movida a historico: consecutivo={consecutivo}, pedido_vulcano={pedido}")
-
-                else:
+                    asignados_parciales += 1
+                    fid = str(r.get("fusion_id"))
+                    parciales_por_fusion[fid] = parciales_por_fusion.get(fid, 0) + 1
+                    logger.info(
+                        f"[VULCANO-FUSION] Pedido {pedido} asignado al original {consecutivo} "
+                        f"(fusión {r.get('fusion_consecutivo')}) — pendiente completar (faltan {r.get('faltantes')})"
+                    )
+                else:  # no_encontrado
                     no_encontrados += 1
                     detalles_no_encontrados.append(consecutivo)
                     logger.warning(f"Consecutivo no encontrado: {consecutivo}")
@@ -783,42 +813,37 @@ async def asignar_pedido_manual(request: AsignarPedidoManualRequest):
 
         logger.info(f"=== ASIGNAR PEDIDO MANUAL === consecutivo={consecutivo}, pedido={pedido}, usuario={request.usuario}")
 
-        # Buscar planilla por consecutivo (igual que el import del Excel)
-        doc = coleccion_pedidos_medical.find_one({"consecutivo": consecutivo})
-        if not doc:
-            raise HTTPException(status_code=404, detail=f"No se encontró planilla con consecutivo {consecutivo}")
+        # Cascada de fusiones compartida con 'importar-vulcano'.
+        r = _procesar_pedido_vulcano(consecutivo, pedido, usuario=request.usuario, requiere_aprobado=True)
+        tipo = r.get("tipo")
 
-        # Solo se puede asignar pedido a planillas APROBADAS
-        if doc.get("estado") != "APROBADO":
+        if tipo == "no_encontrado":
+            raise HTTPException(status_code=404, detail=f"No se encontró planilla con consecutivo {consecutivo}")
+        if tipo == "no_aprobado":
             raise HTTPException(
                 status_code=400,
-                detail=f"La planilla con consecutivo {consecutivo} no está APROBADA (estado actual: {doc.get('estado')}). Solo se puede asignar el pedido a planillas aprobadas."
+                detail=f"La planilla con consecutivo {consecutivo} no está APROBADA (estado actual: {r.get('estado')}). Solo se puede asignar el pedido a planillas aprobadas."
             )
 
-        # Replicar lógica de una fila de importar-vulcano
-        doc["pedido_vulcano"] = pedido
-        doc["fecha_movimiento_historico"] = datetime.now()
-        if request.usuario:
-            doc["usuario_pedido_vulcano"] = request.usuario
+        logger.info(f"Pedido manual asignado: consecutivo={consecutivo}, pedido_vulcano={pedido}, tipo={tipo}")
 
-        # Mover a histórico (delete-first idempotente por si el _id ya existiera ahí)
-        coleccion_historico.delete_one({"_id": doc["_id"]})
-        coleccion_historico.insert_one(doc)
-
-        # Eliminar de pedidos_medical
-        coleccion_pedidos_medical.delete_one({"_id": doc["_id"]})
-
-        # Avisar por WhatsApp al operativo que montó la planilla
-        _notificar_pedido_creado_whatsapp(doc, pedido)
-
-        logger.info(f"Pedido manual asignado: consecutivo={consecutivo}, pedido_vulcano={pedido}")
+        if tipo == "fusion_parcial":
+            return {
+                "mensaje": f"Pedido {pedido} asignado al original {consecutivo}. La fusión {r.get('fusion_consecutivo')} queda pendiente: faltan {r.get('faltantes')} pedido(s).",
+                "exitoso": True,
+                "consecutivo": consecutivo,
+                "pedido": pedido,
+                "tipo": "fusion_parcial",
+                "faltantes": r.get("faltantes"),
+            }
 
         return {
             "mensaje": f"Pedido {pedido} asignado a consecutivo {consecutivo} y movido a histórico.",
             "exitoso": True,
             "consecutivo": consecutivo,
             "pedido": pedido,
-            "planilla": doc.get("planilla")
+            "planilla": r.get("planilla"),
+            "tipo": tipo,
         }
 
     except HTTPException:
@@ -2990,6 +3015,10 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             logger.warning(f"[ACTUALIZAR PLANILLA PEDIDOS] No se encontró planilla: {request.planilla}")
             raise HTTPException(status_code=404, detail=f"Planilla {request.planilla} no encontrada en pedidos_medical")
 
+        # Validar ahorro operativo: no puede superar los $5.000.000
+        if request.ahorro is not None and request.ahorro > 5000000:
+            raise HTTPException(status_code=400, detail="El ahorro no puede ser superior a $5.000.000")
+
         fecha_actual = datetime.now()
 
         # Crear registro de historial de cambios
@@ -3094,6 +3123,8 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "total_solicitado": request.total_solicitado,
             "diferencia": diferencia,
             "causal": request.causal,
+            "ahorro": request.ahorro if request.ahorro is not None else 0,
+            "observacion": request.observacion or "",
             # Trazabilidad de modificación
             "usuario_modificacion": request.usuario_modificacion,
             "fecha_modificacion": fecha_actual,
@@ -3524,6 +3555,8 @@ def _expandir_doc_a_filas(doc):
             "punto_adicional_val": doc.get("punto_adicional", 0),
             "requiere_descargue_val": doc.get("requiere_descargue", 0),
             "registros_detalle": doc.get("registros_detalle", []),
+            "ahorro": doc.get("ahorro", 0),
+            "observacion_ahorro": doc.get("observacion", ""),
         }]
 
     # Caso fusionado: repartir el flete total proporcionalmente por piezas (cajas)
@@ -3568,6 +3601,8 @@ def _expandir_doc_a_filas(doc):
             "punto_adicional_val": d.get("punto_adicional", 0),
             "requiere_descargue_val": d.get("requiere_descargue", 0),
             "registros_detalle": d.get("registros_detalle", []),
+            "ahorro": doc.get("ahorro", 0) if i == 0 else 0,
+            "observacion_ahorro": doc.get("observacion", "") if i == 0 else "",
         })
     return filas
 
@@ -3643,6 +3678,7 @@ def _escribir_fila_planilla(
     regional_usuario, divipolas_lookup, divipolas_por_poblacion,
     mapear_tipo_vehiculo, thin_border,
     ubicacion_descargue_override=None, peso_sicetac=None, fill=None,
+    ahorro=0, observacion_ahorro="",
 ):
     """
     Escribe una fila de planilla en la hoja Excel y devuelve row_num + 1.
@@ -3793,7 +3829,9 @@ def _escribir_fila_planilla(
         1,                                                # REMESAS
         1,                                                # REMISION DEL CLIENTE
         1,                                                # GUIA DE TRANSPORTE
-        1                                                 # MANIFIESTO
+        1,                                                # MANIFIESTO
+        ahorro if ahorro else 0,                          # Ahorro
+        (observacion_ahorro or "")[:300]                  # Observación Ahorro
     ]
 
     # Formatos numéricos por columna (índice 1-based dentro de `datos`).
@@ -3868,7 +3906,8 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
             "SEGURO", "Tipo pago", "Tolerancia", "Vlr hora STBY", "Vlr Declar Mercancia",
             "Aprobar Poliza", "Flete por", "Valor unitario", "Aprobar cupo credito",
             "Aprobar rentabilidad", "Otras caracteristicas", "REMESAS", "REMISION DEL CLIENTE",
-            "GUIA DE TRANSPORTE", "MANIFIESTO"
+            "GUIA DE TRANSPORTE", "MANIFIESTO",
+            "Ahorro", "Observación Ahorro"
         ]
 
         # Estilos
@@ -3897,7 +3936,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
             'O': 15, 'P': 12, 'Q': 15, 'R': 18, 'S': 12, 'T': 12, 'U': 15,
             'V': 15, 'W': 12, 'X': 20, 'Y': 25, 'Z': 15, 'AA': 12, 'AB': 12,
             'AC': 12, 'AD': 15, 'AE': 15, 'AF': 15, 'AG': 12, 'AH': 12, 'AI': 15,
-            'AJ': 12, 'AK': 20, 'AL': 20, 'AM': 12, 'AN': 20, 'AO': 20, 'AP': 12,
+            'AJ': 12, 'AK': 20, 'AL': 20, 'AM': 12, 'AN': 20, 'AO': 15, 'AP': 40,
             'AQ': 20, 'AR': 18
         }
         for col, width in column_widths.items():

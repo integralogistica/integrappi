@@ -71,7 +71,7 @@ API REST para el sistema de gestión de pedidos y pacientes Medical Care.
   - **Campos actualizables**: `tarifa_base`, `requiere_descargue`, `punto_adicional`, `desvio`, `aforo`, `placa`, `tipo_veh_sicetac`
   - **Gestión de estados**: `estado`, `aprobado_por`, `fecha_aprobacion`
   - **Campo de causal**: `causal` (OBLIGATORIO si hay sobrecosto)
-- `POST /exportar-planillas-excel` - Exporta planillas a Excel con columna de Observaciones (causal)
+- `POST /exportar-planillas-excel` - Exporta planillas a Excel (columna de Observaciones/causal; desde 2026-07-31 también **Ahorro** + **Observación Ahorro** al final de la hoja `plantilla`)
 
 ### Causales (`/causales`)
 - `GET /causales` - Obtiene causales activas para dropdown de fusión
@@ -130,6 +130,7 @@ if bodega:
 - **`otros_costos`** - Solicitudes del módulo Otros Costos (ciclo activo). **No es** la configuración de arriba.
 - **`historico_otros_costos`** - Solicitudes de otros costos pagadas
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
+- **`clientes_otros_costos`** - Catálogo de clientes sugeridos en el formulario de Otros Costos (`GET /otros-costos/clientes`; auto-siembra 9 clientes por defecto la primera vez)
 
 > **⚠️ REGLA DE ORO — una colección = un propósito.** Nunca reuses el nombre de una colección existente para un módulo/ruta nuevo. Hasta el 2026-07-29 la configuración de Pedidos y las solicitudes de Otros Costos **compartían** `otros_costos`: cada recarga del Excel hacía `delete_many({})` y borraba las solicitudes, y la configuración terminó vacía (rompió la fusión con *"No hay configuración de 'otros_costos' para el tipo 'TRACTOMULA'"*). Antes de crear un módulo: (1) revisa los nombres de colección ya usados en esta lista y con `grep 'db\["' rutas/`; (2) antes de cualquier `delete_many({})`, confirma que la colección sea de **un único propósito**; (3) si necesitas una tabla de configuración/parámetros, usa su propia colección (`config_*`), nunca la de las solicitudes.
 
@@ -517,7 +518,7 @@ Gestión de costos adicionales posteriores al servicio (parqueadero, peaje, carg
 - `POST /otros-costos/verificar-duplicado` — advertencia de duplicados (no bloquea)
 - `POST /otros-costos/crear` — crea en `borrador` o `pendiente_aprobacion`
 - `PUT /otros-costos/editar` — sólo si no está aprobada/pagada/anulada
-- `POST /otros-costos/enviar-aprobacion`, `/aprobar`, `/devolver`, `/rechazar`, `/registrar-pago`, `/anular`
+- `POST /otros-costos/enviar-aprobacion`, `/aprobar`, `/marcar-tramite-vulcano`, `/devolver`, `/rechazar`, `/registrar-pago`, `/anular`
 - `GET /otros-costos/` — listado paginado con filtros (scope por perfil)
 - `GET /otros-costos/{consecutivo}` — detalle + trazabilidad
 - `GET /otros-costos/historico` y `/historico/{consecutivo}`
@@ -527,12 +528,48 @@ Gestión de costos adicionales posteriores al servicio (parqueadero, peaje, carg
 | Acción | Perfiles |
 |--------|----------|
 | Crear / editar (propias, pre-aprobación) | OPERATIVO, ADMIN |
-| Aprobar ≤ $160.000 | COORDINADOR, CONTROL, ADMIN |
-| Aprobar > $160.000 | CONTROL, ADMIN |
+| Aprobar ≤ $500.000 | COORDINADOR, CONTROL, ADMIN |
+| Aprobar > $500.000 | CONTROL, ADMIN |
+| Marcar trámite Vulcano (`tramite_vulcano` ok/pendiente) | ANALISTA, ADMIN |
 | Devolver / Rechazar | COORDINADOR, CONTROL, ADMIN |
-| Registrar pago | FINANCIERO, ADMIN |
+| Registrar pago (requiere `tramite_vulcano == "ok"`) | FINANCIERO, ADMIN |
 | Anular | ADMIN |
 
 **Trazabilidad**: cada acción agrega a `historial_movimientos` `{accion, estado_anterior, estado_nuevo, usuario, nombre_usuario, rol, fecha(UTC), observacion, ip}`. Datos bancarios (`numero_cuenta`, `cedula_titular`) enmascarados en las respuestas salvo FINANCIERO/ADMIN. **Sin soportes/archivos** (solo valores).
 
 **Perfil FINANCIERO** agregado a `PERFILES_VALIDOS` en `baseusuarios.py`. Consecutivo `OC-AAAAMMDD-NNNN` (índice unique + reintento ante colisión).
+
+## Actualizaciones Recientes (2026-07-31)
+
+### Otros Costos — paso ANALISTA «trámite Vulcano» y formulario de un solo pedido
+
+- **Nuevo eslabón del flujo**: `aprobado → [tramite_vulcano = "ok" marcado por ANALISTA] → pagado`. Al aprobar nace `tramite_vulcano = "pendiente"` (campo `tramite_vulcano_info` + movimiento de acción `tramite_vulcano`).
+- **`POST /otros-costos/marcar-tramite-vulcano`** (ANALISTA + ADMIN): avanza `→ok` o revierte `→pendiente`, solo sobre aprobados (update atómico).
+- **`POST /otros-costos/registrar-pago`**: bloquea con `422` hasta que `tramite_vulcano == "ok"`; su filtro atómico también lo exige (anti-doble-pago coherente).
+- **Scope por perfil**: FINANCIERO ve en activos solo `aprobado` + `tramite_vulcano == "ok"` (su bandeja = listos para pagar); ANALISTA ve `aprobado` (para tramitar/revertir).
+- **Frontend** (`OtrosCostosP`): botón que alterna OK/Revertir (tabla + modal); el de **Pagar** solo aparece con `tramite_vulcano == "ok"`. Perfil ANALISTA habilitado como **rol compartido** en MEDICAL_CARE (no es micro-portal).
+- **Formulario «Nueva solicitud»**: una planilla = **un solo** pedido de Vulcano. Label en singular y validación que rechaza varios (separadores `, - ; /`) tanto al Buscar como al Guardar.
+
+### SolicitudVehiculos — pedido Vulcano por planilla en fusiones
+
+Antes, al asignar el pedido **manualmente** sobre una fusión, el `pedido_vulcano` quedaba en el raíz de toda la fusión y se movía al histórico de golpe, perdiendo la asociación pedido↔planilla. Ahora el flujo manual hace la misma cascada que el Excel.
+
+- **Helper compartido `_procesar_pedido_vulcano(consecutivo, pedido, usuario, requiere_aprobado=False)`** en `siscore_consultas.py`: cascada completa (búsqueda raíz no-fusionada → histórico; original embebido en `fusion_info.datos_originales` → asignación con `array_filters`, evaluación de completitud, concatenación `", ".join(pedidos)` en el raíz y paso al histórico **solo cuando TODOS** los originales tienen pedido, + notificación WhatsApp). Devuelve `{tipo: normal|fusion_parcial|fusion_completa|no_encontrado|no_aprobado}` sin lanzar `HTTPException`.
+  - `POST /siscore/importar-vulcano`: refactorizado para usar el helper (mismo comportamiento, sin duplicación).
+  - `POST /siscore/asignar-pedido-manual`: usa el helper con `requiere_aprobado=True` (sigue validando `APROBADO`). La firma del request no cambia (`consecutivo, pedido, usuario`).
+- **Frontend** (`app/SolicitudVehiculos/page.tsx`, `handleAsignarPedidoManual`): si la fila es una fusión, modal con **un campo de pedido por cada planilla original** (precargado si ya tenía); asigna secuencialmente y muestra resumen (asignados / fusiones completadas / parciales pendientes / errores). Planilla no fusionada → Swal simple.
+- **Histórico** (`HistoricoPedidosP`): columna **"Pedido Vulcano"** por original en la tabla de planillas originales de la fusión (el listado ya filtra por `pedido_vulcano` raíz concatenado, así que buscar un pedido encuentra la fusión y se ve a qué planilla pertenece).
+
+## Actualizaciones del 2026-07-31 (2.ª tanda) — Ahorro/observación en planillas y clientes de Otros Costos
+
+### Campos `ahorro` y `observacion` en planillas (SolicitudVehiculos)
+El usuario operativo puede registrar, en el modal **Editar Planilla**, un **ahorro** (numérico, **máx. $5.000.000**) y una **observación** que lo justifique (ej: evitó un vehículo adicional por una fusión). **No afecta** total solicitado, diferencia ni estado: es metadato. Aplica a registros nuevos/ediciones (los pasados quedan en `0`/`""`).
+
+- **`PUT /siscore/actualizar-planilla-pedidos`** (`siscore_consultas.py`): el modelo `ActualizarPlanillaPedidosRequest` y `campos_actualizar` ahora incluyen `ahorro`/`observacion`; validación **HTTP 400** si `ahorro > 5.000.000`.
+- **Persistencia**: se guardan en `pedidos_medical`; viajan **solos** al histórico porque `_procesar_pedido_vulcano` copia el documento completo a `pedidos_medical_historico`, y sobreviven al re-consultar porque `guardar-busqueda` hace `$set` (no replace).
+- **Excel `POST /siscore/exportar-planillas-excel`**: dos columnas nuevas **al final** de la hoja `plantilla` → "Ahorro" (numérico) y "Observación Ahorro" (texto, máx 300 car.). En planillas fusionadas el ahorro va sólo en la primera fila para no duplicar la suma.
+- **Indicadores de Fletes** (`indicadores_fletes.py`, `GET /indicadores-fletes/resumen`): la pipeline de KPIs ahora suma `ahorro` (`"$sum": _num("ahorro")`) y lo devuelve en `kpis.ahorro`; redondeado como moneda COP.
+
+### Catálogo de clientes de Otros Costos (`otros_costos.py`)
+- **`GET /otros-costos/clientes`**: devuelve los clientes sugeridos para el campo Cliente del formulario. **Auto-siembra** la colección `clientes_otros_costos` con 9 clientes por defecto la primera vez (si está vacía); a partir de ahí es editable directamente en Mongo (documentos `{ "nombre": "..." }`) sin tocar código.
+- **Fix UI OtrosCostos**: los SweetAlert de "Guardar y enviar", aprobar, pagar, etc. quedaban detrás del modal (overlay a `z-index: 9999` vs. Swal por defecto ~1060). Solución: `.swal2-container { z-index: 99999 !important; }` en `OtrosCostosP/estilos.css`.

@@ -294,6 +294,7 @@ def get_resumen_fletes(
                         "punto_adicional": {"$sum": _num("punto_adicional")},
                         "desvio": {"$sum": _num("desvio")},
                         "aforo": {"$sum": _num("aforo")},
+                        "ahorro": {"$sum": _num("ahorro")},
                     }}
                 ],
                 # --- Serie mensual: flete cobrado vs teórico (mes Colombia) ---
@@ -444,6 +445,7 @@ def get_resumen_fletes(
                 "flete_cobrado": 0, "flete_teorico": 0, "diferencia": 0, "toneladas": 0,
                 "piezas": 0, "despachos": 0, "con_diferencia_positiva": 0,
                 "descargue": 0, "punto_adicional": 0, "desvio": 0, "aforo": 0,
+                "ahorro": 0,
             }
 
         # Derivados
@@ -463,7 +465,7 @@ def get_resumen_fletes(
         }
 
         # Redondear moneda/totales a enteros (COP)
-        for clave in ("flete_cobrado", "flete_teorico", "diferencia", "piezas"):
+        for clave in ("flete_cobrado", "flete_teorico", "diferencia", "piezas", "ahorro"):
             kpi[clave] = round(kpi.get(clave) or 0)
         kpi["toneladas"] = round(kpi.get("toneladas") or 0, 2)
 
