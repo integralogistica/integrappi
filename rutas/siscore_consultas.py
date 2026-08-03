@@ -296,8 +296,12 @@ def _notificar_analistas_cambio_estado(doc: dict, estado_anterior: str, estado_n
 
         logger.info(f"[NOTIF ANALISTAS] Planilla pasó de CREADO a {estado_nuevo}, notificando analistas...")
 
-        # Buscar todos los usuarios con perfil ANALISTA
-        analistas = list(coleccion_baseusuarios.find({"perfil": "ANALISTA"}))
+        # Buscar usuarios con perfil ANALISTA activos. Ausencia del campo `activo`
+        # se trata como activo (igual que en login), por eso el $or.
+        analistas = list(coleccion_baseusuarios.find({
+            "perfil": "ANALISTA",
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        }))
 
         if not analistas:
             logger.info("[NOTIF ANALISTAS] No hay usuarios con perfil ANALISTA en baseusuarios; no se notifica.")
@@ -388,8 +392,12 @@ def _notificar_solicitud_autorizacion(doc: dict, estado_nuevo: str):
             logger.info(f"[NOTIF AUTORIZACIÓN] No se notifica: estado {estado_nuevo} no requiere autorización específica")
             return
 
-        # Buscar usuarios con el perfil objetivo
-        usuarios_perfil = list(coleccion_baseusuarios.find({"perfil": perfil_objetivo}))
+        # Buscar usuarios con el perfil objetivo activos. Ausencia del campo
+        # `activo` se trata como activo (igual que en login), por eso el $or.
+        usuarios_perfil = list(coleccion_baseusuarios.find({
+            "perfil": perfil_objetivo,
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        }))
 
         if not usuarios_perfil:
             logger.info(f"[NOTIF AUTORIZACIÓN] No hay usuarios con perfil {perfil_objetivo} en baseusuarios; no se notifica.")
