@@ -573,3 +573,13 @@ El usuario operativo puede registrar, en el modal **Editar Planilla**, un **ahor
 ### Catálogo de clientes de Otros Costos (`otros_costos.py`)
 - **`GET /otros-costos/clientes`**: devuelve los clientes sugeridos para el campo Cliente del formulario. **Auto-siembra** la colección `clientes_otros_costos` con 9 clientes por defecto la primera vez (si está vacía); a partir de ahí es editable directamente en Mongo (documentos `{ "nombre": "..." }`) sin tocar código.
 - **Fix UI OtrosCostos**: los SweetAlert de "Guardar y enviar", aprobar, pagar, etc. quedaban detrás del modal (overlay a `z-index: 9999` vs. Swal por defecto ~1060). Solución: `.swal2-container { z-index: 99999 !important; }` en `OtrosCostosP/estilos.css`.
+
+## Actualizaciones Recientes (2026-08-03)
+
+### Otros Costos — búsqueda de pedidos: datos individuales en planillas fusionadas
+
+**Problema**: al buscar un pedido de Vulcano en el formulario «Nueva solicitud» (`POST /otros-costos/buscar-pedidos`), si el pedido estaba dentro de una **planilla fusionada**, la búsqueda hacía match sobre la fusión entera (`pedido_vulcano` raíz = concatenado de todos los pedidos) y proyectaba los campos **top-level del vehículo fusionado** (piezas/peso totales, destino único), no los del pedido individual → el usuario veía datos que no correspondían sólo a su pedido.
+
+**Fix** (`rutas/otros_costos.py`): `_buscar_pedidos_historico` ahora detecta si el documento es una fusión (`fusion_info.es_fusionada`) y, en ese caso, recorre `fusion_info.datos_originales[]`, localiza el original cuyo `pedido_vulcano`/`codigo_pedido` coincide con el buscado y lo proyecta con **sus datos propios** (piezas, peso, placa, destino, cliente, regional, etc.). Nueva función `_proyeccion_pedido_desde_original(original, doc_fusion)`; los campos comunes del vehículo (`manifiesto`, `transportador`) se toman del documento raíz. Las planillas **no fusionadas** siguen proyectándose igual que antes. Sólo backend; el frontend no cambió.
+
+> **Modelo de fusiones en `pedidos_medical_historico`**: al fusionar, los originales se eliminan y el documento fusionado guarda los campos top-level **agregados** y `pedido_vulcano` **concatenado** (`"120795, 120796, ..."`); los datos individuales por pedido se conservan en `fusion_info.datos_originales[]`. Cualquier lookup por pedido en esta colección debe leer de ahí (no del raíz) cuando `fusion_info.es_fusionada` sea verdadero.

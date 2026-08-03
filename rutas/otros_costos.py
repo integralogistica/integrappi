@@ -189,10 +189,49 @@ def _proyeccion_pedido(doc: dict) -> dict:
     }
 
 
+def _proyeccion_pedido_desde_original(original: dict, doc_fusion: dict) -> dict:
+    """Proyecta un original embebido (fusion_info.datos_originales[i]) al formato de
+    Otros Costos. Usa los datos INDIVIDUALES del pedido; para campos que solo existen
+    a nivel del vehículo fusionado (manifiesto, transportador) usa el documento raíz."""
+    oid = str(doc_fusion.get("_id", ""))
+    sub = (original.get("consecutivo") or original.get("pedido_vulcano")
+           or original.get("codigo_pedido") or "")
+    return {
+        "_id_origen": f"{oid}#{sub}" if sub else oid,
+        "pedido_vulcano": str(original.get("pedido_vulcano") or original.get("codigo_pedido") or ""),
+        "cliente": str(original.get("cliente_origen") or doc_fusion.get("cliente_origen") or ""),
+        "centro_distribucion": str(original.get("regional") or original.get("centro_costo")
+                                   or doc_fusion.get("regional") or ""),
+        "fecha_servicio": (_fecha_a_str(original.get("fecha_preaprobado"))
+                           or _fecha_a_str(original.get("fecha_pedido_vulcano"))
+                           or _fecha_a_str(doc_fusion.get("fecha_movimiento_historico"))
+                           or _fecha_a_str(doc_fusion.get("fecha_aprobacion"))
+                           or _fecha_a_str(doc_fusion.get("fecha_creacion"))),
+        "piezas": _a_numero(original.get("piezas")),
+        "peso_real": _a_numero(original.get("peso_real")),
+        "tipo_vehiculo": str(original.get("tipo_vehiculo") or original.get("tipo_veh_sicetac")
+                             or doc_fusion.get("tipo_vehiculo") or ""),
+        "placa": str(original.get("placa") or doc_fusion.get("placa") or ""),
+        "municipio_destino": str(original.get("municipio_destino") or ""),
+        "departamento_destino": str(original.get("departamento_destino")
+                                    or doc_fusion.get("departamento_destino") or ""),
+        "transportador": str(doc_fusion.get("transportador") or original.get("transportador") or ""),
+        "manifiesto": str(doc_fusion.get("manifiesto") or original.get("manifiesto") or ""),
+        "total_solicitado": _a_numero(original.get("total_solicitado")),
+        "regional": str(original.get("regional") or doc_fusion.get("regional") or ""),
+        "estado_pedido": str(original.get("estado") or doc_fusion.get("estado") or ""),
+    }
+
+
 def _buscar_pedidos_historico(pedidos_norm: List[str]) -> List[dict]:
     """Busca en pedidos_medical_historico los docs cuyo pedido_vulcano/codigo_pedido
     coincide (tolerante a ceros a la izquierda y separadores) con alguno de los
-    pedidos normalizados. Regex armado solo con dígitos escapados (sin inyección)."""
+    pedidos normalizados. Regex armado solo con dígitos escapados (sin inyección).
+
+    Si el documento es una planilla FUSIONADA, proyecta SOLO el/los original(es)
+    embebido(s) en fusion_info.datos_originales que correspondan al pedido buscado,
+    de modo que se traiga la información individual del pedido (sus propias piezas,
+    peso, placa, destino, etc.) y no los totales agregados del vehículo fusionado."""
     if not pedidos_norm:
         return []
     condiciones = []
@@ -204,6 +243,30 @@ def _buscar_pedidos_historico(pedidos_norm: List[str]) -> List[dict]:
     vistos: set[str] = set()
     set_norm = set(pedidos_norm)
     for doc in col_historico_pedidos.find({"$or": condiciones}):
+        fusion_info = doc.get("fusion_info") or {}
+        datos_originales = (fusion_info.get("datos_originales")
+                            if fusion_info.get("es_fusionada") else None)
+        if datos_originales:
+            # Planilla fusionada: proyectar solo el/los original(es) que coinciden.
+            alguno = False
+            for original in datos_originales:
+                almacenados_orig = _normalizar_pedidos(
+                    f"{original.get('pedido_vulcano','')},{original.get('codigo_pedido','')}"
+                )
+                if set_norm & set(almacenados_orig):
+                    sub = (original.get("consecutivo") or original.get("pedido_vulcano")
+                           or original.get("codigo_pedido") or "")
+                    clave = f"{doc['_id']}#{sub}"
+                    if clave in vistos:
+                        continue
+                    vistos.add(clave)
+                    encontrados.append(_proyeccion_pedido_desde_original(original, doc))
+                    alguno = True
+            if alguno:
+                continue
+            # Fallback: la fusión coincidió por el pedido concatenado en la raíz, pero
+            # ningún original individual coincide (p.ej. sin pedido asignado). Proyectar raíz.
+        # No es fusión (o fallback): proyectar el documento top-level.
         almacenados = _normalizar_pedidos(
             f"{doc.get('pedido_vulcano','')},{doc.get('codigo_pedido','')}"
         )
