@@ -44,7 +44,7 @@ TXT_DESCARGAR_ASIGNADOS = "descargar asignados actualmente"
 
 
 # ---------------------------------------------------------------------------
-# Configuración desde entorno
+# Configuración desde entornos
 # ---------------------------------------------------------------------------
 
 def _cfg_str(clave: str, default: str = "") -> str:
