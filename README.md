@@ -131,6 +131,7 @@ if bodega:
 - **`historico_otros_costos`** - Solicitudes de otros costos pagadas
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
 - **`clientes_otros_costos`** - Catálogo de clientes sugeridos en el formulario de Otros Costos (`GET /otros-costos/clientes`; auto-siembra 9 clientes por defecto la primera vez)
+- **`causales_otros_costos`** - Catálogo de causales/tipos de costo del formulario de Otros Costos (`GET /otros-costos/tipos-costo`; auto-siembra 14 causales por defecto la primera vez, editable en Mongo)
 
 > **⚠️ REGLA DE ORO — una colección = un propósito.** Nunca reuses el nombre de una colección existente para un módulo/ruta nuevo. Hasta el 2026-07-29 la configuración de Pedidos y las solicitudes de Otros Costos **compartían** `otros_costos`: cada recarga del Excel hacía `delete_many({})` y borraba las solicitudes, y la configuración terminó vacía (rompió la fusión con *"No hay configuración de 'otros_costos' para el tipo 'TRACTOMULA'"*). Antes de crear un módulo: (1) revisa los nombres de colección ya usados en esta lista y con `grep 'db\["' rutas/`; (2) antes de cualquier `delete_many({})`, confirma que la colección sea de **un único propósito**; (3) si necesitas una tabla de configuración/parámetros, usa su propia colección (`config_*`), nunca la de las solicitudes.
 
@@ -583,3 +584,26 @@ El usuario operativo puede registrar, en el modal **Editar Planilla**, un **ahor
 **Fix** (`rutas/otros_costos.py`): `_buscar_pedidos_historico` ahora detecta si el documento es una fusión (`fusion_info.es_fusionada`) y, en ese caso, recorre `fusion_info.datos_originales[]`, localiza el original cuyo `pedido_vulcano`/`codigo_pedido` coincide con el buscado y lo proyecta con **sus datos propios** (piezas, peso, placa, destino, cliente, regional, etc.). Nueva función `_proyeccion_pedido_desde_original(original, doc_fusion)`; los campos comunes del vehículo (`manifiesto`, `transportador`) se toman del documento raíz. Las planillas **no fusionadas** siguen proyectándose igual que antes. Sólo backend; el frontend no cambió.
 
 > **Modelo de fusiones en `pedidos_medical_historico`**: al fusionar, los originales se eliminan y el documento fusionado guarda los campos top-level **agregados** y `pedido_vulcano` **concatenado** (`"120795, 120796, ..."`); los datos individuales por pedido se conservan en `fusion_info.datos_originales[]`. Cualquier lookup por pedido en esta colección debe leer de ahí (no del raíz) cuando `fusion_info.es_fusionada` sea verdadero.
+
+## Actualizaciones Recientes (2026-08-04)
+
+### Fix OOM en Banco (`rutas/banco.py`)
+El servicio en Render se caía (OOM kill silencioso, sin log) al procesar PDFs de extracto bancario grandes en `POST /banco/pdf-a-excel` (plan starter = 512 MB compartidos con Chromium). El endpoint `async def` hacía trabajo síncrono pesado (pdfplumber + openpyxl) y bloqueaba el event loop, atascando los webhooks de WhatsApp.
+- **`asyncio.to_thread`** para `extract_transactions` y `create_excel` → el event loop queda libre.
+- **Estilos reutilizados** en openpyxl (`Font`/`Alignment`/`PatternFill` se crean una vez fuera del bucle, no por celda) → menor pico de RAM.
+- **`_mem_info()`**: lee `VmRSS`/`VmPeak` de `/proc/self/status` y se registra en 3 puntos del request (recibe PDF, post-pdfplumber, post-Excel) para diagnosticar futuros OOM.
+- No sube la RAM del plan; si los extractos siguen siendo muy grandes, conviene un plan con más memoria.
+
+### Otros Costos — Filtrado por regional (alinea con SolicitudVehiculos)
+- **OPERATIVO** ve todas las solicitudes (activas/históricas) de su regional (antes solo las propias). **ADMIN/ANALISTA/COORDINADOR/CONTROL** ven todo + dropdown opcional de regional. **FINANCIERO** sin cambios.
+- Helpers nuevos en `rutas/otros_costos.py`: `_normalizar_regional`, `_aplicar_filtro_regional`, `_doc_coincide_regional`, maps `CO_A_REGIONAL`/`REGIONAL_A_BODEGA`/`BODEGA_A_REGIONAL`, `PERFILES_GLOBALES_OC`. Normalizan los 3 formatos (código CO `CO05`, ciudad `CALI`, bodega `YUMBO`) y filtran por `$or` sobre `regional_registro` + `datos_servicio.centro_distribucion` (cubre docs viejos sin `regional_registro`).
+- `_scope_lectura` aplica la regional del OPERATIVO (fallback a `usuario_registro` + `logger.warning` si no tiene regional). El parámetro `regional` del dropdown sólo se aplica a `PERFILES_GLOBALES_OC` (anti-bypass vía `?regional=`).
+- `_obtener_detalle`: OPERATIVO ve el detalle de cualquier solicitud de su regional. **Editar** sigue restringido al creador. Eliminados los overrides manuales de `usuario_registro` en `/historico` y `/exportar-excel`.
+
+### Otros Costos — Causales en colección (`causales_otros_costos`)
+- `GET /otros-costos/tipos-costo` ahora lee de la colección `causales_otros_costos` con auto-siembra la primera vez (mismo patrón que `clientes_otros_costos`); editable en Mongo. 14 causales por defecto (AFORO, CARGUE, DESCARGUE, DESVIO, DEVOLUCIONES, ENTREGA EN VEREDA, OTROS, PUNTO ADICIONAL, RECOLECCIONES, REQUERIMIENTO, STAND BY, TRASBORDO, TRASLADO, URGENCIA).
+
+### Otros Costos — Simplificación del formulario y tope de valor
+- **Eliminado el campo `concepto`** del modelo `CostoConcepto` (queda `tipo_costo`, `descripcion`, `valor`), la validación y las tablas. La descripción ya cumplía esa función. Datos viejos inertes en Mongo.
+- **Eliminado `observaciones`** de `CrearOtroCostoRequest`/`EditarOtroCostoRequest` y del guardado/edición. (No se tocó `observaciones` del pago en `RegistrarPagoRequest`.)
+- **Tope `LIMITE_VALOR_SOLICITUD = 5_000_000`**: en `_validar_solicitud` (crear y editar) se rechaza con 422 si el valor total supera $5.000.000.

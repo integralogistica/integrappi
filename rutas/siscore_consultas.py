@@ -3900,7 +3900,7 @@ async def exportar_planillas_excel(request: ExportarPlanillasExcelRequest):
         logger.info(f"Planillas encontradas en BD: {len(planillas_db)}")
 
         if not planillas_db:
-            raise HTTPException(status_code=404, detail="No se encontraron planillas para exportar")
+            raise HTTPException(status_code=404, detail="No hay planillas aprobadas para exportar con los criterios indicados")
 
         # Crear workbook y worksheet
         wb = Workbook()
@@ -4165,7 +4165,7 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
         if not docs:
             raise HTTPException(
                 status_code=404,
-                detail="No se encontraron planillas con los criterios indicados"
+                detail="No hay planillas aprobadas para exportar con los criterios indicados"
             )
 
         from openpyxl import Workbook

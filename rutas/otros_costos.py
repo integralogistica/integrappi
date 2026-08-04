@@ -24,7 +24,7 @@ from typing import List, Literal, Optional
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from bd.bd_cliente import bd_cliente
@@ -36,14 +36,17 @@ router = APIRouter(prefix="/otros-costos", tags=["Otros Costos"])
 # instantes UTC; los límites por "día Colombia" se alinean sumando 5 h.
 _OFFSET_COLOMBIA = timedelta(hours=5)
 LIMITE_COORDINADOR = 500000  # Coordinador aprueba hasta este valor inclusive
+LIMITE_VALOR_SOLICITUD = 5_000_000  # Valor total máximo permitido por solicitud
 
-TIPOS_COSTO = [
-    "Parqueadero", "Peaje", "Cargue", "Descargue", "Stand by", "Horas adicionales",
-    "Ayudante", "Devolución", "Reexpedición", "Reparación", "Alimentación",
-    "Hospedaje", "Otro",
+# Catálogo por defecto de causales/tipos de costo (se siembra en `causales_otros_costos`).
+# Editable directamente en Mongo: si la colección tiene documentos, se usa tal cual.
+CAUSALES_OTROS_COSTOS_DEFAULT = [
+    "AFORO", "CARGUE", "DESCARGUE", "DESVIO", "DEVOLUCIONES",
+    "ENTREGA EN VEREDA", "OTROS", "PUNTO ADICIONAL", "RECOLECCIONES",
+    "REQUERIMIENTO", "STAND BY", "TRASBORDO", "TRASLADO", "URGENCIA",
 ]
 BANCOS = [
-    "NEQUI", "BANCO DE BOGOTÁ", "BANCOLOMBIA", "DAVIVIENDA", "DAVIPLATA",
+    "BANCO DE BOGOTÁ", "BANCOLOMBIA", "DAVIVIENDA", "DAVIPLATA",
     "CMR FALABELLA", "BANCO CAJA SOCIAL", "BANCO AV VILLAS", "COLPATRIA",
 ]
 TIPOS_CUENTA = ["Ahorros", "Corriente", "Depósito electrónico"]
@@ -74,6 +77,7 @@ col_anulados = db["anulados_otros_costos"]
 col_historico_pedidos = db["pedidos_medical_historico"]   # solo lectura (lookup)
 col_usuarios = db["baseusuarios"]                          # resolución de identidad
 col_clientes = db["clientes_otros_costos"]                 # catálogo de clientes (formulario)
+col_causales = db["causales_otros_costos"]                 # catálogo de tipos de costo (formulario)
 
 # Índices (idempotentes al importar, igual patrón que siscore_consultas.py).
 # `consecutivo` unique en activos → anti-colisión en la generación del consecutivo.
@@ -110,6 +114,86 @@ def _ahora_utc() -> datetime:
 def _hoy_colombia() -> datetime:
     """Fecha/hora actual en zona Colombia (UTC-5) como datetime naive."""
     return _ahora_utc() - _OFFSET_COLOMBIA
+
+
+# ── Regional: normalización de formatos ───────────────────────────────────────
+# La regional vive en 3 formatos según el campo:
+#   - baseusuarios.regional y otros_costos.regional_registro   -> CÓDIGO CO (CO04...)
+#   - otros_costos.datos_servicio.centro_distribucion         -> NOMBRE DE BODEGA
+#   - también aparece el nombre de ciudad (CALI/BARRANQUILLA/...)
+# Estos maps permiten traducir entre los tres para filtrar de forma robusta
+# (incluye docs viejos cuyo regional_registro pudo no quedar poblado).
+CO_A_REGIONAL = {
+    "CO04": "BARRANQUILLA", "CO05": "CALI", "CO06": "BUCARAMANGA",
+    "CO07": "FUNZA", "CO09": "MEDELLIN",
+}
+REGIONAL_A_BODEGA = {
+    "BARRANQUILLA": "JUAN MINA", "CALI": "YUMBO", "MEDELLIN": "GIRARDOTA",
+    # BUCARAMANGA y FUNZA no tienen bodega de origen distinta: identidad.
+    "BUCARAMANGA": "BUCARAMANGA", "FUNZA": "FUNZA",
+}
+BODEGA_A_REGIONAL = {b: r for r, b in REGIONAL_A_BODEGA.items()}
+# Perfiles que ven TODAS las regionales (y a los que se les ofrece el dropdown).
+PERFILES_GLOBALES_OC = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL"}
+
+
+def _normalizar_regional(valor: str) -> Optional[dict]:
+    """Dada una regional en cualquiera de los 3 formatos (código CO, nombre de
+    ciudad o nombre de bodega), devuelve los sinónimos canónicos, o None si no la
+    reconoce. Ignora mayúsculas/espacios."""
+    v = (valor or "").strip().upper()
+    if not v:
+        return None
+    if v in CO_A_REGIONAL:                                   # por código CO
+        regional = CO_A_REGIONAL[v]
+        return {"co": v, "regional": regional,
+                "bodega": REGIONAL_A_BODEGA.get(regional, regional)}
+    if v in REGIONAL_A_BODEGA:                               # por nombre de ciudad
+        co = next((c for c, r in CO_A_REGIONAL.items() if r == v), "")
+        return {"co": co, "regional": v, "bodega": REGIONAL_A_BODEGA[v]}
+    if v in BODEGA_A_REGIONAL:                               # por nombre de bodega
+        regional = BODEGA_A_REGIONAL[v]
+        co = next((c for c, r in CO_A_REGIONAL.items() if r == regional), "")
+        return {"co": co, "regional": regional, "bodega": v}
+    return None
+
+
+def _sinonimos_regional(valor: str) -> set:
+    """Set (en mayúsculas) de todas las formas de escribir la misma regional,
+    para comparar contra cualquier campo del documento."""
+    norm = _normalizar_regional(valor)
+    if not norm:
+        return set()
+    return {s for s in (norm["co"], norm["regional"], norm["bodega"]) if s}
+
+
+def _aplicar_filtro_regional(filtro: dict, valor: str) -> None:
+    """Agrega al filtro un $or que casa la regional en los dos campos donde puede
+    vivir: regional_registro (código CO) y datos_servicio.centro_distribucion
+    (nombre de bodega). Cubre documentos viejos sin regional_registro. Si no
+    reconoce el valor, deja el filtro intacto."""
+    sinonimos = _sinonimos_regional(valor)
+    if not sinonimos:
+        return
+    condiciones = []
+    for s in sinonimos:
+        condiciones.append({"regional_registro": s})
+        condiciones.append({"datos_servicio.centro_distribucion": s})
+    filtro["$or"] = condiciones
+
+
+def _doc_coincide_regional(doc: dict, valor: str) -> bool:
+    """True si la regional del documento (en cualquiera de sus campos/formatos)
+    coincide con la regional indicada."""
+    sinonimos = _sinonimos_regional(valor)
+    if not sinonimos:
+        return False
+    ds = doc.get("datos_servicio") or {}
+    valores_doc = {
+        str(doc.get("regional_registro", "")).strip().upper(),
+        str(ds.get("centro_distribucion", "")).strip().upper(),
+    }
+    return bool(valores_doc & sinonimos)
 
 
 # ── Resolución de identidad / autorización ────────────────────────────────────
@@ -279,9 +363,13 @@ def _buscar_pedidos_historico(pedidos_norm: List[str]) -> List[dict]:
     return encontrados
 
 
-# ── Consecutivo OC-AAAAMMDD-NNNN ──────────────────────────────────────────────
-def _generar_consecutivo_oc(fecha_col: datetime) -> str:
-    prefijo = f"OC-{fecha_col.strftime('%Y%m%d')}-"
+# ── Consecutivo {BODEGA}-OC-AAAAMMDD-NNNN ─────────────────────────────────────
+# El prefijo es la bodega/regional del creador (YUMBO, FUNZA, ...), igual que en
+# SolicitudVehiculos. Una secuencia independiente por regional y día.
+def _generar_consecutivo_oc(fecha_col: datetime, regional: str = "") -> str:
+    norm = _normalizar_regional(regional)
+    bodega = (norm or {}).get("bodega") or "FUNZA"   # fallback FUNZA si no hay regional
+    prefijo = f"{bodega}-OC-{fecha_col.strftime('%Y%m%d')}-"
     regex_prefijo = re.compile(rf"^{re.escape(prefijo)}(\d{{4}})$")
     max_n = 0
     for col in (col_activos, col_historico, col_anulados):
@@ -297,7 +385,7 @@ def _insertar_con_reintento(doc: dict) -> str:
     fecha_col = _hoy_colombia()
     ultimo_error = None
     for _ in range(3):
-        doc["consecutivo"] = _generar_consecutivo_oc(fecha_col)
+        doc["consecutivo"] = _generar_consecutivo_oc(fecha_col, doc.get("regional_registro", ""))
         try:
             col_activos.insert_one(doc)
             return doc["consecutivo"]
@@ -357,10 +445,13 @@ def _jsonable(v):
     return v
 
 
-def _aplicar_visibilidad(doc: dict, perfil: str) -> dict:
-    """Enmascara datos bancarios sensibles para perfiles que no los necesitan."""
+def _aplicar_visibilidad(doc: dict, perfil: str, usuario: Optional[str] = None) -> dict:
+    """Enmascara datos bancarios sensibles salvo para ADMIN/FINANCIERO o el dueño
+    de la solicitud (que necesita verlos para editarlos)."""
     if perfil in {"FINANCIERO", "ADMIN"}:
         return doc
+    if usuario and doc.get("usuario_registro") == usuario:
+        return doc  # el dueño ve sus propios datos bancarios
     db_ = doc.get("datos_bancarios")
     if isinstance(db_, dict):
         db_ = dict(db_)
@@ -377,10 +468,10 @@ def _enmascarar(valor: str) -> str:
     return "*" * (len(s) - 4) + s[-4:]
 
 
-def _serializar(doc: Optional[dict], perfil: str) -> Optional[dict]:
+def _serializar(doc: Optional[dict], perfil: str, usuario: Optional[str] = None) -> Optional[dict]:
     if doc is None:
         return None
-    return _aplicar_visibilidad(_jsonable(doc), perfil)
+    return _aplicar_visibilidad(_jsonable(doc), perfil, usuario)
 
 
 # ── Validaciones (spec §8) ────────────────────────────────────────────────────
@@ -406,13 +497,6 @@ def _validar_solicitud(
     for c in costos:
         if not (c.tipo_costo or "").strip():
             raise HTTPException(status_code=422, detail="Cada concepto debe tener un tipo de costo.")
-        if c.tipo_costo == "Otro" and not (c.concepto or "").strip():
-            raise HTTPException(
-                status_code=422,
-                detail="Cuando el tipo de costo es 'Otro' debe indicar el concepto.",
-            )
-        if not (c.concepto or "").strip():
-            raise HTTPException(status_code=422, detail="El concepto del costo es obligatorio.")
         if not (c.descripcion or "").strip():
             raise HTTPException(status_code=422, detail="La descripción del costo es obligatoria.")
         if _a_numero(c.valor) <= 0:
@@ -421,6 +505,12 @@ def _validar_solicitud(
 
     if valor_total <= 0:
         raise HTTPException(status_code=422, detail="El valor solicitado debe ser mayor que cero.")
+    if valor_total > LIMITE_VALOR_SOLICITUD:
+        raise HTTPException(
+            status_code=422,
+            detail=f"El valor total (${valor_total:,.0f}) supera el máximo permitido "
+                   f"(${LIMITE_VALOR_SOLICITUD:,.0f}).",
+        )
 
     # Bancarios
     if not (datos_bancarios.banco or "").strip():
@@ -488,27 +578,92 @@ def _doc_por_consecutivo(consecutivo: str) -> tuple[Optional[dict], Optional[obj
     return None, None
 
 
-def _scope_lectura(filtro: dict, info: dict):
-    """Aplica el alcance de lectura según el perfil real."""
+def _scope_lectura(info: dict, historico: bool = False) -> dict:
+    """
+    Devuelve un sub-filtro Mongo que representa la BANDEJA del perfil: qué
+    solicitudes puede ver/listar según el estado actual (el estado ES la etapa
+    del flujo). _construir_filtro_listado compone este sub-filtro con los
+    filtros del usuario vía $and, así cada perfil solo ve lo que está en 'su'
+    paso del proceso.
+
+    Modo histórico (solo lectura/auditoría): sin restricción de bandeja, salvo
+    el OPERATIVO que solo ve sus propias solicitudes.
+    """
     perfil = info["perfil"]
+    usuario = info["usuario"]
+
+    if historico:
+        # Histórico = solo lectura/auditoría. Sin restricción de bandeja, salvo
+        # el OPERATIVO que ve las de su regional (comportamiento previo).
+        if perfil == "OPERATIVO":
+            base_hist: dict = {}
+            if _normalizar_regional(info.get("regional", "")):
+                _aplicar_filtro_regional(base_hist, info["regional"])
+            else:
+                base_hist = {"usuario_registro": usuario}
+            return base_hist
+        return {}
+
+    # Modo activos: la bandeja se deriva del estado.
+    if perfil == "ADMIN":
+        return {}
     if perfil == "FINANCIERO":
-        filtro["estado"] = "aprobado"
-        filtro["tramite_vulcano"] = "ok"   # solo lo listo para pagar
-    elif perfil == "ANALISTA":
-        filtro["estado"] = "aprobado"      # su bandeja: aprobados para tramitar
-    elif perfil == "OPERATIVO":
-        filtro["usuario_registro"] = info["usuario"]
-    # COORDINADOR / CONTROL / ADMIN: sin restricción
+        return {"estado": "aprobado", "tramite_vulcano": "ok"}   # listo para pagar
+    if perfil == "ANALISTA":
+        return {"estado": "aprobado"}                            # bandeja: trámite
+    if perfil in ("CONTROL", "COORDINADOR"):
+        return {"estado": "pendiente_aprobacion"}               # bandeja: aprobación
+    if perfil == "OPERATIVO":
+        # Bandeja (puede actuar): borrador/devuelto de su regional (o propias si
+        # no tiene regional definida) + seguimiento en SOLO LECTURA de sus
+        # propias solicitudes ya enviadas (otros estados activos).
+        base_regional: dict = {}
+        if _normalizar_regional(info.get("regional", "")):
+            _aplicar_filtro_regional(base_regional, info["regional"])  # deja {"$or": [...]}
+        else:
+            logger.warning(
+                "[OTROS_COSTOS] OPERATIVO %s sin regional definida; fallback a solicitudes propias.",
+                usuario,
+            )
+            base_regional = {"usuario_registro": usuario}
+
+        bandeja = {"$and": [base_regional, {"estado": {"$in": ["borrador", "devuelto"]}}]}
+        seguimiento = [
+            {"usuario_registro": usuario, "estado": e}
+            for e in ("pendiente_aprobacion", "aprobado", "rechazado")
+        ]
+        return {"$or": [bandeja, *seguimiento]}
+
+    # Perfil no contemplado: sin restricción (defensivo).
+    return {}
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # Modelos Pydantic
 # ════════════════════════════════════════════════════════════════════════════
+def _norm_upper(v):
+    """Normaliza texto a MAYÚSCULAS sin espacios en los extremos (para Mongo)."""
+    if v is None:
+        return v
+    return str(v).strip().upper()
+
+
+def _norm_digitos(v):
+    """Deja solo dígitos (para número de cuenta, cédula y teléfono)."""
+    if v is None:
+        return v
+    return re.sub(r"\D", "", str(v))
+
+
 class CostoConcepto(BaseModel):
     tipo_costo: str = ""
-    concepto: str = ""
     descripcion: str = ""
     valor: float = 0
+
+    @field_validator("descripcion", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return _norm_upper(v)
 
 
 class DatosServicio(BaseModel):
@@ -524,6 +679,11 @@ class DatosServicio(BaseModel):
     transportador: str = ""
     manifiesto: str = ""
 
+    @field_validator("placa", "municipio_destino", "departamento_destino", "transportador", "manifiesto", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return _norm_upper(v)
+
 
 class DatosBancarios(BaseModel):
     banco: str = ""
@@ -532,10 +692,30 @@ class DatosBancarios(BaseModel):
     cedula_titular: str = ""
     nombre_titular: str = ""
 
+    @field_validator("nombre_titular", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return _norm_upper(v)
+
+    @field_validator("numero_cuenta", "cedula_titular", mode="before")
+    @classmethod
+    def _digitos(cls, v):
+        return _norm_digitos(v)
+
 
 class Conductor(BaseModel):
     nombre: str = ""
     telefono: str = ""
+
+    @field_validator("nombre", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return _norm_upper(v)
+
+    @field_validator("telefono", mode="before")
+    @classmethod
+    def _digitos(cls, v):
+        return _norm_digitos(v)
 
 
 class BuscarPedidosRequest(BaseModel):
@@ -554,12 +734,12 @@ class CrearOtroCostoRequest(BaseModel):
     costos: List[CostoConcepto]
     datos_bancarios: DatosBancarios
     conductor: Conductor = Field(default_factory=Conductor)
-    observaciones: str = ""
 
 
 class EditarOtroCostoRequest(BaseModel):
     consecutivo: str
     usuario: str
+    enviar: bool = False
     pedido_vulcano_original: Optional[str] = None
     pedidos_normalizados: Optional[List[str]] = None
     pedido_encontrado: Optional[bool] = None
@@ -568,7 +748,6 @@ class EditarOtroCostoRequest(BaseModel):
     costos: Optional[List[CostoConcepto]] = None
     datos_bancarios: Optional[DatosBancarios] = None
     conductor: Optional[Conductor] = None
-    observaciones: Optional[str] = None
 
 
 class AccionConObservacionRequest(BaseModel):
@@ -616,6 +795,7 @@ class ExportarExcelRequest(BaseModel):
     placa: Optional[str] = None
     manifiesto: Optional[str] = None
     cliente: Optional[str] = None
+    regional: Optional[str] = None
     origen: str = "historico"   # "historico" | "activos"
 
 
@@ -624,7 +804,17 @@ class ExportarExcelRequest(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 @router.get("/tipos-costo")
 async def tipos_costo():
-    return TIPOS_COSTO
+    """Causales/tipos de costo para el formulario de Otros Costos.
+    Auto-siembra la colección `causales_otros_costos` con el listado por defecto
+    la primera vez (si está vacía); desde entonces es editable directamente en Mongo."""
+    if col_causales.count_documents({}) == 0:
+        col_causales.insert_many([{"nombre": c} for c in CAUSALES_OTROS_COSTOS_DEFAULT])
+        logger.info(
+            "[CAUSALES OTROS COSTOS] Colección sembrada con %d causales por defecto.",
+            len(CAUSALES_OTROS_COSTOS_DEFAULT),
+        )
+    docs = list(col_causales.find({}, {"_id": 0, "nombre": 1}))
+    return [d.get("nombre", "") for d in docs if d.get("nombre")]
 
 
 @router.get("/bancos")
@@ -718,14 +908,13 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
         "pedido_vulcano_original": str(req.pedido_vulcano_original).strip(),
         "pedidos_normalizados": pedidos_norm,
         "pedido_encontrado": bool(req.pedido_encontrado),
-        "motivo_no_encontrado": req.motivo_no_encontrado or "",
+        "motivo_no_encontrado": _norm_upper(req.motivo_no_encontrado) if req.motivo_no_encontrado else "",
         "datos_servicio": req.datos_servicio.model_dump(),
         "costos": [c.model_dump() for c in req.costos],
         "valor_total": valor_total,
         "requiere_aprobacion_control": requiere_control,
         "datos_bancarios": req.datos_bancarios.model_dump(),
         "conductor": req.conductor.model_dump(),
-        "observaciones": req.observaciones or "",
         "manifiesto": (req.datos_servicio.manifiesto or "").strip(),
         "estado": estado,
         "usuario_registro": info["usuario"],
@@ -756,7 +945,7 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
         "requiere_aprobacion_control": requiere_control,
         "posible_duplicado": len(posible_dup) > 0,
         "duplicados": posible_dup,
-        "solicitud": _serializar(doc, info["perfil"]),
+        "solicitud": _serializar(doc, info["perfil"], info["usuario"]),
     }
 
 
@@ -777,6 +966,15 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
     if info["perfil"] != "ADMIN":
         if info["perfil"] != "OPERATIVO" or doc.get("usuario_registro") != info["usuario"]:
             raise HTTPException(status_code=403, detail="Solo el creador o un administrador pueden editar.")
+        # El operativo solo puede editar borrador o devuelto: una vez enviada a
+        # aprobación (pendiente_aprobacion) la solicitud pasa al aprobador y ya
+        # no le corresponde modificarla.
+        if estado_actual not in {"borrador", "devuelto"}:
+            raise HTTPException(
+                status_code=422,
+                detail="La solicitud ya fue enviada a aprobación y no se puede editar. "
+                       "Debe ser devuelta para poder modificarla.",
+            )
 
     datos_servicio = req.datos_servicio or DatosServicio(**doc.get("datos_servicio", {}))
     costos = req.costos if req.costos is not None else [CostoConcepto(**c) for c in doc.get("costos", [])]
@@ -802,17 +1000,31 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
     if req.pedido_encontrado is not None:
         set_fields["pedido_encontrado"] = bool(req.pedido_encontrado)
     if req.motivo_no_encontrado is not None:
-        set_fields["motivo_no_encontrado"] = req.motivo_no_encontrado
-    if req.observaciones is not None:
-        set_fields["observaciones"] = req.observaciones
+        set_fields["motivo_no_encontrado"] = _norm_upper(req.motivo_no_encontrado)
 
-    mov = _nuevo_movimiento("edicion", estado_actual, estado_actual, info, "Edición de la solicitud", _ip(request))
+    # Si se solicita enviar a aprobación, transicionar el estado (igual que
+    # /enviar-aprobacion). Solo borrador/devuelto pueden enviarse; la validación
+    # de completitud ya se hizo arriba con _validar_solicitud().
+    nuevo_estado = estado_actual
+    if req.enviar:
+        if estado_actual not in {"borrador", "devuelto"}:
+            raise HTTPException(
+                status_code=422,
+                detail="Solo se pueden enviar a aprobación solicitudes en borrador o devueltas.",
+            )
+        nuevo_estado = "pendiente_aprobacion"
+        set_fields["estado"] = nuevo_estado
+        tipo_mov, motivo = "envio_aprobacion", "Edición y envío a aprobación"
+    else:
+        tipo_mov, motivo = "edicion", "Edición de la solicitud"
+
+    mov = _nuevo_movimiento(tipo_mov, estado_actual, nuevo_estado, info, motivo, _ip(request))
     col_activos.update_one(
-        {"consecutivo": req.consecutivo},
+        {"consecutivo": req.consecutivo, "estado": estado_actual},
         {"$set": set_fields, "$push": {"historial_movimientos": mov}},
     )
     actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
-    return {"mensaje": "Solicitud actualizada", "solicitud": _serializar(actualizado, info["perfil"])}
+    return {"mensaje": "Solicitud actualizada", "estado": nuevo_estado, "solicitud": _serializar(actualizado, info["perfil"], info["usuario"])}
 
 
 @router.post("/enviar-aprobacion")
@@ -917,19 +1129,54 @@ async def marcar_tramite_vulcano(req: MarcarTramiteVulcanoRequest, request: Requ
 @router.post("/devolver")
 async def devolver_solicitud(req: AccionConObservacionRequest, request: Request):
     info = _resolver_usuario(req.usuario)
-    _requiere(info, {"COORDINADOR", "CONTROL", "ADMIN"}, "devolver solicitudes")
+    _requiere(info, {"COORDINADOR", "CONTROL", "ADMIN", "ANALISTA", "FINANCIERO"}, "devolver solicitudes")
+    if not (req.observacion or "").strip():
+        raise HTTPException(status_code=422, detail="El motivo de devolución es obligatorio.")
     doc = col_activos.find_one({"consecutivo": req.consecutivo})
     if not doc:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
-    if doc.get("estado") != "pendiente_aprobacion":
-        raise HTTPException(status_code=422, detail="Solo se pueden devolver solicitudes pendientes.")
     estado_prev = doc.get("estado")
+    if estado_prev not in {"pendiente_aprobacion", "aprobado"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Solo se pueden devolver solicitudes pendientes o aprobadas.",
+        )
+    # Permiso según el estado desde el que se devuelve:
+    # - Desde 'pendiente_aprobacion': Coordinador/Control/Admin (los que aprueban).
+    # - Desde 'aprobado': Analista/Financiero/Admin (los que tramitan/pagan).
+    perfil = info["perfil"]
+    if estado_prev == "aprobado":
+        permitidos, msg = {"ANALISTA", "FINANCIERO", "ADMIN"}, \
+            "Desde 'aprobado' solo Analista/Financiero/Admin pueden devolver."
+    else:
+        permitidos, msg = {"COORDINADOR", "CONTROL", "ADMIN"}, \
+            "Desde 'pendiente' solo Coordinador/Control/Admin pueden devolver."
+    if perfil not in permitidos:
+        raise HTTPException(status_code=403, detail=msg)
+    # El Analista solo puede devolver mientras el trámite Vulcano esté pendiente
+    # (su bandeja). Una vez marcó OK, la solicitud pasó a Financiero y ya no le toca.
+    if perfil == "ANALISTA" and estado_prev == "aprobado" and doc.get("tramite_vulcano") == "ok":
+        raise HTTPException(
+            status_code=403,
+            detail="El trámite ya fue marcado OK y la solicitud pasó a Financiero; no se puede devolver desde aquí.",
+        )
+
     mov = _nuevo_movimiento("devolucion", estado_prev, "devuelto", info, req.observacion, _ip(request))
-    col_activos.update_one(
+    set_fields = {"estado": "devuelto", "updated_at": _ahora_utc()}
+    # Al devolver desde 'aprobado', resetear el trámite Vulcano para que el
+    # analista lo revise de nuevo al reaprobar (/aprobar también lo resetea).
+    if estado_prev == "aprobado":
+        set_fields["tramite_vulcano"] = "pendiente"
+    res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": estado_prev},
-        {"$set": {"estado": "devuelto", "updated_at": _ahora_utc()},
-         "$push": {"historial_movimientos": mov}},
+        {"$set": set_fields, "$push": {"historial_movimientos": mov}},
     )
+    # Anti-carrera: si otro proceso cambió el estado entre el find y el update.
+    if res.matched_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="La solicitud cambió de estado (acción simultánea). Recargue e intente de nuevo.",
+        )
     return {"mensaje": "Solicitud devuelta", "estado": "devuelto"}
 
 
@@ -937,6 +1184,8 @@ async def devolver_solicitud(req: AccionConObservacionRequest, request: Request)
 async def rechazar_solicitud(req: AccionConObservacionRequest, request: Request):
     info = _resolver_usuario(req.usuario)
     _requiere(info, {"COORDINADOR", "CONTROL", "ADMIN"}, "rechazar solicitudes")
+    if not (req.observacion or "").strip():
+        raise HTTPException(status_code=422, detail="El motivo de rechazo es obligatorio.")
     doc = col_activos.find_one({"consecutivo": req.consecutivo})
     if not doc:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
@@ -1055,35 +1304,46 @@ def _construir_filtro_listado(
     placa: Optional[str],
     manifiesto: Optional[str],
     cliente: Optional[str],
+    regional: Optional[str] = None,
+    historico: bool = False,
 ) -> dict:
-    filtro: dict = {}
+    # Filtros del usuario, acumulados APARTE para componerlos con el scope del
+    # perfil vía $and. Así el $or de la bandeja de un perfil no se pisa con el
+    # $or del filtro regional ni con un estado que elija el usuario.
+    filtros: dict = {}
     # Descartar documentos huérfanos/incompletos (sin consecutivo) que pudieran existir.
-    filtro["consecutivo"] = {"$exists": True}
-    _scope_lectura(filtro, info)
+    filtros["consecutivo"] = {"$exists": True}
+    # Dropdown de regional: solo lo aplican los perfiles globales (evita que un
+    # OPERATIVO/FINANCIERO bypassée su scope inyectando ?regional=...).
+    if regional and info["perfil"] in PERFILES_GLOBALES_OC:
+        _aplicar_filtro_regional(filtros, regional)
 
     if estado:
-        filtro["estado"] = estado
-    # FINANCIERO siempre ve 'aprobado' en activos (el scope ya lo impone)
+        filtros["estado"] = estado
     if pedido:
         pnorm = _normalizar_pedidos(pedido)
         if len(pnorm) == 1:
-            filtro["pedidos_normalizados"] = pnorm[0]
+            filtros["pedidos_normalizados"] = pnorm[0]
         elif pnorm:
-            filtro["pedidos_normalizados"] = {"$in": pnorm}
+            filtros["pedidos_normalizados"] = {"$in": pnorm}
     if placa:
-        filtro["datos_servicio.placa"] = str(placa).strip().upper()
+        filtros["datos_servicio.placa"] = str(placa).strip().upper()
     if manifiesto:
-        filtro["manifiesto"] = str(manifiesto).strip()
+        filtros["manifiesto"] = str(manifiesto).strip()
     if cliente:
-        filtro["datos_servicio.cliente"] = {"$regex": re.escape(str(cliente).strip()), "$options": "i"}
+        filtros["datos_servicio.cliente"] = {"$regex": re.escape(str(cliente).strip()), "$options": "i"}
     if fecha_inicio or fecha_fin:
         rango = {}
         if fecha_inicio:
             rango["$gte"] = datetime.strptime(fecha_inicio, "%Y-%m-%d") + _OFFSET_COLOMBIA
         if fecha_fin:
             rango["$lt"] = datetime.strptime(fecha_fin, "%Y-%m-%d") + timedelta(days=1) + _OFFSET_COLOMBIA
-        filtro["created_at"] = rango
-    return filtro
+        filtros["created_at"] = rango
+
+    scope = _scope_lectura(info, historico=historico)
+    if not scope:
+        return filtros                 # ADMIN (o histórico no operativo): sin $and
+    return {"$and": [scope, filtros]}
 
 
 @router.get("/")
@@ -1097,14 +1357,15 @@ async def listar_activos(
     placa: Optional[str] = Query(None),
     manifiesto: Optional[str] = Query(None),
     cliente: Optional[str] = Query(None),
+    regional: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
 ):
     info = _resolver_usuario(usuario)
-    filtro = _construir_filtro_listado(info, estado, fecha_inicio, fecha_fin, pedido, placa, manifiesto, cliente)
+    filtro = _construir_filtro_listado(info, estado, fecha_inicio, fecha_fin, pedido, placa, manifiesto, cliente, regional, historico=False)
     total = col_activos.count_documents(filtro)
     cursor = col_activos.find(filtro).sort("created_at", -1).skip(skip).limit(limit)
-    items = [_serializar(d, info["perfil"]) for d in cursor]
+    items = [_serializar(d, info["perfil"], info["usuario"]) for d in cursor]
     return {"total": total, "skip": skip, "limit": limit, "items": items}
 
 
@@ -1119,18 +1380,16 @@ async def listar_historico(
     placa: Optional[str] = Query(None),
     manifiesto: Optional[str] = Query(None),
     cliente: Optional[str] = Query(None),
+    regional: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
 ):
     info = _resolver_usuario(usuario)
-    # FINANCIERO ve todo el histórico (pagadas); OPERATIVO, las propias; el resto, todas.
-    filtro = _construir_filtro_listado(info, estado, fecha_inicio, fecha_fin, pedido, placa, manifiesto, cliente)
-    # Reaplicar scope sobre histórico (FINANCIERO sin restricción aquí; OPERATIVO propias)
-    if info["perfil"] == "OPERATIVO":
-        filtro["usuario_registro"] = info["usuario"]
+    # FINANCIERO ve todo el histórico (pagadas); OPERATIVO, las de su regional; el resto, todas.
+    filtro = _construir_filtro_listado(info, estado, fecha_inicio, fecha_fin, pedido, placa, manifiesto, cliente, regional, historico=True)
     total = col_historico.count_documents(filtro)
     cursor = col_historico.find(filtro).sort("created_at", -1).skip(skip).limit(limit)
-    items = [_serializar(d, info["perfil"]) for d in cursor]
+    items = [_serializar(d, info["perfil"], info["usuario"]) for d in cursor]
     return {"total": total, "skip": skip, "limit": limit, "items": items}
 
 
@@ -1140,11 +1399,17 @@ def _obtener_detalle(consecutivo: str, info: dict, col):
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
     # Scope de detalle
     perfil = info["perfil"]
-    if perfil == "OPERATIVO" and doc.get("usuario_registro") != info["usuario"]:
-        raise HTTPException(status_code=403, detail="No tiene acceso a esta solicitud.")
+    if perfil == "OPERATIVO":
+        # OPERATIVO ve el detalle de cualquier solicitud de su regional; si no
+        # tiene regional definida, solo las propias (mismo fallback que el listado).
+        if _normalizar_regional(info.get("regional", "")):
+            if not _doc_coincide_regional(doc, info["regional"]):
+                raise HTTPException(status_code=403, detail="No tiene acceso a esta solicitud.")
+        elif doc.get("usuario_registro") != info["usuario"]:
+            raise HTTPException(status_code=403, detail="No tiene acceso a esta solicitud.")
     if perfil == "FINANCIERO" and doc.get("estado") not in {"aprobado", "pagado"}:
         raise HTTPException(status_code=403, detail="No tiene acceso a esta solicitud.")
-    return _serializar(doc, perfil)
+    return _serializar(doc, perfil, info.get("usuario"))
 
 
 @router.get("/{consecutivo}")
@@ -1168,10 +1433,9 @@ async def exportar_excel(req: ExportarExcelRequest):
     info = _resolver_usuario(req.usuario)
     col = col_historico if req.origen != "activos" else col_activos
     filtro = _construir_filtro_listado(
-        info, req.estado, req.fecha_inicio, req.fecha_fin, req.pedido, req.placa, req.manifiesto, req.cliente
+        info, req.estado, req.fecha_inicio, req.fecha_fin, req.pedido, req.placa, req.manifiesto, req.cliente, req.regional,
+        historico=(req.origen != "activos"),
     )
-    if col is col_historico and info["perfil"] == "OPERATIVO":
-        filtro["usuario_registro"] = info["usuario"]
 
     docs = list(col.find(filtro).sort("created_at", -1).limit(5000))
 
