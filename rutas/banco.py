@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import Response
+import asyncio
 import io
 import logging
 import pdfplumber
@@ -22,6 +23,34 @@ COLUMNS = [
 ]
 
 Y_TOLERANCE = 5
+
+
+def _mem_info() -> str:
+    """Uso de memoria del proceso para diagnóstico de OOM (entorno Render/Linux).
+
+    Lee VmRSS/VmPeak de /proc/self/status (memoria residente real y pico).
+    Si no está disponible (p.ej. Windows local), cae a resource.getrusage.
+    Útil para detectar cuándo el proceso se acerca al límite de RAM del plan
+    (512 MB en starter) y muere sin dejar log (OOM kill del kernel).
+    """
+    try:
+        rss = peak = None
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = int(line.split()[1]) // 1024  # KB -> MB
+                elif line.startswith("VmPeak:"):
+                    peak = int(line.split()[1]) // 1024
+        if rss is not None:
+            return f"RSS={rss} MB" + (f", pico={peak} MB" if peak else "")
+    except Exception:
+        pass
+    try:
+        import resource
+        kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB en Linux
+        return f"ru_maxrss={kb // 1024} MB"
+    except Exception:
+        return "memoria n/d"
 
 
 def _extract_header(words):
@@ -201,9 +230,14 @@ def create_excel(header_info, transactions) -> bytes:
     green = "548235"
     red = "C00000"
 
+    # Estilos reutilizables: se crean UNA vez fuera del bucle y se asignan por
+    # referencia a cada celda. openpyxl los deduplica internamente por valor, así
+    # evitamos crear miles de objetos Font/Alignment temporales (memoria).
     header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
     subtitle_font = Font(name="Calibri", bold=True, color=dark_blue, size=11)
     normal_font = Font(name="Calibri", size=10)
+    neg_font = Font(name="Calibri", size=10, color=red)
+    pos_font = Font(name="Calibri", size=10, color=green)
     header_fill = PatternFill(start_color=dark_blue, end_color=dark_blue, fill_type="solid")
     alt_fill = PatternFill(start_color=light_blue, end_color=light_blue, fill_type="solid")
     thin_border = Border(
@@ -212,6 +246,9 @@ def create_excel(header_info, transactions) -> bytes:
         top=Side(style="thin", color="B0B0B0"),
         bottom=Side(style="thin", color="B0B0B0"),
     )
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center")
+    right_align = Alignment(horizontal="right", vertical="center")
 
     columns = ["FECHA", "DESCRIPCION", "SUCURSAL/CANAL", "REFERENCIA 1", "REFERENCIA 2", "DOCUMENTO", "VALOR"]
     col_widths = [14, 42, 18, 18, 18, 18, 20]
@@ -226,6 +263,7 @@ def create_excel(header_info, transactions) -> bytes:
 
     row = 2
     for i, txn in enumerate(transactions):
+        is_alt = i % 2 == 1
         data = [
             txn["fecha"],
             txn["descripcion"],
@@ -235,28 +273,30 @@ def create_excel(header_info, transactions) -> bytes:
             txn["documento"],
             txn["valor"],
         ]
+
+        # Font de la columna VALOR: se calcula una vez por fila (rojo/verde)
+        # en lugar de crear un Font nuevo por cada celda.
+        val_str = str(data[6]).replace(",", "").replace("$", "")
+        try:
+            val_font = neg_font if float(val_str) < 0 else pos_font
+        except ValueError:
+            val_font = normal_font
+
         for col_idx, value in enumerate(data, 1):
             cell = ws.cell(row=row, column=col_idx, value=value)
-            cell.font = normal_font
             cell.border = thin_border
 
             if col_idx == 2:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
+                cell.font = normal_font
+                cell.alignment = left_align
             elif col_idx == 7:
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-                val_str = str(value).replace(",", "").replace("$", "")
-                try:
-                    num = float(val_str)
-                    if num < 0:
-                        cell.font = Font(name="Calibri", size=10, color=red)
-                    else:
-                        cell.font = Font(name="Calibri", size=10, color=green)
-                except ValueError:
-                    pass
+                cell.font = val_font
+                cell.alignment = right_align
             else:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.font = normal_font
+                cell.alignment = center_align
 
-            if i % 2 == 1:
+            if is_alt:
                 cell.fill = alt_fill
 
         row += 1
@@ -287,16 +327,24 @@ async def pdf_a_excel(file: UploadFile = File(...)):
         if len(pdf_bytes) == 0:
             raise HTTPException(status_code=400, detail="El archivo esta vacio")
 
-        logger.info(f"Procesando PDF: {file.filename} ({len(pdf_bytes)} bytes)")
+        logger.info(f"Procesando PDF: {file.filename} ({len(pdf_bytes)} bytes) [{_mem_info()}]")
 
-        header_info, transactions = extract_transactions(pdf_bytes)
+        # El parseo del PDF y la generación del Excel son trabajos síncronos y
+        # pesados (pdfplumber/openpyxl). Ejecutándolos directo en un endpoint
+        # async bloquean el event loop principal durante todo el procesamiento,
+        # lo que deja de atender otros requests (incluidos los webhooks de
+        # WhatsApp). Se delegan a un hilo con asyncio.to_thread para mantener
+        # el event loop libre mientras se procesa.
+        header_info, transactions = await asyncio.to_thread(extract_transactions, pdf_bytes)
 
         if not transactions:
             raise HTTPException(status_code=404, detail="No se encontraron transacciones en el PDF")
 
-        logger.info(f"Transacciones encontradas: {len(transactions)}")
+        logger.info(f"Transacciones encontradas: {len(transactions)} [{_mem_info()}]")
 
-        excel_bytes = create_excel(header_info, transactions)
+        excel_bytes = await asyncio.to_thread(create_excel, header_info, transactions)
+
+        logger.info(f"Excel generado ({len(excel_bytes)} bytes) [{_mem_info()}]")
 
         base_name = file.filename.rsplit(".", 1)[0]
         return Response(
