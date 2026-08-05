@@ -3666,6 +3666,7 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "CONCORDIA": "CONCORDIA ANT.",
     "SANTA MARTA MAG": "SANTA MARTA",
     "JERICO": "JERICO ANT.",
+    "SAN JOSE DEL FRAGUA": "SAN JOSE DE FRAGUA"
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
