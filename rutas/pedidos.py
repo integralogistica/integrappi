@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Literal
 from io import BytesIO
 import os
+import asyncio
 import pandas as pd
 from datetime import datetime
 import time
@@ -104,6 +105,9 @@ class AjusteVehiculo(BaseModel):
     nuevo_destino: Optional[str] = None
     destino_desde_real: Optional[str] = None
     usr_solicita_ajuste: Optional[str] = None
+    # Ahorro operativo y su observación (metadata, no afectan totales ni estado). Máx $5.000.000.
+    ahorro: Optional[float] = None
+    observacion: Optional[str] = None
 
 
 class AjustesVehiculosPayload(BaseModel):
@@ -121,6 +125,7 @@ class FusionVehiculosPayload(BaseModel):
     total_punto_adicional: float          # override vehicular
     total_desvio_vehiculo: float          # override vehicular
     observacion_fusion: Optional[str] = None  # opcional
+    causal_sobrecosto: Optional[str] = None  # requerido si la fusión genera sobre costo
 
 # ====== MODELOS PARA DIVIDIR EN HASTA 3 CARROS ======
 class OverridesVehiculo(BaseModel):
@@ -149,6 +154,7 @@ class DividirHastaTresPayload(BaseModel):
     consecutivo_origen: str
     destino_unico: str                    # obligatorio: todos quedan con este destino
     observacion_division: Optional[str] = None
+    causal_sobrecosto: Optional[str] = None  # requerido si la división genera sobre costo
     # Grupos A/B/C/D. A = conserva consecutivo; B, C y D son opcionales
     grupo_A: Optional[GrupoDivision] = None
     grupo_B: Optional[GrupoDivision] = None
@@ -810,6 +816,13 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
         set_aut_por = usuario if estado_calc == "PREAUTORIZADO" else "NA"
         set_fecha_aut = ahora_str if estado_calc == "PREAUTORIZADO" else "NA"
 
+        # Validar ahorro operativo: no puede superar los $5.000.000
+        if adj.ahorro is not None and adj.ahorro > 5000000:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{cv}: El ahorro no puede ser superior a $5.000.000"
+            )
+
         # 8) Campos a actualizar en TODOS los docs del vehículo
         update_fields = {
             "tipo_vehiculo_sicetac":        tipo_vehiculo_sicetac,
@@ -848,6 +861,12 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
 
         if adj.Observaciones_ajustes is not None:
             update_fields["Observaciones_ajustes"] = adj.Observaciones_ajustes
+
+        # Ahorro y observación: metadata (no afectan totales/estado). Sólo si vienen.
+        if adj.ahorro is not None:
+            update_fields["ahorro"] = adj.ahorro
+        if adj.observacion is not None:
+            update_fields["observacion"] = adj.observacion
 
         res = coleccion_pedidos.update_many(
             {"consecutivo_vehiculo": cv},
@@ -946,6 +965,8 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
             "tipo_vehiculo_sicetac": {"$first": "$tipo_vehiculo_sicetac"},
             "destino": {"$first": "$destino"},
             "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},
+            "ahorro": {"$first": "$ahorro"},
+            "observacion": {"$first": "$observacion"},
             "pedidos": {"$push": "$$ROOT"},
             "estados": {"$addToSet": "$estado"},
 
@@ -995,7 +1016,7 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         {"$sort": {"_id": 1}}
     ]
 
-    grupos = list(coleccion_pedidos.aggregate(pipeline))
+    grupos = list(coleccion_pedidos.aggregate(pipeline, allowDiskUse=True))
 
     return [{
         "consecutivo_vehiculo": g["_id"],
@@ -1003,6 +1024,8 @@ async def listar_pedidos_vehiculos(datos: FiltrosConUsuario):
         "tipo_vehiculo_sicetac": g.get("tipo_vehiculo_sicetac"),
         "destino": g["destino"],
         "Observaciones_ajustes": g.get("Observaciones_ajustes"),
+        "ahorro": g.get("ahorro"),
+        "observacion": g.get("observacion"),
         "multiestado": len(g["estados"]) > 1,
         "estados": g["estados"],
 
@@ -1729,17 +1752,74 @@ async def exportar_completados(
     else:
         filtro["regional"] = reg_user
 
-    # 4) traer documentos
-    docs = list(coleccion_pedidos_completados.find(filtro))
+    # 4) Agregar por vehículo (1 fila por vehículo) + nombre de cliente
+    pipeline = [
+        {"$match": filtro},
+        {"$lookup": {
+            "from": "clientes",
+            "localField": "nit_cliente",
+            "foreignField": "nit",
+            "as": "cliente"
+        }},
+        {"$unwind": {"path": "$cliente", "preserveNullAndEmptyArrays": True}},
+        {"$set": {"nombre_cliente": {"$ifNull": ["$cliente.nombre", None]}}},
+        {"$project": {"cliente": 0}},
+        # Sin $group: una fila por PEDIDO (detalle). Orden por fecha y vehículo.
+        {"$sort": {"fecha_creacion": 1, "consecutivo_vehiculo": 1}},
+    ]
+    docs = list(coleccion_pedidos_completados.aggregate(pipeline, allowDiskUse=True))
     if not docs:
         raise HTTPException(404, "No se encontraron pedidos en ese rango.")
 
-    # 5) convertir ObjectId a string
-    for d in docs:
-        d["id"] = str(d.pop("_id"))
+    def _num(v):
+        try:
+            n = float(v)
+            return n if n == n else 0.0  # NaN -> 0
+        except (TypeError, ValueError):
+            return 0.0
 
-    # 6) DataFrame y Excel
-    df = pd.DataFrame(docs)
+    def _fecha_ddmmaaaa(s):
+        # Convierte "YYYY-MM-DD ..." a "DD/MM/YYYY"
+        try:
+            return datetime.strptime((s or "")[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            return (s or "")[:10]
+
+    # 5) Una fila por PEDIDO/planilla (detalle). Los totales del vehículo se repiten
+    #    en cada pedido del mismo vehículo (etiquetados "(vehículo)").
+    filas = []
+    for d in docs:
+        diferencia = _num(d.get("diferencia_flete"))
+        causal = (d.get("Observaciones_ajustes") or "").strip()
+        filas.append({
+            "Fecha": _fecha_ddmmaaaa(d.get("fecha_creacion")),
+            "Vehículo": d.get("consecutivo_vehiculo") or "",
+            "Planilla": d.get("planilla_siscore") or "",
+            "Cliente": d.get("nombre_cliente") or "",
+            "Destinatario (Ubicación Descargue)": d.get("ubicacion_descargue") or "",
+            "Origen": d.get("origen") or "",
+            "Destino Real": d.get("destino_real") or "",
+            "Consecutivo Integrapp": d.get("consecutivo_integrapp") or "",
+            "Kilos": _num(d.get("num_kilos")),
+            "Veh Solicitado (RUNT)": (d.get("tipo_vehiculo_sicetac") or "").split("_")[0],
+            "Flete Solicitado (vehículo)": _num(d.get("total_flete_solicitado")),
+            "Cargue/Descargue (vehículo)": _num(d.get("total_cargue_descargue")),
+            "Punto Adicional (vehículo)": _num(d.get("total_punto_adicional")),
+            "Desvío (vehículo)": _num(d.get("total_desvio_vehiculo")),
+            "Total Solicitado (vehículo)": _num(d.get("total_flete_vehiculo")),
+            "Flete Teórico (vehículo)": _num(d.get("valor_flete_sistema")),
+            "Cargue/Descargue Teórico (vehículo)": _num(d.get("cargue_descargue_teorico")),
+            "Punto Adicional Teórico (vehículo)": _num(d.get("punto_adicional_teorico")),
+            "Total Teórico (vehículo)": _num(d.get("costo_teorico_vehiculo")),
+            "Sobre costo (vehículo)": diferencia,
+            "Causal del sobre costo": ("Sin causal" if diferencia > 0 and not causal else causal),
+            "Ahorro (vehículo)": _num(d.get("ahorro")),
+            "Observación": (d.get("observacion") or ""),
+            "Estado": d.get("estado") or "",
+        })
+
+    # 6) Excel de una sola hoja (1 fila por pedido/planilla)
+    df = pd.DataFrame(filas)
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Completados")
@@ -1752,6 +1832,45 @@ async def exportar_completados(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fn}"}
     )
+
+# ------------------------------
+# ✏️ Asignar causal de sobre costo a vehículos ya completados (arreglo de históricos)
+# ------------------------------
+class AsignarCausalCompletadoPayload(BaseModel):
+    usuario: str
+    consecutivo_vehiculo: str
+    causal: str
+
+@ruta_pedidos.put(
+    "/asignar-causal-completado",
+    response_model=dict,
+    summary="Asignar la causal (Observaciones_ajustes) a un vehículo completado"
+)
+async def asignar_causal_completado(payload: AsignarCausalCompletadoPayload):
+    usuario = payload.usuario.upper().strip()
+    cv = payload.consecutivo_vehiculo.strip()
+    causal = (payload.causal or "").strip()
+    if not cv:
+        raise HTTPException(400, "consecutivo_vehiculo es obligatorio")
+    if not causal:
+        raise HTTPException(400, "La causal es obligatoria")
+
+    ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    res = coleccion_pedidos_completados.update_many(
+        {"consecutivo_vehiculo": cv},
+        {"$set": {
+            "Observaciones_ajustes": causal,
+            "usuario_causal": usuario,
+            "fecha_causal": ahora_str,
+        }}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"No se encontró el vehículo completado {cv}")
+    return {
+        "mensaje": f"Causal asignada a {cv}",
+        "docs_actualizados": res.modified_count
+    }
+
 # ------------------------------
 # 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
@@ -1836,7 +1955,23 @@ async def listar_vehiculos_completados(
             "tipo_vehiculo_sicetac": {"$first": "$tipo_vehiculo_sicetac"},
             "destino": {"$first": "$destino"},
             "Observaciones_ajustes": {"$first": "$Observaciones_ajustes"},
-            "pedidos": {"$push": "$$ROOT"},
+            "ahorro": {"$first": "$ahorro"},
+            "observacion": {"$first": "$observacion"},
+            # 👇 Sólo los campos que usa la subtabla de detalle (evita embeber el doc
+            #    completo con $$ROOT, que con rangos largos colapsa por memoria/tiempo).
+            "pedidos": {"$push": {
+                "_id": "$_id",
+                "consecutivo_integrapp": "$consecutivo_integrapp",
+                "numero_pedido": "$numero_pedido",
+                "origen": "$origen",
+                "destino_real": "$destino_real",
+                "nombre_cliente": "$nombre_cliente",
+                "ubicacion_descargue": "$ubicacion_descargue",
+                "num_kilos": "$num_kilos",
+                "planilla_siscore": "$planilla_siscore",
+                "observaciones": "$observaciones",
+                "estado": "$estado",
+            }},
             "estados": {"$addToSet": "$estado"},
 
             "flete_solicitado_sum_docs": {"$sum": "$valor_flete"},
@@ -1882,7 +2017,8 @@ async def listar_vehiculos_completados(
         {"$sort": {"_id": 1}}
     ]
 
-    grupos = list(coleccion_pedidos_completados.aggregate(pipeline))
+    # Offload a hilo: la agregación es bloqueante y con rangos largos cuelga el event loop
+    grupos = await asyncio.to_thread(lambda: list(coleccion_pedidos_completados.aggregate(pipeline, allowDiskUse=True)))
     if not grupos:
         return []
 
@@ -1896,6 +2032,8 @@ async def listar_vehiculos_completados(
             "tipo_vehiculo_sicetac":        g.get("tipo_vehiculo_sicetac"),
             "destino":                      g["destino"],
             "Observaciones_ajustes":        g.get("Observaciones_ajustes"),
+            "ahorro":                       g.get("ahorro"),
+            "observacion":                  g.get("observacion"),
             "multiestado":                  len(g["estados"]) > 1,
             "estados":                      g["estados"],
 
@@ -2067,6 +2205,14 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
         ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Causal del sobre costo: si la fusión genera sobre costo, exige causal
+        diferencia_fusion = costo_real - costo_teorico
+        if diferencia_fusion > 0 and not (payload.causal_sobrecosto or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="La fusión genera un sobre costo; selecciona una causal del sobre costo."
+            )
+
         # 9) Update masivo (incluye CI del primer carro)
         set_fields = {
             "consecutivo_vehiculo":             target_cv,
@@ -2106,6 +2252,10 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             "observacion_fusion":               (payload.observacion_fusion or ""),
             "fecha_fusion":                     ahora_str,
         }
+
+        # Si la fusión genera sobre costo, fijar la causal (Observaciones_ajustes)
+        if diferencia_fusion > 0:
+            set_fields["Observaciones_ajustes"] = (payload.causal_sobrecosto or "").strip()
 
         # --- Unificar consecutivo_integrapp al del primer carro ---
         from collections import Counter
@@ -2390,34 +2540,45 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         }
 
     def _apply(cv: str, calc: dict):
+        diferencia = calc["creal"] - calc["costo_teo"]
+        # Causal del sobre costo: si este vehículo resultante genera sobre costo, exige causal
+        if diferencia > 0 and not (payload.causal_sobrecosto or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"La división genera un sobre costo en {cv}; selecciona una causal del sobre costo."
+            )
+        update_set = {
+            "destino":                         destino_unico,
+            "tipo_vehiculo_sicetac":           calc["tipo_sic"],
+            "total_cajas_vehiculo":            calc["cajas"],
+            "total_kilos_vehiculo":            calc["kilos"],
+            "total_kilos_vehiculo_sicetac":    calc["kilos_sic"],
+            "total_puntos_vehiculo":           calc["puntos"],
+            "total_puntos":                    calc["puntos"],
+            "valor_flete_sistema":             calc["tbase"],
+            "punto_adicional_teorico":         calc["pto_teo"],
+            "cargue_descargue_teorico":        calc["carg_teo"],
+            "costo_teorico_vehiculo":          calc["costo_teo"],
+            "total_flete_solicitado":          calc["tflete"],
+            "total_cargue_descargue":          calc["tcarg"],
+            "total_desvio_vehiculo":           calc["tdesv"],
+            "total_punto_adicional":           calc["tpad"],
+            "total_flete_vehiculo":            calc["creal"],
+            "diferencia_flete":                diferencia,
+            "estado":                          calc["estado"],
+            "porcentaje_sobre_teorico":        calc["porc"],
+            "autorizado_por":                  "SISTEMA" if calc["estado"] == "PREAUTORIZADO" else "NA",
+            "fecha_autorizacion":              ahora_str if calc["estado"] == "PREAUTORIZADO" else "NA",
+            "usuario_division":                usuario,
+            "observacion_division":            (payload.observacion_division or ""),
+            "fecha_division":                  ahora_str,
+        }
+        # Fijar la causal (Observaciones_ajustes) cuando hay sobre costo
+        if diferencia > 0:
+            update_set["Observaciones_ajustes"] = (payload.causal_sobrecosto or "").strip()
         coleccion_pedidos.update_many(
             {"consecutivo_vehiculo": cv},
-            {"$set": {
-                "destino":                         destino_unico,
-                "tipo_vehiculo_sicetac":           calc["tipo_sic"],
-                "total_cajas_vehiculo":            calc["cajas"],
-                "total_kilos_vehiculo":            calc["kilos"],
-                "total_kilos_vehiculo_sicetac":    calc["kilos_sic"],
-                "total_puntos_vehiculo":           calc["puntos"],
-                "total_puntos":                    calc["puntos"],
-                "valor_flete_sistema":             calc["tbase"],
-                "punto_adicional_teorico":         calc["pto_teo"],
-                "cargue_descargue_teorico":        calc["carg_teo"],
-                "costo_teorico_vehiculo":          calc["costo_teo"],
-                "total_flete_solicitado":          calc["tflete"],
-                "total_cargue_descargue":          calc["tcarg"],
-                "total_desvio_vehiculo":           calc["tdesv"],
-                "total_punto_adicional":           calc["tpad"],
-                "total_flete_vehiculo":            calc["creal"],
-                "diferencia_flete":                calc["creal"] - calc["costo_teo"],
-                "estado":                          calc["estado"],
-                "porcentaje_sobre_teorico":        calc["porc"],
-                "autorizado_por":                  "SISTEMA" if calc["estado"] == "PREAUTORIZADO" else "NA",
-                "fecha_autorizacion":              ahora_str if calc["estado"] == "PREAUTORIZADO" else "NA",
-                "usuario_division":                usuario,
-                "observacion_division":            (payload.observacion_division or ""),
-                "fecha_division":                  ahora_str,
-            }}
+            {"$set": update_set}
         )
 
     # 6) Movimientos por filtro (si los hay) – actualiza CV y sufijos de CI/CP
@@ -2624,21 +2785,29 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
 
     # 9) Recalcular por carro (tipo_vehiculo_sicetac calculado por kilos del grupo)
+    #    Calculamos TODOS los grupos primero, validamos la causal de sobre costo
+    #    y sólo entonces aplicamos (evita una división a medias si falta la causal).
+    grupos_a_aplicar = []  # [(cv, calc), ...]
     if docs_A:
-        calc_A = _calc(docs_A, payload.grupo_A.overrides if payload.grupo_A else None)
-        _apply(cv_origen, calc_A)
-
+        grupos_a_aplicar.append((cv_origen, _calc(docs_A, payload.grupo_A.overrides if payload.grupo_A else None)))
     if docs_B2:
-        calc_B = _calc(docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)
-        _apply(cv_B, calc_B)
-
+        grupos_a_aplicar.append((cv_B, _calc(docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)))
     if docs_C2:
-        calc_C = _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)
-        _apply(cv_C, calc_C)
-
+        grupos_a_aplicar.append((cv_C, _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)))
     if docs_D2:
-        calc_D = _calc(docs_D2, payload.grupo_D.overrides if payload.grupo_D else None)
-        _apply(cv_D, calc_D)
+        grupos_a_aplicar.append((cv_D, _calc(docs_D2, payload.grupo_D.overrides if payload.grupo_D else None)))
+
+    # Pre-validación: si cualquier vehículo resultante genera sobre costo, exige causal
+    for cv, calc in grupos_a_aplicar:
+        if (calc["creal"] - calc["costo_teo"]) > 0 and not (payload.causal_sobrecosto or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"La división genera un sobre costo en {cv}; selecciona una causal del sobre costo."
+            )
+
+    # Aplicar (ya validado)
+    for cv, calc in grupos_a_aplicar:
+        _apply(cv, calc)
 
     resumen = {
         "A": {"vehiculo": cv_origen, "docs": len(docs_A)},
@@ -2705,7 +2874,7 @@ async def pbi_documentos(
     ]
 
     try:
-        raw = list(coleccion_pedidos.aggregate(pipeline))
+        raw = list(coleccion_pedidos.aggregate(pipeline, allowDiskUse=True))
     except Exception as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error en aggregation: {e}")
 

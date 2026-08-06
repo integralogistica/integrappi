@@ -607,3 +607,27 @@ El servicio en Render se caía (OOM kill silencioso, sin log) al procesar PDFs d
 - **Eliminado el campo `concepto`** del modelo `CostoConcepto` (queda `tipo_costo`, `descripcion`, `valor`), la validación y las tablas. La descripción ya cumplía esa función. Datos viejos inertes en Mongo.
 - **Eliminado `observaciones`** de `CrearOtroCostoRequest`/`EditarOtroCostoRequest` y del guardado/edición. (No se tocó `observaciones` del pago en `RegistrarPagoRequest`.)
 - **Tope `LIMITE_VALOR_SOLICITUD = 5_000_000`**: en `_validar_solicitud` (crear y editar) se rechaza con 422 si el valor total supera $5.000.000.
+
+## Actualizaciones Recientes (2026-08-06)
+
+### Pedidos V3 (`rutas/pedidos.py`) — ahorro/observación, causal del sobre costo y fix de memoria
+
+#### Ahorro y observación en edición de vehículos
+- Modelo `AjusteVehiculo` + endpoint `PUT /pedidos/ajustar-totales-vehiculo`: nuevos campos `ahorro` (float, máx 5.000.000) y `observacion` (str). Se validan (`HTTPException 400` si `ahorro > 5.000.000`) y se persisten en `update_fields` de `coleccion_pedidos` por `consecutivo_vehiculo`. Son **metadata**: no participan de `costo_real`, `diferencia_flete` ni `estado`.
+- Agregaciones `listar_pedidos_vehiculos` y `listar_vehiculos_completados`: exponen `ahorro`/`observacion` (`$first`) en el `$group` y en la respuesta.
+
+#### Causal del sobre costo en fusión y división (fix del «sin definir»)
+- La causal del sobre costo es el campo `Observaciones_ajustes`. **Fusión** (`fusionar-vehiculos`) y **división** (`dividir-vehiculo`) recalculaban `diferencia_flete` pero nunca seteaban la causal → los sobre costos quedaban sin causal.
+- Nuevo campo `causal_sobrecosto` en `FusionVehiculosPayload` y `DividirHastaTresPayload`: si la operación genera sobre costo (`costo_real - costo_teorico > 0`) y no viene causal → **HTTP 400**; si viene, se guarda en `Observaciones_ajustes`.
+- La **división** calcula todos los carros resultantes, pre-valida la causal y **sólo entonces aplica** (evita una división a medias si falla la validación).
+- Nuevo `PUT /pedidos/asignar-causal-completado` (modelo `AsignarCausalCompletadoPayload`): setea `Observaciones_ajustes` (+`usuario_causal`/`fecha_causal`) en `pedidos_completados` por `consecutivo_vehiculo`, para arreglar históricos.
+
+#### Excel de PedidosCompletados reestructurado (`GET /pedidos/exportar-completados`)
+- Antes: `pd.DataFrame(docs)` sobre `find()` → volcado crudo con nombres snake_case.
+- Ahora: **una sola hoja** con **una fila por pedido/planilla** (query plana, sin `$group`), nombres legibles y primera columna **Fecha** en `DD/MM/AAAA`. Incluye **Planilla** (`planilla_siscore`) y **Destinatario (Ubicación Descargue)**; los totales del vehículo (flete, sobre costo, causal, ahorro) se repiten por pedido etiquetados «(vehículo)». Columna «Causal del sobre costo» = `Sin causal` cuando hay sobre costo sin causal.
+
+#### Fix de memoria/cuelgue con rangos largos (6+ meses)
+- Las agregaciones con `$sort` superaban el límite de **32 MB** de MongoDB → `OperationFailure` **code 292** (`QueryExceededMemoryLimitNoDiskUseAllowed`), porque el `$group` arrastraba `pedidos: $$ROOT` (docs completos).
+- **`$push` slim** en `listar-vehiculo-completados` y `exportar-completados`: sólo los ~11 campos del detalle en vez de `$$ROOT` → **5,6× menos datos** (18 MB → 3,3 MB a 6 meses) y **6× más rápido**.
+- **`allowDiskUse=True`** en las 4 agregaciones (`listar_pedidos_vehiculos`, `listar-vehiculo-completados`, `exportar-completados` y el agregado interno de listado por destinatarios) → Mongo usa disco y nunca falla por el tope de memoria.
+- **`asyncio.to_thread`** en `listar-vehiculo-completados` → la agregación bloqueante no cuelga el event loop (mismo patrón que el fix OOM de `banco.py`).
