@@ -220,6 +220,19 @@ PLANTILLA_ANALISTAS_PEDIDOS_IDIOMA = "es_CO"
 PLANTILLA_SOLICITUD_AUTORIZACION_NOMBRE = "solicitud_autorizacion"
 PLANTILLA_SOLICITUD_AUTORIZACION_IDIOMA = "es_CO"
 
+# Notificación WhatsApp: aviso al operativo cuando le devuelven una planilla para corrección.
+# Plantilla "devolucion_planilla" (Meta, es_CO), texto sugerido:
+#   Hola {{1}}, la planilla {{2}} fue devuelta para corrección: {{3}}. Revísala en integrApp.
+# Mapeo de variables:
+#   {{1}} = nombre del operativo que registró la planilla
+#   {{2}} = número de planilla o consecutivo
+#   {{3}} = motivo de la devolución (qué debe corregir)
+# ⚠️ Requiere crear/aprobar la plantilla en Meta Business Manager. Mientras no exista, el envío
+#    falla en silencio (solo log) y la devolución igual se completa (el motivo queda visible en la app).
+# ----------------------------------------------------------------------------
+PLANTILLA_DEVOLUCION_NOMBRE = "devolucion_planilla"
+PLANTILLA_DEVOLUCION_IDIOMA = "es_CO"
+
 
 def _normalizar_celular_co(celular: Optional[str]) -> Optional[str]:
     """Convierte un celular a formato internacional Colombia: solo dígitos con prefijo 57."""
@@ -270,6 +283,54 @@ def _notificar_pedido_creado_whatsapp(doc: dict, pedido: str):
             logger.warning(f"[NOTIF PEDIDO] WhatsApp NO enviado a {celular} ({nombre}) — revisar tokens o idioma de la plantilla '{PLANTILLA_PEDIDO_CREADO_NOMBRE}'.")
     except Exception as e:
         logger.error(f"[NOTIF PEDIDO] Error inesperado: {e}")
+
+
+def _notificar_devolucion_operativo(doc: dict, motivo: str):
+    """
+    Envía WhatsApp al operativo que registró la planilla (usuario_registro) para avisar
+    que le fue devuelta para corrección, junto con el motivo.
+
+    Usa la plantilla "devolucion_planilla" (Meta, es_CO).
+    Es a prueba de fallos: si algo falla solo queda en log (no rompe la devolución).
+
+    Variables de la plantilla "devolucion_planilla":
+      {{1}} = nombre del operativo
+      {{2}} = número de planilla o consecutivo
+      {{3}} = motivo de la devolución (truncado a 200 car. por seguridad de la plantilla)
+    """
+    try:
+        usuario_registro = (doc.get("usuario_registro") or "").strip()
+        if not usuario_registro:
+            logger.info("[NOTIF DEVOLUCION] Doc sin usuario_registro; no se notifica.")
+            return
+
+        usuario_doc = coleccion_baseusuarios.find_one({"usuario": usuario_registro.upper()})
+        if not usuario_doc:
+            logger.info(f"[NOTIF DEVOLUCION] Usuario '{usuario_registro}' no está en baseusuarios; no se notifica.")
+            return
+
+        celular = _normalizar_celular_co(usuario_doc.get("celular"))
+        if not celular:
+            logger.info(f"[NOTIF DEVOLUCION] Usuario '{usuario_registro}' sin celular válido; no se notifica.")
+            return
+
+        nombre = (usuario_doc.get("nombre") or usuario_registro).strip()
+        planilla = doc.get("consecutivo") or doc.get("planilla") or ""
+        # Truncar el motivo: las variables de cuerpo de plantillas de Meta tienen límites.
+        motivo_texto = (motivo or "")[:200]
+
+        res = enviar_template_sync(
+            to=celular,
+            template_name=PLANTILLA_DEVOLUCION_NOMBRE,
+            language_code=PLANTILLA_DEVOLUCION_IDIOMA,
+            body_params=[nombre, str(planilla), motivo_texto],
+        )
+        if res:
+            logger.info(f"[NOTIF DEVOLUCION] WhatsApp OK -> {celular} ({nombre}) | planilla={planilla} motivo='{motivo_texto}'")
+        else:
+            logger.warning(f"[NOTIF DEVOLUCION] WhatsApp NO enviado a {celular} ({nombre}) — revisar tokens o que la plantilla '{PLANTILLA_DEVOLUCION_NOMBRE}' exista y esté aprobada en Meta.")
+    except Exception as e:
+        logger.error(f"[NOTIF DEVOLUCION] Error inesperado: {e}")
 
 
 def _notificar_analistas_cambio_estado(doc: dict, estado_anterior: str, estado_nuevo: str):
@@ -559,8 +620,9 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
 class ActualizarEstadoPlanillaRequest(BaseModel):
     """Modelo para actualizar el estado de aprobación de una planilla"""
     planilla: str
-    estado: str  # 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
-    aprobado_por: str  # Usuario que aprueba
+    estado: str  # 'CREADO', 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
+    aprobado_por: str  # Usuario que aprueba o que devuelve
+    motivo_devolucion: Optional[str] = None  # Motivo cuando se devuelve a CREADO (rechazo de coordinador/control)
 
 
 # ============= ENDPOINT IMPORTAR VULCANO =============
@@ -3232,12 +3294,17 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         # Obtener historial existente
         historial_cambios = doc_actual.get("historial_cambios", [])
 
+        # Detectar DEVOLUCIÓN a CREADO con motivo (rechazo de coordinador/control/admin
+        # para que el operativo corrija). Se distingue de la reapertura genérica (sin motivo).
+        motivo = (request.motivo_devolucion or "").strip()
+        es_devolucion = request.estado == "CREADO" and bool(motivo)
+
         # Si el estado cambió, agregar al historial
         if request.estado != estado_anterior:
             nuevo_historial = {
                 "fecha": fecha_actual,
                 "usuario": request.aprobado_por,
-                "accion": "cambio_estado",
+                "accion": "devolucion" if es_devolucion else "cambio_estado",
                 "campos_modificados": [
                     {
                         "campo": "estado",
@@ -3246,6 +3313,8 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
                     }
                 ]
             }
+            if es_devolucion:
+                nuevo_historial["motivo"] = motivo
             historial_cambios.append(nuevo_historial)
 
             logger.info(f"[TRAZABILIDAD] Cambio de estado: {estado_anterior} → {request.estado} por {request.aprobado_por}")
@@ -3258,6 +3327,9 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
 
                 # Notificar a coordinadores/control si requiere su autorización
                 _notificar_solicitud_autorizacion(doc_actual, request.estado)
+            elif es_devolucion:
+                # Devolución con motivo: avisar al operativo qué debe corregir.
+                _notificar_devolucion_operativo(doc_actual, motivo)
 
         # Campos a actualizar
         campos_actualizar = {
@@ -3266,6 +3338,12 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             "fecha_aprobacion": fecha_actual if request.estado == "APROBADO" else None,
             "historial_cambios": historial_cambios
         }
+
+        # Trazabilidad de la devolución (rechazo con motivo hacia el operativo).
+        if es_devolucion:
+            campos_actualizar["motivo_devolucion"] = motivo
+            campos_actualizar["devuelto_por"] = request.aprobado_por
+            campos_actualizar["fecha_devolucion"] = fecha_actual
 
         # Registrar la fecha en que dejó de ser CREADO (visible para todos), sea cual sea
         # el estado destino (PREAPROBADO, REQUIERE_APROBACION_* o APROBADO). En otros

@@ -465,6 +465,7 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
             "flete_real": float(fila["FLETE_REAL"] or 0),
             "destino_real": destino_real_up,
             "creado_por": usuario_db["usuario"],
+            "usr_solicita_ajuste": usuario_db["usuario"],   # Despachador responsable: nace con el vehículo
             "regional": region,
             "consecutivo_pedido": cons,
             "consecutivo_integrapp": cons_int,
@@ -1871,6 +1872,46 @@ async def asignar_causal_completado(payload: AsignarCausalCompletadoPayload):
         "docs_actualizados": res.modified_count
     }
 
+
+class BackfillDespachadorPayload(BaseModel):
+    usuario: str
+
+
+@ruta_pedidos.post(
+    "/backfill-despachador",
+    response_model=dict,
+    summary="Llenar usr_solicita_ajuste (Despachador) en vehículos que lo tienen vacío (sólo ADMIN)"
+)
+async def backfill_despachador(payload: BackfillDespachadorPayload):
+    """Rellena el Despachador de los vehículos que nacieron sin el campo (cargados antes
+    del fix). Toma `creado_por`; si tampoco existe, deja "SISTEMA". Idempotente."""
+    usuario = (payload.usuario or "").upper().strip()
+    user = coleccion_usuarios.find_one({"usuario": usuario})
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+    if (user.get("perfil") or "").upper() != "ADMIN":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sólo ADMIN puede ejecutar el backfill")
+
+    # Sólo documentos sin Despachador (campo ausente, nulo o vacío)
+    filtro = {"$or": [
+        {"usr_solicita_ajuste": {"$exists": False}},
+        {"usr_solicita_ajuste": None},
+        {"usr_solicita_ajuste": ""},
+    ]}
+    # Pipeline update: usr_solicita_ajuste = creado_por, o "SISTEMA" si éste también falta
+    res = coleccion_pedidos.update_many(
+        filtro,
+        [{"$set": {"usr_solicita_ajuste": {
+            "$cond": [{"$in": [{"$ifNull": ["$creado_por", ""]}, [None, ""]]},
+                      "SISTEMA", "$creado_por"]
+        }}}]
+    )
+    return {
+        "mensaje": "Backfill de Despachador completado",
+        "docs_actualizados": res.modified_count
+    }
+
+
 # ------------------------------
 # 🗂 Listar sólo vehículos COMPLETADOS
 # ------------------------------
@@ -2213,6 +2254,13 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
                 detail="La fusión genera un sobre costo; selecciona una causal del sobre costo."
             )
 
+        # Despachador: hereda el primer valor asignado entre los originales, o el usuario que fusiona
+        usr_fusion = next(
+            ((d.get("usr_solicita_ajuste") or "").strip()
+             for d in docs if (d.get("usr_solicita_ajuste") or "").strip()),
+            usuario
+        )
+
         # 9) Update masivo (incluye CI del primer carro)
         set_fields = {
             "consecutivo_vehiculo":             target_cv,
@@ -2251,6 +2299,7 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
             "usuario_fusion":                   usuario,
             "observacion_fusion":               (payload.observacion_fusion or ""),
             "fecha_fusion":                     ahora_str,
+            "usr_solicita_ajuste":              usr_fusion,
         }
 
         # Si la fusión genera sobre costo, fijar la causal (Observaciones_ajustes)
@@ -2378,6 +2427,18 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
     if len(origenes) != 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "El vehículo origen debe tener ORIGEN homogéneo")
     origen_tarifa = next(iter(origenes))
+
+    # Despachador: asegurar usr_solicita_ajuste en el vehículo origen antes de dividir,
+    # así todos los vehículos resultantes (A/B/C/D y los clones por kilo) lo heredan.
+    usr_origen = next(
+        ((d.get("usr_solicita_ajuste") or "").strip()
+         for d in docs_origen if (d.get("usr_solicita_ajuste") or "").strip()),
+        usuario
+    )
+    coleccion_pedidos.update_many(
+        {"consecutivo_vehiculo": cv_origen},
+        {"$set": {"usr_solicita_ajuste": usr_origen}}
+    )
 
     # --- Normalizador
     def _norm(s: str) -> str:
