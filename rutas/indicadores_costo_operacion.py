@@ -50,6 +50,17 @@ logger = logging.getLogger(__name__)
 # 5 h en milisegundos (UTC-5 Colombia). Para restar a un Date en aggregation.
 _MS_5H = 5 * 60 * 60 * 1000
 
+# Etiquetas (nombres visibles) de las 3 etapas del viaje. Las CLAVES (media_milla,
+# ultima_milla, otros_costos) son técnicas y se usan en toda la API/agregaciones: NO
+# se cambian (romperían el contrato backend↔frontend). Para renombrar lo que ve el
+# usuario en el tablero, editar aquí los VALORES y reiniciar el backend (Render).
+# El frontend las recibe en ``data.etiquetas`` de /resumen (con fallback local).
+ETAPAS = {
+    "media_milla": "Fresenius kabi",
+    "ultima_milla": "Última milla general",
+    "otros_costos": "Otros costos",
+}
+
 
 def _num(field: str) -> dict:
     """Convierte un campo a double de forma segura (0 si nulo/no numérico)."""
@@ -159,46 +170,60 @@ def _pipeline_media_milla(anios: List[int], meses: List[int], clientes: Optional
         ]}})
     # DEDUP por vehículo: el costo total_flete_vehiculo y la diferencia_flete están
     # duplicados en cada doc del vehículo; tomamos uno solo antes de sumar por período.
+    # total_cajas_vehiculo también vive a nivel vehículo, así que se toma igual (first).
     pipeline += [
         {"$group": {
             "_id": "$consecutivo_vehiculo",
             "costo": {"$first": _num("total_flete_vehiculo")},
             "diferencia": {"$first": _num("diferencia_flete")},
+            "cajas": {"$first": _num("total_cajas_vehiculo")},
             "fecha_creacion": {"$first": "$fecha_creacion"},
             "nombre_cliente": {"$first": {"$ifNull": ["$nombre_cliente", ""]}},
         }},
         {"$facet": {
             # Costo, sobrecosto (diferencia>0) y ahorro (diferencia<0, negativo) por mes.
+            # cajas_media = total_cajas_vehiculo (cajas) sumado por período.
             "mensual": [
                 {"$group": {
                     "_id": {"$substrCP": ["$fecha_creacion", 0, 7]},
                     "media_milla": {"$sum": "$costo"},
+                    "cajas_media": {"$sum": "$cajas"},
                     "sobrecosto": {"$sum": {"$max": ["$diferencia", 0]}},
                     "ahorro": {"$sum": {"$min": ["$diferencia", 0]}},
                 }},
                 {"$sort": {"_id": 1}},
-                {"$project": {"_id": 0, "periodo": "$_id", "media_milla": 1, "sobrecosto": 1, "ahorro": 1}},
+                {"$project": {"_id": 0, "periodo": "$_id", "media_milla": 1, "cajas_media": 1, "sobrecosto": 1, "ahorro": 1}},
             ],
             "diario": [
                 {"$group": {
                     "_id": {"$substrCP": ["$fecha_creacion", 0, 10]},
                     "media_milla": {"$sum": "$costo"},
+                    "cajas_media": {"$sum": "$cajas"},
                     "sobrecosto": {"$sum": {"$max": ["$diferencia", 0]}},
                     "ahorro": {"$sum": {"$min": ["$diferencia", 0]}},
                 }},
                 {"$sort": {"_id": 1}},
-                {"$project": {"_id": 0, "periodo": "$_id", "media_milla": 1, "sobrecosto": 1, "ahorro": 1}},
+                {"$project": {"_id": 0, "periodo": "$_id", "media_milla": 1, "cajas_media": 1, "sobrecosto": 1, "ahorro": 1}},
             ],
         }},
     ]
     return pipeline
 
 
-def _facet_datetime_utc(campo: str, valor_field: str, out_key: str, dif_field: Optional[str] = None) -> dict:
+def _facet_datetime_utc(
+    campo: str,
+    valor_field: str,
+    out_key: str,
+    dif_field: Optional[str] = None,
+    cajas_field: Optional[str] = None,
+    cajas_key: Optional[str] = None,
+) -> dict:
     """$facet mensual+diario sobre un campo datetime UTC (resta 5 h).
 
     Si se pasa ``dif_field``, suma también el sobrecosto (diferencia>0) y el ahorro
-    (diferencia<0, como número negativo) para el gráfico divergente."""
+    (diferencia<0, como número negativo) para el gráfico divergente.
+    Si se pasa ``cajas_field`` (+ ``cajas_key``), suma la cantidad de cajas/piezas
+    como ``cajas_<etapa>`` para el gráfico de líneas de cajas."""
     def _gran(fmt: str) -> list:
         group = {
             "_id": {"$dateToString": {"format": fmt, "date": {"$subtract": [f"${campo}", _MS_5H]}}},
@@ -210,9 +235,152 @@ def _facet_datetime_utc(campo: str, valor_field: str, out_key: str, dif_field: O
             group["ahorro"] = {"$sum": {"$min": [_num(dif_field), 0]}}
             project["sobrecosto"] = 1
             project["ahorro"] = 1
+        if cajas_field and cajas_key:
+            group[cajas_key] = {"$sum": _num(cajas_field)}
+            project[cajas_key] = 1
         return [{"$group": group}, {"$sort": {"_id": 1}}, {"$project": project}]
 
     return {"mensual": _gran("%Y-%m"), "diario": _gran("%Y-%m-%d")}
+
+
+# ── Sobrecosto por regional / destino (drill-down media milla) ──────────────
+
+def _base_lookup_cliente() -> list:
+    """Bloque reutilizable: lookup del nombre de cliente por NIT."""
+    return [
+        {"$lookup": {
+            "from": "clientes",
+            "localField": "nit_cliente",
+            "foreignField": "nit",
+            "as": "_cli",
+        }},
+        {"$set": {"nombre_cliente": {"$ifNull": [
+            {"$arrayElemAt": ["$_cli.nombre", 0]},
+            {"$ifNull": ["$nombre_cliente", None]},
+        ]}}},
+        {"$project": {"_cli": 0}},
+    ]
+
+
+def _expr_regional_de_consecutivo() -> dict:
+    """Expr de agregación que extrae la REGIONAL del ``consecutivo_vehiculo``.
+
+    El consecutivo tiene la forma ``<ORIGEN>-<FECHA1>-<X>-<FECHA2>-<REGIONAL>-<N>``
+    donde la regional NO contiene guiones (puede tener espacios, ej. "EJE CAFETERO")
+    y ``<N>`` es el índice final. La regional es el segmento entre el penúltimo y el
+    último guion → anteúltimo elemento de ``$split(consecutivo, "-")``.
+    Ej: "CELTA-20250924-M-2025924-EJE CAFETERO-1" → "EJE CAFETERO"."""
+    return {
+        "$let": {
+            "vars": {"partes": {"$split": [{"$ifNull": ["$consecutivo_vehiculo", ""]}, "-"]}},
+            "in": {
+                "$ifNull": [
+                    {"$arrayElemAt": ["$$partes", {"$subtract": [{"$size": "$$partes"}, 2]}]},
+                    "SIN REGIONAL",
+                ],
+            },
+        }
+    }
+
+
+def _pipeline_sobrecosto_por_regional(anios: List[int], meses: List[int], clientes: List[str]) -> list:
+    """Sobrecosto por REGIONAL: dedup por vehículo y agrupa por la regional extraída
+    del ``consecutivo_vehiculo`` (segmento entre el penúltimo y el último guion).
+
+    Devuelve, por regional: sobrecosto (Σ diferencias>0), ahorro (Σ diferencias<0,
+    negativo), costo_real (Σ total_flete_vehiculo) y despachos."""
+    pipeline = [{"$match": _filtro_media_milla(anios, meses)}] + _base_lookup_cliente()
+    if clientes:
+        cl = list(clientes)
+        pipeline.append({"$match": {"$or": [
+            {"nombre_cliente": {"$in": cl}},
+            {"nit_cliente": {"$in": cl}},
+        ]}})
+    pipeline += [
+        # La regional sale del consecutivo_vehiculo (no del campo `regional`).
+        {"$set": {"_regional": _expr_regional_de_consecutivo()}},
+        # DEDUP por vehículo: diferencia_flete y total_flete_vehiculo están
+        # duplicados en cada doc del vehículo → tomamos uno solo antes de sumar.
+        {"$group": {
+            "_id": "$consecutivo_vehiculo",
+            "regional": {"$first": "$_regional"},
+            "diferencia": {"$first": _num("diferencia_flete")},
+            "costo_real": {"$first": _num("total_flete_vehiculo")},
+        }},
+        {"$group": {
+            "_id": "$regional",
+            "sobrecosto": {"$sum": {"$max": ["$diferencia", 0]}},
+            "ahorro": {"$sum": {"$min": ["$diferencia", 0]}},
+            "costo_real": {"$sum": "$costo_real"},
+            "despachos": {"$sum": 1},
+        }},
+        {"$project": {"_id": 0, "regional": "$_id", "sobrecosto": 1, "ahorro": 1,
+                      "costo_real": 1, "despachos": 1}},
+    ]
+    return pipeline
+
+
+def _pipeline_sobrecosto_por_destino(
+    regional: str, anios: List[int], meses: List[int], clientes: List[str]
+) -> list:
+    """Sobrecosto por DESTINO de una regional.
+
+    Reparte la `diferencia_flete` de cada vehículo entre sus destinos
+    proporcionalmente a las cajas (`num_cajas`). Si el vehículo no tiene cajas,
+    reparte equitativamente entre sus destinos (1 / n_destinos). El nº de destinos
+    se obtiene con un $group intermedio por vehículo + $push."""
+    pipeline = [
+        {"$match": _filtro_media_milla(anios, meses)},
+        # La regional se filtra por la extraída del consecutivo (no existe campo).
+        {"$set": {"_regional": _expr_regional_de_consecutivo()}},
+        {"$match": {"_regional": regional}},
+    ] + _base_lookup_cliente()
+    if clientes:
+        cl = list(clientes)
+        pipeline.append({"$match": {"$or": [
+            {"nombre_cliente": {"$in": cl}},
+            {"nit_cliente": {"$in": cl}},
+        ]}})
+    pipeline += [
+        # 1) Por (vehículo, destino): cajas del destino + campos del vehículo.
+        {"$group": {
+            "_id": {"vehiculo": "$consecutivo_vehiculo", "destino": {"$ifNull": ["$destino_real", "SIN DESTINO"]}},
+            "num_cajas_destino": {"$sum": _num("num_cajas")},
+            "diferencia": {"$first": _num("diferencia_flete")},
+            "total_cajas_vehiculo": {"$first": _num("total_cajas_vehiculo")},
+        }},
+        # 2) Por vehículo: colecciona sus destinos y cuenta cuántos son (para el
+        #    fallback equitativo cuando total_cajas_vehiculo == 0).
+        {"$group": {
+            "_id": "$_id.vehiculo",
+            "destinos": {"$push": {
+                "destino": "$_id.destino",
+                "num_cajas_destino": "$num_cajas_destino",
+                "diferencia": "$diferencia",
+                "total_cajas_vehiculo": "$total_cajas_vehiculo",
+            }},
+            "n_destinos": {"$sum": 1},
+        }},
+        {"$unwind": "$destinos"},
+        # 3) Proporción del sobrecosto del vehículo que toca a este destino.
+        {"$set": {
+            "proporcion": {"$cond": [
+                {"$gt": ["$destinos.total_cajas_vehiculo", 0]},
+                {"$divide": ["$destinos.num_cajas_destino", "$destinos.total_cajas_vehiculo"]},
+                {"$divide": [1, "$n_destinos"]},
+            ]},
+        }},
+        {"$set": {"sobrecosto_destino": {"$multiply": ["$destinos.diferencia", "$proporcion"]}}},
+        # 4) Suma por destino + cuenta despachos (un subgrupo (vehículo,destino) = 1).
+        {"$group": {
+            "_id": "$destinos.destino",
+            "sobrecosto": {"$sum": "$sobrecosto_destino"},
+            "despachos": {"$sum": 1},
+        }},
+        {"$project": {"_id": 0, "destino": "$_id", "sobrecosto": 1, "despachos": 1}},
+        {"$sort": {"sobrecosto": -1}},
+    ]
+    return pipeline
 
 
 # ── Listas para selectores ──────────────────────────────────────────────────
@@ -297,10 +465,16 @@ def _merge_series(series: dict) -> tuple:
     """Combina las series mensual/diaria de las 3 fuentes en una lista por período.
 
     Cada fuente aporta sus medidas (media_milla, ultima_milla, otros_costos y, para
-    media/última milla, sobrecosto y ahorro). Se suman todas por período: los costos
-    por su clave propia y sobrecosto/ahorro combinan media + última milla.
-    Devuelve (serieMensual, serieDiaria) ordenadas por período, con total."""
-    MEDIDAS = ("media_milla", "ultima_milla", "otros_costos", "sobrecosto", "ahorro")
+    media/última milla, sobrecosto y ahorro) más las cajas/piezas de cada etapa
+    (cajas_media, cajas_ultima, cajas_otros). Se suman todas por período: los costos
+    por su clave propia, sobrecosto/ahorro combinan media + última milla, y las cajas
+    se acumulan por etapa y en un total_cajas.
+    Devuelve (serieMensual, serieDiaria) ordenadas por período, con total y total_cajas."""
+    MEDIDAS = (
+        "media_milla", "ultima_milla", "otros_costos",
+        "sobrecosto", "ahorro",
+        "cajas_media", "cajas_ultima", "cajas_otros",
+    )
 
     def _merge(gran: str) -> list:
         merged: dict = {}
@@ -319,6 +493,7 @@ def _merge_series(series: dict) -> tuple:
                 b[m] = round(b[m])
             b["periodo"] = p
             b["total"] = b["media_milla"] + b["ultima_milla"] + b["otros_costos"]
+            b["total_cajas"] = b["cajas_media"] + b["cajas_ultima"] + b["cajas_otros"]
             out.append(b)
         return out
 
@@ -367,11 +542,17 @@ async def get_resumen_costo_operacion(
             _run(col_completados, _pipeline_media_milla(anios, meses, clientes)),
             _run(coleccion_historico, [
                 {"$match": um_filtro},
-                {"$facet": _facet_datetime_utc("fecha_movimiento_historico", "total_solicitado", "ultima_milla", "diferencia")},
+                {"$facet": _facet_datetime_utc(
+                    "fecha_movimiento_historico", "total_solicitado", "ultima_milla", "diferencia",
+                    cajas_field="piezas", cajas_key="cajas_ultima",
+                )},
             ]),
             _run(col_otros, [
                 {"$match": oc_filtro},
-                {"$facet": _facet_datetime_utc("created_at", "valor_total", "otros_costos")},
+                {"$facet": _facet_datetime_utc(
+                    "created_at", "valor_total", "otros_costos",
+                    cajas_field="datos_servicio.piezas", cajas_key="cajas_otros",
+                )},
             ]),
         )
 
@@ -410,10 +591,66 @@ async def get_resumen_costo_operacion(
                 "serieDiaria": serie_diaria,
                 "anios": anios_disponibles,
                 "clientes": clientes_disponibles,
+                "etiquetas": dict(ETAPAS),
             },
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
         logger.error(f"[COSTO_OPERACION] Error en /resumen: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sobrecosto-por-regional")
+async def get_sobrecosto_por_regional(
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
+    cliente: Optional[List[str]] = Query(None),
+):
+    """Sobrecosto por regional (media milla) para el período filtrado.
+
+    Devuelve ``data.regionales``: [{regional, sobrecosto, ahorro, costo_real,
+    despachos}]. Cada despacho = un vehículo (deduplicado por consecutivo_vehiculo).
+    """
+    try:
+        anios = [int(a) for a in anio] if anio else []
+        meses = [int(m) for m in mes] if mes else []
+        clientes = [str(c) for c in cliente] if cliente else []
+        docs = await asyncio.to_thread(lambda: list(col_completados.aggregate(
+            _pipeline_sobrecosto_por_regional(anios, meses, clientes),
+            allowDiskUse=True,
+        )))
+        return {"success": True, "data": {"regionales": docs}}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger.error(f"[COSTO_OPERACION] Error en /sobrecosto-por-regional: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sobrecosto-por-destino")
+async def get_sobrecosto_por_destino(
+    regional: str = Query(..., description="Regional/bodega a desglosar"),
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
+    cliente: Optional[List[str]] = Query(None),
+):
+    """Sobrecosto por destino de una regional (media milla).
+
+    Reparte la ``diferencia_flete`` de cada vehículo entre sus destinos
+    proporcionalmente a las cajas. Devuelve ``data.destinos``: [{destino,
+    sobrecosto, despachos}] ordenado por sobrecosto desc."""
+    try:
+        anios = [int(a) for a in anio] if anio else []
+        meses = [int(m) for m in mes] if mes else []
+        clientes = [str(c) for c in cliente] if cliente else []
+        docs = await asyncio.to_thread(lambda: list(col_completados.aggregate(
+            _pipeline_sobrecosto_por_destino(str(regional), anios, meses, clientes),
+            allowDiskUse=True,
+        )))
+        return {"success": True, "data": {"destinos": docs}}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger.error(f"[COSTO_OPERACION] Error en /sobrecosto-por-destino: {e}")
         raise HTTPException(status_code=500, detail=str(e))
