@@ -614,6 +614,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     municipio_destino: Optional[str] = None  # Municipio principal elegido manualmente
     ahorro: Optional[float] = None  # Ahorro operativo generado (máx. $5.000.000)
     observacion: Optional[str] = None  # Observación textual que explica el ahorro
+    observacion_causal: Optional[str] = None  # Texto libre que explica/amplía la causal elegida (máx. 1000 chars)
     usuario_modificacion: str  # Usuario que está editando (trazabilidad)
 
 
@@ -3150,6 +3151,14 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
                 "valor_anterior": doc_actual.get("causal"),
                 "valor_nuevo": request.causal
             })
+        # Observación textual de la causal (texto libre, opcional, máx. 1000 chars)
+        obs_causal_nueva = (request.observacion_causal or "")[:1000]
+        if obs_causal_nueva != (doc_actual.get("observacion_causal") or ""):
+            campos_modificados.append({
+                "campo": "observacion_causal",
+                "valor_anterior": doc_actual.get("observacion_causal"),
+                "valor_nuevo": obs_causal_nueva
+            })
 
         # Registrar cambio de estado
         estado_anterior = doc_actual.get("estado", "PREAPROBADO")
@@ -3195,6 +3204,7 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
             "causal": request.causal,
             "ahorro": request.ahorro if request.ahorro is not None else 0,
             "observacion": request.observacion or "",
+            "observacion_causal": obs_causal_nueva,
             # Trazabilidad de modificación
             "usuario_modificacion": request.usuario_modificacion,
             "fecha_modificacion": fecha_actual,

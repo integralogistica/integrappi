@@ -219,10 +219,36 @@ async def _login(page, usuario: str, password: str, download_dir: Path):
     await page.wait_for_timeout(800)
 
 
+_SELECTORES_INPUT_BUSQUEDA = [
+    "input[name*='planilla' i]",
+    "input[name*='busca' i]",
+    "input[type='search']",
+    "input[type='text']",
+]
+
+
+async def _localizar_input_busqueda(popup, timeout_each: int = 5000):
+    """
+    Localiza el input de búsqueda visible en el popup probando varios selectores.
+    Devuelve el locator del primero que aparezca visible, o None si ninguno aparece.
+    """
+    for sel in _SELECTORES_INPUT_BUSQUEDA:
+        try:
+            loc = popup.locator(sel).first
+            await loc.wait_for(state="visible", timeout=timeout_each)
+            return loc
+        except Exception:
+            continue
+    return None
+
+
 async def _navegar_a_planilla_despacho(page, context, download_dir: Path):
     """
     Navega el menú y abre 'Planilla de despacho'. Devuelve la página (popup) donde
-    se opera la búsqueda. Si el portal abre una ventana nueva, devuelve esa página.
+    se opera la búsqueda. El portal abre esa opción en una ventana nueva; capturarla
+    es lo más frágil del flujo (especialmente por proxy/latencia en producción), por
+    lo que se intenta de varias formas y NUNCA lanza: si todo falla se devuelve la
+    página principal para que el error se reporte por planilla en vez de como 500.
     """
     # En sesión reutilizada el sidebar (acordeones Bootstrap) queda con submenús
     # abiertos; como son data-toggle="collapse", volver a hacer clic los COLAPSARÍA
@@ -242,21 +268,50 @@ async def _navegar_a_planilla_despacho(page, context, download_dir: Path):
         # Esperar la animación de colapso de Bootstrap (~350ms)
         await page.wait_for_timeout(700)
 
-    # 'Planilla de despacho' abre una ventana nueva (popup)
+    # Snapshot de páginas ANTES del clic: para detectar el popup que abra aunque
+    # expect_page no lo capture (race típico con latencia de proxy en producción).
+    paginas_previas = {id(p) for p in context.pages}
+    timeout_popup = _cfg_int("SISCORE_BOT_POPUP_TIMEOUT_MS", 40000)
+
     popup = None
+    # Estrategia 1: capturar la nueva página con expect_page (timeout holgado).
     try:
-        async with context.expect_page(timeout=15000) as popup_info:
+        async with context.expect_page(timeout=timeout_popup) as popup_info:
             ok = await _click_por_texto(page, TXT_PLANILLA_DESPACHO, timeout=12000)
             if not ok:
                 raise RuntimeError("No se pudo hacer clic en 'Planilla de despacho'")
         popup = await popup_info.value
-        await popup.wait_for_load_state("networkidle")
-        logger.info("[BOT] Popup de 'Planilla de despacho' capturado")
-    except Exception:
-        # Fallback: quizá navegó en la misma página (no abrió popup)
-        logger.warning("[BOT] No se capturó popup; se asume navegación en la misma página")
+        logger.info("[BOT] Popup de 'Planilla de despacho' capturado (expect_page)")
+    except Exception as e:
+        logger.warning(f"[BOT] expect_page no capturó popup ({e}); se busca ventana abierta")
+
+    # Estrategia 2: recuperar el popup de context.pages (abrió pero fuera de la
+    # ventana de expect_page). Es el caso más frecuente en producción por proxy.
+    if popup is None:
+        nuevas = [p for p in context.pages
+                  if id(p) not in paginas_previas and not p.is_closed()]
+        if nuevas:
+            popup = nuevas[-1]
+            logger.info(f"[BOT] Popup recuperado de context.pages ({len(nuevas)} nueva(s))")
+
+    # Estrategia 3 (última opción): asumir navegación en la misma página.
+    if popup is None:
+        logger.warning("[BOT] No había ventana nueva; se asume navegación en la misma página")
         await _debug_dump(page, "sin_popup", download_dir)
         popup = page
+
+    # Dar tiempo al popup a renderizar su contenido. Se usa domcontentloaded (no
+    # networkidle, que puede no asentar nunca si el portal hace polling) y luego se
+    # confirma que el input de búsqueda esté visible antes de devolver la página.
+    try:
+        await popup.wait_for_load_state("domcontentloaded", timeout=timeout_popup)
+    except Exception:
+        pass
+    timeout_input = max(5000, timeout_popup // 4)
+    if await _localizar_input_busqueda(popup, timeout_each=timeout_input):
+        logger.info("[BOT] Popup listo: campo de búsqueda visible")
+    else:
+        logger.warning("[BOT] El campo de búsqueda no apareció tras esperar")
 
     return popup
 
@@ -265,18 +320,7 @@ async def _procesar_planilla(popup, numero: str, download_dir: Path,
                              lookup_divipolas: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
     """Busca una planilla, descarga el Excel y devuelve los registros mapeados."""
     # Localizar input de búsqueda (campo de texto visible en el popup)
-    search_input = None
-    for sel in [
-        "input[name*='planilla' i]", "input[name*='busca' i]",
-        "input[type='search']", "input[type='text']",
-    ]:
-        try:
-            loc = popup.locator(sel).first
-            await loc.wait_for(state="visible", timeout=5000)
-            search_input = loc
-            break
-        except Exception:
-            continue
+    search_input = await _localizar_input_busqueda(popup)
     if not search_input:
         await _debug_dump(popup, f"sin_input_{numero}", download_dir)
         raise RuntimeError(f"Planilla {numero}: no se encontró el campo de búsqueda")
@@ -284,8 +328,8 @@ async def _procesar_planilla(popup, numero: str, download_dir: Path,
     await search_input.fill("")
     await search_input.fill(str(numero))
 
-    # Clic en 'Buscar' o Enter
-    if not await _click_por_texto(popup, "buscar", timeout=5000):
+    # Clic en 'Buscar' o Enter (timeout holgado: por proxy el botón tarda en ready)
+    if not await _click_por_texto(popup, "buscar", timeout=12000):
         await search_input.press("Enter")
     try:
         await popup.wait_for_load_state("networkidle")

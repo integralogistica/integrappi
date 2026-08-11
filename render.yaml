@@ -20,6 +20,8 @@ services:
         value: "false"
       - key: SISCORE_BOT_TIMEOUT_MS
         value: "120000"
+      - key: SISCORE_BOT_POPUP_TIMEOUT_MS
+        value: "40000"
       - key: SISCORE_BOT_DOWNLOAD_DIR
         value: "/tmp/descargas_siscore"
       # Secretos: definir en el dashboard de Render (no se commitean)
