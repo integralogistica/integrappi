@@ -603,7 +603,11 @@ def _jsonable(v):
 
 def _aplicar_visibilidad(doc: dict, perfil: str, usuario: Optional[str] = None) -> dict:
     """Enmascara datos bancarios sensibles salvo para ADMIN/FINANCIERO o el dueño
-    de la solicitud (que necesita verlos para editarlos)."""
+    de la solicitud (que necesita verlos para editarlos).
+
+    El ANALISTA, que tramita en Vulcano las solicitudes aprobadas, ve la **cédula
+    del titular** en claro (la necesita para el cruce), pero el **número de cuenta**
+    sigue enmascarado para él."""
     if perfil in {"FINANCIERO", "ADMIN"}:
         return doc
     if usuario and doc.get("usuario_registro") == usuario:
@@ -612,7 +616,8 @@ def _aplicar_visibilidad(doc: dict, perfil: str, usuario: Optional[str] = None) 
     if isinstance(db_, dict):
         db_ = dict(db_)
         db_["numero_cuenta"] = _enmascarar(db_.get("numero_cuenta", ""))
-        db_["cedula_titular"] = _enmascarar(db_.get("cedula_titular", ""))
+        if perfil != "ANALISTA":
+            db_["cedula_titular"] = _enmascarar(db_.get("cedula_titular", ""))
         doc["datos_bancarios"] = db_
     return doc
 
