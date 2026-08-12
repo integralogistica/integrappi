@@ -637,3 +637,32 @@ Hasta ahora COORDINADOR/CONTROL solo podían **Aprobar**; no tenían cómo decir
 - El modelo `ActualizarEstadoPlanillaRequest` suma `motivo_devolucion: Optional[str]`. Cuando se vuelve a `CREADO` **con motivo**, el endpoint persiste `motivo_devolucion`, `devuelto_por` (`aprobado_por`) y `fecha_devolucion`, y deja en `historial_cambios` una entrada con `accion="devolucion"` + `motivo` (en vez del `cambio_estado` genérico). El flujo existente de volver a `CREADO` sin motivo (reapertura de ADMIN/ANALISTA) se mantiene intacto.
 - Nueva función **`_notificar_devolucion_operativo(doc, motivo)`**: WhatsApp al `usuario_registro` (resuelto en `baseusuarios`) con la plantilla **`devolucion_planilla`** (`es_CO`, 3 vars: nombre, consecutivo, motivo truncado a 200 car.). Fire-and-forget (solo log). ⚠️ Requiere crear/aprobar la plantilla `devolucion_planilla` en Meta Business Manager; mientras no exista, el WhatsApp falla en silencio y la devolución igual se completa (el motivo queda visible en la app).
 - La devolución no dispara las notificaciones a analistas ni de solicitud de autorización (ésas solo aplican al *salir* de `CREADO`).
+
+## Actualizaciones Recientes (2026-08-12)
+
+### Otros Costos — Notificaciones WhatsApp a los actores del flujo
+
+Cada transición del flujo ahora dispara un WhatsApp al actor que debe actuar a continuación (o al creador en los hitos), para que las solicitudes no se estanquen esperando a que alguien abra la app. Patrón idéntico al de SolicitudVehiculos: helpers `_notificar_*` que resuelven celular y nombre en `baseusuarios` y disparan `enviar_template_sync` (de `Funciones/whatsapp_utils_integra`) **fire-and-forget** (si Meta falla o la plantilla no existe, solo queda en log y la acción del flujo igual se completa). Se disparan con `asyncio.to_thread` para no bloquear el event loop.
+
+| Endpoint | Transición | Notifica a | Plantilla |
+|----------|-----------|------------|-----------|
+| `/enviar-aprobacion` y `/editar`(enviar) | →`pendiente_aprobacion` | COORDINADOR y CONTROL (solo CONTROL si valor > $500.000) | `oc_solicitud_aprobacion` |
+| `/aprobar` | →`aprobado` | ANALISTA | `oc_para_tramite` |
+| `/marcar-tramite-vulcano` | tramite→`ok` | FINANCIERO | `oc_para_pago` |
+| `/registrar-pago` | →`pagado` | OPERATIVO creador | `oc_pago_realizado` |
+| `/devolver` | →`devuelto` | OPERATIVO creador | `oc_devuelta` |
+| `/rechazar` | →`rechazado` | OPERATIVO creador | `oc_rechazada_anulada` |
+| `/anular` | →`anulado` | OPERATIVO creador | `oc_rechazada_anulada` |
+
+**Alcance**: el OPERATIVO creador recibe WhatsApp **solo en hitos clave** (devuelta, pagada, rechazada, anulada); no se le notifica al aprobar ni al marcar trámite OK (lo ve en la app). `/marcar-tramite-vulcano` solo notifica al pasar a `ok` (no al revertir a `pendiente`).
+
+**Plantillas a crear/aprobar en Meta Business Manager** (idioma `es_CO`, 6 en total). Variables en orden (se pasan en `body_params`):
+
+1. **`oc_solicitud_aprobacion`** (→ COORDINADOR/CONTROL): `Hola {{1}}, tienes una solicitud de Otros Costos pendiente de aprobación: {{2}}. Valor: ${{3}}. Revísala en integrApp.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` valor.
+2. **`oc_para_tramite`** (→ ANALISTA): `Hola {{1}}, la solicitud de Otros Costos {{2}} fue aprobada y requiere tu trámite en Vulcano. Valor: ${{3}}.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` valor.
+3. **`oc_para_pago`** (→ FINANCIERO): `Hola {{1}}, la solicitud de Otros Costos {{2}} está lista para pagar. Valor: ${{3}}.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` valor.
+4. **`oc_pago_realizado`** (→ creador): `Hola {{1}}, tu solicitud de Otros Costos {{2}} fue pagada. Valor: ${{3}}.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` valor.
+5. **`oc_devuelta`** (→ creador): `Hola {{1}}, tu solicitud de Otros Costos {{2}} fue devuelta. Motivo: {{3}}. Corrígela y reenvía en integrApp.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` motivo (≤200 car.).
+6. **`oc_rechazada_anulada`** (→ creador): `Hola {{1}}, tu solicitud de Otros Costos {{2}} fue {{3}}. Motivo: {{4}}.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` la palabra `rechazada` o `anulada` · `{{4}}` motivo.
+
+El valor se formatea en COP con punto de miles (`320.000`). Requiere `WHATSAPP_API_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID` (las mismas vars que SolicitudVehiculos). Mientras las plantillas no estén aprobadas, los logs mostrarán `[NOTIF OC] WhatsApp NO enviado … revisar plantilla …` y el flujo seguirá funcionando. **Archivo**: `rutas/otros_costos.py`.

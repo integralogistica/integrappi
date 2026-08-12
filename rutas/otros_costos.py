@@ -16,6 +16,7 @@ Seguridad: el perfil NO se confía del frontend. Cada endpoint recibe `usuario` 
 lo resuelve contra `baseusuarios` para autorizar con el perfil real.
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from bd.bd_cliente import bd_cliente
+from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/otros-costos", tags=["Otros Costos"])
@@ -37,6 +39,19 @@ router = APIRouter(prefix="/otros-costos", tags=["Otros Costos"])
 _OFFSET_COLOMBIA = timedelta(hours=5)
 LIMITE_COORDINADOR = 500000  # Coordinador aprueba hasta este valor inclusive
 LIMITE_VALOR_SOLICITUD = 5_000_000  # Valor total máximo permitido por solicitud
+
+# ── Plantillas de notificación WhatsApp (Meta, es_CO) ─────────────────────────
+# Una plantilla por evento del flujo. Requieren crearse/aprobarse en Meta Business
+# Manager; mientras no existan, el envío falla en silencio (solo log) y la acción
+# del flujo igual se completa. El destinatario y el número se resuelven en backend
+# desde `baseusuarios` (no se confía en el frontend).
+#   (nombre, idioma)
+PLANTILLA_OC_APROBACION = ("oc_solicitud_aprobacion", "es_CO")  # → COORDINADOR/CONTROL
+PLANTILLA_OC_TRAMITE = ("oc_para_tramite", "es_CO")            # → ANALISTA
+PLANTILLA_OC_PAGO = ("oc_para_pago", "es_CO")                  # → FINANCIERO
+PLANTILLA_OC_PAGADA = ("oc_pago_realizado", "es_CO")           # → OPERATIVO creador
+PLANTILLA_OC_DEVUELTA = ("oc_devuelta", "es_CO")               # → OPERATIVO creador
+PLANTILLA_OC_RECH_ANUL = ("oc_rechazada_anulada", "es_CO")     # → OPERATIVO creador
 
 # Catálogo por defecto de causales/tipos de costo (se siembra en `causales_otros_costos`).
 # Editable directamente en Mongo: si la colección tiene documentos, se usa tal cual.
@@ -415,6 +430,147 @@ def _nuevo_movimiento(
         "observacion": observacion or "",
         "ip": ip or "",
     }
+
+
+# ── Notificaciones WhatsApp a los actores del flujo ───────────────────────────
+# Fire-and-forget: si algo falla (sin celular, plantilla sin aprobar en Meta, error
+# de red) solo queda en log y NO rompe la acción del flujo. El celular y el nombre
+# se resuelven en `baseusuarios` (mismo patrón que siscore_consultas._notificar_*).
+def _normalizar_celular_co(celular: Optional[str]) -> Optional[str]:
+    """Convierte un celular a formato internacional Colombia: solo dígitos con 57."""
+    if not celular:
+        return None
+    limpio = "".join(c for c in str(celular) if c.isdigit())
+    if not limpio:
+        return None
+    if not limpio.startswith("57"):
+        limpio = "57" + limpio
+    return limpio
+
+
+def _resolver_celular_nombre(usuario: str) -> Optional[tuple]:
+    """Lookup único en baseusuarios → (celular_normalizado, nombre) o None."""
+    if not usuario or not str(usuario).strip():
+        return None
+    doc = col_usuarios.find_one({"usuario": str(usuario).strip().upper()})
+    if not doc:
+        return None
+    celular = _normalizar_celular_co(doc.get("celular"))
+    if not celular:
+        return None
+    nombre = (doc.get("nombre") or doc.get("usuario") or "Usuario").strip()
+    return (celular, nombre)
+
+
+def _valor_cop(v) -> str:
+    """Formatea un monto como pesos colombianos con punto de miles: 320000 → '320.000'."""
+    try:
+        return f"{int(round(float(v or 0))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _enviar_a_perfil(perfil: str, plantilla: tuple, body_params_fn, *, consecutivo: str) -> None:
+    """Itera los usuarios activos de `perfil` y les envía la plantilla. `body_params_fn`
+    recibe (nombre) y devuelve la lista de parámetros del cuerpo ({{1}}, {{2}}, ...)."""
+    try:
+        usuarios = list(col_usuarios.find({
+            "perfil": perfil,
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        }))
+        if not usuarios:
+            logger.info(f"[NOTIF OC] No hay usuarios activos con perfil {perfil}; no se notifica ({consecutivo}).")
+            return
+        enviadas = 0
+        for u in usuarios:
+            celular = _normalizar_celular_co(u.get("celular"))
+            if not celular:
+                logger.info(f"[NOTIF OC] {perfil} {u.get('usuario')} sin celular válido; se saltea ({consecutivo}).")
+                continue
+            nombre = (u.get("nombre") or u.get("usuario") or perfil.title()).strip()
+            res = enviar_template_sync(
+                to=celular,
+                template_name=plantilla[0],
+                language_code=plantilla[1],
+                body_params=body_params_fn(nombre),
+            )
+            if res:
+                enviadas += 1
+                logger.info(f"[NOTIF OC] WhatsApp OK -> {celular} ({nombre}) | {plantilla[0]} {consecutivo}")
+            else:
+                logger.warning(f"[NOTIF OC] WhatsApp NO enviado a {celular} ({nombre}) — revisar plantilla '{plantilla[0]}' ({consecutivo}).")
+        logger.info(f"[NOTIF OC] {plantilla[0]} {consecutivo}: {enviadas}/{len(usuarios)} {perfil} notificados.")
+    except Exception as e:
+        logger.error(f"[NOTIF OC] Error en _enviar_a_perfil({perfil}, {plantilla[0]}): {e}")
+
+
+def _enviar_a_creador(doc: dict, plantilla: tuple, body_params_fn) -> None:
+    """Envía la plantilla al OPERATIVO que creó la solicitud (usuario_registro)."""
+    try:
+        resuelto = _resolver_celular_nombre(doc.get("usuario_registro", ""))
+        if not resuelto:
+            logger.info(f"[NOTIF OC] Creador sin celular válido; no se notifica ({doc.get('consecutivo', '')}).")
+            return
+        celular, nombre = resuelto
+        res = enviar_template_sync(
+            to=celular,
+            template_name=plantilla[0],
+            language_code=plantilla[1],
+            body_params=body_params_fn(nombre),
+        )
+        if res:
+            logger.info(f"[NOTIF OC] WhatsApp OK -> {celular} ({nombre}) | {plantilla[0]} {doc.get('consecutivo','')}")
+        else:
+            logger.warning(f"[NOTIF OC] WhatsApp NO enviado a {celular} ({nombre}) — revisar plantilla '{plantilla[0]}' ({doc.get('consecutivo','')}).")
+    except Exception as e:
+        logger.error(f"[NOTIF OC] Error en _enviar_a_creador({plantilla[0]}): {e}")
+
+
+def _notificar_envio_aprobacion(doc: dict) -> None:
+    """→ pendiente_aprobacion: avisa a COORDINADOR/CONTROL. Si el valor supera el
+    límite del coordinador, el trámite es de Control; si no, lo ven ambos."""
+    consec = doc.get("consecutivo", "")
+    valor = _valor_cop(doc.get("valor_total", 0))
+    if _a_numero(doc.get("valor_total")) > LIMITE_COORDINADOR:
+        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
+    else:
+        _enviar_a_perfil("COORDINADOR", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
+        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
+
+
+def _notificar_aprobacion(doc: dict) -> None:
+    """→ aprobado: avisa a ANALISTA que debe tramitar en Vulcano."""
+    consec = doc.get("consecutivo", "")
+    valor = _valor_cop(doc.get("valor_total", 0))
+    _enviar_a_perfil("ANALISTA", PLANTILLA_OC_TRAMITE, lambda n: [n, consec, valor], consecutivo=consec)
+
+
+def _notificar_tramite_ok(doc: dict) -> None:
+    """tramite_vulcano → ok: avisa a FINANCIERO que está listo para pagar."""
+    consec = doc.get("consecutivo", "")
+    valor = _valor_cop(doc.get("valor_total", 0))
+    _enviar_a_perfil("FINANCIERO", PLANTILLA_OC_PAGO, lambda n: [n, consec, valor], consecutivo=consec)
+
+
+def _notificar_pago(doc: dict) -> None:
+    """→ pagado: avisa al creador (OPERATIVO) que se pagó su solicitud."""
+    consec = doc.get("consecutivo", "")
+    valor = _valor_cop(doc.get("valor_total", 0))
+    _enviar_a_creador(doc, PLANTILLA_OC_PAGADA, lambda n: [n, consec, valor])
+
+
+def _notificar_devolucion(doc: dict, motivo: str) -> None:
+    """→ devuelto: avisa al creador con el motivo para que corrija."""
+    consec = doc.get("consecutivo", "")
+    motivo_texto = (motivo or "")[:200]
+    _enviar_a_creador(doc, PLANTILLA_OC_DEVUELTA, lambda n: [n, consec, motivo_texto])
+
+
+def _notificar_rechazo_anulacion(doc: dict, accion: str, motivo: str) -> None:
+    """→ rechazado/anulado: avisa al creador. `accion` = 'rechazada' | 'anulada'."""
+    consec = doc.get("consecutivo", "")
+    motivo_texto = (motivo or "")[:200]
+    _enviar_a_creador(doc, PLANTILLA_OC_RECH_ANUL, lambda n: [n, consec, accion, motivo_texto])
 
 
 # ── Serialización / visibilidad de datos sensibles ────────────────────────────
@@ -1024,6 +1180,9 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
         {"$set": set_fields, "$push": {"historial_movimientos": mov}},
     )
     actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
+    # Si la edición envió a aprobación, avisar a COORDINADOR/CONTROL (fire-and-forget).
+    if req.enviar and actualizado:
+        await asyncio.to_thread(_notificar_envio_aprobacion, actualizado)
     return {"mensaje": "Solicitud actualizada", "estado": nuevo_estado, "solicitud": _serializar(actualizado, info["perfil"], info["usuario"])}
 
 
@@ -1053,6 +1212,10 @@ async def enviar_aprobacion(req: AccionConObservacionRequest, request: Request):
         {"$set": {"estado": "pendiente_aprobacion", "updated_at": _ahora_utc()},
          "$push": {"historial_movimientos": mov}},
     )
+    # Avisar a COORDINADOR/CONTROL que tienen una solicitud pendiente (fire-and-forget).
+    doc_actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
+    if doc_actualizado:
+        await asyncio.to_thread(_notificar_envio_aprobacion, doc_actualizado)
     return {"mensaje": "Solicitud enviada a aprobación", "estado": "pendiente_aprobacion"}
 
 
@@ -1093,6 +1256,9 @@ async def aprobar_solicitud(req: AccionConObservacionRequest, request: Request):
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
+    # Avisar a ANALISTA que debe tramitar en Vulcano (fire-and-forget). `doc` trae
+    # valor_total y consecutivo de antes del update, que no cambian al aprobar.
+    await asyncio.to_thread(_notificar_aprobacion, doc)
     return {"mensaje": "Solicitud aprobada", "estado": "aprobado"}
 
 
@@ -1123,6 +1289,10 @@ async def marcar_tramite_vulcano(req: MarcarTramiteVulcanoRequest, request: Requ
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
+    # Al marcar OK, avisar a FINANCIERO que está listo para pagar. Al revertir a
+    # pendiente no se notifica (lo ve en la app).
+    if req.tramite_vulcano == "ok":
+        await asyncio.to_thread(_notificar_tramite_ok, doc)
     return {"mensaje": f"Trámite Vulcano marcado como {req.tramite_vulcano}", "tramite_vulcano": req.tramite_vulcano}
 
 
@@ -1177,6 +1347,8 @@ async def devolver_solicitud(req: AccionConObservacionRequest, request: Request)
             status_code=409,
             detail="La solicitud cambió de estado (acción simultánea). Recargue e intente de nuevo.",
         )
+    # Avisar al creador con el motivo para que corrija (fire-and-forget).
+    await asyncio.to_thread(_notificar_devolucion, doc, req.observacion)
     return {"mensaje": "Solicitud devuelta", "estado": "devuelto"}
 
 
@@ -1198,6 +1370,8 @@ async def rechazar_solicitud(req: AccionConObservacionRequest, request: Request)
         {"$set": {"estado": "rechazado", "updated_at": _ahora_utc()},
          "$push": {"historial_movimientos": mov}},
     )
+    # Avisar al creador del rechazo con el motivo (fire-and-forget).
+    await asyncio.to_thread(_notificar_rechazo_anulacion, doc, "rechazada", req.observacion)
     return {"mensaje": "Solicitud rechazada", "estado": "rechazado"}
 
 
@@ -1247,6 +1421,9 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
 
     doc_final = col_activos.find_one({"consecutivo": req.consecutivo})
+    # Avisar al creador que se pagó su solicitud (fire-and-forget), antes de moverla.
+    if doc_final:
+        await asyncio.to_thread(_notificar_pago, doc_final)
     # Registrar el paso al histórico y mover
     mov_hist = _nuevo_movimiento("paso_historico", "pagado", "pagado", info, "Paso al histórico", _ip(request))
     col_activos.update_one({"consecutivo": req.consecutivo}, {"$push": {"historial_movimientos": mov_hist}})
@@ -1285,6 +1462,8 @@ async def anular_solicitud(req: AnularRequest, request: Request):
                       "anulado_por": info["usuario"], "fecha_anulacion": ahora, "updated_at": ahora},
              "$push": {"historial_movimientos": mov}},
         )
+    # Avisar al creador de la anulación con el motivo (fire-and-forget).
+    await asyncio.to_thread(_notificar_rechazo_anulacion, doc, "anulada", req.motivo)
     return {"mensaje": "Solicitud anulada", "estado": "anulado"}
 
 
