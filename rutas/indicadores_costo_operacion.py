@@ -74,6 +74,26 @@ def _num(field: str) -> dict:
     }
 
 
+# NIT de Fresenius Kabi (mismo valor que pedidos.py y siscore_consultas.py). Única
+# fuente de verdad para detectar Kabi en media milla (por NIT).
+NIT_FRESENIUS = "900402080"
+
+# Expr Mongo: es_kabi por NIT (media milla). Bool listo para usar en $cond.
+_EXPR_KABI_NIT = {"$eq": [{"$ifNull": ["$nit_cliente", ""]}, NIT_FRESENIUS]}
+
+
+def _expr_kabi_nombre(campo: str) -> dict:
+    """Expr Mongo: True si ``campo`` (ruta tipo 'cliente_origen' o
+    'datos_servicio.cliente') es FRESENIUS KABI (insensible a mayúsculas y espacios
+    laterales). Reproduce lo esencial de _es_cliente_kabi (siscore_consultas.py)."""
+    return {
+        "$eq": [
+            {"$trim": {"input": {"$toUpper": {"$ifNull": [f"${campo}", ""]}}}},
+            "FRESENIUS KABI",
+        ]
+    }
+
+
 # ── Filtros por fuente ──────────────────────────────────────────────────────
 
 def _filtro_media_milla(anios: List[int], meses: List[int]) -> dict:
@@ -243,16 +263,135 @@ def _facet_datetime_utc(
     return {"mensual": _gran("%Y-%m"), "diario": _gran("%Y-%m-%d")}
 
 
-# ── Sobrecosto por regional / destino (drill-down media milla) ──────────────
+def _expr_ultima_milla_expandido() -> dict:
+    """Expr que expande la última milla por cliente, devolviendo un ARRAY de sub-docs
+    ``{cliente, costo, piezas, diferencia}`` para repartir costo/cajas/sobrecosto de
+    planillas fusionadas entre los clientes originales proporcionalmente a piezas.
 
-def _base_lookup_cliente() -> list:
-    """Bloque reutilizable: lookup del nombre de cliente por NIT."""
-    return [
+    - **Fusionada** con ``fusion_info.datos_originales``: un sub-doc por original, con
+      ``total_solicitado`` (costo), ``piezas`` y ``diferencia`` del doc fusionado
+      repartidos por las piezas de cada original (equitativo 1/n si la suma es 0).
+    - **Normal**: un sub-doc con los valores top-level."""
+    da = "$fusion_info.datos_originales"
+    piezas_o = {"$convert": {"input": "$$o.piezas", "to": "double", "onError": 0, "onNull": 0}}
+    total_piezas = {
+        "$sum": {
+            "$map": {
+                "input": {"$ifNull": [da, []]},
+                "as": "x",
+                "in": {"$convert": {"input": "$$x.piezas", "to": "double", "onError": 0, "onNull": 0}},
+            }
+        }
+    }
+    factor_piezas = {"$divide": [piezas_o, "$$tp"]}
+    factor_eq = {"$divide": [1, "$$n"]}
+
+    def repartir(campo):
+        """Reparte el campo top-level del doc por el factor de piezas (o equitativo)."""
+        return {"$cond": [
+            {"$gt": ["$$tp", 0]},
+            {"$multiply": [_num(campo), factor_piezas]},
+            {"$multiply": [_num(campo), factor_eq]},
+        ]}
+
+    return {
+        "$cond": [
+            {  # ¿es fusionada con originales?
+                "$and": [
+                    {"$eq": [{"$ifNull": ["$fusion_info.es_fusionada", False]}, True]},
+                    {"$gt": [{"$size": {"$ifNull": [da, []]}}, 0]},
+                ]
+            },
+            {  # rama fusionada: repartir costo, piezas y diferencia por las piezas originales
+                "$let": {
+                    "vars": {"tp": total_piezas, "n": {"$size": {"$ifNull": [da, []]}}},
+                    "in": {
+                        "$map": {
+                            "input": {"$ifNull": [da, []]},
+                            "as": "o",
+                            "in": {
+                                "cliente": {"$ifNull": ["$$o.cliente_origen", "Sin cliente"]},
+                                "costo": repartir("total_solicitado"),
+                                "piezas": {"$cond": [
+                                    {"$gt": ["$$tp", 0]}, piezas_o,
+                                    {"$multiply": [_num("piezas"), factor_eq]},
+                                ]},
+                                "diferencia": repartir("diferencia"),
+                            },
+                        }
+                    },
+                }
+            },
+            {  # rama no fusionada (envuelta en $cond: la rama no admite lista directa)
+                "$cond": [
+                    {"$in": [{"$ifNull": ["$cliente_origen", ""]}, [None, "", " "]]},
+                    [{"cliente": "Sin cliente", "costo": _num("total_solicitado"),
+                      "piezas": _num("piezas"), "diferencia": _num("diferencia")}],
+                    [{"cliente": {"$ifNull": ["$cliente_origen", "Sin cliente"]},
+                      "costo": _num("total_solicitado"), "piezas": _num("piezas"),
+                      "diferencia": _num("diferencia")}],
+                ]
+            },
+        ]
+    }
+
+
+def _facet_ultima_milla_expandido(clientes: Optional[List[str]] = None) -> dict:
+    """Facet mensual+diario de última milla que EXPANDO las planillas fusionadas y
+    reparte costo (total_solicitado), piezas y diferencia por cliente original. Así,
+    al filtrar un cliente, las fusionadas que también llevan a otros clientes aportan
+    solo la porción de ese cliente (no la fusionada completa).
+
+    Si ``clientes`` viene, aplica un $match POST-expansión sobre el cliente expandido:
+    descarta las porciones cuyo cliente no es el filtrado (los 'compañeros de fusión').
+    Salida por período: ``ultima_milla`` (Σ costo), ``cajas_ultima`` (Σ piezas),
+    ``sobrecosto`` (Σ diferencias>0), ``ahorro`` (Σ diferencias<0)."""
+    post_match = {"$match": {"_exp.cliente": {"$in": list(clientes)}}} if clientes else None
+
+    def _gran(fmt: str) -> list:
+        stages = [
+            {"$set": {"_periodo": {"$dateToString": {
+                "format": fmt,
+                "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+            }}}},
+            {"$project": {"_periodo": 1, "_exp": _expr_ultima_milla_expandido()}},
+            {"$unwind": "$_exp"},
+        ]
+        if post_match:
+            stages.append(post_match)
+        stages += [
+            {"$group": {
+                "_id": "$_periodo",
+                "ultima_milla": {"$sum": "$_exp.costo"},
+                "cajas_ultima": {"$sum": "$_exp.piezas"},
+                "sobrecosto": {"$sum": {"$max": ["$_exp.diferencia", 0]}},
+                "ahorro": {"$sum": {"$min": ["$_exp.diferencia", 0]}},
+            }},
+            {"$sort": {"_id": 1}},
+            {"$project": {"_id": 0, "periodo": "$_id", "ultima_milla": 1, "cajas_ultima": 1,
+                          "sobrecosto": 1, "ahorro": 1}},
+        ]
+        return stages
+
+    return {"mensual": _gran("%Y-%m"), "diario": _gran("%Y-%m-%d")}
+
+
+# ── Costo por caja (reglas por cliente) ─────────────────────────────────────
+# costo_por_caja = (Σ costo_kabi + Σ costo_otros) / (Σ cajas_kabi + Σ cajas_otros)
+#   - Kabi (NIT 900402080): cajas = media milla; costo = media + última + otros.
+#   - Otros: cajas = última milla; costo = última + otros (sin media milla).
+# Cada colección aporta solo a los acumuladores que le corresponden según la regla
+# (ver _merge_costo_por_caja para la verificación de no doble conteo).
+
+def _pipeline_costo_caja_media_milla(anios: List[int], meses: List[int], clientes: List[str]) -> list:
+    """Media milla para costo por caja. Solo aporta al grupo Kabi (costo + cajas):
+    la regla excluye la media milla del costo/cajas de 'otros clientes'. Los
+    vehículos no-Kabi no contribuyen a ningún grupo."""
+    pipeline = [
+        {"$match": _filtro_media_milla(anios, meses)},
         {"$lookup": {
-            "from": "clientes",
-            "localField": "nit_cliente",
-            "foreignField": "nit",
-            "as": "_cli",
+            "from": "clientes", "localField": "nit_cliente",
+            "foreignField": "nit", "as": "_cli",
         }},
         {"$set": {"nombre_cliente": {"$ifNull": [
             {"$arrayElemAt": ["$_cli.nombre", 0]},
@@ -260,127 +399,200 @@ def _base_lookup_cliente() -> list:
         ]}}},
         {"$project": {"_cli": 0}},
     ]
+    if clientes:
+        cl = list(clientes)
+        pipeline.append({"$match": {"$or": [
+            {"nombre_cliente": {"$in": cl}},
+            {"nit_cliente": {"$in": cl}},
+        ]}})
+    pipeline += [
+        # Dedup por vehículo: costo y cajas están a nivel vehículo.
+        {"$group": {
+            "_id": "$consecutivo_vehiculo",
+            "costo": {"$first": _num("total_flete_vehiculo")},
+            "cajas": {"$first": _num("total_cajas_vehiculo")},
+            "fecha_creacion": {"$first": "$fecha_creacion"},
+            "nit_cliente": {"$first": {"$ifNull": ["$nit_cliente", ""]}},
+        }},
+        {"$facet": {
+            "mensual": [
+                {"$group": {
+                    "_id": {"$substrCP": ["$fecha_creacion", 0, 7]},
+                    "costo_kabi": {"$sum": {"$cond": [_EXPR_KABI_NIT, "$costo", 0]}},
+                    "costo_otros": {"$sum": 0},   # media milla nunca aporta a otros
+                    "cajas_kabi": {"$sum": {"$cond": [_EXPR_KABI_NIT, "$cajas", 0]}},
+                    "cajas_otros": {"$sum": 0},
+                }},
+                {"$sort": {"_id": 1}},
+                {"$project": {"_id": 0, "periodo": "$_id", "costo_kabi": 1, "costo_otros": 1,
+                              "cajas_kabi": 1, "cajas_otros": 1}},
+            ],
+            "diario": [
+                {"$group": {
+                    "_id": {"$substrCP": ["$fecha_creacion", 0, 10]},
+                    "costo_kabi": {"$sum": {"$cond": [_EXPR_KABI_NIT, "$costo", 0]}},
+                    "costo_otros": {"$sum": 0},
+                    "cajas_kabi": {"$sum": {"$cond": [_EXPR_KABI_NIT, "$cajas", 0]}},
+                    "cajas_otros": {"$sum": 0},
+                }},
+                {"$sort": {"_id": 1}},
+                {"$project": {"_id": 0, "periodo": "$_id", "costo_kabi": 1, "costo_otros": 1,
+                              "cajas_kabi": 1, "cajas_otros": 1}},
+            ],
+        }},
+    ]
+    return pipeline
 
 
-def _expr_regional_de_consecutivo() -> dict:
-    """Expr de agregación que extrae la REGIONAL del ``consecutivo_vehiculo``.
+def _expr_costo_caja_ultima_expandido() -> dict:
+    """Expr de aggregation que expande la última milla por cliente, devolviendo un
+    ARRAY de sub-docs ``{cliente, costo, piezas}`` para alimentar el costo por caja
+    tras expandir planillas fusionadas.
 
-    El consecutivo tiene la forma ``<ORIGEN>-<FECHA1>-<X>-<FECHA2>-<REGIONAL>-<N>``
-    donde la regional NO contiene guiones (puede tener espacios, ej. "EJE CAFETERO")
-    y ``<N>`` es el índice final. La regional es el segmento entre el penúltimo y el
-    último guion → anteúltimo elemento de ``$split(consecutivo, "-")``.
-    Ej: "CELTA-20250924-M-2025924-EJE CAFETERO-1" → "EJE CAFETERO"."""
-    return {
-        "$let": {
-            "vars": {"partes": {"$split": [{"$ifNull": ["$consecutivo_vehiculo", ""]}, "-"]}},
-            "in": {
-                "$ifNull": [
-                    {"$arrayElemAt": ["$$partes", {"$subtract": [{"$size": "$$partes"}, 2]}]},
-                    "SIN REGIONAL",
-                ],
-            },
+    - **Doc fusionado** con ``fusion_info.datos_originales`` no vacío: un sub-doc
+      por cada original, con su ``cliente_origen`` y el ``total_solicitado`` (costo)
+      y ``piezas`` del doc fusionado **repartidos proporcionalmente por las piezas
+      de cada original** (si la suma de piezas es 0, reparto equitativo 1/n).
+    - **Doc normal**: un único sub-doc con los valores top-level.
+
+    Igual política que ``indicadores_fletes._expr_clientes_expandidos`` (reparto por
+    piezas), adaptada a costo por caja (sin ``diferencia``). Así una fusionada que
+    mezcla Kabi con otro cliente reparte cada porción a su grupo correcto, evitando
+    que caiga entera en 'otros' por el cliente_origen concatenado del top-level."""
+    da = "$fusion_info.datos_originales"
+    piezas_o = {"$convert": {"input": "$$o.piezas", "to": "double", "onError": 0, "onNull": 0}}
+    total_piezas = {
+        "$sum": {
+            "$map": {
+                "input": {"$ifNull": [da, []]},
+                "as": "x",
+                "in": {"$convert": {"input": "$$x.piezas", "to": "double", "onError": 0, "onNull": 0}},
+            }
         }
+    }
+    factor_piezas = {"$divide": [piezas_o, "$$tp"]}
+    factor_eq = {"$divide": [1, "$$n"]}
+    return {
+        "$cond": [
+            {  # ¿es fusionada con originales?
+                "$and": [
+                    {"$eq": [{"$ifNull": ["$fusion_info.es_fusionada", False]}, True]},
+                    {"$gt": [{"$size": {"$ifNull": [da, []]}}, 0]},
+                ]
+            },
+            {  # rama fusionada: repartir costo y piezas por las piezas de cada original
+                "$let": {
+                    "vars": {
+                        "tp": total_piezas,
+                        "n": {"$size": {"$ifNull": [da, []]}},
+                    },
+                    "in": {
+                        "$map": {
+                            "input": {"$ifNull": [da, []]},
+                            "as": "o",
+                            "in": {
+                                "cliente": {"$ifNull": ["$$o.cliente_origen", "Sin cliente"]},
+                                "costo": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        {"$multiply": [_num("total_solicitado"), factor_piezas]},
+                                        {"$multiply": [_num("total_solicitado"), factor_eq]},
+                                    ]
+                                },
+                                "piezas": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        piezas_o,
+                                        {"$multiply": [_num("piezas"), factor_eq]},
+                                    ]
+                                },
+                            },
+                        }
+                    },
+                }
+            },
+            {  # rama no fusionada: un sub-doc con los valores top-level (envuelto en
+                # $cond porque la rama de $cond no admite una lista directamente).
+                "$cond": [
+                    {"$in": [{"$ifNull": ["$cliente_origen", ""]}, [None, "", " "]]},
+                    [{"cliente": "Sin cliente", "costo": _num("total_solicitado"), "piezas": _num("piezas")}],
+                    [{"cliente": {"$ifNull": ["$cliente_origen", "Sin cliente"]},
+                      "costo": _num("total_solicitado"), "piezas": _num("piezas")}],
+                ]
+            },
+        ]
     }
 
 
-def _pipeline_sobrecosto_por_regional(anios: List[int], meses: List[int], clientes: List[str]) -> list:
-    """Sobrecosto por REGIONAL: dedup por vehículo y agrupa por la regional extraída
-    del ``consecutivo_vehiculo`` (segmento entre el penúltimo y el último guion).
+def _facet_costo_caja_ultima_milla(clientes: Optional[List[str]] = None) -> dict:
+    """Facet mensual+diario de última milla para costo por caja.
+    - Costo: aporta a kabi o a otros según el cliente de cada porción.
+    - Cajas: SOLO aporta a 'otros' (no-kabi); los Kabi usan cajas de media milla.
 
-    Devuelve, por regional: sobrecosto (Σ diferencias>0), ahorro (Σ diferencias<0,
-    negativo), costo_real (Σ total_flete_vehiculo) y despachos."""
-    pipeline = [{"$match": _filtro_media_milla(anios, meses)}] + _base_lookup_cliente()
-    if clientes:
-        cl = list(clientes)
-        pipeline.append({"$match": {"$or": [
-            {"nombre_cliente": {"$in": cl}},
-            {"nit_cliente": {"$in": cl}},
-        ]}})
-    pipeline += [
-        # La regional sale del consecutivo_vehiculo (no del campo `regional`).
-        {"$set": {"_regional": _expr_regional_de_consecutivo()}},
-        # DEDUP por vehículo: diferencia_flete y total_flete_vehiculo están
-        # duplicados en cada doc del vehículo → tomamos uno solo antes de sumar.
-        {"$group": {
-            "_id": "$consecutivo_vehiculo",
-            "regional": {"$first": "$_regional"},
-            "diferencia": {"$first": _num("diferencia_flete")},
-            "costo_real": {"$first": _num("total_flete_vehiculo")},
-        }},
-        {"$group": {
-            "_id": "$regional",
-            "sobrecosto": {"$sum": {"$max": ["$diferencia", 0]}},
-            "ahorro": {"$sum": {"$min": ["$diferencia", 0]}},
-            "costo_real": {"$sum": "$costo_real"},
-            "despachos": {"$sum": 1},
-        }},
-        {"$project": {"_id": 0, "regional": "$_id", "sobrecosto": 1, "ahorro": 1,
-                      "costo_real": 1, "despachos": 1}},
-    ]
-    return pipeline
+    EXPANDE las planillas fusionadas: reparte costo y piezas entre los clientes
+    originales proporcionalmente a piezas (``_expr_costo_caja_ultima_expandido``),
+    así una fusionada que mezcla Kabi con otro cliente reparte cada porción a su
+    grupo correcto (no cae entera en 'otros' por el cliente_origen concatenado).
 
+    Si ``clientes`` viene, aplica un $match POST-expansión sobre el cliente expandido:
+    al filtrar un cliente, descarta las porciones de los 'compañeros de fusión' (así
+    el costo por caja respeta estrictamente el filtro, igual que el resto del módulo)."""
+    kabi = _expr_kabi_nombre("_exp.cliente")
+    post_match = {"$match": {"_exp.cliente": {"$in": list(clientes)}}} if clientes else None
 
-def _pipeline_sobrecosto_por_destino(
-    regional: str, anios: List[int], meses: List[int], clientes: List[str]
-) -> list:
-    """Sobrecosto por DESTINO de una regional.
-
-    Reparte la `diferencia_flete` de cada vehículo entre sus destinos
-    proporcionalmente a las cajas (`num_cajas`). Si el vehículo no tiene cajas,
-    reparte equitativamente entre sus destinos (1 / n_destinos). El nº de destinos
-    se obtiene con un $group intermedio por vehículo + $push."""
-    pipeline = [
-        {"$match": _filtro_media_milla(anios, meses)},
-        # La regional se filtra por la extraída del consecutivo (no existe campo).
-        {"$set": {"_regional": _expr_regional_de_consecutivo()}},
-        {"$match": {"_regional": regional}},
-    ] + _base_lookup_cliente()
-    if clientes:
-        cl = list(clientes)
-        pipeline.append({"$match": {"$or": [
-            {"nombre_cliente": {"$in": cl}},
-            {"nit_cliente": {"$in": cl}},
-        ]}})
-    pipeline += [
-        # 1) Por (vehículo, destino): cajas del destino + campos del vehículo.
-        {"$group": {
-            "_id": {"vehiculo": "$consecutivo_vehiculo", "destino": {"$ifNull": ["$destino_real", "SIN DESTINO"]}},
-            "num_cajas_destino": {"$sum": _num("num_cajas")},
-            "diferencia": {"$first": _num("diferencia_flete")},
-            "total_cajas_vehiculo": {"$first": _num("total_cajas_vehiculo")},
-        }},
-        # 2) Por vehículo: colecciona sus destinos y cuenta cuántos son (para el
-        #    fallback equitativo cuando total_cajas_vehiculo == 0).
-        {"$group": {
-            "_id": "$_id.vehiculo",
-            "destinos": {"$push": {
-                "destino": "$_id.destino",
-                "num_cajas_destino": "$num_cajas_destino",
-                "diferencia": "$diferencia",
-                "total_cajas_vehiculo": "$total_cajas_vehiculo",
+    def _gran(fmt: str) -> list:
+        stages = [
+            # Bucket por período ANTES de expandir (sobre el doc original).
+            {"$set": {"_periodo": {"$dateToString": {
+                "format": fmt,
+                "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+            }}}},
+            {"$project": {"_periodo": 1, "_exp": _expr_costo_caja_ultima_expandido()}},
+            {"$unwind": "$_exp"},
+        ]
+        if post_match:
+            stages.append(post_match)
+        stages += [
+            {"$group": {
+                "_id": "$_periodo",
+                "costo_kabi": {"$sum": {"$cond": [kabi, "$_exp.costo", 0]}},
+                "costo_otros": {"$sum": {"$cond": [kabi, 0, "$_exp.costo"]}},
+                "cajas_kabi": {"$sum": 0},
+                "cajas_otros": {"$sum": {"$cond": [kabi, 0, "$_exp.piezas"]}},
             }},
-            "n_destinos": {"$sum": 1},
-        }},
-        {"$unwind": "$destinos"},
-        # 3) Proporción del sobrecosto del vehículo que toca a este destino.
-        {"$set": {
-            "proporcion": {"$cond": [
-                {"$gt": ["$destinos.total_cajas_vehiculo", 0]},
-                {"$divide": ["$destinos.num_cajas_destino", "$destinos.total_cajas_vehiculo"]},
-                {"$divide": [1, "$n_destinos"]},
-            ]},
-        }},
-        {"$set": {"sobrecosto_destino": {"$multiply": ["$destinos.diferencia", "$proporcion"]}}},
-        # 4) Suma por destino + cuenta despachos (un subgrupo (vehículo,destino) = 1).
-        {"$group": {
-            "_id": "$destinos.destino",
-            "sobrecosto": {"$sum": "$sobrecosto_destino"},
-            "despachos": {"$sum": 1},
-        }},
-        {"$project": {"_id": 0, "destino": "$_id", "sobrecosto": 1, "despachos": 1}},
-        {"$sort": {"sobrecosto": -1}},
-    ]
-    return pipeline
+            {"$sort": {"_id": 1}},
+            {"$project": {"_id": 0, "periodo": "$_id", "costo_kabi": 1, "costo_otros": 1,
+                          "cajas_kabi": 1, "cajas_otros": 1}},
+        ]
+        return stages
+
+    return {"mensual": _gran("%Y-%m"), "diario": _gran("%Y-%m-%d")}
+
+
+def _facet_costo_caja_otros() -> dict:
+    """Facet mensual+diario de otros costos para costo por caja. Aporta SOLO al
+    COSTO (kabi u otros según datos_servicio.cliente); NO aporta cajas a ningún
+    denominador (la regla excluye datos_servicio.piezas)."""
+    kabi = _expr_kabi_nombre("datos_servicio.cliente")
+
+    def _gran(fmt: str) -> list:
+        return [
+            {"$group": {
+                "_id": {"$dateToString": {
+                    "format": fmt,
+                    "date": {"$subtract": ["$created_at", _MS_5H]},
+                }},
+                "costo_kabi": {"$sum": {"$cond": [kabi, _num("valor_total"), 0]}},
+                "costo_otros": {"$sum": {"$cond": [kabi, 0, _num("valor_total")]}},
+                "cajas_kabi": {"$sum": 0},
+                "cajas_otros": {"$sum": 0},
+            }},
+            {"$sort": {"_id": 1}},
+            {"$project": {"_id": 0, "periodo": "$_id", "costo_kabi": 1, "costo_otros": 1,
+                          "cajas_kabi": 1, "cajas_otros": 1}},
+        ]
+
+    return {"mensual": _gran("%Y-%m"), "diario": _gran("%Y-%m-%d")}
 
 
 # ── Listas para selectores ──────────────────────────────────────────────────
@@ -500,6 +712,52 @@ def _merge_series(series: dict) -> tuple:
     return _merge("mensual"), _merge("diario")
 
 
+def _merge_costo_por_caja(series: dict) -> tuple:
+    """Combina las series mensual/diaria de las 3 colecciones (cada una ya con los 4
+    acumuladores costo_kabi/costo_otros/cajas_kabi/cajas_otros por período) en una
+    lista por período con un único ``costo_por_caja``.
+
+    costo_por_caja = (Σ costo_kabi + Σ costo_otros) / (Σ cajas_kabi + Σ cajas_otros)
+    con división protegida (0 si denominador 0).
+
+    Descomposición (sin doble conteo — cada dólar/caja va a un solo grupo):
+      - cajas_kabi  = media milla cajas (kabi)            [última/otros = 0]
+      - cajas_otros = última milla piezas (no-kabi)        [media/otros = 0]
+      - costo_kabi  = media(kabi) + última(kabi) + otros(kabi)
+      - costo_otros = última(no-kabi) + otros(no-kabi)     [media no aporta]"""
+    CLAVES = ("costo_kabi", "costo_otros", "cajas_kabi", "cajas_otros")
+
+    def _merge(gran: str) -> list:
+        merged: dict = {}
+        for fuente in ("media_milla", "ultima_milla", "otros_costos"):
+            for item in (series.get(fuente, {}).get(gran) or []):
+                p = item.get("periodo")
+                if not p:
+                    continue
+                bucket = merged.setdefault(p, {k: 0.0 for k in CLAVES})
+                for k in CLAVES:
+                    bucket[k] += float(item.get(k) or 0)
+
+        out = []
+        for p in sorted(merged):
+            b = merged[p]
+            costo = b["costo_kabi"] + b["costo_otros"]
+            cajas = b["cajas_kabi"] + b["cajas_otros"]
+            ratio = (costo / cajas) if cajas else 0.0
+            out.append({
+                "periodo": p,
+                "costo_por_caja": round(ratio),
+                # Desglose para tooltip/auditoría del frontend.
+                "costo_kabi": round(b["costo_kabi"]),
+                "costo_otros": round(b["costo_otros"]),
+                "cajas_kabi": round(b["cajas_kabi"]),
+                "cajas_otros": round(b["cajas_otros"]),
+            })
+        return out
+
+    return _merge("mensual"), _merge("diario")
+
+
 async def _run_sync(func, *args):
     """Ejecuta una función bloqueante en un hilo y devuelve su resultado."""
     return await asyncio.to_thread(lambda: func(*args))
@@ -542,10 +800,7 @@ async def get_resumen_costo_operacion(
             _run(col_completados, _pipeline_media_milla(anios, meses, clientes)),
             _run(coleccion_historico, [
                 {"$match": um_filtro},
-                {"$facet": _facet_datetime_utc(
-                    "fecha_movimiento_historico", "total_solicitado", "ultima_milla", "diferencia",
-                    cajas_field="piezas", cajas_key="cajas_ultima",
-                )},
+                {"$facet": _facet_ultima_milla_expandido(clientes or None)},
             ]),
             _run(col_otros, [
                 {"$match": oc_filtro},
@@ -601,56 +856,63 @@ async def get_resumen_costo_operacion(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/sobrecosto-por-regional")
-async def get_sobrecosto_por_regional(
+@router.get("/costo-por-caja")
+async def get_costo_por_caja(
     anio: Optional[List[int]] = Query(None),
     mes: Optional[List[int]] = Query(None),
     cliente: Optional[List[str]] = Query(None),
 ):
-    """Sobrecosto por regional (media milla) para el período filtrado.
-
-    Devuelve ``data.regionales``: [{regional, sobrecosto, ahorro, costo_real,
-    despachos}]. Cada despacho = un vehículo (deduplicado por consecutivo_vehiculo).
+    """
+    Costo por caja: promedio ponderado por período (Σ costo / Σ cajas), con un solo
+    número combinado. Reglas por cliente:
+      - Fresenius Kabi (NIT 900402080): cajas = media milla; costo = media+última+otros.
+      - Otros: cajas = última milla; costo = última+otros (sin media milla).
+    Devuelve {mensual:[{periodo,costo_por_caja,...}], diario:[...]} con el desglose
+    costo_kabi/costo_otros/cajas_kabi/cajas_otros para tooltip/auditoría.
     """
     try:
         anios = [int(a) for a in anio] if anio else []
         meses = [int(m) for m in mes] if mes else []
         clientes = [str(c) for c in cliente] if cliente else []
-        docs = await asyncio.to_thread(lambda: list(col_completados.aggregate(
-            _pipeline_sobrecosto_por_regional(anios, meses, clientes),
-            allowDiskUse=True,
-        )))
-        return {"success": True, "data": {"regionales": docs}}
+
+        um_filtro = _filtro_datetime_utc(
+            "fecha_movimiento_historico", anios, meses,
+            "cliente_origen", clientes,
+            "fusion_info.datos_originales.cliente_origen",
+        )
+        oc_filtro = _filtro_datetime_utc(
+            "created_at", anios, meses,
+            "datos_servicio.cliente", clientes,
+        )
+
+        async def _run(col, pipe):
+            return await asyncio.to_thread(lambda: list(col.aggregate(pipe, allowDiskUse=True)))
+
+        mm_res, um_res, oc_res = await asyncio.gather(
+            _run(col_completados, _pipeline_costo_caja_media_milla(anios, meses, clientes)),
+            _run(coleccion_historico, [
+                {"$match": um_filtro},
+                {"$facet": _facet_costo_caja_ultima_milla(clientes or None)},
+            ]),
+            _run(col_otros, [
+                {"$match": oc_filtro},
+                {"$facet": _facet_costo_caja_otros()},
+            ]),
+        )
+
+        def _facet_doc(res):
+            r = res[0] if res else {}
+            return {"mensual": r.get("mensual", []), "diario": r.get("diario", [])}
+
+        mensual, diario = _merge_costo_por_caja({
+            "media_milla": _facet_doc(mm_res),
+            "ultima_milla": _facet_doc(um_res),
+            "otros_costos": _facet_doc(oc_res),
+        })
+
+        return {"success": True, "data": {"mensual": mensual, "diario": diario}}
     except Exception as e:
         import traceback
         traceback.print_exc()
-        logger.error(f"[COSTO_OPERACION] Error en /sobrecosto-por-regional: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/sobrecosto-por-destino")
-async def get_sobrecosto_por_destino(
-    regional: str = Query(..., description="Regional/bodega a desglosar"),
-    anio: Optional[List[int]] = Query(None),
-    mes: Optional[List[int]] = Query(None),
-    cliente: Optional[List[str]] = Query(None),
-):
-    """Sobrecosto por destino de una regional (media milla).
-
-    Reparte la ``diferencia_flete`` de cada vehículo entre sus destinos
-    proporcionalmente a las cajas. Devuelve ``data.destinos``: [{destino,
-    sobrecosto, despachos}] ordenado por sobrecosto desc."""
-    try:
-        anios = [int(a) for a in anio] if anio else []
-        meses = [int(m) for m in mes] if mes else []
-        clientes = [str(c) for c in cliente] if cliente else []
-        docs = await asyncio.to_thread(lambda: list(col_completados.aggregate(
-            _pipeline_sobrecosto_por_destino(str(regional), anios, meses, clientes),
-            allowDiskUse=True,
-        )))
-        return {"success": True, "data": {"destinos": docs}}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        logger.error(f"[COSTO_OPERACION] Error en /sobrecosto-por-destino: {e}")
+        logger.error(f"[COSTO_OPERACION] Error en /costo-por-caja: {e}")
         raise HTTPException(status_code=500, detail=str(e))
