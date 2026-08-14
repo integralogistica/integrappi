@@ -3757,7 +3757,8 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "JERICO": "JERICO ANT.",
     "SAN JOSE DEL FRAGUA": "SAN JOSE DE FRAGUA",
     "SAN CARLOS DE GUAROA": "SAN CARLOS GUAROA",
-    "TOLU VIEJO": "TOLUVIEJO"
+    "TOLU VIEJO": "TOLUVIEJO",
+    "VALLE DE SAN JUAN": "VALLE DE S JUAN"
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
