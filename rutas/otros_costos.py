@@ -60,11 +60,43 @@ CAUSALES_OTROS_COSTOS_DEFAULT = [
     "ENTREGA EN VEREDA", "OTROS", "PUNTO ADICIONAL", "RECOLECCIONES",
     "REQUERIMIENTO", "STAND BY", "TRASBORDO", "TRASLADO", "URGENCIA",
 ]
-BANCOS = [
-    "BANCO DE BOGOTÁ", "BANCOLOMBIA", "DAVIVIENDA", "DAVIPLATA",
-    "CMR FALABELLA", "BANCO CAJA SOCIAL", "BANCO AV VILLAS", "COLPATRIA",
+# Catálogo de bancos (nombre + código bancario). Se siembra en `bancos_otros_costos`
+# con el mismo patrón que clientes/causales: editable directamente en Mongo.
+# Nota: NEQUI/DAVIPLATA/BANCOLOMBIA A LA MANO son billeteras asociadas a un banco
+# (comparten código con su banco matriz, según la lista oficial enviada).
+BANCOS_OTROS_COSTOS_DEFAULT = [
+    {"nombre": "BANCO DE LA REPUBLICA", "codigo": "0"},
+    {"nombre": "BANCO DE BOGOTA", "codigo": "1"},
+    {"nombre": "BANCO POPULAR", "codigo": "2"},
+    {"nombre": "ITAU CORPBANCA COLOMBIA S.A.", "codigo": "6"},
+    {"nombre": "BANCOLOMBIA", "codigo": "7"},
+    {"nombre": "CITIBANK COLOMBIA", "codigo": "9"},
+    {"nombre": "GNB SUDAMERIS S.A.", "codigo": "12"},
+    {"nombre": "BBVA", "codigo": "13"},
+    {"nombre": "COLPATRIA", "codigo": "19"},
+    {"nombre": "OCCIDENTE", "codigo": "23"},
+    {"nombre": "CAJA SOCIAL", "codigo": "32"},
+    {"nombre": "BANCO AGRARIO DE COLOMBIA S.A.", "codigo": "40"},
+    {"nombre": "DAVIVIENDA", "codigo": "51"},
+    {"nombre": "AV VILLAS", "codigo": "52"},
+    {"nombre": "BANCO W S.A.", "codigo": "53"},
+    {"nombre": "BANCO CREDIFINANCIERA S.A.C.F", "codigo": "58"},
+    {"nombre": "BANCAMIA", "codigo": "59"},
+    {"nombre": "BANCO PICHINCHA S.A.", "codigo": "60"},
+    {"nombre": "BANCOOMEVA", "codigo": "61"},
+    {"nombre": "CMR FALABELLA S.A.", "codigo": "62"},
+    {"nombre": "BANCO FINANDINA S.A.", "codigo": "63"},
+    {"nombre": "BANCO SANTANDER DE NEGOCIOS COLOMBIA S.A.", "codigo": "65"},
+    {"nombre": "BANCO COOPERATIVO COOPCENTRAL", "codigo": "66"},
+    {"nombre": "BANCO COMPARTIR S.A", "codigo": "67"},
+    {"nombre": "BANCO SERFINANZA S.A", "codigo": "69"},
+    {"nombre": "NEQUI", "codigo": "507"},
+    {"nombre": "DAVIPLATA", "codigo": "51"},
+    {"nombre": "BANCOLOMBIA A LA MANO", "codigo": "7"},
+    {"nombre": "LULO", "codigo": "70"},
 ]
-TIPOS_CUENTA = ["Ahorros", "Corriente", "Depósito electrónico"]
+TIPOS_CUENTA = ["Ahorros", "Corriente", "Depósito electrónico", "BILLETERA DIGITAL", "TARJETA PREPAGO"]
+TIPOS_ID_TITULAR = ["CC", "NIT"]
 # Catálogo por defecto de clientes para el formulario (se siembra en `clientes_otros_costos`).
 # Editable directamente en Mongo: si la colección tiene documentos, se usa tal cual.
 CLIENTES_OTROS_COSTOS_DEFAULT = [
@@ -93,6 +125,7 @@ col_historico_pedidos = db["pedidos_medical_historico"]   # solo lectura (lookup
 col_usuarios = db["baseusuarios"]                          # resolución de identidad
 col_clientes = db["clientes_otros_costos"]                 # catálogo de clientes (formulario)
 col_causales = db["causales_otros_costos"]                 # catálogo de tipos de costo (formulario)
+col_bancos = db["bancos_otros_costos"]                     # catálogo de bancos: nombre + código
 
 # Índices (idempotentes al importar, igual patrón que siscore_consultas.py).
 # `consecutivo` unique en activos → anti-colisión en la generación del consecutivo.
@@ -676,13 +709,18 @@ def _validar_solicitud(
     # Bancarios
     if not (datos_bancarios.banco or "").strip():
         raise HTTPException(status_code=422, detail="El banco es obligatorio.")
-    if (datos_bancarios.banco or "").strip().upper() not in [b.upper() for b in BANCOS]:
+    doc_banco = col_bancos.find_one({"nombre": {"$regex": f"^{re.escape(datos_bancarios.banco.strip())}$", "$options": "i"}})
+    if not doc_banco:
         raise HTTPException(status_code=422, detail="El banco seleccionado no es válido.")
+    # El código se resuelve desde el catálogo (fuente de verdad), no se confía del frontend.
+    datos_bancarios.codigo_banco = str(doc_banco.get("codigo", ""))
     if not (datos_bancarios.numero_cuenta or "").strip():
         raise HTTPException(status_code=422, detail="El número de cuenta es obligatorio.")
     ced = re.sub(r"\D", "", datos_bancarios.cedula_titular or "")
     if not ced:
         raise HTTPException(status_code=422, detail="La cédula del titular es obligatoria.")
+    if (datos_bancarios.tipo_id_titular or "").strip() not in TIPOS_ID_TITULAR:
+        raise HTTPException(status_code=422, detail="El tipo de identificación del titular debe ser CC o NIT.")
     if not (datos_bancarios.nombre_titular or "").strip():
         raise HTTPException(status_code=422, detail="El nombre del titular de la cuenta es obligatorio.")
     if not (conductor.nombre or "").strip():
@@ -848,12 +886,14 @@ class DatosServicio(BaseModel):
 
 class DatosBancarios(BaseModel):
     banco: str = ""
+    codigo_banco: str = ""
     tipo_cuenta: str = ""
     numero_cuenta: str = ""
+    tipo_id_titular: str = ""
     cedula_titular: str = ""
     nombre_titular: str = ""
 
-    @field_validator("nombre_titular", mode="before")
+    @field_validator("nombre_titular", "tipo_id_titular", mode="before")
     @classmethod
     def _upper(cls, v):
         return _norm_upper(v)
@@ -980,7 +1020,21 @@ async def tipos_costo():
 
 @router.get("/bancos")
 async def bancos():
-    return BANCOS
+    """Bancos para el formulario de Otros Costos (nombre + código bancario).
+    Auto-siembra la colección `bancos_otros_costos` con el listado por defecto
+    la primera vez (si está vacía); desde entonces es editable directamente en
+    Mongo (documentos `{ "nombre": "...", "codigo": "..." }`)."""
+    if col_bancos.count_documents({}) == 0:
+        col_bancos.insert_many([dict(b) for b in BANCOS_OTROS_COSTOS_DEFAULT])
+        logger.info(
+            "[BANCOS OTROS COSTOS] Colección sembrada con %d bancos por defecto.",
+            len(BANCOS_OTROS_COSTOS_DEFAULT),
+        )
+    docs = list(col_bancos.find({}, {"_id": 0, "nombre": 1, "codigo": 1}))
+    return [
+        {"nombre": d.get("nombre", ""), "codigo": str(d.get("codigo", ""))}
+        for d in docs if d.get("nombre")
+    ]
 
 
 @router.get("/tipos-cuenta")
