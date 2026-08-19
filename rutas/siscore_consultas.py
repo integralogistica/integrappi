@@ -938,7 +938,7 @@ async def retroceder_a_solicitud(request: RetrocederASolicitudRequest):
     devuelve una planilla de pedidos_medical_historico a pedidos_medical para que
     reaparezca en SolicitudVehiculos. Quita el pedido_vulcano y la fecha de
     movimiento, y deja el estado en APROBADO (lista para reasignar el pedido).
-    Solo ADMIN (validar en frontend).
+    Solo ADMIN y ANALISTA (validar en frontend).
     """
     try:
         planilla = (request.planilla or "").strip()
