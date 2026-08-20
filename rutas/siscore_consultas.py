@@ -3639,6 +3639,7 @@ def _expandir_doc_a_filas(doc):
             )
         return [{
             "consecutivo": doc.get("consecutivo", ""),
+            "planilla": doc.get("planilla", ""),
             "regional_doc": doc.get("regional"),
             "municipio_destino": doc.get("municipio_destino", ""),
             "codigo_pedido": doc.get("codigo_pedido", ""),
@@ -3685,6 +3686,7 @@ def _expandir_doc_a_filas(doc):
             placa_val = doc.get("placa", "")
         filas.append({
             "consecutivo": _consecutivo_original(d, i, consecutivo_fusionado),
+            "planilla": d.get("planilla") or doc.get("planilla", ""),
             "regional_doc": d.get("regional") or doc.get("regional"),
             "municipio_destino": d.get("municipio_destino", ""),
             "codigo_pedido": d.get("codigo_pedido", ""),
@@ -3783,7 +3785,7 @@ def _escribir_fila_planilla(
     regional_usuario, divipolas_lookup, divipolas_por_poblacion,
     mapear_tipo_vehiculo, thin_border,
     ubicacion_descargue_override=None, peso_sicetac=None, fill=None,
-    ahorro=0, observacion_ahorro="",
+    ahorro=0, observacion_ahorro="", planilla="",
 ):
     """
     Escribe una fila de planilla en la hoja Excel y devuelve row_num + 1.
@@ -3806,13 +3808,14 @@ def _escribir_fila_planilla(
     # Tipo de viaje: Urbano si origen == destino, Nacional si son diferentes
     tipo_viaje = "URBANO" if str(regional_doc).upper() == str(municipio_destino).upper() else "NACIONAL"
 
-    # Observación: DN + código pedido
-    observacion = f"DN {codigo_pedido}" if codigo_pedido else "DN"
+    # Observación: número(s) de planilla Siscore (antes iba "DN <codigo_pedido>";
+    # pedido del negocio: la observación debe referenciar la planilla).
+    observacion = f"DN {planilla}" if planilla else "DN"
 
     # Límites de longitud del formato de carga: cortar al máximo permitido por columna.
     #   - Observación: 300 caracteres
     #   - Pedido cliente y Guía: 100 caracteres
-    observacion = observacion[:300]
+    observacion = str(observacion)[:300]
     pedido_cliente = str(codigo_pedido)[:100] if codigo_pedido else codigo_pedido
 
     # CENTRO COSTO: Regional + "CARGA MASIVA OPERACIONES CARGA" + Cliente Origen.
