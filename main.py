@@ -41,9 +41,8 @@ from rutas.cronograma_mc import router as ruta_cronograma_mc
 from rutas.siscore_consultas import router as ruta_siscore_consultas
 from rutas.divipolas import ruta_divipolas
 from rutas.banco import router as ruta_banco
-from rutas.indicadores_transporte import router as ruta_indicadores_transporte
-from rutas.indicadores_fletes import router as ruta_indicadores_fletes
 from rutas.indicadores_costo_operacion import router as ruta_indicadores_costo_operacion
+from rutas.indicadores_cliente import router as ruta_indicadores_cliente
 from rutas.disponibilidad import ruta_disponibilidad
 from rutas.conductores import ruta_conductores
 from rutas.otros_costos import router as ruta_otros_costos
@@ -193,9 +192,8 @@ app.include_router(ruta_cronograma_mc)
 app.include_router(ruta_siscore_consultas)
 app.include_router(ruta_divipolas)
 app.include_router(ruta_banco)
-app.include_router(ruta_indicadores_transporte)
-app.include_router(ruta_indicadores_fletes)
 app.include_router(ruta_indicadores_costo_operacion)
+app.include_router(ruta_indicadores_cliente)
 app.include_router(ruta_disponibilidad)
 app.include_router(ruta_conductores)
 app.include_router(ruta_otros_costos)

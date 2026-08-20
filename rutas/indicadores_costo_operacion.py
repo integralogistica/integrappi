@@ -21,7 +21,7 @@ Fechas eje:
   y filtra sin offset, ver ``pedidos.py``). Para bucket mensual/diario se extrae directo
   del prefijo del string (NO se resta 5 h).
 - Última milla y Otros costos: datetime UTC; se resta 5 h antes de extraer día/mes
-  (igual que el módulo Fletes).
+  (mismo alineamiento Colombia que usa el histórico en el resto del sistema).
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -33,7 +33,6 @@ import logging
 # Reutiliza la conexión Mongo y el offset Colombia de siscore_consultas
 # (main.py lo importa antes que este módulo, así que ya está cargado).
 from rutas.siscore_consultas import coleccion_historico, _OFFSET_COLOMBIA
-from rutas.indicadores_fletes import _expr_clientes_expandidos
 from bd.bd_cliente import bd_cliente
 
 _db = bd_cliente["integra"]
@@ -71,6 +70,92 @@ def _num(field: str) -> dict:
             "onError": 0,
             "onNull": 0,
         }
+    }
+
+
+def _expr_clientes_expandidos() -> dict:
+    """
+    Expresión de aggregation que, por cada documento del histórico, devuelve un
+    ARRAY de sub-docs ``{cliente, flete, sobrecosto}`` para alimentar group-by
+    por cliente tras expandir las planillas fusionadas:
+
+    - **Doc fusionado** con ``fusion_info.datos_originales`` no vacío: un sub-doc
+      por cada planilla original, con el ``cliente_origen`` del original y el
+      ``total_solicitado`` (flete) y la ``diferencia`` (sobrecosto) del doc
+      fusionado **repartidos proporcionalmente por piezas (cajas)**. Es la misma
+      política con la que se facturan los Excel de aprobados/gastos
+      (``_repartir_flete``); aquí sin residuo exacto porque a nivel indicador la
+      pérdida de redondeo (unos COP) es despreciable frente a cifras en millones.
+    - **Doc normal**: un único sub-doc con los valores top-level.
+
+    Pensado para usarse como ``{"$project": {"_exp": _expr_clientes_expandidos()}}``
+    seguido de ``$unwind`` + ``$group`` por ``$_exp.cliente``.
+
+    (Migrada desde ``indicadores_fletes.py`` cuando ese módulo se eliminó.)
+    """
+    da = "$fusion_info.datos_originales"  # atajo de lectura
+    piezas_o = {"$convert": {"input": "$$o.piezas", "to": "double", "onError": 0, "onNull": 0}}
+    total_piezas = {
+        # Suma de piezas de los originales (como double, tolerando strings).
+        "$sum": {
+            "$map": {
+                "input": {"$ifNull": [da, []]},
+                "as": "x",
+                "in": {"$convert": {"input": "$$x.piezas", "to": "double", "onError": 0, "onNull": 0}},
+            }
+        }
+    }
+    # factor de reparto por piezas (protegido por $cond en su uso). Si total_piezas
+    # es 0, se reparte equitativamente (1/n), igual que _repartir_flete del Excel.
+    factor_piezas = {"$divide": [piezas_o, "$$tp"]}
+    factor_eq = {"$divide": [1, "$$n"]}
+    return {
+        "$cond": [
+            {  # ¿es fusionada con originales?
+                "$and": [
+                    {"$eq": [{"$ifNull": ["$fusion_info.es_fusionada", False]}, True]},
+                    {"$gt": [{"$size": {"$ifNull": [da, []]}}, 0]},
+                ]
+            },
+            {  # rama fusionada: repartir flete y sobrecosto por piezas
+                "$let": {
+                    "vars": {
+                        "tp": total_piezas,
+                        "n": {"$size": {"$ifNull": [da, []]}},
+                    },
+                    "in": {
+                        "$map": {
+                            "input": {"$ifNull": [da, []]},
+                            "as": "o",
+                            "in": {
+                                "cliente": {"$ifNull": ["$$o.cliente_origen", "Sin cliente"]},
+                                "flete": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        {"$multiply": [_num("total_solicitado"), factor_piezas]},
+                                        {"$multiply": [_num("total_solicitado"), factor_eq]},
+                                    ]
+                                },
+                                "sobrecosto": {
+                                    "$cond": [
+                                        {"$gt": ["$$tp", 0]},
+                                        {"$multiply": [_num("diferencia"), factor_piezas]},
+                                        {"$multiply": [_num("diferencia"), factor_eq]},
+                                    ]
+                                },
+                            },
+                        }
+                    },
+                }
+            },
+            {  # rama no fusionada: un sub-doc con los valores top-level
+                "$cond": [
+                    {"$in": [{"$ifNull": ["$cliente_origen", ""]}, [None, "", " "]]},
+                    [{"cliente": "Sin cliente", "flete": _num("total_solicitado"), "sobrecosto": _num("diferencia")}],
+                    [{"cliente": "$cliente_origen", "flete": _num("total_solicitado"), "sobrecosto": _num("diferencia")}],
+                ]
+            },
+        ]
     }
 
 
@@ -455,8 +540,8 @@ def _expr_costo_caja_ultima_expandido() -> dict:
       de cada original** (si la suma de piezas es 0, reparto equitativo 1/n).
     - **Doc normal**: un único sub-doc con los valores top-level.
 
-    Igual política que ``indicadores_fletes._expr_clientes_expandidos`` (reparto por
-    piezas), adaptada a costo por caja (sin ``diferencia``). Así una fusionada que
+    Igual política que ``_expr_clientes_expandidos`` (reparto por piezas),
+    adaptada a costo por caja (sin ``diferencia``). Así una fusionada que
     mezcla Kabi con otro cliente reparte cada porción a su grupo correcto, evitando
     que caiga entera en 'otros' por el cliente_origen concatenado del top-level."""
     da = "$fusion_info.datos_originales"
@@ -643,7 +728,7 @@ def _clientes_media_milla(anios: List[int], meses: List[int]) -> list:
 
 def _clientes_ultima_milla(anios: List[int], meses: List[int]) -> list:
     """Clientes de la última milla expandiendo fusionadas (un nombre por cliente,
-    sin comas), respetando año/mes. Reutiliza la expansión del módulo Fletes."""
+    sin comas), respetando año/mes (expansión de ``_expr_clientes_expandidos``)."""
     filtro = _filtro_datetime_utc("fecha_movimiento_historico", anios, meses)
     out = set()
     for d in coleccion_historico.aggregate([

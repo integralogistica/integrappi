@@ -793,8 +793,8 @@ def _scope_lectura(info: dict, historico: bool = False) -> dict:
 
     if historico:
         # Histórico = solo lectura/auditoría. Sin restricción de bandeja, salvo
-        # el OPERATIVO que ve las de su regional (comportamiento previo).
-        if perfil == "OPERATIVO":
+        # el OPERATIVO/DESPACHADOR que ve las de su regional (comportamiento previo).
+        if perfil in ("OPERATIVO", "DESPACHADOR"):
             base_hist: dict = {}
             if _normalizar_regional(info.get("regional", "")):
                 _aplicar_filtro_regional(base_hist, info["regional"])
@@ -812,17 +812,18 @@ def _scope_lectura(info: dict, historico: bool = False) -> dict:
         return {"estado": "aprobado"}                            # bandeja: trámite
     if perfil in ("CONTROL", "COORDINADOR"):
         return {"estado": "pendiente_aprobacion"}               # bandeja: aprobación
-    if perfil == "OPERATIVO":
+    if perfil in ("OPERATIVO", "DESPACHADOR"):
         # Bandeja (puede actuar): borrador/devuelto de su regional (o propias si
         # no tiene regional definida) + seguimiento en SOLO LECTURA de sus
         # propias solicitudes ya enviadas (otros estados activos).
+        # DESPACHADOR tiene el mismo tratamiento que OPERATIVO (mismo rol operativo).
         base_regional: dict = {}
         if _normalizar_regional(info.get("regional", "")):
             _aplicar_filtro_regional(base_regional, info["regional"])  # deja {"$or": [...]}
         else:
             logger.warning(
-                "[OTROS_COSTOS] OPERATIVO %s sin regional definida; fallback a solicitudes propias.",
-                usuario,
+                "[OTROS_COSTOS] %s %s sin regional definida; fallback a solicitudes propias.",
+                perfil, usuario,
             )
             base_regional = {"usuario_registro": usuario}
 
@@ -1108,7 +1109,7 @@ async def verificar_duplicado(req: VerificarDuplicadoRequest):
 @router.post("/crear")
 async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
     info = _resolver_usuario(req.usuario)
-    _requiere(info, {"OPERATIVO", "ADMIN"}, "crear solicitudes")
+    _requiere(info, {"OPERATIVO", "DESPACHADOR", "ADMIN"}, "crear solicitudes")
 
     if not str(req.pedido_vulcano_original or "").strip():
         raise HTTPException(status_code=422, detail="El pedido de Vulcano es obligatorio.")
@@ -1177,9 +1178,9 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
             status_code=422,
             detail="La solicitud está aprobada/pagada/anulada y no se puede editar.",
         )
-    # Permiso: ADMIN, o OPERATIVO dueño
+    # Permiso: ADMIN, o OPERATIVO/DESPACHADOR dueño
     if info["perfil"] != "ADMIN":
-        if info["perfil"] != "OPERATIVO" or doc.get("usuario_registro") != info["usuario"]:
+        if info["perfil"] not in ("OPERATIVO", "DESPACHADOR") or doc.get("usuario_registro") != info["usuario"]:
             raise HTTPException(status_code=403, detail="Solo el creador o un administrador pueden editar.")
         # El operativo solo puede editar borrador o devuelto: una vez enviada a
         # aprobación (pendiente_aprobacion) la solicitud pasa al aprobador y ya
@@ -1248,7 +1249,7 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
 @router.post("/enviar-aprobacion")
 async def enviar_aprobacion(req: AccionConObservacionRequest, request: Request):
     info = _resolver_usuario(req.usuario)
-    _requiere(info, {"OPERATIVO", "ADMIN"}, "enviar solicitudes a aprobación")
+    _requiere(info, {"OPERATIVO", "DESPACHADOR", "ADMIN"}, "enviar solicitudes a aprobación")
     doc = col_activos.find_one({"consecutivo": req.consecutivo})
     if not doc:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
@@ -1637,9 +1638,10 @@ def _obtener_detalle(consecutivo: str, info: dict, col):
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
     # Scope de detalle
     perfil = info["perfil"]
-    if perfil == "OPERATIVO":
-        # OPERATIVO ve el detalle de cualquier solicitud de su regional; si no
-        # tiene regional definida, solo las propias (mismo fallback que el listado).
+    if perfil in ("OPERATIVO", "DESPACHADOR"):
+        # OPERATIVO/DESPACHADOR ve el detalle de cualquier solicitud de su
+        # regional; si no tiene regional definida, solo las propias (mismo
+        # fallback que el listado).
         if _normalizar_regional(info.get("regional", "")):
             if not _doc_coincide_regional(doc, info["regional"]):
                 raise HTTPException(status_code=403, detail="No tiene acceso a esta solicitud.")

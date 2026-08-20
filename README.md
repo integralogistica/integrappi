@@ -569,7 +569,7 @@ El usuario operativo puede registrar, en el modal **Editar Planilla**, un **ahor
 - **`PUT /siscore/actualizar-planilla-pedidos`** (`siscore_consultas.py`): el modelo `ActualizarPlanillaPedidosRequest` y `campos_actualizar` ahora incluyen `ahorro`/`observacion`; validación **HTTP 400** si `ahorro > 5.000.000`.
 - **Persistencia**: se guardan en `pedidos_medical`; viajan **solos** al histórico porque `_procesar_pedido_vulcano` copia el documento completo a `pedidos_medical_historico`, y sobreviven al re-consultar porque `guardar-busqueda` hace `$set` (no replace).
 - **Excel `POST /siscore/exportar-planillas-excel`**: dos columnas nuevas **al final** de la hoja `plantilla` → "Ahorro" (numérico) y "Observación Ahorro" (texto, máx 300 car.). En planillas fusionadas el ahorro va sólo en la primera fila para no duplicar la suma.
-- **Indicadores de Fletes** (`indicadores_fletes.py`, `GET /indicadores-fletes/resumen`): la pipeline de KPIs ahora suma `ahorro` (`"$sum": _num("ahorro")`) y lo devuelve en `kpis.ahorro`; redondeado como moneda COP.
+- **Indicadores de Fletes** (`indicadores_fletes.py`, `GET /indicadores-fletes/resumen`): la pipeline de KPIs ahora suma `ahorro` (`"$sum": _num("ahorro")`) y lo devuelve en `kpis.ahorro`; redondeado como moneda COP. *(Módulo eliminado el 2026-08-19; registro histórico.)*
 
 ### Catálogo de clientes de Otros Costos (`otros_costos.py`)
 - **`GET /otros-costos/clientes`**: devuelve los clientes sugeridos para el campo Cliente del formulario. **Auto-siembra** la colección `clientes_otros_costos` con 9 clientes por defecto la primera vez (si está vacía); a partir de ahí es editable directamente en Mongo (documentos `{ "nombre": "..." }`) sin tocar código.
