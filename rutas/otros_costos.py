@@ -1804,7 +1804,7 @@ async def exportar_excel(req: ExportarExcelRequest):
 # histórico (ver /importar-pago).
 CABECERAS_ARCHIVO_PAGO = [
     "Consecutivo", "Tipo Identificacion", "Numero Identificacion", "Nombre Titular",
-    "Numero Cuenta", "Tipo de Producto", "Codigo del Banco", "Referencia",
+    "Numero Cuenta", "Tipo de Producto", "Codigo del Banco", "Valor Total", "Referencia",
 ]
 
 
@@ -1858,16 +1858,27 @@ async def exportar_pago(req: ExportarPagoRequest):
     ws.column_dimensions["E"].number_format = "@"   # número de cuenta como texto
     ws.column_dimensions["H"].number_format = "@"   # referencia como texto
 
+    # Abreviatura del tipo de producto para el formato bancario:
+    # Ahorros → CA, Corriente → CC, Tarjeta prepago → TP. El resto (Depósito
+    # electrónico, Billetera digital) no tiene abreviatura definida: sale tal cual.
+    _TIPO_PRODUCTO_COD = {
+        "AHORROS": "CA",
+        "CORRIENTE": "CC",
+        "TARJETA PREPAGO": "TP",
+    }
+
     for r, d in enumerate(docs, start=2):
         db_ = d.get("datos_bancarios", {}) or {}
+        tipo_prod_raw = (db_.get("tipo_cuenta") or "").strip().upper()
         fila = [
             d.get("consecutivo", ""),                                 # Consecutivo
             (db_.get("tipo_id_titular") or "").strip().upper() or "CC",  # CC o NIT
             str(db_.get("cedula_titular") or ""),                     # Número identificación
             db_.get("nombre_titular", ""),                            # Nombre titular
             str(db_.get("numero_cuenta") or ""),                      # Número cuenta
-            (db_.get("tipo_cuenta") or "").strip().upper(),           # Tipo de producto
+            _TIPO_PRODUCTO_COD.get(tipo_prod_raw, tipo_prod_raw),    # Tipo de producto (CA/CC/TP)
             str(db_.get("codigo_banco") or ""),                       # Código del banco
+            _a_numero(d.get("valor_total")),                         # Valor total del consecutivo
             "",                                                       # Referencia (en blanco: la llena el banco)
         ]
         for i, v in enumerate(fila, 1):
