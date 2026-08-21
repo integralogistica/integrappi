@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
@@ -1001,6 +1001,23 @@ class ExportarExcelRequest(BaseModel):
     origen: str = "historico"   # "historico" | "activos"
 
 
+class ExportarPagoRequest(BaseModel):
+    """Export del archivo plano bancario: una fila por consecutivo seleccionado."""
+    usuario: str
+    consecutivos: List[str]
+
+
+class DevolverDelHistoricoRequest(BaseModel):
+    consecutivo: str
+    usuario: str
+    motivo: str = ""
+
+
+class VerificarManifiestoRequest(BaseModel):
+    usuario: str
+    manifiesto: str
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Endpoints
 # ════════════════════════════════════════════════════════════════════════════
@@ -1106,6 +1123,47 @@ async def verificar_duplicado(req: VerificarDuplicadoRequest):
     return {"posible_duplicado": len(coincidencias) > 0, "coincidencias": coincidencias}
 
 
+def _manifiestos_usados(manes: List[str]) -> List[dict]:
+    """Consulta histórico (+anulados) y devuelve los manifiestos ya usados con su
+    consecutivo OC y fecha de pago (para la advertencia de reuso). Un manifiesto
+    pagado/anulado ya no puede volver a usarse en una nueva solicitud."""
+    usados: List[dict] = []
+    vistos: set[str] = set()
+    manifiesto_in = [str(m).strip().upper() for m in manes if str(m).strip()]
+    if not manifiesto_in:
+        return usados
+    filtro = {"manifiesto": {"$in": manifiesto_in}}
+    proyeccion = {"consecutivo": 1, "manifiesto": 1, "estado": 1, "created_at": 1,
+                  "pago.fecha_pago": 1, "usuario_registro": 1}
+    for col, origen in ((col_historico, "historico"), (col_anulados, "anulados")):
+        for d in col.find(filtro, proyeccion):
+            m = str(d.get("manifiesto", "")).strip().upper()
+            if m in vistos:
+                continue
+            vistos.add(m)
+            usados.append({
+                "manifiesto": m,
+                "consecutivo": d.get("consecutivo", ""),
+                "estado": d.get("estado", ""),
+                "origen": origen,
+                "fecha_pago": _fecha_a_str((d.get("pago") or {}).get("fecha_pago")),
+                "creado_por": d.get("usuario_registro", ""),
+            })
+    return usados
+
+
+@router.post("/verificar-manifiesto")
+async def verificar_manifiesto(req: VerificarManifiestoRequest):
+    """Advertencia (no bloqueante) al OPERATIVO: manifiestos ya usados en el
+    histórico. Un manifiesto pagado no debe volver a usarse."""
+    _resolver_usuario(req.usuario)
+    manifiesto = str(req.manifiesto or "").strip().upper()
+    if not manifiesto:
+        return {"manifiesto": "", "ya_usado": False, "usos": []}
+    usos = _manifiestos_usados([manifiesto])
+    return {"manifiesto": manifiesto, "ya_usado": len(usos) > 0, "usos": usos}
+
+
 @router.post("/crear")
 async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
     info = _resolver_usuario(req.usuario)
@@ -1152,6 +1210,7 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
     consecutivo = _insertar_con_reintento(doc)
 
     posible_dup = _verificar_duplicado_interno(pedidos_norm, doc["manifiesto"], req.costos, excluir_consecutivo=consecutivo)
+    manifiesto_ya_usado = _manifiestos_usados([doc["manifiesto"]]) if doc["manifiesto"] else []
 
     return {
         "mensaje": "Solicitud creada",
@@ -1161,6 +1220,8 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
         "requiere_aprobacion_control": requiere_control,
         "posible_duplicado": len(posible_dup) > 0,
         "duplicados": posible_dup,
+        "manifiesto_ya_usado": len(manifiesto_ya_usado) > 0,
+        "usos_manifiesto": manifiesto_ya_usado,
         "solicitud": _serializar(doc, info["perfil"], info["usuario"]),
     }
 
@@ -1734,3 +1795,268 @@ async def exportar_excel(req: ExportarExcelRequest):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=otros_costos.xlsx"},
     )
+
+
+# ── Archivo plano bancario (FINANCIERO/ADMIN) ─────────────────────────────────
+# Formato de carga bancaria: una fila por consecutivo seleccionado. La columna
+# "Referencia" se exporta EN BLANCO porque el banco la devuelve diligenciada; al
+# re-subir el archivo, esa referencia se guarda como `Referencia_bancaria` en el
+# histórico (ver /importar-pago).
+CABECERAS_ARCHIVO_PAGO = [
+    "Consecutivo", "Tipo Identificacion", "Numero Identificacion", "Nombre Titular",
+    "Numero Cuenta", "Tipo de Producto", "Codigo del Banco", "Referencia",
+]
+
+
+@router.post("/exportar-pago")
+async def exportar_pago(req: ExportarPagoRequest):
+    """Archivo plano bancario de los consecutivos seleccionados (FINANCIERO/ADMIN)."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    info = _resolver_usuario(req.usuario)
+    _requiere(info, {"FINANCIERO", "ADMIN"}, "exportar el archivo de pago")
+
+    consecutivos = [c.strip() for c in req.consecutivos if c and c.strip()]
+    if not consecutivos:
+        raise HTTPException(status_code=422, detail="Seleccione al menos un consecutivo.")
+
+    docs = list(col_activos.find({"consecutivo": {"$in": consecutivos}}))
+    encontrados = {d.get("consecutivo") for d in docs}
+    faltantes = [c for c in consecutivos if c not in encontrados]
+    if faltantes:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontraron en solicitudes activas: {', '.join(faltantes)}",
+        )
+    # Solo solicitudes listas para pagar (aprobadas + trámite Vulcano OK).
+    no_pagables = [
+        d["consecutivo"] for d in docs
+        if d.get("estado") != "aprobado" or d.get("tramite_vulcano") != "ok"
+    ]
+    if no_pagables:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Solo se exportan solicitudes aprobadas con trámite Vulcano OK. "
+                   f"Revisar: {', '.join(no_pagables)}",
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pago"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+    thin = Border(*(Side(style="thin"),) * 4)
+    for i, c in enumerate(CABECERAS_ARCHIVO_PAGO, 1):
+        cell = ws.cell(row=1, column=i, value=c)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin
+        cell.alignment = Alignment(horizontal="center")
+    ws.column_dimensions["C"].number_format = "@"   # identificación como texto
+    ws.column_dimensions["E"].number_format = "@"   # número de cuenta como texto
+    ws.column_dimensions["H"].number_format = "@"   # referencia como texto
+
+    for r, d in enumerate(docs, start=2):
+        db_ = d.get("datos_bancarios", {}) or {}
+        fila = [
+            d.get("consecutivo", ""),                                 # Consecutivo
+            (db_.get("tipo_id_titular") or "").strip().upper() or "CC",  # CC o NIT
+            str(db_.get("cedula_titular") or ""),                     # Número identificación
+            db_.get("nombre_titular", ""),                            # Nombre titular
+            str(db_.get("numero_cuenta") or ""),                      # Número cuenta
+            (db_.get("tipo_cuenta") or "").strip().upper(),           # Tipo de producto
+            str(db_.get("codigo_banco") or ""),                       # Código del banco
+            "",                                                       # Referencia (en blanco: la llena el banco)
+        ]
+        for i, v in enumerate(fila, 1):
+            ws.cell(row=r, column=i, value=v).border = thin
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return Response(
+        content=output.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=pago_otros_costos_{_hoy_colombia().strftime('%Y%m%d')}.xlsx"},
+    )
+
+
+def _celda_texto(v) -> str:
+    """Celda Excel → texto limpio (cero decimal de openpyxl: 1.23e+08 → '123000000')."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
+@router.post("/importar-pago")
+async def importar_pago(
+    usuario: str = Query(...),
+    archivo: UploadFile = File(...),
+    request: Request = None,
+):
+    """Sube el archivo plano bancario (el mismo que se descargó, con la columna
+    Referencia ya diligenciada por el banco) y:
+
+      1. Registra el pago de cada consecutivo (estado pagado + pago.referencia =
+         Referencia_bancaria), y
+      2. Mueve las solicitudes al histórico (historico_otros_costos).
+
+    El Financiero puede también dejar la referencia vacía: en ese caso la
+    solicitud se marca pagada sin referencia (igual que el registro manual).
+    FINANCIERO/ADMIN únicamente. Columnas requeridas: Consecutivo y Referencia."""
+    import io
+    from openpyxl import load_workbook
+
+    info = _resolver_usuario(usuario)
+    _requiere(info, {"FINANCIERO", "ADMIN"}, "importar el archivo de pago")
+
+    contenido = await archivo.read()
+    if not contenido:
+        raise HTTPException(status_code=422, detail="El archivo está vacío.")
+    try:
+        wb = load_workbook(io.BytesIO(contenido), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(status_code=422, detail="El archivo no es un Excel válido (.xlsx).")
+    ws = wb.active
+
+    filas = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not filas:
+        raise HTTPException(status_code=422, detail="El archivo no tiene filas.")
+
+    # Localizar las columnas por cabecera (tolerante a mayúsculas/acentos/espacios).
+    def _norm_col(s) -> str:
+        return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+    cabeceras = {_norm_col(c): i for i, c in enumerate(filas[0]) if c is not None}
+    col_consec = next((cabeceras[k] for k in cabeceras
+                       if k in ("consecutivo", "consecutivo oc")), None)
+    col_ref = next((cabeceras[k] for k in cabeceras
+                    if "referencia" in k and not k.startswith("referencia pago")), None)
+    if col_consec is None or col_ref is None:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo debe tener las columnas 'Consecutivo' y 'Referencia'.",
+        )
+
+    resultados, errores = [], []
+    ahora = _ahora_utc()
+    for fila in filas[1:]:
+        if fila is None or all(v is None or str(v).strip() == "" for v in fila):
+            continue
+        consecutivo = _celda_texto(fila[col_consec] if col_consec < len(fila) else "")
+        referencia = _celda_texto(fila[col_ref] if col_ref < len(fila) else "")
+        if not consecutivo:
+            continue
+        doc = col_activos.find_one({"consecutivo": consecutivo})
+        if not doc:
+            # ¿Ya está pagada en el histórico? → idempotente, no es error.
+            if col_historico.find_one({"consecutivo": consecutivo}, {"_id": 1}):
+                resultados.append({"consecutivo": consecutivo, "estado": "ya_pagada"})
+                continue
+            errores.append({"consecutivo": consecutivo, "detalle": "No encontrada en activos"})
+            continue
+        if doc.get("estado") != "aprobado":
+            errores.append({"consecutivo": consecutivo,
+                            "detalle": f"Estado {doc.get('estado')} (debe estar aprobada)"})
+            continue
+        if doc.get("tramite_vulcano") != "ok":
+            errores.append({"consecutivo": consecutivo, "detalle": "Trámite Vulcano pendiente"})
+            continue
+
+        pago = {
+            "usuario": info["usuario"], "nombre": info["nombre"], "rol": info["perfil"],
+            "estado_pago": "PAGADO",
+            "fecha_pago": ahora,
+            "fecha_pago_ingresada": None,
+            "referencia": referencia,
+            "observaciones": "Pago registrado por archivo plano bancario",
+        }
+        mov_pago = _nuevo_movimiento("registro_pago", "aprobado", "pagado", info,
+                                     f"Archivo bancario. Referencia: {referencia or '(sin referencia)'}",
+                                     _ip(request))
+        # Guardar atómicamente SOLO si sigue aprobada + trámite OK (anti-doble-pago).
+        res = col_activos.update_one(
+            {"consecutivo": consecutivo, "estado": "aprobado", "tramite_vulcano": "ok"},
+            {"$set": {"estado": "pagado", "pago": pago, "Referencia_bancaria": referencia,
+                      "updated_at": ahora},
+             "$push": {"historial_movimientos": mov_pago}},
+        )
+        if res.matched_count == 0:
+            errores.append({"consecutivo": consecutivo, "detalle": "Cambio de estado simultáneo"})
+            continue
+
+        doc_final = col_activos.find_one({"consecutivo": consecutivo})
+        if doc_final:
+            await asyncio.to_thread(_notificar_pago, doc_final)
+        mov_hist = _nuevo_movimiento("paso_historico", "pagado", "pagado", info,
+                                     "Paso al histórico (archivo bancario)", _ip(request))
+        col_activos.update_one({"consecutivo": consecutivo},
+                               {"$push": {"historial_movimientos": mov_hist}})
+        doc_final = col_activos.find_one({"consecutivo": consecutivo})
+        _mover_documento(doc_final, col_historico)
+        resultados.append({"consecutivo": consecutivo, "estado": "pagado",
+                           "referencia_bancaria": referencia or "(sin referencia)"})
+
+    return {
+        "mensaje": f"{len(resultados)} procesadas, {len(errores)} con error",
+        "procesadas": resultados,
+        "errores": errores,
+    }
+
+
+@router.post("/devolver-del-historico")
+async def devolver_del_historico(req: DevolverDelHistoricoRequest, request: Request):
+    """ADMIN/FINANCIERO: devuelve una solicitud PAGADA del histórico al operativo.
+    La solicitud vuelve a `otros_costos` en estado 'devuelto' (su bandeja), con
+    trámite Vulcano reseteado, conservando TODO el historial y agregando un
+    movimiento de trazabilidad del regreso."""
+    info = _resolver_usuario(req.usuario)
+    _requiere(info, {"ADMIN", "FINANCIERO"}, "devolver solicitudes del histórico")
+    if not (req.motivo or "").strip():
+        raise HTTPException(status_code=422, detail="El motivo de devolución es obligatorio.")
+
+    doc = col_historico.find_one({"consecutivo": req.consecutivo})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada en el histórico.")
+    if doc.get("estado") != "pagado":
+        raise HTTPException(status_code=422, detail="Solo se pueden devolver solicitudes pagadas del histórico.")
+
+    ahora = _ahora_utc()
+    mov = _nuevo_movimiento(
+        "devolucion_historico", "pagado", "devuelto", info, req.motivo, _ip(request),
+    )
+    # Estado devuelto → vuelve a la bandeja del operativo; se resetea el trámite
+    # Vulcano (al reaprobar, /aprobar también lo resetea) y la info del pago
+    # previo queda en historial (trazabilidad), no en el doc activo.
+    col_historico.update_one(
+        {"consecutivo": req.consecutivo, "estado": "pagado"},
+        {
+            "$set": {
+                "estado": "devuelto",
+                "tramite_vulcano": "pendiente",
+                "devuelta_del_historico": {
+                    "usuario": info["usuario"], "nombre": info["nombre"],
+                    "rol": info["perfil"], "fecha": ahora, "motivo": req.motivo,
+                },
+                "updated_at": ahora,
+            },
+            "$unset": {"pago": ""},   # el pago anterior ya quedó trazado en historial_movimientos
+            "$push": {"historial_movimientos": mov},
+        },
+    )
+    doc_devuelto = col_historico.find_one({"consecutivo": req.consecutivo})
+    _mover_documento(doc_devuelto, col_activos)   # histórico → activos (inverso de _mover_documento)
+    # Avisar al creador que su solicitud volvió para corrección (fire-and-forget).
+    doc_notificar = col_activos.find_one({"consecutivo": req.consecutivo})
+    if doc_notificar:
+        await asyncio.to_thread(_notificar_devolucion, doc_notificar, req.motivo)
+    return {
+        "mensaje": "Solicitud devuelta al operativo desde el histórico",
+        "consecutivo": req.consecutivo,
+        "estado": "devuelto",
+    }
