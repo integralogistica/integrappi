@@ -50,6 +50,9 @@ class TarifaRutaFmc(BaseModel):
     patineta: float
     tractomula: float
     requiere_descargue: str
+    # Promesa de entrega en días (ej. GUACHETA = 1). Opcional: los destinos
+    # creados antes de 2026-08-21 no lo tienen → default 0.
+    promesa_entrega_dias: int = 0
 
 # ------------------------------
 # 📌 Modelo de salida
@@ -67,6 +70,7 @@ def modelo_tarifa(t: dict) -> dict:
         "patineta": t.get("patineta", 0),
         "tractomula": t.get("tractomula", 0),
         "requiere_descargue": t.get("requiere_descargue", "NO"),
+        "promesa_entrega_dias": t.get("promesa_entrega_dias", 0) or 0,
     }
 
 # ------------------------------
@@ -103,6 +107,7 @@ async def crear_tarifa(data: TarifaRutaFmc):
         "patineta": float(data.patineta),
         "tractomula": float(data.tractomula),
         "requiere_descargue": data.requiere_descargue.upper().strip(),
+        "promesa_entrega_dias": int(data.promesa_entrega_dias),
     }
 
     result = coleccion_tarifas.insert_one(nuevo)
@@ -130,6 +135,7 @@ async def actualizar_tarifa(tarifa_id: str, data: TarifaRutaFmc):
         "patineta": float(data.patineta),
         "tractomula": float(data.tractomula),
         "requiere_descargue": data.requiere_descargue.upper().strip(),
+        "promesa_entrega_dias": int(data.promesa_entrega_dias),
     }
 
     result = coleccion_tarifas.update_one(
@@ -191,6 +197,9 @@ async def cargar_tarifas_masivo(archivo: UploadFile = File(...)):
 
         # Verificar columnas requeridas
         columnas_requeridas = {"CENTRO_COSTO", "RUTA", "CARRY", "NHR", "TURBO", "NIES", "SENCILLO", "PATINETA", "TRACTOMULA", "REQUIERE_DESCARGUE"}
+        # Opcional desde 2026-08-21: promesa de entrega en horas (default 0 si
+        # el archivo no la trae — compatibilidad con plantillas viejas).
+        tiene_promesa = "PROMESA_ENTREGA_DIAS" in df.columns
 
         if not columnas_requeridas.issubset(df.columns):
             faltantes = columnas_requeridas - set(df.columns)
@@ -247,6 +256,7 @@ async def cargar_tarifas_masivo(archivo: UploadFile = File(...)):
                     "patineta": float(row["PATINETA"]) if pd.notna(row["PATINETA"]) else 0,
                     "tractomula": float(row["TRACTOMULA"]) if pd.notna(row["TRACTOMULA"]) else 0,
                     "requiere_descargue": str(row["REQUIERE_DESCARGUE"]).strip().upper() if pd.notna(row["REQUIERE_DESCARGUE"]) else "NO",
+                    "promesa_entrega_dias": int(float(row["PROMESA_ENTREGA_DIAS"])) if tiene_promesa and pd.notna(row["PROMESA_ENTREGA_DIAS"]) else 0,
                 }
 
                 # Insertar nuevo registro (no actualiza si existe)
@@ -304,7 +314,8 @@ async def descargar_plantilla():
         "SENCILLO": [],
         "PATINETA": [],
         "TRACTOMULA": [],
-        "REQUIERE_DESCARGUE": []
+        "REQUIERE_DESCARGUE": [],
+        "PROMESA_ENTREGA_DIAS": []
     }
 
     df = pd.DataFrame(columnas)

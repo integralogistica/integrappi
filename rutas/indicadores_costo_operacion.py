@@ -38,6 +38,7 @@ from bd.bd_cliente import bd_cliente
 _db = bd_cliente["integra"]
 col_completados = _db["pedidos_completados"]            # media milla
 col_otros = _db["historico_otros_costos"]               # otros costos
+col_usuarios = _db["baseusuarios"]                      # cruce de perfil (analistas)
 # coleccion_historico (importado) = pedidos_medical_historico  → última milla
 
 router = APIRouter(
@@ -1000,4 +1001,279 @@ async def get_costo_por_caja(
         import traceback
         traceback.print_exc()
         logger.error(f"[COSTO_OPERACION] Error en /costo-por-caja: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Pedidos atendidos por analista ───────────────────────────────────────────
+# "El analista que atiende" = quien hace el trámite Vulcano de cada etapa:
+#   - Media milla  (`pedidos_completados`): `pedido_actualizado_vulcano_por`
+#     (quien sube el Excel de pedidos Vulcano, /cargar-masivo en pedidos.py).
+#   - Última milla (`pedidos_medical_historico`): `usuario_pedido_vulcano`
+#     (quien asigna el número de pedido Vulcano, _procesar_pedido_vulcano).
+#   - Otros costos (`historico_otros_costos`): `tramite_vulcano_info.usuario`
+#     (quien marca el trámite Vulcano, /marcar-tramite-vulcano en otros_costos.py).
+# Se cuenta 1 por DOCUMENTO (pedido) y se agrega en 2 niveles: serie por período
+# (mensual/diario) para el gráfico apilado por analista y un ranking total para
+# la leyenda/CSV. En media milla NO se deduplica por consecutivo_vehiculo (a
+# diferencia de los pipelines de costo): cada doc es un pedido atendido. Una
+# planilla fusionada en última milla también cuenta 1, a nombre de quien asignó
+# el ÚLTIMO original (quien completa la fusión).
+
+# Clave del grupo "sin tramitador registrado" en las agregaciones. Empezada en
+# "(" para que nunca colisione con un usuario real (vienen en MAYÚSCULAS sin
+# paréntesis) y distinguible si alguien la ve cruda en un dump.
+CLAVE_SIN_ASIGNAR = "(SIN ASIGNAR)"
+
+
+def _expr_usuario_normalizado(campo: str) -> dict:
+    """Expr Mongo: valor del campo de usuario normalizado a mayúsculas y sin
+    espacios laterales (los campos de analista guardan casing según el origen:
+    cookie en última milla, valor canónico de baseusuarios en las otras)."""
+    return {"$toUpper": {"$trim": {"input": {"$ifNull": [f"${campo}", ""]}}}}
+
+
+def _grupo_usuario_o_senal(campo: str) -> dict:
+    """Expr Mongo: usuario normalizado, o la señal CLAVE_SIN_ASIGNAR si el campo
+    está vacío/nulo (doc sin tramitador registrado). Distingue el bucket "Sin
+    asignar" de un eventual usuario con nombre vacío-tras-normalizar."""
+    return {"$cond": [
+        {"$eq": [{"$trim": {"input": {"$ifNull": [f"${campo}", ""]}}}, ""]},
+        CLAVE_SIN_ASIGNAR,
+        _expr_usuario_normalizado(campo),
+    ]}
+
+
+def _pipeline_pedidos_analista_media_milla(anios: List[int], meses: List[int], clientes: Optional[List[str]]) -> list:
+    """Conteo de pedidos por PERÍODO x analista en media milla
+    (pedido_actualizado_vulcano_por). Período = día Colombia sacado del prefijo
+    del string local fecha_creacion (mismo eje que el resto del módulo para
+    media milla; el mensual se agrupa en Python por el prefijo YYYY-MM).
+    El $lookup a `clientes` SOLO se agrega si hay filtro de cliente (en el conteo
+    sin filtro no se necesita el nombre del cliente)."""
+    pipeline = [{"$match": _filtro_media_milla(anios, meses)}]
+    if clientes:
+        cl = list(clientes)
+        pipeline += [
+            {"$lookup": {
+                "from": "clientes",
+                "localField": "nit_cliente",
+                "foreignField": "nit",
+                "as": "_cli",
+            }},
+            {"$set": {"nombre_cliente": {"$ifNull": [
+                {"$arrayElemAt": ["$_cli.nombre", 0]},
+                {"$ifNull": ["$nombre_cliente", None]},
+            ]}}},
+            {"$project": {"_cli": 0}},
+            {"$match": {"$or": [
+                {"nombre_cliente": {"$in": cl}},
+                {"nit_cliente": {"$in": cl}},
+            ]}},
+        ]
+    pipeline.append({"$group": {
+        "_id": {
+            "periodo": {"$substrCP": ["$fecha_creacion", 0, 10]},
+            "usuario": _grupo_usuario_o_senal("pedido_actualizado_vulcano_por"),
+        },
+        "pedidos": {"$sum": 1},
+    }})
+    return pipeline
+
+
+def _pipeline_pedidos_analista_ultima_milla(anios: List[int], meses: List[int], clientes: Optional[List[str]]) -> list:
+    """Conteo de planillas por PERÍODO x analista en última milla
+    (usuario_pedido_vulcano). Período = día Colombia de
+    fecha_movimiento_historico (UTC − 5 h, mismo eje que el resto del módulo).
+    El filtro de cliente es el mismo $match a nivel doc de /resumen (incluye los
+    originales embebidos de fusiones); NO se expande: se cuentan docs, no dinero."""
+    filtro = _filtro_datetime_utc(
+        "fecha_movimiento_historico", anios, meses,
+        "cliente_origen", clientes,
+        "fusion_info.datos_originales.cliente_origen",
+    )
+    return [
+        {"$match": filtro},
+        {"$group": {
+            "_id": {
+                "periodo": {"$dateToString": {
+                    "format": "%Y-%m-%d",
+                    "date": {"$subtract": ["$fecha_movimiento_historico", _MS_5H]},
+                }},
+                "usuario": _grupo_usuario_o_senal("usuario_pedido_vulcano"),
+            },
+            "pedidos": {"$sum": 1},
+        }},
+    ]
+
+
+def _pipeline_pedidos_analista_otros(anios: List[int], meses: List[int], clientes: Optional[List[str]]) -> list:
+    """Conteo de solicitudes por PERÍODO x analista en otros costos
+    (tramite_vulcano_info.usuario). Período = día Colombia de created_at (UTC − 5 h)."""
+    filtro = _filtro_datetime_utc(
+        "created_at", anios, meses,
+        "datos_servicio.cliente", clientes,
+    )
+    return [
+        {"$match": filtro},
+        {"$group": {
+            "_id": {
+                "periodo": {"$dateToString": {
+                    "format": "%Y-%m-%d",
+                    "date": {"$subtract": ["$created_at", _MS_5H]},
+                }},
+                "usuario": _grupo_usuario_o_senal("tramite_vulcano_info.usuario"),
+            },
+            "pedidos": {"$sum": 1},
+        }},
+    ]
+
+
+def _usuarios_analista_admin() -> dict:
+    """Dict {USUARIO_NORMALIZADO: {nombre, perfil}} con los usuarios de
+    baseusuarios cuyo perfil es ANALISTA o ADMIN (perfil con casing variable, se
+    normaliza). No se filtra por `activo`: el trabajo pasado de un analista hoy
+    inactivo sigue siendo trabajo atendido."""
+    out = {}
+    for u in col_usuarios.find({}, {"usuario": 1, "nombre": 1, "perfil": 1}):
+        usuario = (u.get("usuario") or "").strip().upper()
+        perfil = (u.get("perfil") or "").strip().upper()
+        if usuario and perfil in {"ANALISTA", "ADMIN"}:
+            out[usuario] = {"nombre": u.get("nombre") or usuario, "perfil": perfil}
+    return out
+
+
+def _merge_analistas_series(
+    conteos_por_etapa: List[list],
+    usuarios: dict,
+) -> tuple:
+    """Combina los conteos {periodo, usuario, pedidos} de las 3 etapas en:
+
+    - ``series``: {periodo → {clave_usuario → n}} con las 3 etapas sumadas (un
+      doc solo puede estar en una etapa, así que sumar es seguro).
+    - ``ranking``: {clave_usuario → n} total del período filtrado.
+
+    La clave es el USUARIO normalizado, o None para todo lo que no es un
+    ANALISTA/ADMIN visible: docs sin tramitador (CLAVE_SIN_ASIGNAR), otros
+    perfiles y usuarios que ya no existen en baseusuarios → "Sin asignar"."""
+    series: dict = {}
+    ranking: dict = {}
+
+    def _destino(usuario_raw: str):
+        """Clave de acumulación: el usuario si es ANALISTA/ADMIN, None si no."""
+        if usuario_raw == CLAVE_SIN_ASIGNAR:
+            return None
+        if usuario_raw in usuarios:
+            return usuario_raw
+        return None  # otro perfil o usuario que ya no existe en baseusuarios
+
+    for conteo in conteos_por_etapa:
+        for d in conteo:
+            _id = d.get("_id") or {}
+            periodo = _id.get("periodo")
+            usuario = (_id.get("usuario") or "").strip()
+            n = int(d.get("pedidos") or 0)
+            if not periodo or n <= 0:
+                continue
+            clave = _destino(usuario)
+            bucket = series.setdefault(periodo, {})
+            bucket[clave] = bucket.get(clave, 0) + n
+            ranking[clave] = ranking.get(clave, 0) + n
+
+    return series, ranking
+
+
+@router.get("/pedidos-por-analista")
+async def get_pedidos_por_analista(
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
+    cliente: Optional[List[str]] = Query(None),
+):
+    """
+    Pedidos atendidos por analista: cuántos pedidos/planillas/solicitudes tramitó
+    cada usuario (perfil ANALISTA o ADMIN). Devuelve:
+      - ``usuarios``: orden fijo de las series (total descendente; "Sin asignar"
+        al final) — es el orden de columnas del gráfico y de la leyenda.
+      - ``serieMensual``/``serieDiaria``: buckets {periodo, <usuario>: n, ...,
+        total} para el gráfico apilado por analista (igual que el de costo total).
+      - ``analistas``: ranking {usuario, nombre, perfil, pedidos} del período
+        filtrado completo (CSV/auditoría).
+    Los docs cuyo tramitador no es ANALISTA/ADMIN (o no se registró) van bajo la
+    clave "Sin asignar". Respeta los filtros de año/mes/cliente.
+    """
+    try:
+        anios = [int(a) for a in anio] if anio else []
+        meses = [int(m) for m in mes] if mes else []
+        clientes = [str(c) for c in cliente] if cliente else []
+
+        async def _run(col, pipe):
+            return await asyncio.to_thread(lambda: list(col.aggregate(pipe, allowDiskUse=True)))
+
+        mm_res, um_res, oc_res, usuarios = await asyncio.gather(
+            _run(col_completados, _pipeline_pedidos_analista_media_milla(anios, meses, clientes or None)),
+            _run(coleccion_historico, _pipeline_pedidos_analista_ultima_milla(anios, meses, clientes or None)),
+            _run(col_otros, _pipeline_pedidos_analista_otros(anios, meses, clientes or None)),
+            _run_sync(_usuarios_analista_admin),
+        )
+
+        series, ranking = _merge_analistas_series([mm_res, um_res, oc_res], usuarios)
+
+        # Orden de las series: total descendente; "Sin asignar" (None) al final.
+        usuarios_orden = [u for u in sorted(ranking, key=lambda k: ranking[k], reverse=True) if u is not None]
+        if None in ranking:
+            usuarios_orden.append(None)
+
+        def _nombre(u):
+            return "Sin asignar" if u is None else usuarios[u]["nombre"]
+
+        def _columna(u):
+            """Clave EXACTA de la columna de este usuario en los buckets de las
+            series (el código de usuario, o 'Sin asignar'). El frontend la usa
+            como dataKey; `nombre` es solo el rótulo visible (leyenda/CSV)."""
+            return u if u is not None else "Sin asignar"
+
+        def _serie(fmt_mes: bool) -> list:
+            """Buckets por período {periodo, <columna>: n..., total}. Los
+            pipelines traen período DÍA; el mensual agrupa por el prefijo
+            YYYY-MM antes de pivotear (así ambos salen de las mismas queries)."""
+            acum: dict = {}
+            for periodo in series:
+                p = periodo[:7] if fmt_mes else periodo
+                bucket = acum.setdefault(p, {})
+                for u, n in series[periodo].items():
+                    bucket[u] = bucket.get(u, 0) + n
+            out = []
+            for p in sorted(acum):
+                fila = {"periodo": p}
+                total = 0
+                for u in usuarios_orden:
+                    n = int(acum[p].get(u) or 0)
+                    fila[_columna(u)] = n
+                    total += n
+                fila["total"] = total
+                out.append(fila)
+            return out
+
+        return {
+            "success": True,
+            "data": {
+                "usuarios": [
+                    {"usuario": u, "nombre": _nombre(u), "columna": _columna(u),
+                     "perfil": (usuarios[u]["perfil"] if u is not None else None)}
+                    for u in usuarios_orden
+                ],
+                "serieMensual": _serie(True),
+                "serieDiaria": _serie(False),
+                "analistas": [
+                    {"usuario": u, "nombre": _nombre(u),
+                     "perfil": (usuarios[u]["perfil"] if u is not None else None),
+                     "pedidos": ranking[u]}
+                    for u in usuarios_orden if ranking.get(u, 0) > 0
+                ],
+                "etiquetas": dict(ETAPAS),
+            },
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger.error(f"[COSTO_OPERACION] Error en /pedidos-por-analista: {e}")
         raise HTTPException(status_code=500, detail=str(e))

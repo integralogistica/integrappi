@@ -42,6 +42,9 @@ class Flete(BaseModel):
     pago_cargue_desc: str
     equivalencia_centro_costo: str
     tarifas: Dict[str, float]
+    # Promesa de entrega en días (ej. GUACHETA = 1). Opcional: default 0
+    # para los fletes creados antes de 2026-08-21.
+    promesa_entrega_dias: int = 0
 
 # ------------------------------
 # 📌 Modelo de salida
@@ -55,6 +58,7 @@ def modelo_flete(f: dict) -> dict:
         "pago_cargue_desc": f.get("pago_cargue_desc", ""),
         "equivalencia_centro_costo": f["equivalencia_centro_costo"],
         "tarifas": f["tarifas"],
+        "promesa_entrega_dias": f.get("promesa_entrega_dias", 0) or 0,
     }
 
 # ------------------------------
@@ -75,6 +79,7 @@ async def crear_flete(data: Flete):
         "pago_cargue_desc": data.pago_cargue_desc.upper().strip(),
         "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
+        "promesa_entrega_dias": int(data.promesa_entrega_dias),
     }
     coleccion_fletes.insert_one(nuevo)
     return {"mensaje": "Flete creado exitosamente", "flete": modelo_flete(nuevo)}
@@ -91,6 +96,14 @@ async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
         if not {"ORIGEN", "DESTINO", "RUTA", "TIPO","EQUIVALENCIA_CENTRO_COSTO"}.issubset(df.columns):
             raise HTTPException(status_code=400, detail="El archivo debe tener ORIGEN, DESTINO, RUTA,  TIPO y EQUIVALENCIA_CENTRO_COSTO")
         registros = []
+        # PROMESA_ENTREGA_DIAS opcional (default 0 — compatibilidad con
+        # archivos viejos que no la traen). Se reconocen variantes del nombre
+        # (PROMESAENTREGADIAS, PROMESA ENTREGA DIAS, PromesaEntregaDias) para
+        # que nunca caiga como "tarifa de vehículo" dinámica.
+        COL_PROMESA = "PROMESA_ENTREGA_DIAS"
+        variantes_promesa = {c for c in df.columns if c.replace(" ", "_") == COL_PROMESA or c.replace("_", "") == COL_PROMESA.replace("_", "")}
+        col_promesa_real = next(iter(variantes_promesa), None)
+        columnas_fijas = {"ORIGEN", "DESTINO", "RUTA", "TIPO","PAGO_CARGUE_DESC","EQUIVALENCIA_CENTRO_COSTO"} | variantes_promesa
         for _, row in df.iterrows():
             origen = str(row["ORIGEN"]).strip().upper()
             destino = str(row["DESTINO"]).strip().upper()
@@ -98,11 +111,12 @@ async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
             tipo = str(row["TIPO"]).strip().upper()
             pago_cargue_desc = str(row["PAGO_CARGUE_DESC"]).strip().upper()
             equivalencia_centro_costo  = str(row["EQUIVALENCIA_CENTRO_COSTO"]).strip().upper()
+            promesa = int(float(row[col_promesa_real])) if col_promesa_real and pd.notna(row[col_promesa_real]) else 0
             tarifas = {}
             for col in df.columns:
-                if col not in {"ORIGEN", "DESTINO", "RUTA", "TIPO","PAGO_CARGUE_DESC","EQUIVALENCIA_CENTRO_COSTO"}:
+                if col not in columnas_fijas:
                     tarifas[col] = float(row[col])
-            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "pago_cargue_desc": pago_cargue_desc,"equivalencia_centro_costo": equivalencia_centro_costo, "tarifas": tarifas})
+            registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "pago_cargue_desc": pago_cargue_desc,"equivalencia_centro_costo": equivalencia_centro_costo, "promesa_entrega_dias": promesa, "tarifas": tarifas})
         coleccion_fletes.delete_many({})
         if registros:
             coleccion_fletes.insert_many(registros)
@@ -164,6 +178,7 @@ async def actualizar_flete(origen: str, destino: str, data: Flete):
         "pago_cargue_desc": data.pago_cargue_desc.upper().strip(),
         "equivalencia_centro_costo": data.equivalencia_centro_costo.upper().strip(),
         "tarifas": {k.upper().strip(): v for k, v in data.tarifas.items()},
+        "promesa_entrega_dias": int(data.promesa_entrega_dias),
     }
     result = coleccion_fletes.update_one({"origen": o, "destino": d}, {"$set": actualiza})
     if result.matched_count == 0:

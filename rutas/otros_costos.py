@@ -709,10 +709,12 @@ def _validar_solicitud(
     # Bancarios
     if not (datos_bancarios.banco or "").strip():
         raise HTTPException(status_code=422, detail="El banco es obligatorio.")
-    doc_banco = col_bancos.find_one({"nombre": {"$regex": f"^{re.escape(datos_bancarios.banco.strip())}$", "$options": "i"}})
+    doc_banco = _buscar_banco_catalogo(datos_bancarios.banco)
     if not doc_banco:
         raise HTTPException(status_code=422, detail="El banco seleccionado no es válido.")
     # El código se resuelve desde el catálogo (fuente de verdad), no se confía del frontend.
+    # Se normaliza también el nombre al canónico del catálogo (p. ej. tildes).
+    datos_bancarios.banco = str(doc_banco.get("nombre") or datos_bancarios.banco)
     datos_bancarios.codigo_banco = str(doc_banco.get("codigo", ""))
     if not (datos_bancarios.numero_cuenta or "").strip():
         raise HTTPException(status_code=422, detail="El número de cuenta es obligatorio.")
@@ -727,6 +729,25 @@ def _validar_solicitud(
         raise HTTPException(status_code=422, detail="El nombre del conductor es obligatorio.")
 
     return round(valor_total, 2)
+
+
+def _sin_tildes(s: str) -> str:
+    """Mayúsculas sin tildes ni espacios extra, para comparar nombres de banco
+    ('BANCO DE BOGOTÁ' == 'BANCO DE BOGOTA')."""
+    import unicodedata
+    n = unicodedata.normalize("NFD", (s or "").upper())
+    return "".join(c for c in n if unicodedata.category(c) != "Mn").strip()
+
+
+def _buscar_banco_catalogo(nombre: str) -> Optional[dict]:
+    """Busca el banco en `bancos_otros_costos` de forma insensible a
+    mayúsculas/tildes. Devuelve el doc del catálogo (nombre canónico + código)
+    o None si no hay match."""
+    objetivo = _sin_tildes(nombre)
+    for b in col_bancos.find({}, {"nombre": 1, "codigo": 1}):
+        if _sin_tildes(b.get("nombre", "")) == objetivo:
+            return b
+    return None
 
 
 def _verificar_duplicado_interno(
@@ -1669,6 +1690,43 @@ async def listar_activos(
     return {"total": total, "skip": skip, "limit": limit, "items": items}
 
 
+@router.get("/pagables")
+async def listar_pagables(
+    usuario: str = Query(...),
+    fecha_inicio: Optional[str] = Query(None),
+    fecha_fin: Optional[str] = Query(None),
+    pedido: Optional[str] = Query(None),
+    placa: Optional[str] = Query(None),
+    manifiesto: Optional[str] = Query(None),
+    cliente: Optional[str] = Query(None),
+    regional: Optional[str] = Query(None),
+):
+    """Todos los consecutivos listos para el archivo bancario (aprobados + trámite
+    Vulcano OK) según los filtros del usuario, SIN paginar. Lo usa el botón
+    "Seleccionar todos" del frontend para marcar de una vez los que están en
+    otras páginas. FINANCIERO/ADMIN únicamente."""
+    info = _resolver_usuario(usuario)
+    _requiere(info, {"FINANCIERO", "ADMIN"}, "listar pagables")
+
+    filtro = _construir_filtro_listado(
+        info, "aprobado", fecha_inicio, fecha_fin, pedido, placa, manifiesto, cliente, regional,
+        historico=False,
+    )
+    cond_pagable = {"tramite_vulcano": "ok"}
+    if "$and" in filtro:
+        filtro["$and"].append(cond_pagable)
+    else:
+        filtro = {"$and": [filtro, cond_pagable]}
+
+    docs = list(col_activos.find(filtro, {"consecutivo": 1, "valor_total": 1}).sort("created_at", -1))
+    consecutivos = [d["consecutivo"] for d in docs if d.get("consecutivo")]
+    return {
+        "total": len(consecutivos),
+        "consecutivos": consecutivos,
+        "valor_total": sum(_a_numero(d.get("valor_total")) for d in docs if d.get("consecutivo")),
+    }
+
+
 @router.get("/historico")
 async def listar_historico(
     request: Request,
@@ -1746,7 +1804,8 @@ async def exportar_excel(req: ExportarExcelRequest):
 
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
-        "Tipo de Costo", "Valor Total", "Usuario Creación", "Usuario Aprobación",
+        "Tipo de Costo", "Valor Total", "Valor Despues Retenciones",
+        "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
         "Fecha Aprobación", "Fecha Pago",
     ]
@@ -1775,6 +1834,7 @@ async def exportar_excel(req: ExportarExcelRequest):
             d.get("manifiesto", ""),
             tipos,
             d.get("valor_total", 0),
+            d.get("valor_despues_retenciones"),
             (d.get("creado_por", {}) or {}).get("usuario", ""),
             aprob.get("usuario", ""),
             aprob.get("rol", ""),
@@ -1798,13 +1858,14 @@ async def exportar_excel(req: ExportarExcelRequest):
 
 
 # ── Archivo plano bancario (FINANCIERO/ADMIN) ─────────────────────────────────
-# Formato de carga bancaria: una fila por consecutivo seleccionado. La columna
-# "Referencia" se exporta EN BLANCO porque el banco la devuelve diligenciada; al
-# re-subir el archivo, esa referencia se guarda como `Referencia_bancaria` en el
-# histórico (ver /importar-pago).
+# Formato de carga bancaria: una fila por consecutivo seleccionado. Las columnas
+# "Valor Despues Retenciones" y "Referencia" se exportan EN BLANCO: las diligencia
+# el usuario/el banco y, al re-subir el archivo, se guardan en el documento
+# (`valor_despues_retenciones` y `Referencia_bancaria`; ver /importar-pago).
 CABECERAS_ARCHIVO_PAGO = [
     "Consecutivo", "Tipo Identificacion", "Numero Identificacion", "Nombre Titular",
-    "Numero Cuenta", "Tipo de Producto", "Codigo del Banco", "Valor Total", "Referencia",
+    "Numero Cuenta", "Tipo de Producto", "Codigo del Banco", "Valor Total", "Manifiesto",
+    "Valor Despues Retenciones", "Referencia",
 ]
 
 
@@ -1856,7 +1917,8 @@ async def exportar_pago(req: ExportarPagoRequest):
         cell.alignment = Alignment(horizontal="center")
     ws.column_dimensions["C"].number_format = "@"   # identificación como texto
     ws.column_dimensions["E"].number_format = "@"   # número de cuenta como texto
-    ws.column_dimensions["H"].number_format = "@"   # referencia como texto
+    ws.column_dimensions["I"].number_format = "@"   # manifiesto como texto
+    ws.column_dimensions["K"].number_format = "@"   # referencia como texto
 
     # Abreviatura del tipo de producto para el formato bancario:
     # Ahorros → CA, Corriente → CC, Tarjeta prepago → TP. El resto (Depósito
@@ -1870,6 +1932,12 @@ async def exportar_pago(req: ExportarPagoRequest):
     for r, d in enumerate(docs, start=2):
         db_ = d.get("datos_bancarios", {}) or {}
         tipo_prod_raw = (db_.get("tipo_cuenta") or "").strip().upper()
+        # Código del banco: se guarda en la solicitud al crear/editar; si falta
+        # (docs anteriores al fix), se resuelve en el momento desde el catálogo.
+        codigo_banco = str(db_.get("codigo_banco") or "").strip()
+        if not codigo_banco and db_.get("banco"):
+            doc_banco = _buscar_banco_catalogo(db_.get("banco", ""))
+            codigo_banco = str((doc_banco or {}).get("codigo", "") or "")
         fila = [
             d.get("consecutivo", ""),                                 # Consecutivo
             (db_.get("tipo_id_titular") or "").strip().upper() or "CC",  # CC o NIT
@@ -1877,9 +1945,11 @@ async def exportar_pago(req: ExportarPagoRequest):
             db_.get("nombre_titular", ""),                            # Nombre titular
             str(db_.get("numero_cuenta") or ""),                      # Número cuenta
             _TIPO_PRODUCTO_COD.get(tipo_prod_raw, tipo_prod_raw),    # Tipo de producto (CA/CC/TP)
-            str(db_.get("codigo_banco") or ""),                       # Código del banco
+            codigo_banco,                                             # Código del banco
             _a_numero(d.get("valor_total")),                         # Valor total del consecutivo
-            "",                                                       # Referencia (en blanco: la llena el banco)
+            str(d.get("manifiesto") or ""),                           # Manifiesto
+            "",                                                       # Valor después de retenciones (lo diligencia el usuario)
+            "",                                                       # Referencia (la llena el banco)
         ]
         for i, v in enumerate(fila, 1):
             ws.cell(row=r, column=i, value=v).border = thin
@@ -1909,15 +1979,16 @@ async def importar_pago(
     archivo: UploadFile = File(...),
     request: Request = None,
 ):
-    """Sube el archivo plano bancario (el mismo que se descargó, con la columna
-    Referencia ya diligenciada por el banco) y:
+    """Sube el archivo plano bancario (el mismo que se descargó, con las columnas
+    Valor Despues Retenciones y Referencia ya diligenciadas) y:
 
       1. Registra el pago de cada consecutivo (estado pagado + pago.referencia =
-         Referencia_bancaria), y
+         Referencia_bancaria + valor_despues_retenciones), y
       2. Mueve las solicitudes al histórico (historico_otros_costos).
 
-    El Financiero puede también dejar la referencia vacía: en ese caso la
-    solicitud se marca pagada sin referencia (igual que el registro manual).
+    El Financiero puede también dejar la referencia o el valor vacíos: en ese
+    caso la solicitud se marca pagada sin referencia / sin valor (igual que el
+    registro manual).
     FINANCIERO/ADMIN únicamente. Columnas requeridas: Consecutivo y Referencia."""
     import io
     from openpyxl import load_workbook
@@ -1948,6 +2019,8 @@ async def importar_pago(
                        if k in ("consecutivo", "consecutivo oc")), None)
     col_ref = next((cabeceras[k] for k in cabeceras
                     if "referencia" in k and not k.startswith("referencia pago")), None)
+    col_vdr = next((cabeceras[k] for k in cabeceras
+                    if "despues de retenciones" in k or "despues retenciones" in k), None)
     if col_consec is None or col_ref is None:
         raise HTTPException(
             status_code=422,
@@ -1961,6 +2034,11 @@ async def importar_pago(
             continue
         consecutivo = _celda_texto(fila[col_consec] if col_consec < len(fila) else "")
         referencia = _celda_texto(fila[col_ref] if col_ref < len(fila) else "")
+        vdr_crudo = _celda_texto(fila[col_vdr] if (col_vdr is not None and col_vdr < len(fila)) else "")
+        try:
+            valor_despues_retenciones = float(vdr_crudo.replace("$", "").replace(",", "").replace(" ", "")) if vdr_crudo else None
+        except ValueError:
+            valor_despues_retenciones = None
         if not consecutivo:
             continue
         doc = col_activos.find_one({"consecutivo": consecutivo})
@@ -1985,16 +2063,20 @@ async def importar_pago(
             "fecha_pago": ahora,
             "fecha_pago_ingresada": None,
             "referencia": referencia,
+            "valor_despues_retenciones": valor_despues_retenciones,
             "observaciones": "Pago registrado por archivo plano bancario",
         }
         mov_pago = _nuevo_movimiento("registro_pago", "aprobado", "pagado", info,
                                      f"Archivo bancario. Referencia: {referencia or '(sin referencia)'}",
                                      _ip(request))
         # Guardar atómicamente SOLO si sigue aprobada + trámite OK (anti-doble-pago).
+        set_pago = {"estado": "pagado", "pago": pago, "Referencia_bancaria": referencia,
+                    "updated_at": ahora}
+        if valor_despues_retenciones is not None:
+            set_pago["valor_despues_retenciones"] = valor_despues_retenciones
         res = col_activos.update_one(
             {"consecutivo": consecutivo, "estado": "aprobado", "tramite_vulcano": "ok"},
-            {"$set": {"estado": "pagado", "pago": pago, "Referencia_bancaria": referencia,
-                      "updated_at": ahora},
+            {"$set": set_pago,
              "$push": {"historial_movimientos": mov_pago}},
         )
         if res.matched_count == 0:
@@ -2011,7 +2093,8 @@ async def importar_pago(
         doc_final = col_activos.find_one({"consecutivo": consecutivo})
         _mover_documento(doc_final, col_historico)
         resultados.append({"consecutivo": consecutivo, "estado": "pagado",
-                           "referencia_bancaria": referencia or "(sin referencia)"})
+                           "referencia_bancaria": referencia or "(sin referencia)",
+                           "valor_despues_retenciones": valor_despues_retenciones})
 
     return {
         "mensaje": f"{len(resultados)} procesadas, {len(errores)} con error",

@@ -79,10 +79,10 @@ def _asegurar_indice_guia() -> None:
 def consultar_guias(guias: list, lote: int = 500) -> dict:
     """SELECT de estado/fechas por lote de guías.
 
-    Devuelve ``{guia: {"estado": ..., "fecha_entrega": ..., "fecha_digitalizacion": ...}}``
-    (guia y fechas como str o None). NO lanza: ante error de Postgres devuelve
-    ``{}`` para que el endpoint degrade el informe (solo pierde el estado, no
-    las filas de Mongo).
+    Devuelve ``{guia: {"estado": ..., "fecha_entrega": ..., "fecha_digitalizacion": ...,
+    "fecha_cita": ...}}`` (guia y fechas como str o None). NO lanza: ante error
+    de Postgres devuelve ``{}`` para que el endpoint degrade el informe (solo
+    pierde el estado, no las filas de Mongo).
     """
     if not guias:
         return {}
@@ -101,7 +101,8 @@ def consultar_guias(guias: list, lote: int = 500) -> dict:
             for i in range(0, len(limpias), lote):
                 cur.execute(
                     """
-                    SELECT guia, estado, fecha_entrega, fecha_digitalizacion
+                    SELECT guia, estado, fecha_entrega, fecha_digitalizacion, fecha_cita,
+                           destinatario, fecha_emision
                     FROM informe_guias_tms
                     WHERE guia = ANY(%s);
                     """,
@@ -112,6 +113,11 @@ def consultar_guias(guias: list, lote: int = 500) -> dict:
                         "estado": (fila["estado"] or "").strip() or None,
                         "fecha_entrega": fila["fecha_entrega"],
                         "fecha_digitalizacion": fila["fecha_digitalizacion"],
+                        # fecha_cita: TEXT crudo (puede traer basura histórica —
+                        # zonas Z_CIU, teléfonos…; sin normalizar a propósito).
+                        "fecha_cita": (fila["fecha_cita"] or "").strip() or None,
+                        "destinatario": (fila["destinatario"] or "").strip() or None,
+                        "fecha_emision": fila["fecha_emision"],
                     }
         return out
     except Exception:

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List, Optional
 import httpx
@@ -702,6 +702,10 @@ def _procesar_pedido_vulcano(consecutivo: str, pedido: str, usuario: Optional[st
         ]
         doc_actualizado["pedido_vulcano"] = ", ".join(pedidos_fusion)
         doc_actualizado["fecha_movimiento_historico"] = datetime.now()
+        # La fusión queda a nombre de quien asignó el ÚLTIMO original (quien la
+        # cierra), para el indicador de pedidos por analista.
+        if usuario:
+            doc_actualizado["usuario_pedido_vulcano"] = usuario
         coleccion_historico.insert_one(doc_actualizado)
         coleccion_pedidos_medical.delete_one({"_id": doc_actualizado["_id"]})
 
@@ -738,16 +742,19 @@ def _procesar_pedido_vulcano(consecutivo: str, pedido: str, usuario: Optional[st
 
 
 @router.post("/importar-vulcano")
-async def importar_vulcano(archivo: UploadFile = File(...)):
+async def importar_vulcano(archivo: UploadFile = File(...), usuario: Optional[str] = Form(None)):
     """
     Importa pedidos Vulcano desde un Excel con columnas CONSECUTIVO y PEDIDO.
     Busca planillas en pedidos_medical por consecutivo, agrega pedido_vulcano,
     mueve el documento a pedidos_medical_historico y lo elimina de pedidos_medical.
     Solo accesible para ADMIN y ANALISTA (validar en frontend).
+    ``usuario`` (opcional) es quien importa: se registra en usuario_pedido_vulcano
+    para el indicador de pedidos por analista.
     """
     try:
         logger.info(f"=== IMPORTAR VULCANO ===")
         logger.info(f"Archivo recibido: {archivo.filename}")
+        logger.info(f"Usuario: {usuario}")
 
         nombre_archivo = archivo.filename.lower()
 
@@ -802,7 +809,7 @@ async def importar_vulcano(archivo: UploadFile = File(...)):
                 continue
 
             try:
-                r = _procesar_pedido_vulcano(consecutivo, pedido)
+                r = _procesar_pedido_vulcano(consecutivo, pedido, usuario=usuario)
                 tipo = r.get("tipo")
 
                 if tipo == "normal":
