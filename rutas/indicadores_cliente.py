@@ -13,7 +13,7 @@ que Costo de Operación identifica clientes (NIT en media milla, nombre
 normalizado en las demás colecciones).
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 import logging
@@ -30,13 +30,26 @@ from rutas.indicadores_costo_operacion import (
     NIT_FRESENIUS,
 )
 from rutas.fletes import coleccion_fletes
+from bd.bd_cliente import bd_cliente
 from bd.bd_postgres import consultar_guias
+
+import pandas as pd
+from io import BytesIO
+from pymongo import UpdateOne
 
 router = APIRouter(
     prefix="/indicadores-cliente",
     tags=["Indicadores Cliente"],
 )
 logger = logging.getLogger(__name__)
+
+# Citas "plan B" (colección citas_kabi): cuando fecha_cita del TMS (Postgres)
+# viene vacía o con basura, la fecha de cita digitada acá manda. Un doc por
+# guía: {guia, fecha_cita (string 'YYYY-MM-DD'), actualizado_el}.
+col_citas = bd_cliente["integra"]["citas_kabi"]
+
+# Perfiles autorizados a cargar el Excel de citas.
+PERFILES_CARGA_CITAS = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL"}
 
 # Registro backend de clientes (espejo del clientes.ts del frontend; mantener
 # sincronizado). El filtro de media milla se expresa como $match directo
@@ -130,6 +143,11 @@ MAX_FILAS = 5000
 # PENDIENTE, "En distribucion", "CON NOVEDAD", "Transito Nacional" + basura
 # ('', '0000-00-00', 'planilla normal'). Solo ENTREGADO cuenta como entregada.
 ESTADO_ENTREGADO = "ENTREGADO"
+
+# Una guía sin registro en el TMS más antigua que esto se marca ANULADA
+# (regla de negocio: planillas anuladas nunca generaron guía real); más
+# reciente = aún no cargada por el bot diario.
+DIAS_ANULADA = 7
 
 
 def _split_planillas(valor) -> List[str]:
@@ -342,14 +360,31 @@ def get_guias_cliente(
 
         # JOIN con Postgres (degradación elegante: {} → filas sin estado).
         info = consultar_guias([f["guia"] for f in filas]) if filas else {}
+
+        # Citas plan B (citas_kabi): para guías cuya fecha_cita del TMS no es
+        # servible, se busca la digitada acá (mandan sobre el cálculo por
+        # promesa del destino).
+        citas_kb = {}
+        if filas:
+            for c in col_citas.find(
+                {"guia": {"$in": [f["guia"] for f in filas]}},
+                {"guia": 1, "fecha_cita": 1},
+            ):
+                if c.get("fecha_cita"):
+                    citas_kb[c["guia"]] = c["fecha_cita"]
         advertencia = None
         if filas and not info:
             advertencia = "Estado de guías no disponible en este momento (TMS)"
 
-        entregadas = en_proceso = sin_info = 0
+        entregadas = en_proceso = sin_info = anuladas = 0
         ot_cumplen = ot_no_cumplen = ot_no_evaluables = 0
         por_estado = {}
         promesas = _mapa_promesa_destinos()  # {DESTINO: dias} desde tarifas FUNZA
+        # Corte para clasificar "sin info": una guía sin registro en el TMS con
+        # más de DIAS_ANULADA días de creada es ANULADA (nunca llegó a guía
+        # real); más reciente que eso probablemente aún no ha sido cargada por
+        # el bot diario.
+        corte_anulada = (datetime.utcnow() - timedelta(days=DIAS_ANULADA)).date()
         for f in filas:
             dato = info.get(f["guia"])
             estado = (dato or {}).get("estado")
@@ -373,7 +408,13 @@ def get_guias_cliente(
                 f["fecha_cita"] = None
                 f["destinatario"] = None
                 f["fecha_emision"] = None
-                sin_info += 1
+                # Regla de negocio: sin registro TMS y antigua → anulada.
+                f_creacion = _fecha_servible(f.get("fecha_creacion"))
+                if f_creacion and f_creacion < corte_anulada:
+                    f["estado"] = "ANULADA"
+                    anuladas += 1
+                else:
+                    sin_info += 1
 
             # ── On Time ──
             # Solo guías ENTREGADO con fecha de entrega son evaluables.
@@ -388,7 +429,13 @@ def get_guias_cliente(
                 cita = _fecha_servible(f.get("fecha_cita"))
                 if f_inicial and entrega:
                     # Fecha promesa: la CITA manda si es servible; si no,
-                    # inicial + promesa del destino (días hábiles).
+                    # inicial + promesa del destino (días hábiles). La cita
+                    # puede venir del TMS (PG) o del plan B (citas_kabi).
+                    if not cita:
+                        cita_kb = citas_kb.get(f["guia"])
+                        if cita_kb:
+                            # viene como string 'YYYY-MM-DD' desde citas_kabi
+                            cita = cita_kb if isinstance(cita_kb, date) else _fecha_servible(str(cita_kb)[:10])
                     if cita:
                         f_fecha_promesa = cita.isoformat()
                         origen_ot = "CITA"
@@ -421,6 +468,7 @@ def get_guias_cliente(
             "entregadas": entregadas,
             "en_proceso": en_proceso,
             "sin_info": sin_info,
+            "anuladas": anuladas,
             "por_estado": dict(sorted(por_estado.items(), key=lambda kv: -kv[1])),
             "ot_cumplen": ot_cumplen,
             "ot_no_cumplen": ot_no_cumplen,
@@ -440,4 +488,79 @@ def get_guias_cliente(
         }
     except Exception as e:
         logger.exception(f"[indicadores-cliente] Error en guías de {cliente_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Carga de citas (plan B) ──────────────────────────────────────────────────
+
+@router.post("/citas")
+async def cargar_citas(archivo: UploadFile = File(...), perfil: str = Query("")):
+    """Carga un Excel {GUIA, FECHA_CITA} a ``citas_kabi`` (upsert por guia).
+
+    Plan B del OT: cuando la fecha_cita del TMS viene vacía/corrupta, la cita
+    digitada acá es la que se usa como fecha promesa. Solo perfiles
+    ADMIN/ANALISTA/COORDINADOR/CONTROL.
+    """
+    if (perfil or "").upper().strip() not in PERFILES_CARGA_CITAS:
+        raise HTTPException(status_code=403, detail="Perfil no autorizado para cargar citas")
+
+    try:
+        contenido = await archivo.read()
+        df = pd.read_excel(BytesIO(contenido))
+        df.columns = [str(c).strip().upper().replace(" ", "_") for c in df.columns]
+
+        if not {"GUIA", "FECHA_CITA"}.issubset(df.columns):
+            raise HTTPException(
+                status_code=400,
+                detail="El Excel debe tener las columnas GUIA y FECHA_CITA",
+            )
+
+        ahora = datetime.utcnow()
+        invalidas = 0
+        errores = []
+        operaciones = []
+        for idx, row in df.iterrows():
+            guia = str(row["GUIA"]).strip()
+            fecha = _fecha_servible(_fecha_iso(row["FECHA_CITA"]))
+            if not guia or guia.lower() in ("nan", "none"):
+                continue
+            if fecha is None:
+                invalidas += 1
+                if len(errores) < 10:
+                    errores.append(f"Fila {idx + 2}: guia {guia or '?'} con fecha_cita inválida '{row['FECHA_CITA']}'")
+                continue
+            operaciones.append(UpdateOne(
+                {"guia": guia},
+                {"$set": {"fecha_cita": fecha.isoformat(), "actualizado_el": ahora}},
+                upsert=True,
+            ))
+
+        # bulk_write por lotes: un update_one POR FILA por red a Atlas tarda
+        # ~150ms → 4.000 guías = 10+ min. En lotes de 1.000 baja a segundos
+        # (misma lección del execute_batch del Bot 001).
+        cargadas = 0
+        LOTE = 1000
+        for i in range(0, len(operaciones), LOTE):
+            lote = operaciones[i:i + LOTE]
+            try:
+                res = col_citas.bulk_write(lote, ordered=False)
+                cargadas += res.upserted_count + res.modified_count
+            except Exception as e:
+                # BulkWriteError con ordered=False deja saber qué falló; el
+                # resto del lote se aplicó.
+                logger.warning(f"[indicadores-cliente] Lote de citas {i//LOTE + 1} con errores: {e}")
+                cargadas += max(len(lote) - getattr(getattr(e, 'details', {}), 'get', lambda *_: 0)('nWriteErrors', 0), 0)
+
+        return {
+            "success": True,
+            "data": {
+                "cargadas": cargadas,
+                "invalidas": invalidas,
+                "errores": errores,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[indicadores-cliente] Error cargando citas")
         raise HTTPException(status_code=500, detail=str(e))
