@@ -298,6 +298,7 @@ def get_guias_cliente(
     cliente_id: str,
     anio: Optional[List[int]] = Query(None),
     mes: Optional[List[int]] = Query(None),
+    q: Optional[str] = Query(None, description="Trazabilidad: número de guía o consecutivo de vehículo"),
 ):
     """Informe de guías por cliente: contexto del vehículo (Mongo media milla)
     + estado/fecha_entrega/fecha_digitalizacion (PostgreSQL informe_guias_tms).
@@ -307,30 +308,64 @@ def get_guias_cliente(
     la ``planilla_siscore`` — que puede traer varias guías separadas por coma —
     y hace JOIN en Python contra Postgres por ``guia``. Guías sin match en
     Postgres se devuelven con estado/fechas en None (el frontend pinta «—»).
+
+    Con ``q`` (trazabilidad): SIN filtro de fecha, trae los vehículos que
+    coincidan — por consecutivo de vehículo (regex, case-insensitive) o cuya
+    ``planilla_siscore`` contenga la guía buscada. Así se ve el vehículo en
+    que viajó una guía y el estado de todas sus compañeras de planilla.
     """
     cliente = CLIENTES.get(cliente_id)
     if not cliente:
         raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
 
     try:
-        pipeline = [
-            {"$match": _filtro_media_milla(anio or [], mes or [])},
-            {"$match": cliente["match_media_milla"]()},
-            # Orden por fecha desc ANTES del $group: hace determinista el $first
-            # de planilla_siscore (toma el doc más reciente del vehículo).
-            {"$sort": {"fecha_creacion": -1}},
-            {"$group": {
-                "_id": "$consecutivo_vehiculo",
-                "fecha_creacion": {"$first": "$fecha_creacion"},
-                "cajas": {"$first": _num("total_cajas_vehiculo")},
-                "planilla": {"$first": {"$ifNull": ["$planilla_siscore", ""]}},
-                # destino crudo; se normaliza (trim/upper) en Python — esta
-                # versión de Atlas no acepta $ifNull dentro de $trim.
-                "destino": {"$first": "$destino"},
-            }},
-            {"$sort": {"fecha_creacion": -1}},
-            {"$limit": MAX_VEHICULOS},
-        ]
+        # ── Modo trazabilidad: match por consecutivo o por guía ──
+        consulta = (q if isinstance(q, str) else "").strip()
+        if consulta:
+            import re as _re
+            rx = _re.escape(consulta)
+            cond_regex = {"$regex": rx, "$options": "i"}
+            match_traza = {
+                "$and": [
+                    cliente["match_media_milla"](),
+                    {"$or": [
+                        {"consecutivo_vehiculo": cond_regex},
+                        {"planilla_siscore": cond_regex},
+                    ]},
+                ]
+            }
+            pipeline = [
+                {"$match": match_traza},
+                {"$sort": {"fecha_creacion": -1}},
+                {"$group": {
+                    "_id": "$consecutivo_vehiculo",
+                    "fecha_creacion": {"$first": "$fecha_creacion"},
+                    "cajas": {"$first": _num("total_cajas_vehiculo")},
+                    "planilla": {"$first": {"$ifNull": ["$planilla_siscore", ""]}},
+                    "destino": {"$first": "$destino"},
+                }},
+                {"$sort": {"fecha_creacion": -1}},
+                {"$limit": MAX_VEHICULOS},
+            ]
+        else:
+            pipeline = [
+                {"$match": _filtro_media_milla(anio or [], mes or [])},
+                {"$match": cliente["match_media_milla"]()},
+                # Orden por fecha desc ANTES del $group: hace determinista el $first
+                # de planilla_siscore (toma el doc más reciente del vehículo).
+                {"$sort": {"fecha_creacion": -1}},
+                {"$group": {
+                    "_id": "$consecutivo_vehiculo",
+                    "fecha_creacion": {"$first": "$fecha_creacion"},
+                    "cajas": {"$first": _num("total_cajas_vehiculo")},
+                    "planilla": {"$first": {"$ifNull": ["$planilla_siscore", ""]}},
+                    # destino crudo; se normaliza (trim/upper) en Python — esta
+                    # versión de Atlas no acepta $ifNull dentro de $trim.
+                    "destino": {"$first": "$destino"},
+                }},
+                {"$sort": {"fecha_creacion": -1}},
+                {"$limit": MAX_VEHICULOS},
+            ]
         vehiculos = list(col_completados.aggregate(pipeline, allowDiskUse=True))
 
         # Explotar planilla_siscore (multi-guía por coma) → una fila por guía,
