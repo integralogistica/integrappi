@@ -137,7 +137,9 @@ def get_cajas_cliente(
 
 # Válvulas de seguridad del informe (un año completo son miles de guías).
 MAX_VEHICULOS = 8000
-MAX_FILAS = 5000
+# Un año completo de Kabi son ~12-15k guías desde el fix de planillas
+# acumuladas ($addToSet) — 20k cubre todo el histórico (2025-09 → hoy).
+MAX_FILAS = 20000
 
 # Estados reales de informe_guias_tms (verificados 2026-08-20): ENTREGADO,
 # PENDIENTE, "En distribucion", "CON NOVEDAD", "Transito Nacional" + basura
@@ -341,7 +343,7 @@ def get_guias_cliente(
                     "_id": "$consecutivo_vehiculo",
                     "fecha_creacion": {"$first": "$fecha_creacion"},
                     "cajas": {"$first": _num("total_cajas_vehiculo")},
-                    "planilla": {"$first": {"$ifNull": ["$planilla_siscore", ""]}},
+                    "planillas": {"$addToSet": {"$ifNull": ["$planilla_siscore", ""]}},
                     "destino": {"$first": "$destino"},
                 }},
                 {"$sort": {"fecha_creacion": -1}},
@@ -351,14 +353,18 @@ def get_guias_cliente(
             pipeline = [
                 {"$match": _filtro_media_milla(anio or [], mes or [])},
                 {"$match": cliente["match_media_milla"]()},
-                # Orden por fecha desc ANTES del $group: hace determinista el $first
-                # de planilla_siscore (toma el doc más reciente del vehículo).
+                # Orden por fecha desc ANTES del $group: hace determinista el
+                # $first de fecha/cajas (doc más reciente del vehículo).
                 {"$sort": {"fecha_creacion": -1}},
                 {"$group": {
                     "_id": "$consecutivo_vehiculo",
                     "fecha_creacion": {"$first": "$fecha_creacion"},
                     "cajas": {"$first": _num("total_cajas_vehiculo")},
-                    "planilla": {"$first": {"$ifNull": ["$planilla_siscore", ""]}},
+                    # ⚠️ UN vehículo puede tener VARIOS docs con planilla_siscore
+                    # distintas (178/322 vehículos de enero 2026): con $first se
+                    # perdían ~54 guías del mes. Se acumulan TODAS y se explotan
+                    # abajo (dedup global por guía).
+                    "planillas": {"$addToSet": {"$ifNull": ["$planilla_siscore", ""]}},
                     # destino crudo; se normaliza (trim/upper) en Python — esta
                     # versión de Atlas no acepta $ifNull dentro de $trim.
                     "destino": {"$first": "$destino"},
@@ -368,23 +374,25 @@ def get_guias_cliente(
             ]
         vehiculos = list(col_completados.aggregate(pipeline, allowDiskUse=True))
 
-        # Explotar planilla_siscore (multi-guía por coma) → una fila por guía,
-        # con dedup global: si una guía apareciera en dos vehículos, gana la
-        # primera aparición (los vehículos ya vienen ordenados fecha desc).
+        # Explotar planilla_siscore (multi-guía por coma y multi-planilla por
+        # vehículo) → una fila por guía, con dedup global: si una guía
+        # apareciera en dos vehículos, gana la primera aparición (los vehículos
+        # ya vienen ordenados fecha desc).
         filas = []
         vistas = set()
         for v in vehiculos:
-            for guia in _split_planillas(v.get("planilla")):
-                if guia in vistas:
-                    continue
-                vistas.add(guia)
-                filas.append({
-                    "guia": guia,
-                    "consecutivo_vehiculo": v["_id"],
-                    "fecha_creacion": _fecha_iso(v.get("fecha_creacion")),
-                    "cajas_vehiculo": v.get("cajas") or 0,
-                    "destino": str(v.get("destino") or "").strip().upper(),
-                })
+            for planilla in v.get("planillas") or [v.get("planilla") or ""]:
+                for guia in _split_planillas(planilla):
+                    if guia in vistas:
+                        continue
+                    vistas.add(guia)
+                    filas.append({
+                        "guia": guia,
+                        "consecutivo_vehiculo": v["_id"],
+                        "fecha_creacion": _fecha_iso(v.get("fecha_creacion")),
+                        "cajas_vehiculo": v.get("cajas") or 0,
+                        "destino": str(v.get("destino") or "").strip().upper(),
+                    })
 
         # Orden estable compuesto: fecha desc, guía asc.
         filas.sort(key=lambda f: f["guia"])
