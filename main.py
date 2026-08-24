@@ -46,6 +46,7 @@ from rutas.indicadores_cliente import router as ruta_indicadores_cliente
 from rutas.disponibilidad import ruta_disponibilidad
 from rutas.conductores import ruta_conductores
 from rutas.otros_costos import router as ruta_otros_costos
+from rutas.sicetac import router as ruta_sicetac
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ app.include_router(ruta_indicadores_cliente)
 app.include_router(ruta_disponibilidad)
 app.include_router(ruta_conductores)
 app.include_router(ruta_otros_costos)
+app.include_router(ruta_sicetac)
 
 @app.get("/", tags=['Home'])
 async def root():

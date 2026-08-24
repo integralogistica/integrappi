@@ -1,5 +1,10 @@
 # Integra API - Backend (FastAPI)
 
+## SICE-TAC por web service RNDC
+
+La integración SOAP, sus variables, endpoints administrativos, persistencia y
+procedimiento de validación están documentados en [`docs/SICETAC_SOAP.md`](docs/SICETAC_SOAP.md).
+
 API REST para el sistema de gestión de pedidos y pacientes Medical Care.
 
 ## Endpoints Principales

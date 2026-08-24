@@ -2335,12 +2335,28 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
             for resultado in fusionados:
                 fusion_info = resultado.get("fusion_info", {})
                 planillas_originales = fusion_info.get("planillas_originales", [])
+                datos_originales = fusion_info.get("datos_originales", []) or []
+                datos_por_planilla = {
+                    str(original.get("planilla")): original
+                    for original in datos_originales
+                    if original.get("planilla") is not None
+                }
 
                 # Buscar cada planilla original en MongoDB para obtener su consecutivo
                 for planilla_num in planillas_originales:
                     doc_original = coleccion_pedidos_medical.find_one({"planilla": planilla_num})
                     if doc_original and doc_original.get("consecutivo"):
                         cons = doc_original.get("consecutivo")
+                        # Completar el snapshot embebido con el consecutivo definitivo
+                        # antes de eliminar los documentos originales por la fusion.
+                        original_embebido = datos_por_planilla.get(str(planilla_num))
+                        if original_embebido is not None:
+                            original_embebido["consecutivo"] = cons
+                            original_embebido["consecutivo_base"] = (
+                                doc_original.get("consecutivo_base") or cons
+                            )
+                            original_embebido["numero_consecutivo"] = doc_original.get("numero_consecutivo")
+                            original_embebido["letra_consecutivo"] = doc_original.get("letra_consecutivo")
                         parts = cons.split("-")
                         if len(parts) >= 3:
                             numero_letra = parts[2]
@@ -2361,6 +2377,25 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
             logger.info(f"[CONSECUTIVO] Números de planillas a fusionar: {numeros_planillas_a_fusionar}")
 
             # Generar consecutivos para la fusión
+            # No permitir que se cree otra fusion inconsistente: todos los
+            # originales deben conservar el consecutivo que usa Vulcano.
+            originales_sin_consecutivo = [
+                str(original.get("planilla") or "-")
+                for resultado in fusionados
+                for original in (resultado.get("fusion_info", {}).get("datos_originales", []) or [])
+                if not original.get("consecutivo")
+            ]
+            if originales_sin_consecutivo:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No se puede guardar la fusion porque faltan los consecutivos "
+                        "de las planillas originales: "
+                        + ", ".join(originales_sin_consecutivo)
+                        + ". Recargue las planillas e intente fusionarlas nuevamente."
+                    ),
+                )
+
             try:
                 consecutivo_info = _generar_consecutivo(
                     regional=regional,
