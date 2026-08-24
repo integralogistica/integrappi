@@ -125,10 +125,9 @@ Antes de usar los códigos en producción, valida los códigos DIVIPOLA contra e
 También define estas variables no secretas:
 
 ```text
-HORAS_CARGUE = 2
-HORAS_DESCARGUE = 2
-HORAS_ESPERA = 2
-MESES_RETROCESO_PERIODO = 3
+HORAS_TOTALES_CARGUE_DEFAULT = 3
+HORAS_TOTALES_DESCARGUE_DEFAULT = 3
+MESES_RETROCESO_PERIODO = 1
 ```
 
 El total inicial de tiempos logísticos es seis horas. Mantén los tres conceptos separados para poder cambiar la fórmula si la validación contra el portal demuestra que SICE-TAC distingue otros tiempos.
@@ -328,7 +327,7 @@ valor de movilización +
 Para la configuración inicial:
 
 ```text
-horas_logisticas = HORAS_CARGUE + HORAS_DESCARGUE + HORAS_ESPERA
+horas_logisticas = horas_totales_cargue + horas_totales_descargue
 costo_total_calculado = valormoviliza + valorhora * horas_logisticas
 ```
 
@@ -409,9 +408,8 @@ Ejemplo orientativo del documento almacenado:
   "costos": {
     "valor_moviliza": "3873858",
     "valor_hora": "101509",
-    "horas_cargue": "2",
-    "horas_descargue": "2",
-    "horas_espera": "2",
+    "horas_totales_cargue": "3",
+    "horas_totales_descargue": "3",
     "horas_logisticas_total": "6",
     "costo_total_calculado": "4482912"
   },

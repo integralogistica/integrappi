@@ -5,10 +5,10 @@ from dataclasses import dataclass
 
 from .errors import ConfigurationError
 
-HORAS_CARGUE = 2
-HORAS_DESCARGUE = 2
-HORAS_ESPERA = 2
-MESES_RETROCESO_PERIODO = 3
+HORAS_TOTALES_CARGUE_DEFAULT = 3
+HORAS_TOTALES_DESCARGUE_DEFAULT = 3
+# Consulta el periodo solicitado y, si no hay datos, únicamente el mes anterior.
+MESES_RETROCESO_PERIODO = 1
 
 COMBINACIONES = [
     {"origen": "GALAPA - GALAPA - ATLÁNTICO", "origen_codigo": "08296000", "destino": "YUMBO", "destino_codigo": "76892000", "configuracion": "Camión dos ejes - Livianos PBV 7500-8000 Kg", "configuracion_codigo": "2L3", "unidad_transporte": "FURGON", "tipo_carga": "General", "condicion_carga": "CARGADO", "condicion_carga_codigo": "1"},
@@ -19,10 +19,19 @@ COMBINACIONES = [
 ]
 
 ENDPOINTS = {
-    "production": {"wsdl": "http://plc.mintransporte.gov.co:8080/wsdl/IBPMServices", "soap": "http://plc.mintransporte.gov.co:8080/soap/IBPMServices"},
+    # Aunque la guía general RNDC V5 asigna las consultas a PLC, el proceso
+    # especial SICE-TAC 26/tipo 6 es aceptado actualmente por rndcws.
+    "production": {"wsdl": "http://rndcws.mintransporte.gov.co:8080/wsdl/IBPMServices", "soap": "http://rndcws.mintransporte.gov.co:8080/ws/svr008w.dll/soap/IBPMServices"},
     "test": {"wsdl": "http://rndcpruebas.mintransporte.gov.co:8080/wsdl/IBPMServices", "soap": ""},
 }
 CONFIGURACIONES_VALIDAS = {"3S3", "3S2", "2S3", "2S2", "3", "2", "2L1", "2L2", "2L3", "V2", "V3", "V4"}
+# La guía publica aliases 2L*, pero el proceso 26 consulta literalmente la
+# columna CONFIGURACIONESID. En RNDC los IDs persistidos para livianos son estos.
+CONFIGURACION_RNDC_IDS = {
+    "2L1": "2_9_105",
+    "2L2": "2_8_9",
+    "2L3": "2_7_8",
+}
 
 
 def validar_combinaciones(combinaciones=COMBINACIONES):
@@ -57,7 +66,7 @@ class Settings:
 
     @classmethod
     def from_env(cls):
-        obligatorias = ("RNDC_USERNAME", "RNDC_PASSWORD", "MONGODB_URI")
+        obligatorias = ("RNDC_USERNAME", "RNDC_PASSWORD", "MONGO_URI")
         faltantes = [x for x in obligatorias if not os.getenv(x, "").strip()]
         if faltantes:
             raise ConfigurationError("Faltan variables obligatorias: " + ", ".join(faltantes))
@@ -68,5 +77,4 @@ class Settings:
         if not soap_url:
             raise ConfigurationError("RNDC_SOAP_URL es obligatoria en el ambiente test; confírmela en su WSDL")
         validar_combinaciones()
-        return cls(os.environ["RNDC_USERNAME"], os.environ["RNDC_PASSWORD"], os.environ["MONGODB_URI"], os.getenv("MONGODB_DATABASE", "sicetac"), os.getenv("MONGODB_COLLECTION", "consultas"), environment, soap_url)
-
+        return cls(os.environ["RNDC_USERNAME"], os.environ["RNDC_PASSWORD"], os.environ["MONGO_URI"], os.getenv("MONGODB_DATABASE", "sicetac"), os.getenv("MONGODB_COLLECTION", "consultas"), environment, soap_url)

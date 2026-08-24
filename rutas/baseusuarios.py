@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, status, Body, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Body, BackgroundTasks, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pymongo import MongoClient
 from bson import ObjectId
 from pydantic import BaseModel
@@ -8,6 +9,8 @@ import random
 import resend 
 import requests
 import re
+import jwt
+from datetime import datetime, timedelta, timezone
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================
@@ -16,6 +19,14 @@ from bd.bd_cliente import bd_cliente
 ConexionMongo = bd_cliente
 base_datos = ConexionMongo["integra"]
 coleccion_usuarios = base_datos["baseusuarios"]
+
+BASEUSUARIOS_JWT_SECRET = os.getenv("JWT_SECRET", "cambia_esta_clave_por_una_bien_larga_y_aleatoria")
+BASEUSUARIOS_JWT_ALGORITHM = "HS256"
+BASEUSUARIOS_TOKEN_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "20"))
+baseusuarios_oauth2 = OAuth2PasswordBearer(
+    tokenUrl="baseusuarios/token",
+    scheme_name="BaseUsuariosOAuth2",
+)
 
 # Índices
 try:
@@ -112,6 +123,56 @@ def modelo_usuario(u) -> dict:
         "activo": u.get("activo", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
     }
+
+
+def _buscar_baseusuario_activo(usuario: str, clave: str):
+    usuario_norm = usuario.strip().upper()
+    clave_ingresada = clave.strip()
+    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
+    if not encontrado:
+        return None
+    if not encontrado.get("activo", True):
+        raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")
+    clave_almacenada = str(encontrado.get("clave", "")).strip()
+    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+        return None
+    return encontrado
+
+
+def _crear_token_baseusuario(usuario: dict) -> str:
+    ahora = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(usuario["_id"]),
+        "usuario": usuario.get("usuario", ""),
+        "perfil": str(usuario.get("perfil", "")).upper(),
+        "auth_source": "baseusuarios",
+        "iat": ahora,
+        "exp": ahora + timedelta(minutes=BASEUSUARIOS_TOKEN_MINUTES),
+    }
+    return jwt.encode(payload, BASEUSUARIOS_JWT_SECRET, algorithm=BASEUSUARIOS_JWT_ALGORITHM)
+
+
+async def obtener_baseusuario_actual(token: str = Depends(baseusuarios_oauth2)):
+    error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="No se pudo validar las credenciales",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, BASEUSUARIOS_JWT_SECRET, algorithms=[BASEUSUARIOS_JWT_ALGORITHM])
+        if payload.get("auth_source") != "baseusuarios":
+            raise error
+        usuario_id = payload.get("sub")
+        if not usuario_id:
+            raise error
+        usuario = coleccion_usuarios.find_one({"_id": ObjectId(usuario_id)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise error from exc
+    if not usuario or not usuario.get("activo", True):
+        raise error
+    return modelo_usuario(usuario)
 
 def normalizar_clientes(clientes: Optional[List[str]]) -> List[str]:
     clientes_validos = {"KABI", "MEDICAL_CARE"}
@@ -390,21 +451,9 @@ async def eliminar_baseusuario(usuario_id: str):
 
 @ruta_baseusuarios.post("/login", response_model=dict)
 async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
-    usuario_norm = usuario.strip().upper()
-    clave_ingresada = clave.strip()
-    
-    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
+    encontrado = _buscar_baseusuario_activo(usuario, clave)
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
-
-    if not encontrado.get("activo", True):
-        raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")
-
-    clave_almacenada = str(encontrado.get("clave", "")).strip()
-
-    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
-        
     return {
         "mensaje": "Login exitoso",
         "usuario": {
@@ -414,6 +463,24 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
             "regional": encontrado["regional"],
             "clientes": encontrado.get("clientes") or ["KABI"],
         }
+    }
+
+
+@ruta_baseusuarios.post("/token", tags=["Autenticación"])
+async def token_baseusuario(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Entrega el Bearer JWT usado por Swagger y los endpoints administrativos."""
+    encontrado = _buscar_baseusuario_activo(form_data.username, form_data.password)
+    if not encontrado:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario o clave incorrectos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {
+        "access_token": _crear_token_baseusuario(encontrado),
+        "token_type": "bearer",
+        "usuario": encontrado.get("usuario", ""),
+        "perfil": str(encontrado.get("perfil", "")).upper(),
     }
 
 
