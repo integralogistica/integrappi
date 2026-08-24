@@ -142,7 +142,8 @@ class RNDCClient:
     def _reconnect(self):
         self._client.close()
         self._client = self._new_http_client()
-        self._last_request_at = 0.0
+        # Conservar el instante de la solicitud anterior. RNDC puede devolver
+        # RNDC13 si una reconexión reintenta inmediatamente dentro de un lote.
 
     def consultar(self, periodo, combinacion):
         return self._consultar(periodo, combinacion, amplia=False)

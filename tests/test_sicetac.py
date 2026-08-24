@@ -1,12 +1,15 @@
 import unittest
 import xml.etree.ElementTree as ET
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import patch
 
 import httpx
+from openpyxl import Workbook, load_workbook
 
 from rutas.sicetac import _resumir_rutas
 from sicetac.config import COMBINACIONES, validar_combinaciones
+from sicetac.excel_service import crear_plantilla, leer_consultas_excel, procesar_excel
 from sicetac.errors import RNDCBusinessError, RNDCCredentialsError, RNDCNoDataError, RNDCSoapFaultError
 from sicetac.models import ExploracionRutaRequest, calcular_costo_total
 from sicetac.rndc_client import RNDCClient, SOAP_ACTION, construir_envolvente_soap, construir_xml_exploracion, construir_xml_rndc, interpretar_respuesta_soap, sanitizar
@@ -99,6 +102,7 @@ class XmlTests(unittest.TestCase):
             return respuestas.pop(0)
 
         client = RNDCClient("http://rndc.test", "u", "p", transport=httpx.MockTransport(handler))
+        client._min_request_interval = 0
         try:
             docs = client.explorar("202608", "3S3", "11001000", "05001000", "1")
         finally:
@@ -137,6 +141,41 @@ class DomainTests(unittest.TestCase):
         )
         self.assertEqual(rutas[0]["horas_logisticas_total"], "4.0")
         self.assertEqual(rutas[0]["costo_total_calculado"], "1400.0")
+
+
+class ExcelTests(unittest.TestCase):
+    def test_plantilla_contiene_dos_ejemplos_validos(self):
+        consultas, errores = leer_consultas_excel(crear_plantilla().getvalue())
+        self.assertEqual(len(consultas), 2)
+        self.assertEqual(errores, [])
+        self.assertEqual(consultas[0][1].origen, "08296000")
+        self.assertEqual(consultas[0][1].limit, 20)
+
+    def test_resultado_excel_incluye_una_fila_por_ruta(self):
+        wb = Workbook(); ws = wb.active
+        ws.append(["periodo", "configuracion", "origen", "destino", "condicion_carga"])
+        ws.append([202608, "3S3", 11001000, 5001000, 1])
+        source = BytesIO(); wb.save(source)
+
+        class ExcelClient:
+            def explorar(self, *args):
+                return [{
+                    "periodo": "202608", "origen": "11001000", "destino": "5001000",
+                    "configuracion": "3S3", "condicioncarga": "CARGADO",
+                    "rutasid": "106", "valormoviliza": "1000", "valorhora": "100",
+                }]
+
+        output = procesar_excel(source.getvalue(), ExcelClient(), _resumir_rutas)
+        result = load_workbook(output, data_only=True).active
+        headers = [cell.value for cell in result[1]]
+        row = dict(zip(headers, [cell.value for cell in result[2]]))
+        self.assertEqual(row["estado"], "OK")
+        self.assertEqual(row["destino"], "05001000")
+        self.assertEqual(row["limit"], 20)
+        self.assertEqual(row["costo_total_calculado"], 1600)
+        costo_cell = result.cell(2, headers.index("costo_total_calculado") + 1)
+        self.assertEqual(costo_cell.data_type, "n")
+        self.assertEqual(costo_cell.number_format, "$#,##0")
 
     def test_decimal_y_formula(self):
         value = calcular_costo_total("3873858", "101509", 3, 3)

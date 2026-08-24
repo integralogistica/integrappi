@@ -344,6 +344,60 @@ Parámetros:
 
 Si la ejecución se hizo con `dryRun: true`, no aparecerá información nueva en este endpoint.
 
+## 9.1. Consultas masivas mediante Excel
+
+La carga masiva es de solo lectura: consulta RNDC y devuelve otro Excel, pero no guarda resultados en MongoDB.
+
+### Descargar la plantilla
+
+```http
+GET /sicetac/plantilla-excel
+```
+
+Descarga `plantilla_sicetac.xlsx` con las columnas admitidas y dos filas de ejemplo. Las columnas son:
+
+```text
+periodo
+configuracion
+origen
+destino
+condicion_carga
+unidad_transporte_nombre
+tipo_carga_nombre
+horas_totales_cargue
+horas_totales_descargue
+limit
+```
+
+Son obligatorias `periodo`, `configuracion`, `origen` y `destino`. Las demás columnas pueden quedar vacías. En la carga Excel, `limit` utiliza por defecto `20`; el resto conserva los valores predeterminados del endpoint JSON.
+
+### Procesar el archivo
+
+```http
+POST /sicetac/consultas-excel
+Content-Type: multipart/form-data
+```
+
+En Swagger se selecciona el archivo en el campo `archivo`. Solo se admiten archivos `.xlsx`, con un máximo de 5 MB y 200 filas de datos. La respuesta descarga `resultados_sicetac.xlsx`.
+
+Una fila de entrada puede producir varias filas de salida, porque RNDC puede devolver distintas vías para la misma combinación. La columna `fila_entrada` permite rastrear cada resultado hasta la fila original. La columna `estado` puede contener:
+
+```text
+OK
+SIN_RESULTADO
+ERROR_VALIDACION
+ERROR_RNDC
+ERROR
+```
+
+Las filas inválidas no detienen todo el archivo; aparecen en el Excel de salida con su mensaje. Los códigos DIVIPOLA numéricos se normalizan a ocho dígitos para recuperar ceros iniciales perdidos por Excel.
+
+La plantilla usa `limit = 20`, por lo que produce como máximo veinte filas de resultado por consulta. Si la celda `limit` queda vacía, también se aplica `20`. Las alternativas conservan el orden entregado por RNDC; no aparecen necesariamente ordenadas de la más barata, corta o rápida.
+
+Las columnas de salida incluyen los datos originales, nombres reconocidos por RNDC, ruta, vía, kilómetros, horas de recorrido, valor de movilización, valor hora, horas logísticas y costo total calculado.
+
+Las columnas `kilometros`, `horas_recorrido`, `valor_moviliza`, `valor_hora`, `horas_logisticas_total` y `costo_total_calculado` se escriben como celdas numéricas reales. Los valores monetarios llevan formato de moneda y las distancias y horas admiten decimales, por lo que pueden sumarse, filtrarse y utilizarse en fórmulas de Excel.
+
 ## 10. Períodos examinados
 
 `MESES_RETROCESO_PERIODO = 1` significa que se consulta:
@@ -442,7 +496,7 @@ El cliente utiliza:
 - Hasta tres intentos para errores de red y HTTP 5xx.
 - Reconexión y reintento para `RNDC13`.
 
-Se comprobó que distintos nodos internos de `rndcws` responden de forma inconsistente al mismo XML: uno puede devolver documentos y otro `RNDC13`. Por eso, al recibir `RNDC13`, el cliente cierra la conexión y abre otra antes de decidir que la combinación no existe.
+Se comprobó que distintos nodos internos de `rndcws` responden de forma inconsistente al mismo XML: uno puede devolver documentos y otro `RNDC13`. Por eso, al recibir `RNDC13`, el cliente cierra la conexión y abre otra antes de decidir que la combinación no existe. La reconexión conserva además el intervalo mínimo de un segundo respecto de la solicitud anterior; esto evita rechazos consecutivos al procesar varias filas de Excel.
 
 Para una consulta exacta que finalmente no entrega datos, el servicio intenta una consulta más amplia por período, configuración y origen, y aplica localmente los demás filtros. Estas respuestas se reutilizan entre combinaciones equivalentes. El servidor puede rechazar también la consulta amplia; en ese caso se trata como ausencia de coincidencias y se prueba el mes anterior.
 

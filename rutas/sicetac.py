@@ -7,7 +7,9 @@ import uuid
 from datetime import datetime, timezone
 
 from bson import Decimal128
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import (APIRouter, BackgroundTasks, Depends, File, HTTPException,
+                     Query, UploadFile, status)
+from fastapi.responses import StreamingResponse
 
 from bd.bd_cliente import bd_cliente
 from rutas.baseusuarios import obtener_baseusuario_actual
@@ -16,6 +18,7 @@ from sicetac.errors import (ConfigurationError, RNDCBusinessError,
                             RNDCCredentialsError, RNDCNoDataError,
                             RNDCResponseParseError, RNDCSoapFaultError,
                             RNDCTransportError)
+from sicetac.excel_service import crear_plantilla, procesar_excel
 from sicetac.models import (ConsultaRequest, ExploracionRutaRequest,
                             calcular_costo_total)
 from sicetac.repository import SicetacRepository
@@ -25,6 +28,8 @@ from sicetac.service import SicetacService, normalizar
 router = APIRouter(prefix="/sicetac", tags=["SICE-TAC"])
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MAX_EXCEL_BYTES = 5 * 1024 * 1024
 
 
 def _shared_client(settings):
@@ -202,3 +207,40 @@ async def rutas_disponibles(
     finally:
         if client:
             client.close()
+
+
+@router.get("/plantilla-excel")
+async def plantilla_excel(_=Depends(_admin)):
+    return StreamingResponse(
+        crear_plantilla(), media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="plantilla_sicetac.xlsx"'},
+    )
+
+
+@router.post("/consultas-excel")
+async def consultas_excel(archivo: UploadFile = File(...), _=Depends(_admin)):
+    filename = (archivo.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(422, detail="El archivo debe tener extensión .xlsx")
+    content = await archivo.read(MAX_EXCEL_BYTES + 1)
+    if len(content) > MAX_EXCEL_BYTES:
+        raise HTTPException(413, detail="El archivo supera el máximo de 5 MB")
+    if not _lock.acquire(blocking=False):
+        raise HTTPException(409, detail="Ya existe una ejecución SICE-TAC activa")
+    client = None
+    try:
+        settings = Settings.from_env()
+        client = RNDCClient(settings.soap_url, settings.username, settings.password)
+        output = await asyncio.to_thread(procesar_excel, content, client, _resumir_rutas)
+        return StreamingResponse(
+            output, media_type=XLSX_MEDIA_TYPE,
+            headers={"Content-Disposition": 'attachment; filename="resultados_sicetac.xlsx"'},
+        )
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    finally:
+        if client:
+            client.close()
+        _lock.release()
