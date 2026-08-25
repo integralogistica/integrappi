@@ -396,7 +396,7 @@ Las filas inválidas no detienen todo el archivo; aparecen en el Excel de salida
 
 La plantilla usa `limit = 20`, por lo que produce como máximo veinte filas de resultado por consulta. Si la celda `limit` queda vacía, también se aplica `20`. Las alternativas conservan el orden entregado por RNDC; no aparecen necesariamente ordenadas de la más barata, corta o rápida.
 
-Las columnas de salida incluyen los datos originales, nombres reconocidos por RNDC, ruta, vía, kilómetros, horas de recorrido, valor de movilización, valor hora, horas logísticas y costo total calculado.
+Las columnas de salida incluyen los datos originales necesarios, nombres reconocidos por RNDC, ruta, vía, kilómetros, horas de recorrido, valor de movilización, valor hora, horas logísticas y costo total calculado. `consulta_id_usuario` y `fila_original` se aceptan por compatibilidad en archivos de entrada, pero no se incluyen en el consolidado descargado; `fila_entrada` conserva la trazabilidad con la fila del Excel cargado.
 
 Las columnas `kilometros`, `horas_recorrido`, `valor_moviliza`, `valor_hora`, `horas_logisticas_total` y `costo_total_calculado` se escriben como celdas numéricas reales. Los valores monetarios llevan formato de moneda y las distancias y horas admiten decimales, por lo que pueden sumarse, filtrarse y utilizarse en fórmulas de Excel.
 

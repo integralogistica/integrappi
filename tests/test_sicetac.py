@@ -168,6 +168,9 @@ class ExcelTests(unittest.TestCase):
         output = procesar_excel(source.getvalue(), ExcelClient(), _resumir_rutas)
         result = load_workbook(output, data_only=True).active
         headers = [cell.value for cell in result[1]]
+        self.assertNotIn("consulta_id_usuario", headers)
+        self.assertNotIn("fila_original", headers)
+        self.assertIn("fila_entrada", headers)
         row = dict(zip(headers, [cell.value for cell in result[2]]))
         self.assertEqual(row["estado"], "OK")
         self.assertEqual(row["destino"], "05001000")

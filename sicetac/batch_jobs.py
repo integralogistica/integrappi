@@ -12,7 +12,7 @@ from pymongo import ASCENDING, MongoClient, ReturnDocument
 
 from .errors import (RNDCBusinessError, RNDCCredentialsError, RNDCNoDataError,
                      RNDCResponseParseError, RNDCSoapFaultError, RNDCTransportError)
-from .excel_service import (ENTRADAS, SALIDAS, _ajustar_hoja,
+from .excel_service import (ENTRADAS_RESULTADO, SALIDAS, _ajustar_hoja,
                             _formatear_columnas_numericas, _numero_excel,
                             leer_consultas_excel, resumir_rutas)
 from .execution import RNDC_EXECUTION_LOCK
@@ -204,10 +204,10 @@ class SicetacBatchJobs:
         if job["estado"] != "completada":
             raise RuntimeError("La ejecución todavía no está completada")
         wb = Workbook(); ws = wb.active; ws.title = "resultados"
-        ws.append(ENTRADAS + SALIDAS)
+        ws.append(ENTRADAS_RESULTADO + SALIDAS)
         for row in self.rows.find({"job_id": job_id}).sort("fila_entrada", ASCENDING):
             payload = row.get("payload", {})
-            base = [payload.get(x) for x in ENTRADAS]
+            base = [payload.get(x) for x in ENTRADAS_RESULTADO]
             routes = row.get("resultados") or []
             if not routes:
                 ws.append(base + [row["fila_entrada"], row["estado"], row.get("mensaje", "")] + [None] * (len(SALIDAS) - 3))

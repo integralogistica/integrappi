@@ -17,6 +17,12 @@ ENTRADAS = [
     "unidad_transporte_nombre", "tipo_carga_nombre", "horas_totales_cargue",
     "horas_totales_descargue", "limit",
 ]
+# Se siguen aceptando los identificadores opcionales en archivos de entrada,
+# pero no se repiten en el consolidado: fila_entrada ya aporta la trazabilidad.
+ENTRADAS_RESULTADO = [
+    campo for campo in ENTRADAS
+    if campo not in {"consulta_id_usuario", "fila_original"}
+]
 SALIDAS = [
     "fila_entrada", "estado", "mensaje", "periodo_resultado", "origen_codigo",
     "origen_nombre", "destino_codigo", "destino_nombre", "configuracion_resultado",
@@ -180,11 +186,10 @@ def leer_consultas_excel(content: bytes, max_filas=MAX_FILAS) -> list[tuple[int,
 
 def _fila_base(payload):
     return [
-        payload.consulta_id_usuario, payload.fila_original,
-        payload.periodo, payload.configuracion, payload.origen, payload.destino,
-        payload.condicion_carga, payload.unidad_transporte_nombre,
-        payload.tipo_carga_nombre, str(payload.horas_totales_cargue),
-        str(payload.horas_totales_descargue), payload.limit,
+        str(getattr(payload, campo))
+        if campo in {"horas_totales_cargue", "horas_totales_descargue"}
+        else getattr(payload, campo)
+        for campo in ENTRADAS_RESULTADO
     ]
 
 
@@ -193,10 +198,10 @@ def procesar_excel(content: bytes, client, resumir_rutas) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "resultados"
-    ws.append(ENTRADAS + SALIDAS)
+    ws.append(ENTRADAS_RESULTADO + SALIDAS)
 
     for row_number, raw, mensaje in errores_validacion:
-        base = [raw.get(x) for x in ENTRADAS]
+        base = [raw.get(x) for x in ENTRADAS_RESULTADO]
         ws.append(base + [row_number, "ERROR_VALIDACION", mensaje] + [None] * (len(SALIDAS) - 3))
 
     for row_number, payload in consultas:
