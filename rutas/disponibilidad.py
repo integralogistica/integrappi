@@ -102,7 +102,11 @@ async def checkin(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa_limpia})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    if str(vehiculo.get("idUsuario", "")) != str(id_usuario):
+    # Propiedad: dueño de la ficha (idUsuario = tenedor o conductor legacy) o
+    # conductor invitado vinculado (idConductor).
+    es_dueno = str(vehiculo.get("idUsuario", "")) == str(id_usuario)
+    es_conductor_vinculado = str(vehiculo.get("idConductor") or "") == str(id_usuario)
+    if not (es_dueno or es_conductor_vinculado):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este conductor.")
     if vehiculo.get("estadoIntegra") != "aprobado":
         raise HTTPException(
@@ -168,8 +172,10 @@ def mia(id_usuario: str):
     """
     hoy = _fecha_hoy_str()
 
+    # Placas aprobadas del usuario: propias (idUsuario) o como conductor
+    # invitado (idConductor).
     aprobados = list(coleccion_vehiculos.find(
-        {"idUsuario": id_usuario, "estadoIntegra": "aprobado"},
+        {"$or": [{"idUsuario": id_usuario}, {"idConductor": id_usuario}], "estadoIntegra": "aprobado"},
         {"_id": 0, "placa": 1, "vehMarca": 1, "tipo_veh_sicetac": 1}
     ))
 

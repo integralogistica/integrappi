@@ -11,6 +11,9 @@ import requests
 import re
 import jwt
 from datetime import datetime, timedelta, timezone
+
+from Funciones.claves import crear_hash, verificar_clave, es_hash
+
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
 # ==============================================================================
@@ -126,15 +129,28 @@ def modelo_usuario(u) -> dict:
 
 
 def _buscar_baseusuario_activo(usuario: str, clave: str):
-    usuario_norm = usuario.strip().upper()
+    """
+    Login por CORREO (estricto). El campo del body sigue llamándose `usuario`
+    para no romper el front desplegado, pero se espera un correo.
+    """
+    valor = usuario.strip()
     clave_ingresada = clave.strip()
-    encontrado = coleccion_usuarios.find_one({"usuario": usuario_norm})
-    if not encontrado:
+    if "@" not in valor:
         return None
+    query_correo = {"correo": {"$regex": f"^{re.escape(valor.lower())}$", "$options": "i"}}
+    encontrados = list(coleccion_usuarios.find(query_correo).limit(5))
+    if not encontrados:
+        return None
+    if len(encontrados) > 1:
+        # Sin índice único en `correo` puede haber duplicados; determinístico:
+        # el primero activo. El script de migración los reporta para sanear.
+        print(f"⚠️ baseusuarios: correo duplicado en login → {valor.lower()}")
+        encontrados.sort(key=lambda d: d.get("activo", True), reverse=True)
+    encontrado = encontrados[0]
     if not encontrado.get("activo", True):
         raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")
     clave_almacenada = str(encontrado.get("clave", "")).strip()
-    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+    if not verificar_clave(clave_ingresada, clave_almacenada):
         return None
     return encontrado
 
@@ -283,7 +299,7 @@ async def cambiar_clave_conductor(data: CambioClaveInput):
     coleccion_usuarios.update_one(
         {"_id": usuario["_id"]},
         {
-            "$set": {"clave": data.nuevaClave.strip()}, 
+            "$set": {"clave": crear_hash(data.nuevaClave.strip())},
             "$unset": {"recovery_code": ""}
         }
     )
@@ -334,7 +350,7 @@ async def recuperar_base_confirmar(data: ConfirmarBaseInput):
     coleccion_usuarios.update_one(
         {"_id": doc["_id"]},
         {
-            "$set": {"clave": data.nuevaClave.strip()},
+            "$set": {"clave": crear_hash(data.nuevaClave.strip())},
             "$unset": {"recovery_code": ""}
         }
     )
@@ -356,8 +372,8 @@ async def crear_baseusuario(data: BaseUsuario):
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
         "perfil": data.perfil.upper(),
-        "usuario": data.usuario.upper(),     
-        "clave": data.clave.strip(),         
+        "usuario": data.usuario.upper(),
+        "clave": crear_hash(data.clave.strip()),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
 
@@ -417,9 +433,12 @@ async def actualizar_baseusuario(usuario_id: str, data: BaseUsuario):
         "celular": data.celular.upper() if data.celular else None,
         "perfil": data.perfil.upper(),
         "usuario": data.usuario.upper(),
-        "clave": data.clave.strip(),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
+    # Solo pisar la clave si viene una clave NUEVA en claro; si el cliente
+    # reenvía el hash (que nunca debería tener) se conserva la existente.
+    if data.clave and data.clave.strip() and not es_hash(data.clave.strip()):
+        actualiza["clave"] = crear_hash(data.clave.strip())
     
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     
@@ -461,6 +480,8 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
         "usuario": {
             "id": str(encontrado["_id"]),
             "usuario": encontrado["usuario"],
+            "nombre": encontrado.get("nombre", ""),
+            "correo": encontrado.get("correo") or "",
             "perfil": encontrado["perfil"],
             "regional": encontrado["regional"],
             "clientes": encontrado.get("clientes") or ["KABI"],
@@ -541,8 +562,8 @@ async def actualizar_datos_usuario(id: str, data: ActualizarDatosInput):
             raise HTTPException(status_code=400, detail="El nombre de usuario ya está en uso")
         actualiza["usuario"] = nuevo_usuario
 
-    if data.clave and data.clave.strip():
-        actualiza["clave"] = data.clave.strip()
+    if data.clave and data.clave.strip() and not es_hash(data.clave.strip()):
+        actualiza["clave"] = crear_hash(data.clave.strip())
 
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     if result.matched_count == 0:
@@ -607,9 +628,9 @@ async def login_seguridad(correo: str = Body(..., embed=True), clave: str = Body
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
         
     clave_almacenada = str(encontrado.get("clave", "")).strip()
-    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+    if not verificar_clave(clave_ingresada, clave_almacenada):
         raise HTTPException(status_code=401, detail="Correo o clave incorrectos")
-        
+
     perfil = encontrado.get("perfil", "").strip().upper()
     if perfil not in ["SEGURIDAD", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tiene permisos de Seguridad")
@@ -632,14 +653,14 @@ async def login_Conductor(usuario: str = Body(..., embed=True), clave: str = Bod
     usuario_ingresado = usuario.strip()
     clave_ingresada = clave.strip()
     encontrado = coleccion_usuarios.find_one({
-        "correo": {"$regex": re.escape(usuario_ingresado), "$options": "i"}
+        "correo": {"$regex": f"^{re.escape(usuario_ingresado)}$", "$options": "i"}
     })
-    
+
     if not encontrado:
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
-        
+
     clave_almacenada = str(encontrado.get("clave", "")).strip()
-    if not (clave_almacenada == clave_ingresada or clave_almacenada == clave_ingresada.upper()):
+    if not verificar_clave(clave_ingresada, clave_almacenada):
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
         
     perfil = encontrado.get("perfil", "").strip().upper()
