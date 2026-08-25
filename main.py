@@ -46,7 +46,7 @@ from rutas.indicadores_cliente import router as ruta_indicadores_cliente
 from rutas.disponibilidad import ruta_disponibilidad
 from rutas.conductores import ruta_conductores
 from rutas.otros_costos import router as ruta_otros_costos
-from rutas.sicetac import router as ruta_sicetac
+from rutas.sicetac import reanudar_jobs_excel, router as ruta_sicetac
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,9 @@ async def _loop_sync_v3():
 async def lifespan(app: FastAPI):
     print("[LIFESPAN] Iniciando aplicación...")
     logger.info("[LIFESPAN] Iniciando aplicación...")
+
+    # Recupera cargas Excel SICE-TAC pendientes antes de atender solicitudes.
+    await asyncio.to_thread(reanudar_jobs_excel)
 
     # Crear la tarea de fondo
     task = asyncio.create_task(_loop_sync_v3())

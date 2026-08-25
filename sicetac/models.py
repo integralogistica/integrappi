@@ -26,6 +26,8 @@ class ConsultaRequest(BaseModel):
 
 
 class ExploracionRutaRequest(BaseModel):
+    consulta_id_usuario: str | None = None
+    fila_original: int | None = Field(None, ge=2)
     periodo: str
     configuracion: str
     origen: str

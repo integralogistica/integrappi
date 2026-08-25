@@ -13,28 +13,46 @@ from fastapi.responses import StreamingResponse
 
 from bd.bd_cliente import bd_cliente
 from rutas.baseusuarios import obtener_baseusuario_actual
+from sicetac.batch_jobs import SicetacBatchJobs
 from sicetac.config import Settings
 from sicetac.errors import (ConfigurationError, RNDCBusinessError,
                             RNDCCredentialsError, RNDCNoDataError,
                             RNDCResponseParseError, RNDCSoapFaultError,
                             RNDCTransportError)
-from sicetac.excel_service import crear_plantilla, procesar_excel
-from sicetac.models import (ConsultaRequest, ExploracionRutaRequest,
-                            calcular_costo_total)
+from sicetac.excel_service import crear_plantilla, procesar_excel, resumir_rutas as _resumir_rutas
+from sicetac.execution import RNDC_EXECUTION_LOCK
+from sicetac.models import ConsultaRequest, ExploracionRutaRequest
 from sicetac.repository import SicetacRepository
 from sicetac.rndc_client import RNDCClient
 from sicetac.service import SicetacService, normalizar
 
 router = APIRouter(prefix="/sicetac", tags=["SICE-TAC"])
 _jobs: dict[str, dict] = {}
-_lock = threading.Lock()
+_lock = RNDC_EXECUTION_LOCK
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MAX_EXCEL_BYTES = 5 * 1024 * 1024
+MAX_JOB_EXCEL_BYTES = 20 * 1024 * 1024
+_batch_manager = None
+_batch_manager_lock = threading.Lock()
 
 
 def _shared_client(settings):
     existing_uri = os.getenv("MONGO_URI", "").strip()
     return bd_cliente if existing_uri and existing_uri == settings.mongodb_uri else None
+
+
+def _get_batch_manager():
+    global _batch_manager
+    if _batch_manager is None:
+        with _batch_manager_lock:
+            if _batch_manager is None:
+                settings = Settings.from_env()
+                _batch_manager = SicetacBatchJobs(settings, shared_client=_shared_client(settings))
+    return _batch_manager
+
+
+def reanudar_jobs_excel():
+    _get_batch_manager().recuperar()
 
 
 def _admin(user=Depends(obtener_baseusuario_actual)):
@@ -50,52 +68,6 @@ def _json(value):
     if isinstance(value, dict): return {k: _json(v) for k, v in value.items()}
     if isinstance(value, list): return [_json(v) for v in value]
     return value
-
-
-def _resumir_rutas(documentos, limit, unidad_transporte_nombre=None, tipo_carga_nombre=None,
-                   horas_totales_cargue=3, horas_totales_descargue=3):
-    rutas, vistas = [], set()
-    for doc in documentos:
-        if unidad_transporte_nombre and normalizar(doc.get("nombreunidadtransporte")) != normalizar(unidad_transporte_nombre):
-            continue
-        if tipo_carga_nombre and normalizar(doc.get("nombretipocarga")) != normalizar(tipo_carga_nombre):
-            continue
-        clave = tuple(str(doc.get(campo) or "") for campo in (
-            "periodo", "origen", "destino", "configuracion", "condicioncarga",
-            "tipocarga", "unidadtransporte", "rutasid"
-        ))
-        if clave in vistas:
-            continue
-        vistas.add(clave)
-        ruta = {
-            "periodo": doc.get("periodo"),
-            "origen_codigo": str(doc.get("origen") or "").zfill(8),
-            "origen_nombre": doc.get("nomorigen"),
-            "destino_codigo": str(doc.get("destino") or "").zfill(8),
-            "destino_nombre": doc.get("nomdestino"),
-            "configuracion": doc.get("configuracion"),
-            "condicion_carga": doc.get("condicioncarga"),
-            "tipo_carga_codigo": doc.get("tipocarga"),
-            "tipo_carga_nombre": doc.get("nombretipocarga"),
-            "unidad_transporte_codigo": doc.get("unidadtransporte"),
-            "unidad_transporte_nombre": doc.get("nombreunidadtransporte"),
-            "ruta_id": doc.get("rutasid"),
-            "via": doc.get("via"),
-            "kilometros": doc.get("kilometros"),
-            "horas_recorrido": doc.get("horasrecorrido"),
-            "valor_moviliza": doc.get("valormoviliza"),
-            "valor_hora": doc.get("valorhora"),
-            "horas_totales_cargue": str(horas_totales_cargue),
-            "horas_totales_descargue": str(horas_totales_descargue),
-            "horas_logisticas_total": str(horas_totales_cargue + horas_totales_descargue),
-            "costo_total_calculado": str(calcular_costo_total(
-                doc.get("valormoviliza"), doc.get("valorhora"),
-                horas_totales_cargue, horas_totales_descargue
-            )),
-        }
-        if len(rutas) < limit:
-            rutas.append(ruta)
-    return rutas, len(vistas)
 
 
 def _run(job_id, payload):
@@ -244,3 +216,52 @@ async def consultas_excel(archivo: UploadFile = File(...), _=Depends(_admin)):
         if client:
             client.close()
         _lock.release()
+
+
+@router.post("/consultas-excel/jobs", status_code=status.HTTP_202_ACCEPTED)
+async def crear_job_excel(archivo: UploadFile = File(...), user=Depends(_admin)):
+    filename = archivo.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(422, detail="El archivo debe tener extensión .xlsx")
+    content = await archivo.read(MAX_JOB_EXCEL_BYTES + 1)
+    if len(content) > MAX_JOB_EXCEL_BYTES:
+        raise HTTPException(413, detail="El archivo supera el máximo de 20 MB")
+    creado_por = str(user.get("usuario") or user.get("username") or user.get("email") or "")
+    try:
+        manager = _get_batch_manager()
+        return await asyncio.to_thread(manager.crear, content, filename, creado_por)
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+
+
+@router.get("/consultas-excel/jobs")
+async def listar_jobs_excel(
+    limit: int = Query(10, ge=1, le=50),
+    _=Depends(_admin),
+):
+    return await asyncio.to_thread(_get_batch_manager().listar, limit)
+
+
+@router.get("/consultas-excel/jobs/{ejecucion_id}")
+async def estado_job_excel(ejecucion_id: str, _=Depends(_admin)):
+    job = await asyncio.to_thread(_get_batch_manager().obtener, ejecucion_id)
+    if not job:
+        raise HTTPException(404, detail="Ejecución Excel no encontrada")
+    return job
+
+
+@router.get("/consultas-excel/jobs/{ejecucion_id}/resultado")
+async def resultado_job_excel(ejecucion_id: str, _=Depends(_admin)):
+    manager = _get_batch_manager()
+    job = await asyncio.to_thread(manager.obtener, ejecucion_id)
+    if not job:
+        raise HTTPException(404, detail="Ejecución Excel no encontrada")
+    if job["estado"] != "completada":
+        raise HTTPException(409, detail=f"La ejecución está en estado {job['estado']}")
+    output = await asyncio.to_thread(manager.generar_excel, ejecucion_id)
+    return StreamingResponse(
+        output, media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="resultados_sicetac_{ejecucion_id}.xlsx"'},
+    )

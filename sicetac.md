@@ -329,7 +329,7 @@ Campos del resumen:
 
 Una ejecución `completada` con cero documentos significa que la comunicación terminó correctamente, pero ninguna combinación coincidió. No significa que haya datos guardados.
 
-Los trabajos se mantienen en memoria. El estado y el `ejecucion_id` se pierden al reiniciar el backend. Solo se admite una ejecución simultánea por proceso; una segunda recibe HTTP `409`.
+Las ejecuciones creadas por `POST /sicetac/consultas` se mantienen en memoria. Su estado y `ejecucion_id` se pierden al reiniciar el backend. Solo se admite una ejecución simultánea por proceso; una segunda recibe HTTP `409`. Esto no aplica a los trabajos Excel asíncronos descritos más adelante, cuyo progreso sí se persiste en MongoDB.
 
 ## 9. Consultar resultados guardados
 
@@ -357,6 +357,8 @@ GET /sicetac/plantilla-excel
 Descarga `plantilla_sicetac.xlsx` con las columnas admitidas y dos filas de ejemplo. Las columnas son:
 
 ```text
+consulta_id_usuario
+fila_original
 periodo
 configuracion
 origen
@@ -369,7 +371,7 @@ horas_totales_descargue
 limit
 ```
 
-Son obligatorias `periodo`, `configuracion`, `origen` y `destino`. Las demás columnas pueden quedar vacías. En la carga Excel, `limit` utiliza por defecto `20`; el resto conserva los valores predeterminados del endpoint JSON.
+Son obligatorias `periodo`, `configuracion`, `origen` y `destino`. `consulta_id_usuario` y `fila_original` son opcionales, pero se recomiendan para conservar trazabilidad al dividir archivos en lotes. Las demás columnas pueden quedar vacías. En la carga Excel, `limit` utiliza por defecto `20`; el resto conserva los valores predeterminados del endpoint JSON.
 
 ### Procesar el archivo
 
@@ -397,6 +399,126 @@ La plantilla usa `limit = 20`, por lo que produce como máximo veinte filas de r
 Las columnas de salida incluyen los datos originales, nombres reconocidos por RNDC, ruta, vía, kilómetros, horas de recorrido, valor de movilización, valor hora, horas logísticas y costo total calculado.
 
 Las columnas `kilometros`, `horas_recorrido`, `valor_moviliza`, `valor_hora`, `horas_logisticas_total` y `costo_total_calculado` se escriben como celdas numéricas reales. Los valores monetarios llevan formato de moneda y las distancias y horas admiten decimales, por lo que pueden sumarse, filtrarse y utilizarse en fórmulas de Excel.
+
+### Trabajos asíncronos para archivos grandes
+
+Para archivos de hasta 2.000 consultas se debe usar el flujo de trabajos. El usuario sube un solo Excel; la API lo divide lógicamente en bloques de 30, sin crear archivos intermedios visibles.
+
+| Modalidad | Endpoint | Límite | Persistencia del progreso | Uso recomendado |
+|---|---|---:|---|---|
+| Excel síncrono | `POST /sicetac/consultas-excel` | 200 filas / 5 MB | No | Pruebas y archivos pequeños. |
+| Excel asíncrono | `POST /sicetac/consultas-excel/jobs` | 2.000 filas / 20 MB | Sí, en MongoDB | Cargas grandes y procesos de varios minutos. |
+
+El tamaño de lote `30` es interno: controla el reporte de avance y organiza el trabajo, pero no obliga al usuario a dividir el archivo. RNDC se consulta secuencialmente y conserva la pausa mínima entre solicitudes.
+
+#### Crear el trabajo
+
+```http
+POST /sicetac/consultas-excel/jobs
+Content-Type: multipart/form-data
+```
+
+El campo `archivo` admite `.xlsx` de hasta 20 MB. La respuesta HTTP `202` contiene:
+
+```json
+{
+  "ejecucion_id": "abc123",
+  "estado": "pendiente",
+  "filas_totales": 1632,
+  "filas_procesadas": 0,
+  "tamano_lote": 30,
+  "lotes_totales": 55,
+  "progreso_porcentaje": 0
+}
+```
+
+`ejecucion_id` se utiliza en los endpoints siguientes. La respuesta también conserva `job_id` como identificador interno equivalente.
+
+#### Consultar el progreso
+
+```http
+GET /sicetac/consultas-excel/jobs/{ejecucion_id}
+```
+
+Para listar las diez ejecuciones Excel más recientes almacenadas en MongoDB:
+
+```http
+GET /sicetac/consultas-excel/jobs?limit=10
+Authorization: Bearer <token_admin>
+```
+
+`limit` acepta valores entre 1 y 50. La respuesta permite recuperar un trabajo
+aunque el navegador haya perdido su `localStorage`; cada elemento contiene el
+`ejecucion_id`, estado, archivo, usuario creador, contadores y porcentaje.
+
+La respuesta informa `filas_exitosas`, `filas_sin_resultado`, `filas_con_error`, `resultados_generados`, `lote_actual`, `lotes_totales` y `progreso_porcentaje`. Los estados del trabajo son:
+
+```text
+pendiente
+ejecutando
+completada
+fallida
+```
+
+Ejemplo durante la ejecución:
+
+```json
+{
+  "ejecucion_id": "abc123",
+  "estado": "ejecutando",
+  "filas_totales": 1632,
+  "filas_procesadas": 450,
+  "filas_exitosas": 445,
+  "filas_sin_resultado": 3,
+  "filas_con_error": 2,
+  "resultados_generados": 510,
+  "tamano_lote": 30,
+  "lote_actual": 15,
+  "lotes_totales": 55,
+  "progreso_porcentaje": 27.57
+}
+```
+
+#### Descargar el consolidado
+
+```http
+GET /sicetac/consultas-excel/jobs/{ejecucion_id}/resultado
+```
+
+Solo está disponible cuando el trabajo está `completada`; antes responde HTTP `409`. El Excel se construye desde los resultados persistidos en MongoDB y conserva los tipos numéricos y formatos de moneda.
+
+El trabajo guarda sus metadatos en la colección `<MONGODB_COLLECTION>_excel_jobs` y cada fila en `<MONGODB_COLLECTION>_excel_job_rows`. Esto evita el límite de 16 MB por documento y permite que una consulta produzca varias rutas. En un reinicio normal del backend, los trabajos que estaban ejecutándose vuelven a estado pendiente y continúan desde las filas todavía no procesadas.
+
+Los errores transitorios de transporte, XML o SOAP se reintentan por fila. Los errores de validación y las combinaciones sin coincidencia se conservan en el consolidado y no detienen las demás consultas. Solo debe desplegarse un worker del backend para este procesador mientras se utilice el mecanismo actual de recuperación.
+
+#### Procedimiento en Swagger
+
+1. Reiniciar el backend después de desplegar cambios.
+2. Abrir `/docs#/` y autorizarse con un administrador.
+3. Ejecutar `POST /sicetac/consultas-excel/jobs` y seleccionar el Excel completo.
+4. Copiar `ejecucion_id` de la respuesta `202`.
+5. Consultar periódicamente `GET /sicetac/consultas-excel/jobs/{ejecucion_id}`.
+6. Esperar hasta que `estado` sea `completada`.
+7. Ejecutar `GET /sicetac/consultas-excel/jobs/{ejecucion_id}/resultado`.
+8. Descargar y conservar el consolidado.
+
+No es necesario mantener abierta la solicitud de carga mientras RNDC procesa las filas. El trabajo continúa en segundo plano. Con 1.632 consultas y una pausa mínima de un segundo, la duración base supera 27 minutos y puede aumentar por los reintentos. `limit = 20` permite hasta veinte rutas por consulta, por lo que el número de filas del consolidado puede ser mayor que el número de filas de entrada.
+
+La implementación fue validada integralmente creando un trabajo real, procesando sus filas, consultando el estado, generando el Excel y retirando posteriormente solo los documentos identificados como prueba.
+
+#### Pantalla web
+
+El frontend `integrapp-next` expone la ruta:
+
+```text
+/Sicetac
+```
+
+Solo permite acceso a perfiles `ADMIN` y `ADMINISTRADOR`, y aparece como opción **SICE-TAC** en el selector de portales para esos perfiles. La pantalla permite descargar la plantilla, seleccionar o arrastrar un `.xlsx`, crear el trabajo, observar el avance, revisar los contadores y descargar el consolidado.
+
+El navegador consulta el estado cada cuatro segundos mientras el trabajo está `pendiente` o `ejecutando`. `ejecucion_id` se conserva en `localStorage` bajo `sicetacJobId`, por lo que recargar o volver a la pantalla recupera el trabajo activo. La sección **Ejecuciones recientes** consulta MongoDB mediante la API y permite abrir cualquiera de los últimos trabajos con un clic, incluso si se borró el almacenamiento local. El Bearer JWT entregado por `/baseusuarios/login` se conserva como `baseUsuarioAccessToken`; si vence o RNDC responde `401`, la pantalla limpia la sesión y redirige a `/LoginUsuario`.
+
+La descarga usa el encabezado `Content-Disposition` del backend para conservar el nombre del archivo. El frontend valida antes de subir que el archivo termine en `.xlsx` y no exceda 20 MB.
 
 ## 10. Períodos examinados
 
@@ -486,6 +608,43 @@ La sección `costos` guardada tiene esta forma:
 
 En MongoDB esos importes y horas son `Decimal128`; aquí se representan como texto solamente para que el ejemplo JSON no pierda precisión.
 
+### Persistencia de los trabajos Excel y su historial
+
+Además de la colección principal de resultados, los trabajos asíncronos utilizan
+dos colecciones derivadas del valor de `MONGODB_COLLECTION`:
+
+```text
+<MONGODB_COLLECTION>_excel_jobs
+<MONGODB_COLLECTION>_excel_job_rows
+```
+
+Con la configuración actual (`MONGODB_DATABASE=integra` y
+`MONGODB_COLLECTION=consultas_sicetac`) corresponden a:
+
+```text
+Base de datos: integra
+Colección de trabajos: consultas_sicetac_excel_jobs
+Colección de filas:     consultas_sicetac_excel_job_rows
+```
+
+`consultas_sicetac_excel_jobs` contiene un documento por archivo cargado: ID,
+nombre del archivo, usuario creador, estado, fechas, totales y avance.
+`consultas_sicetac_excel_job_rows` contiene un documento por fila de entrada,
+incluidos el payload normalizado, estado, intentos y rutas obtenidas. Por ejemplo,
+un archivo de 828 consultas crea un trabajo y 828 documentos de detalle.
+
+Actualmente no existe vencimiento, índice TTL ni eliminación automática: tanto
+los trabajos como sus filas se conservan indefinidamente hasta que se implemente
+una política de retención o se eliminen explícitamente. Tampoco existe un máximo
+global de históricos. El límite de 2.000 aplica a las filas de cada archivo, no
+al número acumulado de ejecuciones.
+
+La pantalla muestra los 10 trabajos más recientes. El endpoint de historial
+acepta `limit` entre 1 y 50; este límite solo controla cuántos trabajos devuelve
+la consulta y no elimina los anteriores. Una política futura posible es conservar
+los encabezados indefinidamente y aplicar TTL solamente al detalle después de un
+periodo definido, por ejemplo 90 días.
+
 ## 13. Reintentos y comportamiento observado de RNDC
 
 El cliente utiliza:
@@ -546,8 +705,8 @@ Para una prueba operativa manual:
 ## 16. Limitaciones actuales
 
 - RNDC no permite descubrir confiablemente todos los orígenes o destinos con filtros omitidos; las parejas se verifican individualmente.
-- Los estados de ejecución no son durables y se pierden al reiniciar.
-- El bloqueo de ejecuciones es local al proceso; un despliegue con varios workers necesita una cola o bloqueo distribuido.
+- Los estados de `POST /sicetac/consultas` siguen siendo locales y se pierden al reiniciar; los trabajos de `/consultas-excel/jobs` sí son durables en MongoDB.
+- El bloqueo RNDC es local al proceso. El procesador Excel durable debe ejecutarse con un solo worker del backend; un despliegue con varios workers necesita un bloqueo distribuido o una cola externa.
 - La comunicación oficial observada usa HTTP sin TLS.
 - Los textos RNDC pueden llegar con problemas de codificación de tildes.
 - Las equivalencias con el portal deben validarse periódicamente porque los catálogos y valores son administrados por RNDC.

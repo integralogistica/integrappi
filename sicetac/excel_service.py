@@ -9,11 +9,11 @@ from openpyxl.utils import get_column_letter
 from pydantic import ValidationError
 
 from .errors import RNDCBusinessError, RNDCNoDataError
-from .models import ExploracionRutaRequest
+from .models import ExploracionRutaRequest, calcular_costo_total
 from .service import normalizar
 
 ENTRADAS = [
-    "periodo", "configuracion", "origen", "destino", "condicion_carga",
+    "consulta_id_usuario", "fila_original", "periodo", "configuracion", "origen", "destino", "condicion_carga",
     "unidad_transporte_nombre", "tipo_carga_nombre", "horas_totales_cargue",
     "horas_totales_descargue", "limit",
 ]
@@ -26,6 +26,42 @@ SALIDAS = [
     "horas_logisticas_total", "costo_total_calculado",
 ]
 MAX_FILAS = 200
+
+
+def resumir_rutas(documentos, limit, unidad_transporte_nombre=None, tipo_carga_nombre=None,
+                  horas_totales_cargue=3, horas_totales_descargue=3):
+    rutas, vistas = [], set()
+    for doc in documentos:
+        if unidad_transporte_nombre and normalizar(doc.get("nombreunidadtransporte")) != normalizar(unidad_transporte_nombre):
+            continue
+        if tipo_carga_nombre and normalizar(doc.get("nombretipocarga")) != normalizar(tipo_carga_nombre):
+            continue
+        clave = tuple(str(doc.get(campo) or "") for campo in (
+            "periodo", "origen", "destino", "configuracion", "condicioncarga",
+            "tipocarga", "unidadtransporte", "rutasid"
+        ))
+        if clave in vistas:
+            continue
+        vistas.add(clave)
+        ruta = {
+            "periodo": doc.get("periodo"), "origen_codigo": str(doc.get("origen") or "").zfill(8),
+            "origen_nombre": doc.get("nomorigen"), "destino_codigo": str(doc.get("destino") or "").zfill(8),
+            "destino_nombre": doc.get("nomdestino"), "configuracion": doc.get("configuracion"),
+            "condicion_carga": doc.get("condicioncarga"), "tipo_carga_codigo": doc.get("tipocarga"),
+            "tipo_carga_nombre": doc.get("nombretipocarga"), "unidad_transporte_codigo": doc.get("unidadtransporte"),
+            "unidad_transporte_nombre": doc.get("nombreunidadtransporte"), "ruta_id": doc.get("rutasid"),
+            "via": doc.get("via"), "kilometros": doc.get("kilometros"), "horas_recorrido": doc.get("horasrecorrido"),
+            "valor_moviliza": doc.get("valormoviliza"), "valor_hora": doc.get("valorhora"),
+            "horas_totales_cargue": str(horas_totales_cargue),
+            "horas_totales_descargue": str(horas_totales_descargue),
+            "horas_logisticas_total": str(horas_totales_cargue + horas_totales_descargue),
+            "costo_total_calculado": str(calcular_costo_total(
+                doc.get("valormoviliza"), doc.get("valorhora"), horas_totales_cargue, horas_totales_descargue
+            )),
+        }
+        if len(rutas) < limit:
+            rutas.append(ruta)
+    return rutas, len(vistas)
 
 
 def _ajustar_hoja(ws):
@@ -45,12 +81,12 @@ def crear_plantilla() -> BytesIO:
     ws = wb.active
     ws.title = "consultas"
     ws.append(ENTRADAS)
-    ws.append(["202608", "2L3", "08296000", "76892000", "1", "FURGON", "General", 3, 3, 20])
-    ws.append(["202608", "3S3", "11001000", "05001000", "1", "FURGON", "General", 3, 3, 20])
+    ws.append(["C000001", 2, "202608", "2L3", "08296000", "76892000", "1", "FURGON", "General", 3, 3, 20])
+    ws.append(["C000002", 3, "202608", "3S3", "11001000", "05001000", "1", "FURGON", "General", 3, 3, 20])
     for row in range(2, ws.max_row + 1):
-        ws.cell(row, 1).number_format = "@"
-        ws.cell(row, 3).number_format = "00000000"
-        ws.cell(row, 4).number_format = "00000000"
+        ws.cell(row, 3).number_format = "@"
+        ws.cell(row, 5).number_format = "00000000"
+        ws.cell(row, 6).number_format = "00000000"
     _ajustar_hoja(ws)
     output = BytesIO()
     wb.save(output)
@@ -98,7 +134,7 @@ def _formatear_columnas_numericas(ws):
             ws.cell(row, column).number_format = number_format
 
 
-def leer_consultas_excel(content: bytes) -> list[tuple[int, ExploracionRutaRequest]]:
+def leer_consultas_excel(content: bytes, max_filas=MAX_FILAS) -> list[tuple[int, ExploracionRutaRequest]]:
     try:
         wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
@@ -135,8 +171,8 @@ def leer_consultas_excel(content: bytes) -> list[tuple[int, ExploracionRutaReque
         except ValidationError as exc:
             mensaje = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
             errores.append((row_number, raw, mensaje))
-    if len(consultas) + len(errores) > MAX_FILAS:
-        raise ValueError(f"El archivo supera el máximo de {MAX_FILAS} filas")
+    if len(consultas) + len(errores) > max_filas:
+        raise ValueError(f"El archivo supera el máximo de {max_filas} filas")
     if not consultas and not errores:
         raise ValueError("El Excel no contiene filas de consulta")
     return consultas, errores
@@ -144,6 +180,7 @@ def leer_consultas_excel(content: bytes) -> list[tuple[int, ExploracionRutaReque
 
 def _fila_base(payload):
     return [
+        payload.consulta_id_usuario, payload.fila_original,
         payload.periodo, payload.configuracion, payload.origen, payload.destino,
         payload.condicion_carga, payload.unidad_transporte_nombre,
         payload.tipo_carga_nombre, str(payload.horas_totales_cargue),

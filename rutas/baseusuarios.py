@@ -456,6 +456,8 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
         raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
     return {
         "mensaje": "Login exitoso",
+        "access_token": _crear_token_baseusuario(encontrado),
+        "token_type": "bearer",
         "usuario": {
             "id": str(encontrado["_id"]),
             "usuario": encontrado["usuario"],
