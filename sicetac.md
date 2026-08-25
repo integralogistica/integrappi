@@ -672,6 +672,7 @@ Para una consulta exacta que finalmente no entrega datos, el servicio intenta un
 | `Documento no encontrado` / `RNDC11` | No existen registros para los filtros. Se clasifica como ausencia de datos. |
 | `Todas las combinaciones SICE-TAC fallaron` | Ninguna consulta terminó técnicamente bien; revisar el arreglo `errores`. |
 | Ejecución completada con cero documentos | RNDC respondió, pero no hubo coincidencias para el mes solicitado ni el anterior. |
+| El avance supera las filas totales | Algún worker contabilizó nuevamente filas ya terminadas. El estado reconstruye los contadores desde las filas únicas de MongoDB y solo incrementa cuando una fila cambia realmente de pendiente a final. |
 | Textos como `SÃ³lido` | Problema de codificación de caracteres de la respuesta RNDC; los códigos y valores numéricos no se alteran. |
 
 ## 15. Pruebas
@@ -701,6 +702,49 @@ Para una prueba operativa manual:
 7. Revisar el resumen.
 8. Ejecutar con `dryRun: false`.
 9. Verificar los documentos mediante `GET /sicetac/resultados`.
+
+### Pendiente para validar el 25 de agosto de 2026: consulta por placa
+
+Validar si las credenciales RNDC configuradas permiten consultar información
+asociada a una placa mediante el web service, sin utilizar scraping del portal
+público. Esta funcionalidad es distinta de SICE-TAC y debe implementarse como un
+módulo o endpoint RNDC independiente.
+
+Pruebas propuestas:
+
+1. Consultar el proceso `12 - Vehículo` con una placa conocida para identificar
+   los datos maestros que RNDC autoriza devolver.
+2. Probar el proceso `2 - Información del viaje`, filtrando por placa y un rango
+   corto de fechas.
+3. Probar el proceso `4 - Manifiesto`, también por placa y fechas.
+4. Evaluar el proceso `6 - Cumplido de manifiesto` para determinar si permite
+   conocer el estado o cierre de los viajes encontrados.
+5. Guardar las solicitudes y respuestas sanitizadas, sin usuario ni contraseña,
+   para documentar los nombres exactos de los campos aceptados.
+6. Confirmar si el usuario solo puede consultar documentos de su empresa o si
+   RNDC permite un alcance diferente. No asumir acceso al historial nacional.
+7. Comparar una placa de prueba con la consulta pública oficial **Consulta de
+   Manifiestos de una Placa o Conductor**.
+
+Si las pruebas son satisfactorias, diseñar un endpoint administrativo similar a:
+
+```http
+POST /rndc/consulta-placa
+```
+
+```json
+{
+  "placa": "ABC123",
+  "fecha_inicio": "2026-07-01",
+  "fecha_fin": "2026-08-25",
+  "consultar": ["vehiculo", "viajes", "manifiestos"]
+}
+```
+
+La implementación debe exigir autenticación administrativa, limitar el rango de
+fechas, evitar consultas indiscriminadas y tratar los resultados como información
+sensible. No automatizar el CAPTCHA ni hacer scraping del portal público mientras
+exista una alternativa autorizada por web service.
 
 ## 16. Limitaciones actuales
 

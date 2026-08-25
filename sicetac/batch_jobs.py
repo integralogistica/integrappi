@@ -157,20 +157,48 @@ class SicetacBatchJobs:
             )
             estado = "OK" if rutas else "SIN_RESULTADO"
             mensaje = "" if rutas else "RNDC no devolvió coincidencias para los filtros"
-        self.rows.update_one({"_id": row["_id"]}, {"$set": {
+        result = self.rows.update_one({"_id": row["_id"], "estado": "pendiente"}, {"$set": {
             "estado": estado, "mensaje": mensaje, "resultados": rutas,
             "intentos": 3 if ultimo_error else 1, "actualizado_en": _ahora(),
         }})
+        # Otro worker puede haber terminado la misma fila mientras esta llamada
+        # RNDC estaba en curso. Solo quien cambia pendiente -> final contabiliza.
+        if not result.modified_count:
+            return
         increments = {"filas_procesadas": 1, "resultados_generados": len(rutas)}
         increments["filas_exitosas" if estado == "OK" else "filas_sin_resultado" if estado == "SIN_RESULTADO" else "filas_con_error"] = 1
         self.jobs.update_one({"job_id": job_id}, {
             "$inc": increments, "$set": {"actualizado_en": _ahora()}
         })
 
-    def obtener(self, job_id):
-        job = self.jobs.find_one({"job_id": job_id}, {"_id": 0})
-        if not job:
-            return None
+    def _sincronizar_contadores(self, job):
+        """Reconstruye el avance desde las filas únicas, fuente real del consolidado."""
+        contadores = {
+            "filas_procesadas": 0, "filas_exitosas": 0,
+            "filas_sin_resultado": 0, "filas_con_error": 0,
+            "resultados_generados": 0,
+        }
+        for row in self.rows.find(
+            {"job_id": job["job_id"]}, {"_id": 0, "estado": 1, "resultados": 1}
+        ):
+            estado = row.get("estado", "pendiente")
+            if estado == "pendiente":
+                continue
+            contadores["filas_procesadas"] += 1
+            if estado == "OK":
+                contadores["filas_exitosas"] += 1
+            elif estado == "SIN_RESULTADO":
+                contadores["filas_sin_resultado"] += 1
+            else:
+                contadores["filas_con_error"] += 1
+            contadores["resultados_generados"] += len(row.get("resultados") or [])
+        if any(job.get(key, 0) != value for key, value in contadores.items()):
+            self.jobs.update_one({"job_id": job["job_id"]}, {"$set": contadores})
+            job.update(contadores)
+        return job
+
+    def _serializar_job(self, job):
+        job = self._sincronizar_contadores(job)
         job["ejecucion_id"] = job["job_id"]
         total, done = job.get("filas_totales", 0), job.get("filas_procesadas", 0)
         job["progreso_porcentaje"] = round(done * 100 / total, 2) if total else 0
@@ -180,21 +208,16 @@ class SicetacBatchJobs:
                 job[key] = value.isoformat()
         return job
 
+    def obtener(self, job_id):
+        job = self.jobs.find_one({"job_id": job_id}, {"_id": 0})
+        return self._serializar_job(job) if job else None
+
     def listar(self, limit=10):
         """Devuelve los jobs mas recientes con el mismo resumen de progreso de ``obtener``."""
         jobs = []
         cursor = self.jobs.find({}, {"_id": 0}).sort("creado_en", -1).limit(limit)
         for job in cursor:
-            job["ejecucion_id"] = job["job_id"]
-            total, done = job.get("filas_totales", 0), job.get("filas_procesadas", 0)
-            job["progreso_porcentaje"] = round(done * 100 / total, 2) if total else 0
-            job["lote_actual"] = min(
-                math.ceil(done / TAMANO_LOTE), job.get("lotes_totales", 0)
-            ) if done else 0
-            for key, value in list(job.items()):
-                if isinstance(value, datetime):
-                    job[key] = value.isoformat()
-            jobs.append(job)
+            jobs.append(self._serializar_job(job))
         return jobs
 
     def generar_excel(self, job_id):
