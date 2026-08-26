@@ -174,6 +174,8 @@ ESQUEMAS_EXTRACCION = {
             "departamento": "Departamento (campo 39)",
             "correo": "Correo electrónico (campo 42)",
             "telefono": "Teléfono, SOLO dígitos (campo 44)",
+            "fecha_inicio_actividad": "Fecha de inicio de la actividad económica (campo 47) en formato YYYY-MM-DD",
+            "fecha_expedicion_rut": "Fecha de generación del documento PDF (línea 'Fecha generación documento PDF') en formato YYYY-MM-DD",
             "responsabilidades": "Lista de códigos DIAN de responsabilidades (ej: [\"05\",\"22\",\"49\"])",
         },
         "descripcion": (
@@ -198,34 +200,56 @@ ESQUEMAS_EXTRACCION = {
     "licencia": {
         "campos": {
             "numero": "Número de la licencia de conducción, SOLO dígitos",
-            "categoria": "Categoría (A1, A2, B1, B2, B3, C1, C2 o C3)",
+            "categorias": (
+                "Lista con TODAS las categorías que la licencia autoriza, entre "
+                "A1, A2, B1, B2, B3, C1, C2 y C3 (ej: [\"C1\",\"C2\"]). Una licencia "
+                "puede tener varias categorías: inclúyelas TODAS"
+            ),
             "fecha_vencimiento": "Fecha de vencimiento en formato YYYY-MM-DD",
             "nombre_completo": "Nombre completo del conductor tal como aparece",
             "cedula": "Número de cédula del conductor, SOLO dígitos",
         },
         "descripcion": (
             "Licencia de conducción colombiana. Tiene DOS caras: los datos "
-            "principales (número, categoría, vencimiento) están en el FRENTE; "
+            "principales (número, categorías, vencimiento) están en el FRENTE; "
             "el reverso aporta datos complementarios. Puede llegar 1 imagen "
             "(frente) o 2 (frente y reverso)."
         ),
     },
     "tarjeta_propiedad": {
         "campos": {
+            "numero_licencia_transito": "Número de la licencia de tránsito (esquina superior), SOLO dígitos",
             "placa": "Placa del vehículo, SOLO letras, números y guiones",
             "marca": "Marca del vehículo",
             "linea": "Línea o referencia del vehículo",
             "modelo": "Año del modelo (4 dígitos)",
             "color": "Color del vehículo",
-            "numero_serie": "Número de serie/chasis, SOLO caracteres alfanuméricos",
+            "clase_vehiculo": "Clase de vehículo (ej: Motocicleta, Automóvil, Camión, Bus)",
+            "cilindraje": "Cilindraje en c.c., SOLO dígitos",
+            "servicio": "Servicio (ej: Particular, Público, Comercial)",
+            "combustible": "Combustible (ej: Gasolina, Diesel, GNV, Híbrido, Eléctrico)",
+            "capacidad_pasajeros": "Capacidad de pasajeros (número entero)",
+            "potencia": "Potencia (ej: 15 HP)",
+            "vin": "Número VIN, SOLO caracteres alfanuméricos",
+            "numero_chasis": "Número de chasis, SOLO caracteres alfanuméricos",
+            "numero_motor": "Número de motor, SOLO caracteres alfanuméricos y guiones",
+            "numero_puertas": "Número de puertas (entero)",
+            "fecha_matricula": "Fecha de matrícula en formato YYYY-MM-DD",
+            "organismo_transito": "Organismo de tránsito emisor",
+            "blindaje": "Sí/No según tenga blindaje",
+            "limitacion_propiedad": "Sí/No según tenga limitación a la propiedad",
+            "codigo_licencia": "Código inferior de la licencia (empieza por LT)",
             "propietario_nombre": "Nombre o razón social del propietario registrado",
             "propietario_documento": "Cédula o NIT del propietario, SOLO dígitos",
         },
         "descripcion": (
-            "Tarjeta de propiedad (registro RUNT) de un vehículo colombiano. "
-            "Tiene DOS caras: los datos del vehículo en el FRENTE; el reverso "
-            "tiene información del propietario y restricciones. Puede llegar "
-            "1 imagen (frente) o 2 (frente y reverso)."
+            "Tarjeta de propiedad / licencia de tránsito (registro RUNT) de un "
+            "vehículo colombiano. Tiene DOS caras: el FRENTE tiene placa, "
+            "número de licencia de tránsito, marca, línea, modelo, color, clase, "
+            "cilindraje, servicio, combustible, VIN/chasis/motor y fechas; el "
+            "REVERSO tiene el propietario, el organismo de tránsito, el código "
+            "inferior (LT...) y las anotaciones (blindaje, limitaciones). "
+            "Puede llegar 1 imagen (frente) o 2 (frente y reverso)."
         ),
     },
     "soat": {
@@ -512,18 +536,21 @@ FAMILIAS_FIGURA = {
     },
 }
 
-# Documentos exigidos al pasar a completado_revision (los 18 del paso 3).
+# Documentos exigidos al pasar a completado_revision (los del paso 3).
 # Los de figura se satisfacen por gemelo cuando las figuras coinciden.
+# Reversos OBLIGATORIOS (2026-08-27): licencia y tarjeta de propiedad tienen
+# dos caras y ambas se exigen; el de la cédula queda opcional (solo amarilla).
 DOCUMENTOS_REQUERIDOS = [
-    "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
+    "tarjetaPropiedad", "tarjetaPropiedadReverso", "soat", "revisionTecnomecanica", "tarjetaRemolque",
     "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
-    "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
+    "documentoIdentidadTenedor", "licencia", "licenciaReverso", "planillaEpsArl", "condFoto",
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "fotos",
 ]
 
 ETIQUETAS_DOCUMENTO = {
     "tarjetaPropiedad": "Tarjeta de Propiedad",
+    "tarjetaPropiedadReverso": "Tarjeta de Propiedad (Reverso)",
     "soat": "SOAT",
     "revisionTecnomecanica": "Revisión Tecnomecánica",
     "tarjetaRemolque": "Tarjeta de Remolque",
@@ -532,6 +559,7 @@ ETIQUETAS_DOCUMENTO = {
     "documentoIdentidadPropietario": "Documento de Identidad del Propietario",
     "documentoIdentidadTenedor": "Documento de Identidad del Tenedor",
     "licencia": "Licencia de Conducción Vigente",
+    "licenciaReverso": "Licencia de Conducción (Reverso)",
     "planillaEpsArl": "Planilla de EPS y ARL",
     "condFoto": "Foto del Conductor",
     "condCertificacionBancaria": "Certificación Bancaria del Conductor",
@@ -874,6 +902,8 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "firmaUrl",
+    # Reversos de documentos de dos caras (mismo blindaje que sus frentes).
+    "documentoIdentidadConductorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
 }
 
 
@@ -1018,7 +1048,9 @@ async def subir_documento(
         "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
         "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
         "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
-        "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario"
+        "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario",
+        # Reversos como tipo directo: el paso 3 los sube como ítem propio.
+        "licenciaReverso", "tarjetaPropiedadReverso",
     ]
     if tipo not in tipos_validos:
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")

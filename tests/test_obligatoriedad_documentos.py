@@ -64,11 +64,12 @@ class FakeColeccionVehiculos:
 
 
 TODOS_DOCS = {
-    "tarjetaPropiedad": "https://x/1", "soat": "https://x/2",
+    "tarjetaPropiedad": "https://x/1", "tarjetaPropiedadReverso": "https://x/1r", "soat": "https://x/2",
     "revisionTecnomecanica": "https://x/3", "tarjetaRemolque": "https://x/4",
     "polizaResponsabilidad": "https://x/5", "documentoIdentidadConductor": "https://x/6",
     "documentoIdentidadPropietario": "https://x/7", "documentoIdentidadTenedor": "https://x/8",
-    "licencia": "https://x/9", "planillaEpsArl": "https://x/10", "condFoto": "https://x/11",
+    "licencia": "https://x/9", "licenciaReverso": "https://x/9r", "planillaEpsArl": "https://x/10",
+    "condFoto": "https://x/11",
     "condCertificacionBancaria": "https://x/12", "propCertificacionBancaria": "https://x/13",
     "tenedCertificacionBancaria": "https://x/14", "documentoAcreditacionTenedor": "https://x/15",
     "rutTenedor": "https://x/16", "rutPropietario": "https://x/17",
@@ -152,6 +153,13 @@ class DocumentosFaltantesTests(unittest.TestCase):
         v = vehiculo_completo(licencia="null")
         self.assertIn("licencia", vehiculos._documentos_faltantes(v))
 
+    def test_reverso_de_licencia_y_tarjeta_son_obligatorios(self):
+        # Sin los reversos, el frente solo NO satisface el requisito (2026-08-27).
+        v = vehiculo_completo(licenciaReverso=None, tarjetaPropiedadReverso=None)
+        faltantes = vehiculos._documentos_faltantes(v)
+        self.assertIn("licenciaReverso", faltantes)
+        self.assertIn("tarjetaPropiedadReverso", faltantes)
+
 
 class NombreDocBucketTests(unittest.TestCase):
     """Nomenclatura de archivos en el bucket: {PLACA}/{AAAA-MM-DD}/{tipo}[_{cedula}][sufijo].{ext}"""
@@ -191,7 +199,8 @@ class CamposDocumentoProtegidosTests(unittest.TestCase):
     def test_todos_los_documentos_estan_blindados(self):
         for clave in ["documentoIdentidadConductor", "licencia", "tarjetaPropiedad",
                       "soat", "rutTenedor", "rutPropietario", "condCertificacionBancaria",
-                      "propCertificacionBancaria", "tenedCertificacionBancaria", "firmaUrl"]:
+                      "propCertificacionBancaria", "tenedCertificacionBancaria", "firmaUrl",
+                      "licenciaReverso", "tarjetaPropiedadReverso", "documentoIdentidadConductorReverso"]:
             self.assertIn(clave, vehiculos.CAMPOS_DOCUMENTO_PROTEGIDOS, f"Falta blindar {clave}")
 
 
