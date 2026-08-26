@@ -4,8 +4,7 @@ import asyncio
 from datetime import datetime
 from io import BytesIO
 from typing import List, Optional
-from uuid import uuid4
-import resend 
+import resend
 from dotenv import load_dotenv
 from fastapi import APIRouter, File, Form, HTTPException,Response, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -17,6 +16,7 @@ import re
 import requests
 import base64
 import pdfplumber
+import pytz
 from PIL import Image
 import io
 
@@ -34,6 +34,8 @@ if not MONGO_URI:
 BUCKET_NAME = "integrapp"
 CARPETA_STORAGE = "Vehiculos"
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+# Zona Colombia para las fechas de la nomenclatura del bucket (el server es UTC).
+_TZ_BOGOTA = pytz.timezone("America/Bogota")
 
 if GOOGLE_CREDENTIALS_PATH:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_PATH
@@ -107,6 +109,23 @@ def subir_a_google_storage(archivo: UploadFile, nombre_archivo: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al subir el archivo a Google Storage: {str(e)}")
 
+
+def _nombre_doc_bucket(placa: str, tipo: str, extension: str, vehiculo: dict = None, sufijo: str = "") -> str:
+    """
+    Nomenclatura estándar de archivos en el bucket (2026-08-27):
+        {PLACA}/{AAAA-MM-DD}/{tipo}{_cedula}{sufijo}.{ext}
+    Ej: Vehiculos/MX48E/2026-08-27/soat_1020304050.pdf
+    — Agrupado por placa → fecha → documento; la cédula (si ya se conoce)
+    identifica al conductor; si no, se omite (ej. la primera subida de la
+    cédula se hace ANTES de que la IA lea el número). Re-subir el mismo doc
+    el mismo día pisa el archivo (sin duplicados); otro día crea versión
+    nueva y Mongo queda con la URL vigente (la anterior queda como histórico).
+    """
+    fecha = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+    cedula = re.sub(r"\D", "", str((vehiculo or {}).get("condCedulaCiudadania") or ""))
+    identificador = f"_{cedula}" if cedula else ""
+    return f"{placa.strip().upper()}/{fecha}/{tipo}{identificador}{sufijo}.{extension}"
+
 def eliminar_de_google_storage(url: str):
     try:
         cliente = storage.Client()
@@ -130,14 +149,10 @@ ESQUEMAS_EXTRACCION = {
             "nombres": "Nombres de pila (como aparecen, en MAYÚSCULAS)",
             "apellidos": "Apellidos (como aparecen, en MAYÚSCULAS)",
             "fecha_nacimiento": "Fecha de nacimiento en formato YYYY-MM-DD",
-            "lugar_nacimiento": "Municipio/Ciudad de nacimiento (solo el nombre)",
-            "departamento_nacimiento": "Departamento de nacimiento (solo el nombre)",
             "fecha_expedicion": "Fecha de expedición en formato YYYY-MM-DD",
             "lugar_expedicion": "Municipio/Ciudad de expedición (solo el nombre)",
             "departamento_expedicion": "Departamento de expedición (solo el nombre)",
             "rh": "Grupo sanguíneo con RH (ej: O+, A-)",
-            "sexo": "H para hombre o M para mujer",
-            "estatura": "Estatura en metros con punto (ej: 1.75)",
         },
         "descripcion": (
             "Cédula de Ciudadanía colombiana. Dos formatos posibles: "
@@ -188,7 +203,12 @@ ESQUEMAS_EXTRACCION = {
             "nombre_completo": "Nombre completo del conductor tal como aparece",
             "cedula": "Número de cédula del conductor, SOLO dígitos",
         },
-        "descripcion": "Licencia de conducción colombiana (frente). Foto o escaneo.",
+        "descripcion": (
+            "Licencia de conducción colombiana. Tiene DOS caras: los datos "
+            "principales (número, categoría, vencimiento) están en el FRENTE; "
+            "el reverso aporta datos complementarios. Puede llegar 1 imagen "
+            "(frente) o 2 (frente y reverso)."
+        ),
     },
     "tarjeta_propiedad": {
         "campos": {
@@ -203,7 +223,9 @@ ESQUEMAS_EXTRACCION = {
         },
         "descripcion": (
             "Tarjeta de propiedad (registro RUNT) de un vehículo colombiano. "
-            "Foto o escaneo del anverso."
+            "Tiene DOS caras: los datos del vehículo en el FRENTE; el reverso "
+            "tiene información del propietario y restricciones. Puede llegar "
+            "1 imagen (frente) o 2 (frente y reverso)."
         ),
     },
     "soat": {
@@ -265,6 +287,7 @@ def _prompt_extraccion(tipo_doc: str) -> tuple[str, dict]:
 Devuelve EXCLUSIVAMENTE un objeto JSON con estas claves (nada más, sin markdown, sin explicaciones):
 {{
 {lista_campos}
+  "documento_valido": true si la imagen corresponde realmente a {tipo_doc}; false si es cualquier otra cosa (foto personal, meme, factura, otro documento, imagen sin relación)
 }}
 
 Reglas estrictas:
@@ -297,6 +320,23 @@ def _extraer_texto_pdf(datos: bytes) -> str:
         return ""
 
 
+def _reencodear_imagen_para_llm(datos: bytes) -> bytes:
+    """
+    Re-encodea una imagen muy pesada (JPEG q80, máx 1600px) para que quepa en
+    el límite de 6 MB de Gemini. Si falla, devuelve los bytes originales
+    (el llamador decidirá si rechaza con 400).
+    """
+    try:
+        imagen = Image.open(io.BytesIO(datos))
+        imagen.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        imagen.save(buffer, format="JPEG", optimize=True, quality=80)
+        return buffer.getvalue()
+    except Exception as e:
+        print(f"[lecturaIA] No se pudo re-encodear la imagen para el LLM: {e}")
+        return datos
+
+
 def extraer_datos_con_llm(tipo_doc: str, archivos: list[UploadFile]) -> dict:
     """
     Envía 1 o 2 archivos (imagen o PDF) al LLM y retorna el JSON de datos.
@@ -312,9 +352,14 @@ def extraer_datos_con_llm(tipo_doc: str, archivos: list[UploadFile]) -> dict:
     for archivo in archivos:
         datos = archivo.file.read()
         archivo.file.seek(0)
-        if len(datos) > 6 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="Cada archivo debe pesar menos de 6 MB.")
         content_type = archivo.content_type or "image/jpeg"
+        if len(datos) > 6 * 1024 * 1024:
+            # Imágenes muy pesadas: re-encodear para que Gemini las acepte
+            # (la foto ORIGINAL ya quedó guardada; esto es solo para lectura).
+            if content_type.startswith("image/"):
+                datos = _reencodear_imagen_para_llm(datos)
+            if len(datos) > 6 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Cada archivo debe pesar menos de 6 MB.")
         if content_type == "application/pdf":
             texto = _extraer_texto_pdf(datos)
             if len(texto.strip()) >= 200:
@@ -363,6 +408,18 @@ def extraer_datos_con_llm(tipo_doc: str, archivos: list[UploadFile]) -> dict:
             datos = json.loads(texto[inicio:fin + 1])
         except json.JSONDecodeError:
             raise HTTPException(status_code=502, detail="No se pudo interpretar la lectura del documento. Intenta con una foto más nítida.")
+
+    # documentación_valida: veredicto del LLM sobre si la imagen ES el documento
+    # esperado (control anti-archivos ajenos: memes, facturas, fotos personales).
+    # Se SEPARA de los datos para no contaminar lecturasIA ni los mapeos del front.
+    # 409 (no 422): el front distingue "ilegible, guarda igual" de "documento
+    # equivocado, NO guardar".
+    documento_valido = datos.pop("documento_valido", None)
+    if documento_valido is False:
+        raise HTTPException(
+            status_code=409,
+            detail="Esto no parece ser el documento esperado. Sube una foto o PDF del documento indicado.",
+        )
 
     # Normalizar: solo claves del esquema (defensa ante respuestas con claves extra).
     datos = {k: datos.get(k) for k in esquema["campos"] if datos.get(k) is not None}
@@ -420,6 +477,7 @@ def _generar_avisos(tipo_doc: str, datos: dict, contexto: dict) -> list:
 # ESQUEMAS_EXTRACCION. Al subirlos, se extraen los datos y se dejan en
 # `lecturasIA.<tipo_subida>` para que el formulario los aplique (paso 2).
 TIPOS_SUBIDA_LEIBLES = {
+    "documentoIdentidadConductor": "cedula",
     "rutTenedor": "rut",
     "rutPropietario": "rut",
     "condCertificacionBancaria": "certificado_bancario",
@@ -429,6 +487,141 @@ TIPOS_SUBIDA_LEIBLES = {
     "tarjetaPropiedad": "tarjeta_propiedad",
     "soat": "soat",
 }
+
+
+# ==========================================
+# 2e. FIGURAS Y OBLIGATORIEDAD DE DOCUMENTOS
+# ==========================================
+# Documentos por familia de figura: cuando Propietario=Conductor y/o
+# Tenedor=Propietario, el mismo archivo satisface a las figuras gemelas
+# (misma semántica que el front en documentConstants.tsx).
+FAMILIAS_FIGURA = {
+    "identidad": {
+        "conductor": "documentoIdentidadConductor",
+        "propietario": "documentoIdentidadPropietario",
+        "tenedor": "documentoIdentidadTenedor",
+    },
+    "bancaria": {
+        "conductor": "condCertificacionBancaria",
+        "propietario": "propCertificacionBancaria",
+        "tenedor": "tenedCertificacionBancaria",
+    },
+    "rut": {
+        "propietario": "rutPropietario",
+        "tenedor": "rutTenedor",
+    },
+}
+
+# Documentos exigidos al pasar a completado_revision (los 18 del paso 3).
+# Los de figura se satisfacen por gemelo cuando las figuras coinciden.
+DOCUMENTOS_REQUERIDOS = [
+    "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
+    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
+    "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
+    "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
+    "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "fotos",
+]
+
+ETIQUETAS_DOCUMENTO = {
+    "tarjetaPropiedad": "Tarjeta de Propiedad",
+    "soat": "SOAT",
+    "revisionTecnomecanica": "Revisión Tecnomecánica",
+    "tarjetaRemolque": "Tarjeta de Remolque",
+    "polizaResponsabilidad": "Póliza de Responsabilidad Civil",
+    "documentoIdentidadConductor": "Documento de Identidad del Conductor",
+    "documentoIdentidadPropietario": "Documento de Identidad del Propietario",
+    "documentoIdentidadTenedor": "Documento de Identidad del Tenedor",
+    "licencia": "Licencia de Conducción Vigente",
+    "planillaEpsArl": "Planilla de EPS y ARL",
+    "condFoto": "Foto del Conductor",
+    "condCertificacionBancaria": "Certificación Bancaria del Conductor",
+    "propCertificacionBancaria": "Certificación Bancaria del Propietario",
+    "tenedCertificacionBancaria": "Certificación Bancaria del Tenedor",
+    "documentoAcreditacionTenedor": "Documento que lo acredite como Tenedor",
+    "rutTenedor": "RUT del Tenedor",
+    "rutPropietario": "RUT del Propietario",
+    "fotos": "Fotos del vehículo",
+}
+
+
+def _solo_digitos(valor) -> str:
+    return re.sub(r"\D", "", str(valor or ""))
+
+
+def _figuras_iguales(vehiculo: dict) -> dict:
+    """
+    Propietario=Conductor y Tenedor=Propietario. Prioriza los flags persistidos
+    (`propietarioIgualConductor` / `tenedorIgualPropietario`); si no existen
+    (históricos), infiere comparando los dígitos de los documentos.
+    """
+    flag_prop = vehiculo.get("propietarioIgualConductor")
+    flag_tened = vehiculo.get("tenedorIgualPropietario")
+
+    cedula_cond = _solo_digitos(vehiculo.get("condCedulaCiudadania"))
+    doc_prop = _solo_digitos(vehiculo.get("propDocumento"))
+    doc_tened = _solo_digitos(vehiculo.get("tenedDocumento"))
+
+    prop_igual_cond = flag_prop if isinstance(flag_prop, bool) else (bool(doc_prop) and doc_prop == cedula_cond)
+    tened_igual_prop = flag_tened if isinstance(flag_tened, bool) else (bool(doc_tened) and doc_tened == doc_prop)
+    return {"prop_igual_cond": prop_igual_cond, "tened_igual_prop": tened_igual_prop}
+
+
+def _gemelos_documento(tipo: str, vehiculo: dict) -> list:
+    """Campos de figuras iguales de la misma familia donde replicar la URL."""
+    fig = _figuras_iguales(vehiculo)
+    prop_igual_cond = fig["prop_igual_cond"]
+    tened_igual_prop = fig["tened_igual_prop"]
+    tened_igual_cond = tened_igual_prop and prop_igual_cond
+
+    gemelos = []
+    for familia in FAMILIAS_FIGURA.values():
+        cond = familia.get("conductor")
+        prop = familia.get("propietario")
+        tened = familia.get("tenedor")
+
+        if tipo == prop:
+            # prop → cond (si son iguales) y prop → tened (si son iguales).
+            if cond and prop_igual_cond:
+                gemelos.append(cond)
+            if tened and tened_igual_prop:
+                gemelos.append(tened)
+        elif tipo == tened:
+            # tened → prop (si son iguales) y, por transitividad, → cond.
+            if prop and tened_igual_prop:
+                gemelos.append(prop)
+            if cond and tened_igual_cond:
+                gemelos.append(cond)
+        elif tipo == cond and cond:
+            # cond → prop y, por transitividad, → tened.
+            if prop and prop_igual_cond:
+                gemelos.append(prop)
+            if tened and tened_igual_cond:
+                gemelos.append(tened)
+    return [g for g in gemelos if g != tipo]
+
+
+def _doc_lleno(vehiculo: dict, campo: str) -> bool:
+    """Un documento está 'lleno' si su campo tiene una URL (o array no vacío)."""
+    valor = vehiculo.get(campo)
+    if isinstance(valor, list):
+        return len([u for u in valor if u and str(u).strip()]) > 0
+    return bool(valor and str(valor).strip() and str(valor) not in ("null", "undefined"))
+
+
+def _documentos_faltantes(vehiculo: dict) -> list:
+    """
+    Documentos obligatorios que faltan para pasar a completado_revision.
+    Un documento de figura se satisface si su campo está lleno O si el de una
+    figura igual (gemelo de la misma familia) lo está.
+    """
+    faltantes = []
+    for campo in DOCUMENTOS_REQUERIDOS:
+        if _doc_lleno(vehiculo, campo):
+            continue
+        if any(_doc_lleno(vehiculo, gemelo) for gemelo in _gemelos_documento(campo, vehiculo)):
+            continue
+        faltantes.append(campo)
+    return faltantes
 
 
 def _registrar_cambio_aprobado(vehiculo: dict, editado_por: str, seccion: str, campos: list) -> None:
@@ -628,7 +821,19 @@ async def actualizar_estado(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    
+
+    # Al pasar a completado_revision el conductor declara la documentación
+    # completa: validar server-side ( Seguridad usa este endpoint con otros
+    # estados y NO se le exige nada).
+    if nuevo_estado == "completado_revision":
+        faltantes = _documentos_faltantes(vehiculo)
+        if faltantes:
+            nombres = ", ".join(ETIQUETAS_DOCUMENTO.get(f, f) for f in faltantes)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Faltan documentos obligatorios: {nombres}.",
+            )
+
     datos_actualizar = {
         "estadoIntegra": nuevo_estado,
         "usuarioIntegra": usuario_id
@@ -660,6 +865,17 @@ CLAVES_PROTEGIDAS = {
     "estudioSeguridad", "fotoconductorseguridad", "lecturasIA", "fotos",
 }
 
+# URLs de documentos: sus dueños son subir-documento/eliminar-documento.
+# actualizar-informacion NUNCA las toca (un form con valores null/vacíos del
+# montaje pisaría la URL recién subida — bug real del autoguardado, 2026-08-27).
+CAMPOS_DOCUMENTO_PROTEGIDOS = {
+    "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
+    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
+    "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
+    "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
+    "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "firmaUrl",
+}
+
 
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: Optional[str] = None):
@@ -667,8 +883,12 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    # Defensa: el endpoint acepta cualquier clave, pero las internas se ignoran.
-    datos_limpios = {k: v for k, v in datos.items() if k not in CLAVES_PROTEGIDAS}
+    # Defensa: el endpoint acepta cualquier clave, pero las internas se ignoran
+    # y los campos de documentos también (sus dueños son los endpoints de subida).
+    datos_limpios = {
+        k: v for k, v in datos.items()
+        if k not in CLAVES_PROTEGIDAS and k not in CAMPOS_DOCUMENTO_PROTEGIDOS
+    }
     if not datos_limpios:
         return JSONResponse(status_code=200, content={"message": "Información actualizada"})
 
@@ -731,7 +951,7 @@ async def subir_estudio_seguridad(
     else:
         raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF o Imágenes.")
 
-    nombre_archivo = f"EstudioSeguridad_{placa_limpia}_{uuid4().hex[:8]}.{extension}"
+    nombre_archivo = _nombre_doc_bucket(placa_limpia, "estudioSeguridad", extension, vehiculo)
 
     try:
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
@@ -761,7 +981,7 @@ async def subir_foto_seguridad(
     if not archivo.content_type.startswith("image/"):
          raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen para la foto del conductor.")
 
-    nombre_archivo = f"Seguridad_FotoConductor_{placa_limpia}_{uuid4().hex[:8]}.webp"
+    nombre_archivo = _nombre_doc_bucket(placa_limpia, "fotoConductorSeguridad", "webp", vehiculo)
 
     try:
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
@@ -784,7 +1004,15 @@ async def subir_documento(
     tipo: str = Form(...),
     editado_por: Optional[str] = Form(None),
     extraer: Optional[str] = Form("true"),
+    replicar_en: Optional[str] = Form(None),
+    lectura_datos: Optional[str] = Form(None),
+    lectura_avisos: Optional[str] = Form(None),
+    reverso: Optional[UploadFile] = File(None),
 ):
+    # Documentos de dos caras: el reverso se guarda junto al frente.
+    TIPOS_DOS_CARAS = {"documentoIdentidadConductor", "licencia", "tarjetaPropiedad"}
+    if reverso and tipo not in TIPOS_DOS_CARAS:
+        raise HTTPException(status_code=400, detail="Ese tipo de documento no admite reverso.")
     tipos_validos = [
         "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
         "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
@@ -806,45 +1034,101 @@ async def subir_documento(
     else:
         raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen o PDF.")
 
-    nombre_archivo = f"{tipo}_{placa}.{extension}"
-    url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+    # Gemelos (figuras iguales): los que manda el front, filtrados por válidos,
+    # + los que el propio backend calcula por si el front no los manda.
+    gemelos_front = [g.strip() for g in (replicar_en or "").split(",") if g.strip()]
+    gemelos = list(dict.fromkeys(
+        [g for g in gemelos_front if g in tipos_validos and g != tipo]
+        + [g for g in _gemelos_documento(tipo, vehiculo) if g in tipos_validos]
+    ))
 
-    coleccion_vehiculos.update_one({"placa": placa}, {"$set": {tipo: url_archivo}})
-
-    # Edición de un aprobado por el conductor/tenedor → baja a re-revisión.
-    _registrar_cambio_aprobado(
-        vehiculo, editado_por or "", "documentos",
-        [{"campo": tipo, "antes": vehiculo.get(tipo) or "(ninguno)", "despues": url_archivo}],
-    )
-
-    # Lectura IA opcional para los tipos leíbles. Un fallo de Gemini NO rompe
-    # la subida: se devuelve lectura_ia=None y el usuario diligencia a mano.
+    # Para tipos leíbles: leer con IA ANTES de subir. Si Gemini determina que
+    # NO es el documento esperado (409), se rechaza la subida completa (nada
+    # en el bucket ni en Mongo). Ilegible (422) u otros fallos: se sube igual.
+    # `lectura_datos`/`lectura_avisos` (JSON): lectura YA hecha por el front
+    # (flujo de dos caras: cédula/licencia/tarjeta leyeron frente+reverso por
+    # separado) — se persiste en lecturasIA sin re-pagar Gemini.
     lectura_ia = None
     esquema_ia = TIPOS_SUBIDA_LEIBLES.get(tipo)
-    if esquema_ia and (extraer or "true").lower() != "false":
+    if lectura_datos:
+        try:
+            lectura_ia = {
+                "datos": json.loads(lectura_datos),
+                "avisos": json.loads(lectura_avisos) if lectura_avisos else [],
+            }
+        except (ValueError, TypeError):
+            lectura_ia = None
+    elif esquema_ia and (extraer or "true").lower() != "false":
         try:
             contexto = {
                 "placa_vehiculo": placa,
                 "cedula_conductor": vehiculo.get("condCedulaCiudadania") or "",
             }
-            # Rebobinar: subir_a_google_storage dejó el puntero al final y la
-            # lectura IA necesita el contenido completo desde el inicio.
-            archivo.file.seek(0)
             datos_leidos = await asyncio.to_thread(extraer_datos_con_llm, esquema_ia, [archivo])
+            archivo.file.seek(0)
             avisos = _generar_avisos(esquema_ia, datos_leidos, contexto)
             lectura_ia = {"datos": datos_leidos, "avisos": avisos}
-            coleccion_vehiculos.update_one(
-                {"placa": placa},
-                {"$set": {f"lecturasIA.{tipo}": {**lectura_ia, "fecha": datetime.utcnow()}}},
-            )
         except HTTPException as e:
+            if e.status_code == 409:
+                # Documento equivocado (meme/factura/otro doc): NO guardar nada.
+                raise
+            # Ilegible o servicio caído: el archivo SÍ se guarda, campos a mano.
             print(f"[lecturaIA] Fallo leyendo {tipo} de {placa}: {e.detail}")
+            lectura_ia = None
+            archivo.file.seek(0)
         except Exception as e:
             print(f"[lecturaIA] Error inesperado leyendo {tipo} de {placa}: {e}")
+            lectura_ia = None
+            archivo.file.seek(0)
+
+    nombre_archivo = _nombre_doc_bucket(placa, tipo, extension, vehiculo)
+    url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+
+    set_inicial = {tipo: url_archivo}
+    set_inicial.update({g: url_archivo for g in gemelos})
+
+    # Reverso (solo docs de dos caras): se guarda con su propio campo y URL.
+    url_reverso = None
+    if reverso is not None:
+        if reverso.content_type.startswith("image/"):
+            extension_rev = "webp"
+        elif reverso.content_type == "application/pdf":
+            extension_rev = "pdf"
+        else:
+            raise HTTPException(status_code=400, detail="El reverso solo puede ser imagen o PDF.")
+        nombre_reverso = _nombre_doc_bucket(placa, f"{tipo}Reverso", extension_rev, vehiculo)
+        url_reverso = subir_a_google_storage(reverso, nombre_reverso)
+        set_inicial[f"{tipo}Reverso"] = url_reverso
+
+    coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_inicial})
+
+    # Edición de un aprobado por el conductor/tenedor → baja a re-revisión.
+    campos_diff = [{"campo": tipo, "antes": vehiculo.get(tipo) or "(ninguno)", "despues": url_archivo}]
+    campos_diff += [
+        {"campo": g, "antes": vehiculo.get(g) or "(ninguno)", "despues": url_archivo}
+        for g in gemelos
+    ]
+    if url_reverso:
+        campos_diff.append({"campo": f"{tipo}Reverso", "antes": vehiculo.get(f"{tipo}Reverso") or "(ninguno)", "despues": url_reverso})
+    _registrar_cambio_aprobado(vehiculo, editado_por or "", "documentos", campos_diff)
+
+    if lectura_ia:
+        lecturas_set = {f"lecturasIA.{tipo}": {**lectura_ia, "fecha": datetime.utcnow()}}
+        # La lectura también queda disponible para los gemelos (autollenado
+        # de la otra figura en el próximo montaje del formulario).
+        for g in gemelos:
+            lecturas_set[f"lecturasIA.{g}"] = {**lectura_ia, "fecha": datetime.utcnow()}
+        coleccion_vehiculos.update_one({"placa": placa}, {"$set": lecturas_set})
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": f"{tipo} subido correctamente", "url": url_archivo, "lectura_ia": lectura_ia}
+        content={
+            "message": f"{tipo} subido correctamente",
+            "url": url_archivo,
+            "lectura_ia": lectura_ia,
+            "replicado_en": gemelos,
+            "url_reverso": url_reverso,
+        }
     )
 
 
@@ -855,8 +1139,8 @@ async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     
     urls_fotos = []
-    for archivo in archivos:
-        nombre_archivo = f"Foto_{placa}_{uuid4().hex}.webp"
+    for indice, archivo in enumerate(archivos, start=1):
+        nombre_archivo = _nombre_doc_bucket(placa, "foto", "webp", vehiculo, sufijo=f"_{indice:03d}")
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
         urls_fotos.append(url_archivo)
 
@@ -906,8 +1190,8 @@ async def subir_firma(
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
     try:
-        # Generar nombre único. Usamos .png o .webp
-        nombre_archivo = f"Firma_{placa}_{uuid4().hex[:8]}.webp"
+        # Nomenclatura estándar del bucket (placa/fecha/firma_cedula.webp).
+        nombre_archivo = _nombre_doc_bucket(placa, "firma", "webp", vehiculo)
 
         # Reutilizamos la lógica existente de Google Cloud
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
@@ -982,14 +1266,35 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
 
     url_previa = vehiculo[tipo]
     eliminar_de_google_storage(url_previa)
-    coleccion_vehiculos.update_one({"placa": placa}, {"$set": {tipo: None}})
+    unset_campos = {tipo: None}
 
+    # Reverso del documento de dos caras (si existe): se borra junto al frente.
+    campo_reverso = f"{tipo}Reverso"
+    if vehiculo.get(campo_reverso):
+        eliminar_de_google_storage(vehiculo[campo_reverso])
+        unset_campos[campo_reverso] = None
+
+    # Gemelos replicados: si otra figura de la misma familia tiene EXACTAMENTE
+    # la misma URL (el archivo se replicó), se limpia también.
+    gemelos = _gemelos_documento(tipo, vehiculo)
+    gemelos_eliminados = [g for g in gemelos if vehiculo.get(g) == url_previa]
+    for g in gemelos_eliminados:
+        unset_campos[g] = None
+    coleccion_vehiculos.update_one({"placa": placa}, {"$unset": unset_campos})
+
+    campos_diff = [{"campo": tipo, "antes": url_previa, "despues": "(eliminado)"}]
+    if campo_reverso in unset_campos:
+        campos_diff.append({"campo": campo_reverso, "antes": vehiculo.get(campo_reverso), "despues": "(eliminado)"})
+    campos_diff += [{"campo": g, "antes": url_previa, "despues": "(eliminado)"} for g in gemelos_eliminados]
     _registrar_cambio_aprobado(
         vehiculo, editado_por or "", "documentos",
-        [{"campo": tipo, "antes": url_previa, "despues": "(eliminado)"}],
+        campos_diff,
     )
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": f"{tipo} eliminado correctamente"})
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": f"{tipo} eliminado correctamente", "gemelos_eliminados": gemelos_eliminados},
+    )
 
 
 @ruta_vehiculos.delete("/eliminar-foto")
