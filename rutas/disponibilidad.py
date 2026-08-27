@@ -291,7 +291,8 @@ async def cancelar(id_usuario: str = Form(...), placa: str = Form(...)):
 async def asignar(
     placa: str = Form(...),
     asignado_por: str = Form(...),
-    nombre_asignado: Optional[str] = Form(None)
+    nombre_asignado: Optional[str] = Form(None),
+    observacion: Optional[str] = Form(None)
 ):
     """
     La operación TOMA un vehículo de la bolsa de hoy:
@@ -329,6 +330,7 @@ async def asignar(
         "idUsuario": disp.get("idUsuario"),
         "asignado_por": str(asignado_por).strip(),
         "nombre_asignado_por": (nombre_asignado or "").strip() or None,
+        "observacion": (observacion or "").strip() or None,
         "asignado_en": ahora,
         "estado": "asignada"
     }
