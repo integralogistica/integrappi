@@ -1,0 +1,592 @@
+{
+ "creado_en": "2026-08-27T18:58:25.858872+00:00",
+ "baseusuarios": [
+  {
+   "_id": "685898fbb0d72e1e1d0075c2",
+   "nombre": "EDWIN ZARATE",
+   "correo": "edwin.zarate@integralogistica.com",
+   "regional": "FUNZA",
+   "celular": "3125443396",
+   "perfil": "ADMIN",
+   "usuario": "EZARATE",
+   "clave": "123",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ],
+   "notificaciones_mc": []
+  },
+  {
+   "_id": "685c27118bf28646f2c3df00",
+   "nombre": "VIRGINIA VALENCIA",
+   "correo": "JEFEOPERACIONES.MDE@INTEGRALOGISTICA.COM",
+   "regional": "MEDELLIN",
+   "celular": "3102157481",
+   "perfil": "OPERATIVO",
+   "usuario": "VVALENCIA",
+   "clave": "1ntegra*",
+   "activo": true,
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "685c840a8bf28646f2c3df01",
+   "nombre": "JUAN SUAREZ",
+   "correo": "JUAN.SUAREZ@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3112224715",
+   "perfil": "ADMIN",
+   "usuario": "JSUAREZ",
+   "clave": "123",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ],
+   "notificaciones_mc": []
+  },
+  {
+   "_id": "685c85168bf28646f2c3df02",
+   "nombre": "Camilo Riaño Triana",
+   "correo": "despachos@integralogistica.com",
+   "regional": "FUNZA",
+   "celular": "3187908311",
+   "perfil": "DESPACHADOR",
+   "usuario": "CRIANO",
+   "clave": "1ntegr4"
+  },
+  {
+   "_id": "68b7144392c04021e51dfa94",
+   "nombre": "MARLON BABATIVA",
+   "correo": "auxiliar.despacho@integraenvios.com",
+   "regional": "CELTA",
+   "celular": "3118094035",
+   "perfil": "OPERADOR",
+   "usuario": "MBABATIVA",
+   "clave": "1ntegr4app*"
+  },
+  {
+   "_id": "68b714ca92c04021e51dfa95",
+   "nombre": "CAMILA  MOSQUERA",
+   "correo": "solicitudpedidosintegra@gmail.com",
+   "regional": "FUNZA",
+   "celular": "3213330158",
+   "perfil": "ANALISTA",
+   "usuario": "CMOSQUERA",
+   "clave": "1ntegr4app1*",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ],
+   "recovery_code": "4477"
+  },
+  {
+   "_id": "68d41ba9742072b0326371b8",
+   "nombre": "HECTOR JAVIER OTALORA VELAZCO",
+   "correo": "JAVIER.OTALORA@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3204987722",
+   "perfil": "DESPACHADOR",
+   "usuario": "HOTALORA",
+   "clave": "1ntegr4d3s"
+  },
+  {
+   "_id": "68faac1382491d8d15c257fd",
+   "nombre": "LUIS CASTAÑO",
+   "correo": "SEGURIDAD@INTEGRALOGSTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3124841812",
+   "perfil": "DESPACHADOR",
+   "usuario": "LCASTANO",
+   "clave": "Int3grap*03"
+  },
+  {
+   "_id": "68faace582491d8d15c257ff",
+   "nombre": "MARIANA PEÑA",
+   "correo": "DESPACHOS3@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3213326721",
+   "perfil": "DESPACHADOR",
+   "usuario": "MPENA",
+   "clave": "Int3grap*01"
+  },
+  {
+   "_id": "68faaceb82491d8d15c25800",
+   "nombre": "FARID DOCTOR",
+   "correo": "DESPACHOS2@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3168663021",
+   "perfil": "DESPACHADOR",
+   "usuario": "FDOCTOR",
+   "clave": "Int3grap*02",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6932efd69e2858994136fe27",
+   "nombre": "SANTIAGO ACOSTA",
+   "correo": "SANTIAGOZARATEACOSTA@GMAIL.COM",
+   "regional": "BUCARAMANGA",
+   "celular": "3102084306",
+   "perfil": "CONDUCTOR",
+   "usuario": "PRUEBA123",
+   "clave": "2005",
+   "recovery_code": "",
+   "activo": false
+  },
+  {
+   "_id": "694a9fa9e065fafa58ae5c83",
+   "nombre": "PEPITO PEREZ",
+   "correo": "RICHARD223015@GMAIL.COM",
+   "regional": "FUNZA",
+   "celular": "3124841812",
+   "perfil": "CONDUCTOR",
+   "usuario": "RICHARD223015@GMAIL.COM",
+   "clave": "Richard10"
+  },
+  {
+   "_id": "695d3151e065fafa58ae5d48",
+   "nombre": "YAMID LEITON",
+   "correo": "YAMIDLEITON84@GMAIL.COM",
+   "regional": "CALI",
+   "celular": "3116203027",
+   "perfil": "CONDUCTOR",
+   "usuario": "YAMIDLEITON84@GMAIL.COM",
+   "clave": "14624904"
+  },
+  {
+   "_id": "697931e4e79b6cae9b9eb781",
+   "nombre": "NESTOR VELA",
+   "correo": "NESTOR.VELA@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3232094969",
+   "perfil": "ADMIN",
+   "usuario": "NVELA",
+   "clave": "123",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ],
+   "notificaciones_mc": []
+  },
+  {
+   "_id": "69b9bdb49b1474bab0f6a621",
+   "nombre": "JORGE ALEXANDER RICO CARDENAS",
+   "correo": "COORDINADOR.OPERACIONESNAL@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3107707136",
+   "perfil": "COORDINADOR",
+   "usuario": "JRICO",
+   "clave": "1nt3grapp",
+   "activo": false
+  },
+  {
+   "_id": "69d93f707809e687b3d328e8",
+   "nombre": "SEBASTIAN OVALLE",
+   "correo": "SEBASTIAN.OVALLE@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3213031677",
+   "perfil": "CONTROL",
+   "usuario": "SOVALLE",
+   "clave": "1ntegrapp2026*",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ],
+   "activo": false
+  },
+  {
+   "_id": "69e8e8c8d9a2333d812da618",
+   "nombre": "JOEL CARREÑO",
+   "correo": "ANALISTA.LOGISTICO2@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3138745494",
+   "perfil": "ANALISTA",
+   "usuario": "JCARENO",
+   "clave": "1ntegrapp2026*",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "69e9027961ebe9033f8b96a3",
+   "nombre": "SOFIA VARGAS HERNANDEZ",
+   "correo": "SOFIA.VARGAS@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3226060695",
+   "perfil": "CONTROL",
+   "usuario": "SVARGAS",
+   "clave": "1ntegr4p",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "69fa60988cbedd06d45ff554",
+   "nombre": "LEIDY FERNANDA GUERRERO RAMOS",
+   "correo": "ANALISTA.OPERACIONESNAL@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3205627542",
+   "perfil": "ANALISTA",
+   "usuario": "JRAMOS",
+   "clave": "12345"
+  },
+  {
+   "_id": "6a17657cfbcf718c97d26c85",
+   "nombre": "PAULA ESTEFANY MARTINEZ ROA",
+   "correo": "ANALISTA.OPERACIONESNAL@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3205627542",
+   "perfil": "ANALISTA",
+   "usuario": "PMARTINEZ",
+   "clave": "1NT3grAPP"
+  },
+  {
+   "_id": "6a1ded50a3322fc28fa839c7",
+   "nombre": "JUAN PRUEBAS",
+   "correo": "EMZP1994@GMAIL.COM",
+   "regional": "FUNZA",
+   "celular": "3125443396",
+   "perfil": "CONTROL",
+   "usuario": "JPRUEBAS",
+   "clave": "1234",
+   "clientes": [
+    "MEDICAL_CARE"
+   ],
+   "activo": false
+  },
+  {
+   "_id": "6a24377fb6be6120259a519a",
+   "nombre": "WILSON ENRIQUE GUTIERREZ CHAPARRO",
+   "correo": "COORDINADOR.OPERACIONESNAL@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3107707136",
+   "perfil": "COORDINADOR",
+   "usuario": "WCHAPARRO",
+   "clave": "$2b$12$4nK0sf8OSms9OceDfXwSOOjTOIfrOuPBIt8TcqbBBPtAJws4KQa6C",
+   "clientes": [
+    "KABI",
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a3315195a6d6e2f7b2167b7",
+   "nombre": "JEFERSON CARDENAS",
+   "correo": "COORDINADORFMC.CLO@INTEGRALOGISITCA.COM",
+   "regional": "CALI",
+   "celular": "3102158337",
+   "perfil": "OPERATIVO",
+   "usuario": "JCARDENAS",
+   "clave": "1nTEGrappCali",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a3c5415706ef8d194119c66",
+   "nombre": "JULIO MONTENEGRO",
+   "correo": "DESPACHOS.CALI@INTEGRAENVIOS.COM",
+   "regional": "CALI",
+   "celular": "3102157635",
+   "perfil": "OPERATIVO",
+   "usuario": "JMONTENEGRO",
+   "clave": "1ntegra2026#",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a46c3fdf9f9765840656052",
+   "nombre": "VICTOR ALFONSO SALAMANCA JIMENEZ",
+   "correo": "COORDINADOR.OPERACIONESNAL2@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3102927655",
+   "perfil": "COORDINADOR",
+   "usuario": "VSALAMANCA",
+   "clave": "1integr4pp2026",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a47e54b199502cb622804af",
+   "nombre": "DAVID FERNANDO AMADO ARDILA",
+   "correo": "COORDINADOR.PAQUETEO@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3132422975",
+   "perfil": "OPERATIVO",
+   "usuario": "DAMADO",
+   "clave": "1integrapp2026**",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a47e59a199502cb622804b0",
+   "nombre": "DAVID LEONARDO GARCIA",
+   "correo": "JEFEOPERACIONPQ@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3174360469",
+   "perfil": "OPERATIVO",
+   "usuario": "DGARCIA",
+   "clave": "1int3gr4pp2026**",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a4d15d7ca59e4690fbcfa8a",
+   "nombre": "JOHANA AMADO",
+   "correo": "DESPACHOS.BGA@INTEGRAENVIOS.COM",
+   "regional": "BUCARAMANGA",
+   "celular": "3102158167",
+   "perfil": "OPERATIVO",
+   "usuario": "JAMADO",
+   "clave": "1ntegr42026*",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a4d1da1ca59e4690fbcfa90",
+   "nombre": "JOHANA MARTINEZ",
+   "correo": "ADMINISTRATIVOBGA@INTEGRAENVIOS.COM",
+   "regional": "BUCARAMANGA",
+   "celular": "3183208501",
+   "perfil": "OPERATIVO",
+   "usuario": "JMARTINEZ",
+   "clave": "1ntegra2026*",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a4d2456b1518b99936faa83",
+   "nombre": "JUAN CARLOS ZUÑIGA MESTRA",
+   "correo": "DESPACHOS.BAQ@INTEGRALOGISTICA.COM",
+   "regional": "BARRANQUILLA",
+   "celular": "3102157437",
+   "perfil": "OPERATIVO",
+   "usuario": "JMESTRA",
+   "clave": "1ntegrap2026",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a4d2b7bb1518b99936faa87",
+   "nombre": "YOSELI PACHECO CONTRERAS",
+   "correo": "JEFEOPERACIONES.BAQ@INTEGRALOGISTICA.COM",
+   "regional": "BARRANQUILLA",
+   "celular": "3102157600",
+   "perfil": "OPERATIVO",
+   "usuario": "YPACHECO",
+   "clave": "1ntegrappBaq*",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a4e99e7616ff52713156e42",
+   "nombre": "FABIO ROJAS",
+   "correo": "DESPACHOS@INTEGRAENVIOS.COM",
+   "regional": "FUNZA",
+   "celular": "3187908311",
+   "perfil": "DESPACHADOR",
+   "usuario": "FROJAS",
+   "clave": "integ4appKabi*",
+   "clientes": [
+    "KABI"
+   ]
+  },
+  {
+   "_id": "6a5138c767c0ffe16a858069",
+   "nombre": "JAIRO HENAO",
+   "correo": "JAIRO.HENAO@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3168347628",
+   "perfil": "ADMIN",
+   "usuario": "JHENAO",
+   "clave": "1nt3gra2026*-",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a5a5f4d00cb95e31eb8ba34",
+   "nombre": "TEMPORAL ADMIN",
+   "correo": "SOLICITUDPEDIDOSINTEGRA@GMAIL.COM",
+   "regional": "FUNZA",
+   "celular": "3213330158",
+   "perfil": "ADMIN",
+   "usuario": "TADMIN",
+   "clave": "12345",
+   "clientes": [
+    "MEDICAL_CARE",
+    "KABI"
+   ],
+   "activo": false
+  },
+  {
+   "_id": "6a7a1048d60816747ae8025b",
+   "nombre": "ESTEBAN LOPEZ",
+   "correo": "EDGAR.LOPEZ-USECHE@EXT.FRESENIUS-KABI.COM",
+   "regional": "CELTA",
+   "celular": "3209125447",
+   "perfil": "DESPACHADOR",
+   "usuario": "ELOPEZ",
+   "clave": "int3gra*",
+   "clientes": [
+    "KABI"
+   ]
+  },
+  {
+   "_id": "6a7ca3662e374442a0fa21cb",
+   "nombre": "JULIO AMILCAR",
+   "correo": "JEFEOPERACIONES.BCA@INTEGRALOGISTICA.COM",
+   "regional": "BUCARAMANGA",
+   "celular": "3102157273",
+   "perfil": "OPERATIVO",
+   "usuario": "JAMILCAR",
+   "clave": "1ntegra2026*",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a84aa66ddf8824e7b9d52cd",
+   "nombre": "ZERIMAR DEL VALLE  LANDAETA RODRIGUEZ",
+   "correo": "ANALISTAFINANCIERO1@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3103141476",
+   "perfil": "FINANCIERO",
+   "usuario": "ZVALLE",
+   "clave": "$2b$12$.bPGz8CxvXCVuZCZOE1cieaSSFBUVJQUFjXKNbZO8HP5lYCJLlTma",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a85b533637dbaf1f3233e73",
+   "nombre": "HENRY R PINZON RAMOS",
+   "correo": "ANALISTA.OPERACIONESNAL@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3205627542",
+   "perfil": "OPERATIVO",
+   "usuario": "HPINZON",
+   "clave": "1ntegrap2027",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a85b554637dbaf1f3233e74",
+   "nombre": "DANIELA CARTAGENA GONZALES",
+   "correo": "DESPACHOS3@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3213326721",
+   "perfil": "OPERATIVO",
+   "usuario": "DCARTAGENA",
+   "clave": "1ntegrapp2026**",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a85b5c0637dbaf1f3233e75",
+   "nombre": "RONALD S ARIAS TORRES",
+   "correo": "INHOUSE.CONGRUPO@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3102157217",
+   "perfil": "OPERATIVO",
+   "usuario": "RARIAS",
+   "clave": "integrapp2026**",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a85b5f7637dbaf1f3233e76",
+   "nombre": "ANDRES C MESA M",
+   "correo": "CUMPLIDOS1@INTEGRAENVIOS.COM",
+   "regional": "FUNZA",
+   "celular": "3233123458",
+   "perfil": "OPERATIVO",
+   "usuario": "AMESA",
+   "clave": "integrapp2026*/",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a87c11d112427d8c73290d3",
+   "nombre": "JACKELYNE JULIO GONZALEZ",
+   "correo": "JEFE.FINANCIERO@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3102516906",
+   "perfil": "FINANCIERO",
+   "usuario": "JGONZALEZ",
+   "clave": "1ntegrapp2026*",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  },
+  {
+   "_id": "6a907ae5effdf65e3cf981fc",
+   "nombre": "SANTIAGO CARVAJAL",
+   "correo": "SUPERVISOR.OPERACIONES@INTEGRALOGISTICA.COM",
+   "regional": "FUNZA",
+   "celular": "3107931994",
+   "perfil": "OPERATIVO",
+   "usuario": "SCARVAJAL",
+   "clave": "$2b$12$cbDYujWUvAHkS5N46NLzbeua7mIZjvOuvSwxlUR/YgWCc/HoMiZrK",
+   "clientes": [
+    "MEDICAL_CARE"
+   ]
+  }
+ ],
+ "conductores": [
+  {
+   "_id": "6a8f363395c6f417ecf9a291",
+   "nombre": "EDWIN MISAEL ZÁRATE PEÑA",
+   "correo": "INTEGRAPPLOGISTICA@GMAIL.COM",
+   "cedula": "1010213062",
+   "regional": "N/A",
+   "celular": "3125443396",
+   "perfil": "CONDUCTOR",
+   "clave": "$2b$12$i72gYEq/WkwTTHWRm8bHyOnDok7IsNnl.bE1BmRBESvBnflnhZ8.K",
+   "clientes": [],
+   "activo": true,
+   "correo_verificado": true,
+   "verificacion_expira": "2026-08-28T23:53:39.587000+00:00",
+   "verificacion_token_hash": "$2b$12$gyS.aJjn3vs8B.Fa56t84e.TAZfdrUeOZX.BS5jrzwNIaCKPJHAES",
+   "aceptacion_politica": {
+    "version": 2,
+    "politica_id": "6a8ef7fa55b03e5467cdd223",
+    "aceptado_en": "2026-08-26T23:54:04.831000+00:00",
+    "declaraciones_aceptadas": [
+     "origen_fondos",
+     "sarlaft",
+     "ptee",
+     "informacion_veraz",
+     "tratamiento_datos",
+     "seguridad_salud",
+     "pesv"
+    ]
+   },
+   "declaraciones_aceptadas": [
+    "origen_fondos",
+    "sarlaft",
+    "ptee",
+    "informacion_veraz",
+    "tratamiento_datos",
+    "seguridad_salud",
+    "pesv"
+   ]
+  }
+ ]
+}
