@@ -15,6 +15,8 @@ from bd.bd_cliente import bd_cliente
 bd = bd_cliente['integra']
 coleccion_disponibilidades = bd['disponibilidades']
 coleccion_vehiculos = bd['vehiculos']
+# Control de vehículos tomados de la bolsa por la operación (usar/devolver).
+coleccion_asignaciones = bd['asignaciones_flota']
 
 # ==========================================
 # Constantes
@@ -179,9 +181,11 @@ def mia(id_usuario: str):
         {"_id": 0, "placa": 1, "vehMarca": 1, "tipo_veh_sicetac": 1}
     ))
 
+    # Se incluyen las ASIGNADAS (tomadas por la operación): siguen siendo
+    # check-ins de hoy, pero fuera de la bolsa hasta que las devuelvan.
     checkins_hoy = [
         _serializar(c) for c in coleccion_disponibilidades.find(
-            {"idUsuario": str(id_usuario), "fecha": hoy, "estado": "activa"},
+            {"idUsuario": str(id_usuario), "fecha": hoy, "estado": {"$in": ["activa", "asignada"]}},
             {"_id": 0}
         )
     ]
@@ -276,4 +280,125 @@ async def cancelar(id_usuario: str = Form(...), placa: str = Form(...)):
         "message": "Disponibilidad cancelada",
         "placa": placa_limpia,
         "fecha": hoy
+    })
+
+
+# ==========================================
+# ASIGNACIÓN DE FLOTA (operación toma un vehículo de la bolsa)
+# ==========================================
+
+@ruta_disponibilidad.put("/asignar")
+async def asignar(
+    placa: str = Form(...),
+    asignado_por: str = Form(...),
+    nombre_asignado: Optional[str] = Form(None)
+):
+    """
+    La operación TOMA un vehículo de la bolsa de hoy:
+
+    - Su check-in pasa de `activa` a `asignada` (desaparece de la bolsa).
+    - Queda registrado en `asignaciones_flota` (control de vehículos usados,
+      con quién lo tomó y cuándo).
+    """
+    placa_limpia = placa.strip().upper()
+    hoy = _fecha_hoy_str()
+    ahora = _ahora_bogota()
+
+    # Un vehículo no se asigna dos veces el mismo día sin devolverse antes.
+    if coleccion_asignaciones.find_one({"placa": placa_limpia, "fecha": hoy, "estado": "asignada"}):
+        raise HTTPException(
+            status_code=400,
+            detail="Este vehículo ya está asignado hoy (mira la lista de vehículos en uso)."
+        )
+
+    disp = coleccion_disponibilidades.find_one_and_update(
+        {"placa": placa_limpia, "fecha": hoy, "estado": "activa"},
+        {"$set": {"estado": "asignada", "actualizado_en": ahora}}
+    )
+    if not disp:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay disponibilidad activa hoy para esta placa."
+        )
+
+    doc = {
+        "placa": placa_limpia,
+        "fecha": hoy,
+        "origen": disp.get("origen"),
+        "departamentos_destino": disp.get("departamentos_destino", []),
+        "idUsuario": disp.get("idUsuario"),
+        "asignado_por": str(asignado_por).strip(),
+        "nombre_asignado_por": (nombre_asignado or "").strip() or None,
+        "asignado_en": ahora,
+        "estado": "asignada"
+    }
+    insertado = coleccion_asignaciones.insert_one(doc)
+    doc["_id"] = str(insertado.inserted_id)
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Vehículo asignado",
+        "asignacion": _serializar(doc)
+    })
+
+
+@ruta_disponibilidad.put("/devolver")
+async def devolver(placa: str = Form(...), devuelto_por: str = Form(...)):
+    """
+    Devuelve un vehículo asignado (no se va a usar):
+
+    - Cierra la asignación abierta más reciente (queda `devuelta` con fecha/quién).
+    - Si la asignación era de HOY, su check-in vuelve a `activa` y reaparece
+      en la bolsa. Si era de otro día, solo queda el registro (el check-in
+      ya expiró).
+    """
+    placa_limpia = placa.strip().upper()
+    ahora = _ahora_bogota()
+    hoy = _fecha_hoy_str()
+
+    asig = coleccion_asignaciones.find_one_and_update(
+        {"placa": placa_limpia, "estado": "asignada"},
+        {"$set": {
+            "estado": "devuelta",
+            "devuelto_en": ahora,
+            "devuelto_por": str(devuelto_por).strip()
+        }},
+        sort=[("asignado_en", -1)]
+    )
+    if not asig:
+        raise HTTPException(
+            status_code=404,
+            detail="Esta placa no tiene una asignación abierta."
+        )
+
+    # Reactivar el check-in SOLO si la asignación era de hoy.
+    reactivada = False
+    if asig.get("fecha") == hoy:
+        res = coleccion_disponibilidades.update_one(
+            {"placa": placa_limpia, "fecha": hoy, "estado": "asignada"},
+            {"$set": {"estado": "activa", "actualizado_en": ahora}}
+        )
+        reactivada = res.matched_count > 0
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Vehículo devuelto",
+        "placa": placa_limpia,
+        "reactivada": reactivada,
+        "asignacion": _serializar(asig)
+    })
+
+
+@ruta_disponibilidad.get("/asignadas")
+def asignadas(solo_abiertas: bool = False, limit: int = 100):
+    """
+    Asignaciones de flota (control de vehículos usados), la más reciente primero.
+    `solo_abiertas=true` → solo las que están en uso (sin devolver).
+    """
+    query = {"estado": "asignada"} if solo_abiertas else {}
+    cursor = coleccion_asignaciones.find(query).sort("asignado_en", -1).limit(max(1, min(limit, 500)))
+    lista = [_serializar(d) for d in cursor]
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "OK",
+        "total": len(lista),
+        "asignaciones": lista
     })
