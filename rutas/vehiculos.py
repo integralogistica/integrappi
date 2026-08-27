@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 from typing import List, Optional
 import resend
@@ -63,6 +63,26 @@ bd = bd_cliente['integra']
 # --- COLECCIONES ---
 coleccion_vehiculos = bd['vehiculos']
 coleccion_disponibilidades = bd['disponibilidades']
+
+
+def _json_seguro(valor):
+    """
+    Convierte un documento Mongo a tipos JSON-serializables de forma recursiva:
+    datetime → ISO string (UTC naive), ObjectId → str. Los endpoints que
+    devuelven el documento crudo reventaban con 500 cuando el doc tenía
+    lecturasIA.{tipo}.fecha / historialCambios[].fecha (bug real 2026-08-27:
+    un vehículo con lecturas IA rompía obtener-vehiculos y el conductor
+    dejaba de ver sus placas).
+    """
+    if isinstance(valor, dict):
+        return {k: _json_seguro(v) for k, v in valor.items()}
+    if isinstance(valor, list):
+        return [_json_seguro(v) for v in valor]
+    if isinstance(valor, ObjectId):
+        return str(valor)
+    if isinstance(valor, (datetime, date)):
+        return valor.isoformat()
+    return valor
 # Cuentas de conductor/tenedor (para propagar la cédula leída por IA).
 coleccion_conductores_cuenta = bd['conductores']
 coleccion_usuarios = bd['usuarios']         # Conductores / Usuarios app
@@ -164,10 +184,11 @@ ESQUEMAS_EXTRACCION = {
     "rut": {
         "campos": {
             "tipo_persona": "PERSONA NATURAL o PERSONA JURIDICA",
+            "tipo_documento": "Tipo de documento del campo 25 (Cédula de Ciudadanía, NIT, Cédula de Extranjería, Pasaporte o Tarjeta de Identidad), tal como aparece",
             "razon_social": "Razón social completa en MAYÚSCULAS (solo si es persona jurídica)",
             "nombres": "Nombres de pila tal como aparecen (solo persona natural)",
             "apellidos": "Primer y segundo apellido tal como aparecen (solo persona natural)",
-            "numero_documento": "NIT sin dígito de verificación o cédula, SOLO dígitos",
+            "numero_documento": "Número de identificación del campo 26 (NIT sin dígito de verificación o cédula), SOLO dígitos",
             "digito_verificacion": "Dígito de verificación del NIT (un dígito) o null",
             "direccion": "Dirección principal (campo 41)",
             "ciudad": "Municipio (campo 40)",
@@ -826,7 +847,7 @@ def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
     vehiculos = list(coleccion_vehiculos.find(filtro, {"_id": 0}))
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Búsqueda finalizada", "vehiculos": vehiculos}
+        content={"message": "Búsqueda finalizada", "vehiculos": _json_seguro(vehiculos)}
     )
 
 
@@ -836,7 +857,7 @@ async def obtener_vehiculo(placa: str):
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": vehiculo})
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": _json_seguro(vehiculo)})
 
 @ruta_vehiculos.put("/actualizar-estado")
 async def actualizar_estado(
@@ -1366,7 +1387,7 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
         veh["_id"] = str(veh["_id"])
         documentos = {
             k: v for k, v in veh.items()
-            # SE HA MODIFICADO AQUÍ PARA QUE NO DEVUELVA estudioSeguridad NI fotoconductorseguridad 
+            # SE HA MODIFICADO AQUÍ PARA QUE NO DEVUELVA estudioSeguridad NI fotoconductorseguridad
             # SI NO QUIERES QUE EL CONDUCTOR LOS VEA (Opcional, pero recomendado por seguridad)
             if isinstance(v, str) and v.startswith("https://storage.googleapis.com") and k not in ["estudioSeguridad", "fotoconductorseguridad"]
         }
@@ -1375,7 +1396,7 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Vehículos encontrados", "vehicles": vehiculos_final}
+        content={"message": "Vehículos encontrados", "vehicles": _json_seguro(vehiculos_final)}
     )
 
 
@@ -1402,6 +1423,6 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
         vehiculos_final.append(veh)
 
     return JSONResponse(
-        status_code=status.HTTP_200_OK, 
-        content={"vehiculos": vehiculos_final}
+        status_code=status.HTTP_200_OK,
+        content={"vehiculos": _json_seguro(vehiculos_final)}
     )

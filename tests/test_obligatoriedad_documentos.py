@@ -7,6 +7,7 @@ Cubre:
 - subir-documento con replicar_en: setea gemelos y copia lecturasIA.
 - eliminar-documento: limpia gemelos con la misma URL.
 """
+import json
 import unittest
 from unittest.mock import patch
 
@@ -159,6 +160,32 @@ class DocumentosFaltantesTests(unittest.TestCase):
         faltantes = vehiculos._documentos_faltantes(v)
         self.assertIn("licenciaReverso", faltantes)
         self.assertIn("tarjetaPropiedadReverso", faltantes)
+
+
+class JsonSeguroTests(unittest.TestCase):
+    """Los docs de vehículo llevan datetime (lecturasIA, historialCambios) y
+    ObjectId: _json_seguro los convierte para que los endpoints no revienten
+    con 500 (bug real 2026-08-27: un vehículo con lecturas IA rompía
+    obtener-vehiculos y el conductor dejaba de ver sus placas)."""
+
+    def test_datetime_y_objectid_anidados_se_serializan(self):
+        from datetime import datetime as dt
+        from bson import ObjectId
+        doc = {
+            "placa": "TEST01",
+            "_id": ObjectId("64b000000000000000000000"),
+            "lecturasIA": {"licencia": {"fecha": dt(2026, 8, 27, 12, 0, 0)}},
+            "historialCambios": [{"fecha": dt(2026, 8, 27), "campos": []}],
+        }
+        seguro = vehiculos._json_seguro(doc)
+        json.dumps(seguro)  # no debe lanzar
+        self.assertIsInstance(seguro["_id"], str)
+        self.assertEqual(seguro["lecturasIA"]["licencia"]["fecha"], "2026-08-27T12:00:00")
+        self.assertEqual(seguro["historialCambios"][0]["fecha"], "2026-08-27T00:00:00")
+
+    def test_lista_y_tipos_simples_intactos(self):
+        seguro = vehiculos._json_seguro({"a": [1, "x", None, True], "b": 2.5})
+        self.assertEqual(seguro, {"a": [1, "x", None, True], "b": 2.5})
 
 
 class NombreDocBucketTests(unittest.TestCase):
