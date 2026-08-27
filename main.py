@@ -20,7 +20,6 @@ from rutas.novedades import ruta_novedades
 from rutas.vehiculos import ruta_vehiculos
 from rutas.empleados import ruta_empleado
 from rutas.revision import ruta_revision
-from rutas.puente_biometrico import ruta_biometria
 from rutas.baseusuarios import ruta_baseusuarios
 from rutas.clientes import ruta_clientes
 from rutas.clientes_siscore import ruta_clientes_siscore
@@ -29,7 +28,6 @@ from rutas.ciudades_general import ruta_ciudades_general
 from rutas.fletes import ruta_fletes
 from rutas.tarifas_rutas_fmc import ruta_tarifas_rutas_fmc
 from rutas.pedidos import ruta_pedidos
-from rutas.consultar_biometrico import ruta_verificacion
 from rutas.whatsapp_integra import ruta_whatsapp_integra
 from rutas.whatsapp_report_integra import ruta_whatsapp_report
 from rutas.debug import ruta_debug_network
@@ -174,7 +172,6 @@ app.include_router(ruta_manifiestos)
 app.include_router(ruta_novedades)
 app.include_router(ruta_vehiculos)
 app.include_router(ruta_empleado)
-app.include_router(ruta_biometria)
 app.include_router(ruta_baseusuarios)
 app.include_router(ruta_clientes)
 app.include_router(ruta_clientes_siscore)
@@ -183,7 +180,6 @@ app.include_router(ruta_ciudades_general)
 app.include_router(ruta_fletes)
 app.include_router(ruta_tarifas_rutas_fmc)
 app.include_router(ruta_pedidos)
-app.include_router(ruta_verificacion)
 app.include_router(ruta_revision)
 app.include_router(ruta_whatsapp_integra)
 app.include_router(ruta_whatsapp_report)

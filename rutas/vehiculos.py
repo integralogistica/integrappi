@@ -1,12 +1,13 @@
 import os
 import json
 import asyncio
+import hashlib
 from datetime import datetime, date
 from io import BytesIO
 from typing import List, Optional
 import resend
 from dotenv import load_dotenv
-from fastapi import APIRouter, File, Form, HTTPException,Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from google.cloud import storage
 from PIL import Image
@@ -63,6 +64,10 @@ bd = bd_cliente['integra']
 # --- COLECCIONES ---
 coleccion_vehiculos = bd['vehiculos']
 coleccion_disponibilidades = bd['disponibilidades']
+# Evidencias de firma electrónica (append-only, como aceptaciones_politica):
+# cada firma del conductor sella un registro que sobrevive a ediciones del
+# documento del vehículo.
+coleccion_firmas = bd['firmas_conductor']
 
 
 def _json_seguro(valor):
@@ -83,6 +88,31 @@ def _json_seguro(valor):
     if isinstance(valor, (datetime, date)):
         return valor.isoformat()
     return valor
+
+# ==========================================
+# Firma electrónica — helpers de sellado
+# ==========================================
+
+# Campos EXCLUIDOS del hash de datos firmados: bookkeeping interno, estado
+# administrativo o la propia evidencia. Todo lo demás (datos del formulario y
+# URLs de los documentos cargados) queda amarrado criptográficamente a la firma.
+CAMPOS_VOLATILES_FIRMA = {
+    "_id", "firmaUrl", "firmaEvidencia", "lecturasIA", "historialCambios",
+    "invitacionConductor", "estadoIntegra", "observaciones", "usuarioIntegra",
+    "estudioSeguridad", "fotoconductorseguridad",
+}
+
+def _hash_datos_firmados(vehiculo: dict) -> str:
+    """
+    SHA-256 canónico del contenido declarado del vehículo en el momento de
+    firmar: normaliza (datetime/ObjectId → JSON), ordena claves y excluye los
+    campos volátiles. Si cualquier dato o documento cambia después de firmado,
+    el hash recalculado ya no coincide → integridad verificable.
+    """
+    datos = {k: v for k, v in _json_seguro(vehiculo).items() if k not in CAMPOS_VOLATILES_FIRMA}
+    canonico = json.dumps(datos, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
+
 # Cuentas de conductor/tenedor (para propagar la cédula leída por IA).
 coleccion_conductores_cuenta = bd['conductores']
 coleccion_usuarios = bd['usuarios']         # Conductores / Usuarios app
@@ -523,6 +553,10 @@ def _generar_avisos(tipo_doc: str, datos: dict, contexto: dict) -> list:
 # `lecturasIA.<tipo_subida>` para que el formulario los aplique (paso 2).
 TIPOS_SUBIDA_LEIBLES = {
     "documentoIdentidadConductor": "cedula",
+    # Cédulas de propietario/tenedor: en el paso 2 la tarjeta IA las pide EN
+    # VEZ de los RUT (los RUT se cargan en el paso 3 de documentación).
+    "documentoIdentidadPropietario": "cedula",
+    "documentoIdentidadTenedor": "cedula",
     "rutTenedor": "rut",
     "rutPropietario": "rut",
     "condCertificacionBancaria": "certificado_bancario",
@@ -561,13 +595,23 @@ FAMILIAS_FIGURA = {
 # Los de figura se satisfacen por gemelo cuando las figuras coinciden.
 # Reversos OBLIGATORIOS (2026-08-27): licencia y tarjeta de propiedad tienen
 # dos caras y ambas se exigen; el de la cédula queda opcional (solo amarilla).
+# La Tarjeta de Remolque es OPCIONAL (2026-08-27, orden del usuario: no todo
+# vehículo arrastra remolque). Las fotos del vehículo: mínimo 1 (exigida como
+# "fotos"), máximo 10 (tope en subir-fotos).
+# TODAS las cédulas exigen reverso (2026-08-27, orden del usuario: siempre
+# dos caras, ya no solo la cédula amarilla del conductor).
 DOCUMENTOS_REQUERIDOS = [
-    "tarjetaPropiedad", "tarjetaPropiedadReverso", "soat", "revisionTecnomecanica", "tarjetaRemolque",
-    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
-    "documentoIdentidadTenedor", "licencia", "licenciaReverso", "planillaEpsArl", "condFoto",
+    "tarjetaPropiedad", "tarjetaPropiedadReverso", "soat", "revisionTecnomecanica",
+    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadConductorReverso",
+    "documentoIdentidadPropietario", "documentoIdentidadPropietarioReverso",
+    "documentoIdentidadTenedor", "documentoIdentidadTenedorReverso",
+    "licencia", "licenciaReverso", "planillaEpsArl", "condFoto",
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "fotos",
 ]
+
+# Tope de fotos del vehículo por placa (mínimo 1 = "fotos" requerida arriba).
+MAX_FOTOS_VEHICULO = 10
 
 ETIQUETAS_DOCUMENTO = {
     "tarjetaPropiedad": "Tarjeta de Propiedad",
@@ -577,8 +621,11 @@ ETIQUETAS_DOCUMENTO = {
     "tarjetaRemolque": "Tarjeta de Remolque",
     "polizaResponsabilidad": "Póliza de Responsabilidad Civil",
     "documentoIdentidadConductor": "Documento de Identidad del Conductor",
+    "documentoIdentidadConductorReverso": "Documento de Identidad del Conductor (Reverso)",
     "documentoIdentidadPropietario": "Documento de Identidad del Propietario",
+    "documentoIdentidadPropietarioReverso": "Documento de Identidad del Propietario (Reverso)",
     "documentoIdentidadTenedor": "Documento de Identidad del Tenedor",
+    "documentoIdentidadTenedorReverso": "Documento de Identidad del Tenedor (Reverso)",
     "licencia": "Licencia de Conducción Vigente",
     "licenciaReverso": "Licencia de Conducción (Reverso)",
     "planillaEpsArl": "Planilla de EPS y ARL",
@@ -689,7 +736,7 @@ def _registrar_cambio_aprobado(vehiculo: dict, editado_por: str, seccion: str, c
     coleccion_vehiculos.update_one(
         {"placa": placa},
         {
-            "$set": {"estadoIntegra": "completado_revision"},
+            "$set": {"estadoIntegra": "completado_revision", "fechaEstado": ahora},
             "$push": {
                 "historialCambios": {
                     "fecha": ahora,
@@ -826,6 +873,10 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
         "invitacionConductor": None,   # {correo, estado: pendiente|aceptada, creado_en, expira}
         # Auditoría de ediciones sobre vehículos aprobados (re-revisión).
         "historialCambios": [],
+        # Histórico de inactivaciones/reactivaciones por Seguridad.
+        "historialInactivacion": [],
+        # Fecha del último cambio de estado (para "tiempo esperando").
+        "fechaEstado": datetime.utcnow(),
         # Datos extraídos por IA al subir documentos, por tipo de subida:
         # {rutTenedor: {datos, avisos, fecha}, ...} — el paso 2 los aplica.
         "lecturasIA": {},
@@ -859,17 +910,38 @@ async def obtener_vehiculo(placa: str):
 
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": _json_seguro(vehiculo)})
 
+# Transiciones permitidas de estadoIntegra (2026-08-27): todo pasa por
+# actualizar-estado, que antes aceptaba cualquier string. `inactivo` es un
+# aprobado pausado por Seguridad (motivo obligatorio); reactivar vuelve a
+# `aprobado` SIN re-revisión.
+TRANSICIONES_VALIDAS = {
+    "registro_incompleto": {"completado_revision"},
+    "completado_revision": {"aprobado", "registro_incompleto"},
+    "aprobado": {"inactivo", "registro_incompleto"},
+    "inactivo": {"aprobado"},
+}
+
 @ruta_vehiculos.put("/actualizar-estado")
 async def actualizar_estado(
     placa: str = Form(...),
     nuevo_estado: str = Form(...),
     usuario_id: str = Form(...),
     observaciones: Optional[str] = Form(None),
-    nombre_conductor: str = Form("Conductor") 
+    motivo: Optional[str] = Form(None),
+    nombre_conductor: str = Form("Conductor")
 ):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    # Whitelist de transiciones: evita estados basura y saltos inválidos
+    # (ej. registro_incompleto → aprobado directo, o re-revisión de un inactivo).
+    estado_actual = vehiculo.get("estadoIntegra")
+    if nuevo_estado not in TRANSICIONES_VALIDAS.get(estado_actual, set()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Transición inválida: {estado_actual} → {nuevo_estado}.",
+        )
 
     # Al pasar a completado_revision el conductor declara la documentación
     # completa: validar server-side ( Seguridad usa este endpoint con otros
@@ -883,18 +955,53 @@ async def actualizar_estado(
                 detail=f"Faltan documentos obligatorios: {nombres}.",
             )
 
+    # Inactivar un aprobado exige SIEMPRE un motivo (quedar en la base sin
+    # operar debe ser explicable).
+    if nuevo_estado == "inactivo" and not (motivo or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="El motivo de inactivación es obligatorio.",
+        )
+
+    ahora = datetime.utcnow()
     datos_actualizar = {
         "estadoIntegra": nuevo_estado,
-        "usuarioIntegra": usuario_id
+        "usuarioIntegra": usuario_id,
+        # Sello temporal del último cambio de estado (para "tiempo esperando").
+        "fechaEstado": ahora,
     }
 
     if observaciones:
         datos_actualizar["observaciones"] = observaciones
 
-    coleccion_vehiculos.update_one(
-        {"placa": placa},
-        {"$set": datos_actualizar}
-    )
+    operacion = {"$set": datos_actualizar}
+
+    # Histórico de inactivación (append-only): quién, cuándo y por qué.
+    if nuevo_estado == "inactivo":
+        operacion["$push"] = {"historialInactivacion": {
+            "fecha": ahora, "usuario": usuario_id,
+            "motivo": motivo.strip(), "accion": "inactivo",
+        }}
+    elif nuevo_estado == "aprobado" and estado_actual == "inactivo":
+        operacion["$push"] = {"historialInactivacion": {
+            "fecha": ahora, "usuario": usuario_id,
+            "motivo": (motivo or "").strip() or "Reactivado por Seguridad",
+            "accion": "reactivado",
+        }}
+
+    coleccion_vehiculos.update_one({"placa": placa}, operacion)
+
+    # Al inactivar, el carro sale de la bolsa del día aunque tuviera check-in
+    # activo (mismo patrón de _registrar_cambio_aprobado; la /bolsa además
+    # filtra por estado como segunda barrera).
+    if nuevo_estado == "inactivo":
+        try:
+            coleccion_disponibilidades.update_many(
+                {"placa": placa, "estado": "activa"},
+                {"$set": {"estado": "cancelada", "actualizado_en": ahora}},
+            )
+        except Exception as e:
+            print(f"[disponibilidad] No se pudo cancelar el check-in al inactivar {placa}: {e}")
 
     if nuevo_estado == "completado_revision":
         enviar_notificacion_seguridad(placa, nombre_conductor)
@@ -912,6 +1019,8 @@ CLAVES_PROTEGIDAS = {
     "_id", "placa", "idUsuario", "idConductor", "estadoIntegra",
     "invitacionConductor", "historialCambios", "usuarioIntegra",
     "estudioSeguridad", "fotoconductorseguridad", "lecturasIA", "fotos",
+    # Sello de la firma electrónica: solo /vehiculos/firmar lo escribe.
+    "firmaEvidencia",
 }
 
 # URLs de documentos: sus dueños son subir-documento/eliminar-documento.
@@ -924,7 +1033,8 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "firmaUrl",
     # Reversos de documentos de dos caras (mismo blindaje que sus frentes).
-    "documentoIdentidadConductorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
+    "documentoIdentidadConductorReverso", "documentoIdentidadPropietarioReverso",
+    "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
 }
 
 
@@ -1061,7 +1171,12 @@ async def subir_documento(
     reverso: Optional[UploadFile] = File(None),
 ):
     # Documentos de dos caras: el reverso se guarda junto al frente.
-    TIPOS_DOS_CARAS = {"documentoIdentidadConductor", "licencia", "tarjetaPropiedad"}
+    # Cédulas de propietario/tenedor (2026-08-27): la tarjeta IA también pide
+    # su reverso opcional (cédula amarilla), como la del conductor.
+    TIPOS_DOS_CARAS = {
+        "documentoIdentidadConductor", "documentoIdentidadPropietario",
+        "documentoIdentidadTenedor", "licencia", "tarjetaPropiedad",
+    }
     if reverso and tipo not in TIPOS_DOS_CARAS:
         raise HTTPException(status_code=400, detail="Ese tipo de documento no admite reverso.")
     tipos_validos = [
@@ -1141,6 +1256,8 @@ async def subir_documento(
     set_inicial.update({g: url_archivo for g in gemelos})
 
     # Reverso (solo docs de dos caras): se guarda con su propio campo y URL.
+    # También se replica a los gemelos de figura (identidad): si prop==cond,
+    # el reverso de la cédula cubre a ambas figuras igual que el frente.
     url_reverso = None
     if reverso is not None:
         if reverso.content_type.startswith("image/"):
@@ -1152,6 +1269,7 @@ async def subir_documento(
         nombre_reverso = _nombre_doc_bucket(placa, f"{tipo}Reverso", extension_rev, vehiculo)
         url_reverso = subir_a_google_storage(reverso, nombre_reverso)
         set_inicial[f"{tipo}Reverso"] = url_reverso
+        set_inicial.update({f"{g}Reverso": url_reverso for g in gemelos})
 
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_inicial})
 
@@ -1163,6 +1281,10 @@ async def subir_documento(
     ]
     if url_reverso:
         campos_diff.append({"campo": f"{tipo}Reverso", "antes": vehiculo.get(f"{tipo}Reverso") or "(ninguno)", "despues": url_reverso})
+        campos_diff += [
+            {"campo": f"{g}Reverso", "antes": vehiculo.get(f"{g}Reverso") or "(ninguno)", "despues": url_reverso}
+            for g in gemelos
+        ]
     _registrar_cambio_aprobado(vehiculo, editado_por or "", "documentos", campos_diff)
 
     if lectura_ia:
@@ -1190,14 +1312,48 @@ async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    
+
+    # Tope de fotos por vehículo: máximo 10 en total (las ya subidas + estas).
+    # Se deduplican primero (sanear docs contaminados por el bug de numeración:
+    # la misma URL repetida N veces cuenta como UNA foto).
+    actuales = [u for u in (vehiculo.get("fotos") or []) if u and str(u).strip()]
+    actuales = list(dict.fromkeys(actuales))
+    if len(actuales) + len(archivos) > MAX_FOTOS_VEHICULO:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Máximo {MAX_FOTOS_VEHICULO} fotos del vehículo. "
+                f"Ya tienes {len(actuales)}; puedes subir hasta {MAX_FOTOS_VEHICULO - len(actuales)} más."
+            ),
+        )
+
     urls_fotos = []
-    for indice, archivo in enumerate(archivos, start=1):
+    # La numeración CONTINÚA desde el mayor sufijo _NNN usado HOY para esta
+    # placa: si empezara en _001 cada tanda, subir de a una foto repetiría el
+    # nombre (foto_001), el blob nuevo pisaría al anterior y Mongo quedaría con
+    # la MISMA URL varias veces (bug real: la última foto aparecía "repetida N
+    # veces"). Contar hoy (y no el total histórico) evita pisar también tras
+    # borrar fotos de días anteriores.
+    fecha_hoy = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+    prefijo_hoy = f"{placa.strip().upper()}/{fecha_hoy}/foto_"
+    maximo_hoy = 0
+    for url_existente in actuales:
+        s = str(url_existente)
+        if prefijo_hoy in s:
+            try:
+                numero = int(s.rsplit("_", 1)[-1].split(".")[0])
+                maximo_hoy = max(maximo_hoy, numero)
+            except ValueError:
+                continue
+
+    for indice, archivo in enumerate(archivos, start=maximo_hoy + 1):
         nombre_archivo = _nombre_doc_bucket(placa, "foto", "webp", vehiculo, sufijo=f"_{indice:03d}")
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
         urls_fotos.append(url_archivo)
 
-    coleccion_vehiculos.update_one({"placa": placa}, {"$push": {"fotos": {"$each": urls_fotos}}})
+    # $set (no $push): escribe el array saneado (sin duplicados) + las nuevas,
+    # reparando de paso los docs con URLs repetidas del bug de numeración.
+    coleccion_vehiculos.update_one({"placa": placa}, {"$set": {"fotos": actuales + urls_fotos}})
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Fotos subidas correctamente", "urls": urls_fotos})
 
 
@@ -1266,6 +1422,129 @@ async def subir_firma(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error subiendo firma: {str(e)}")
+
+
+@ruta_vehiculos.put("/firmar")
+async def firmar(
+    request: Request,
+    archivo: UploadFile = File(...),
+    placa: str = Form(...),
+    id_usuario: Optional[str] = Form(None),
+    editado_por: Optional[str] = Form(None),
+):
+    """
+    Firma ELECTRÓNICA del conductor (nivel de evidencia reforzada, Ley 1955
+    art. 76 / Decreto 1499 de 2020): en UN solo acto
+      1. sube la imagen de la firma al bucket (nomenclatura estándar),
+      2. calcula el SHA-256 de los datos declarados del vehículo EN ESE
+         MOMENTO y de la propia imagen,
+      3. sella un registro append-only en `firmas_conductor` con fecha UTC,
+         IP y user-agent (mismo patrón de evidencia que aceptaciones_politica).
+    El registro es inmutable y sobrevive a ediciones posteriores del vehículo;
+    re-firmar agrega un registro nuevo (version 2, 3, …), nunca reemplaza.
+    """
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    contenido = await archivo.read()
+    if not contenido:
+        raise HTTPException(status_code=400, detail="La firma está vacía: dibújala antes de firmar.")
+    hash_firma = hashlib.sha256(contenido).hexdigest()
+
+    # El hash amarra la firma a los datos EXACTOS declarados en este momento.
+    hash_datos = _hash_datos_firmados(vehiculo)
+
+    try:
+        archivo.file.seek(0)
+        nombre_archivo = _nombre_doc_bucket(placa, "firma", "webp", vehiculo)
+        url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error subiendo la firma: {str(e)}")
+
+    ahora = datetime.utcnow()
+    ip = request.client.host if request.client else ""
+    user_agent = (request.headers.get("user-agent") or "")[:300]
+
+    cedula = re.sub(r"\D", "", str(vehiculo.get("condCedulaCiudadania") or ""))
+    nombre = " ".join(
+        str(vehiculo.get(k) or "").strip()
+        for k in ("condNombres", "condPrimerApellido", "condSegundoApellido")
+    ).strip()
+
+    version = 1 + coleccion_firmas.count_documents({"placa": placa})
+    registro = {
+        "placa": placa,
+        "version": version,
+        "id_usuario": id_usuario or vehiculo.get("idUsuario"),
+        "cedula": cedula,
+        "nombre": nombre,
+        "correo": (vehiculo.get("condCorreo") or "").upper(),
+        "hash_datos": hash_datos,
+        "firma_url": url_archivo,
+        "hash_firma": hash_firma,
+        "firmado_en": ahora,
+        "ip": ip,
+        "user_agent": user_agent,
+    }
+    resultado = coleccion_firmas.insert_one(registro)
+
+    # Puntero de conveniencia en el vehículo (la evidencia vive en la colección
+    # append-only; esto es solo para mostrar el sello en panel/revisión/HV).
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {"$set": {
+            "firmaUrl": url_archivo,
+            "firmaEvidencia": {
+                "hash_datos": hash_datos,
+                "hash_firma": hash_firma,
+                "firmado_en": ahora,
+                "version": version,
+                "registro_id": str(resultado.inserted_id),
+            },
+        }},
+    )
+
+    _registrar_cambio_aprobado(
+        vehiculo, editado_por or "", "documentos",
+        [{"campo": "firmaUrl", "antes": vehiculo.get("firmaUrl") or "(ninguna)", "despues": url_archivo}],
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": "Firma registrada y sellada",
+            "url": url_archivo,
+            "firmado_en": ahora.isoformat(),
+            "hash_datos": hash_datos,
+            "version": version,
+        },
+    )
+
+
+@ruta_vehiculos.get("/verificar-firma/{placa}")
+async def verificar_firma(placa: str):
+    """
+    Verificación de integridad de la firma electrónica: recalcula el hash de
+    los datos actuales del vehículo y lo compara con el sellado en la última
+    firma. `coincide=false` = el documento cambió después de firmado (el diff
+    de qué cambió vive en `historialCambios`).
+    """
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    evidencia = coleccion_firmas.find_one({"placa": placa}, sort=[("firmado_en", -1)])
+    if not evidencia:
+        raise HTTPException(status_code=404, detail="Este vehículo no tiene firmas registradas.")
+    hash_actual = _hash_datos_firmados(vehiculo)
+    return {
+        "placa": placa,
+        "coincide": hash_actual == evidencia.get("hash_datos"),
+        "hash_actual": hash_actual,
+        "evidencia": _json_seguro({k: v for k, v in evidencia.items() if k != "_id"}),
+    }
 
 @ruta_vehiculos.get("/obtener-firma")
 async def obtener_firma(placa: str):
@@ -1371,7 +1650,7 @@ async def eliminar_foto(placa: str, url: str, editado_por: Optional[str] = None)
 def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
     filtro = {
         "estadoIntegra": {
-            "$in": ["registro_incompleto", "completado_revision", "aprobado", "rechazado"]
+            "$in": ["registro_incompleto", "completado_revision", "aprobado", "inactivo", "rechazado"]
         }
     }
     vehiculos_raw = list(coleccion_vehiculos.find(filtro))

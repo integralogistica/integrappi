@@ -220,6 +220,10 @@ def bolsa(
             continue
 
         veh = coleccion_vehiculos.find_one({"placa": c.get("placa")}, {"_id": 0}) or {}
+        # Segunda barrera: un vehículo inactivado con check-in activo (si la
+        # cancelación falló) NO aparece en la bolsa — solo los aprobados operan.
+        if veh.get("estadoIntegra") != "aprobado":
+            continue
         tipo_veh = (veh.get("tipo_veh_sicetac") or "")
         if tipo_buscar and tipo_veh.strip().upper() != tipo_buscar:
             continue

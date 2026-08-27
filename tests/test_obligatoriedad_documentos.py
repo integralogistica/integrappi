@@ -68,7 +68,9 @@ TODOS_DOCS = {
     "tarjetaPropiedad": "https://x/1", "tarjetaPropiedadReverso": "https://x/1r", "soat": "https://x/2",
     "revisionTecnomecanica": "https://x/3", "tarjetaRemolque": "https://x/4",
     "polizaResponsabilidad": "https://x/5", "documentoIdentidadConductor": "https://x/6",
-    "documentoIdentidadPropietario": "https://x/7", "documentoIdentidadTenedor": "https://x/8",
+    "documentoIdentidadConductorReverso": "https://x/6r",
+    "documentoIdentidadPropietario": "https://x/7", "documentoIdentidadPropietarioReverso": "https://x/7r",
+    "documentoIdentidadTenedor": "https://x/8", "documentoIdentidadTenedorReverso": "https://x/8r",
     "licencia": "https://x/9", "licenciaReverso": "https://x/9r", "planillaEpsArl": "https://x/10",
     "condFoto": "https://x/11",
     "condCertificacionBancaria": "https://x/12", "propCertificacionBancaria": "https://x/13",
@@ -161,6 +163,16 @@ class DocumentosFaltantesTests(unittest.TestCase):
         self.assertIn("licenciaReverso", faltantes)
         self.assertIn("tarjetaPropiedadReverso", faltantes)
 
+    def test_tarjeta_remolque_es_opcional(self):
+        # No todo vehículo arrastra remolque: sin ella NO hay faltante (2026-08-27).
+        v = vehiculo_completo(tarjetaRemolque=None)
+        self.assertEqual(vehiculos._documentos_faltantes(v), [])
+
+    def test_fotos_minimo_una(self):
+        # Fotos del vehículo: se exige al menos 1 (máximo 10 lo valida subir-fotos).
+        v = vehiculo_completo(fotos=None)
+        self.assertIn("fotos", vehiculos._documentos_faltantes(v))
+
 
 class JsonSeguroTests(unittest.TestCase):
     """Los docs de vehículo llevan datetime (lecturasIA, historialCambios) y
@@ -252,7 +264,9 @@ class ActualizarEstadoValidacionTests(unittest.TestCase):
 
     def test_aprobado_no_valida_documentos(self):
         # Seguridad aprueba con el mismo endpoint: no debe exigir documentos.
-        fake = FakeColeccionVehiculos([vehiculo_completo(soat=None)])
+        # (Desde completado_revision — la transición real del flujo; desde
+        # registro_incompleto directo ya no se permite, ver test_transiciones.)
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="completado_revision", soat=None)])
         with patch.object(vehiculos, "coleccion_vehiculos", fake):
             resp = self.client.put(
                 "/vehiculos/actualizar-estado",
@@ -431,7 +445,9 @@ class EliminarDocumentoGemelosTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 200)
         self.assertIn("documentoIdentidadPropietario", resp.json()["gemelos_eliminados"])
-        mock_del.assert_called_once()
+        # 2 blobs: frente + reverso (la cédula del conductor ahora SIEMPRE
+        # tiene reverso cargado en TODOS_DOCS — eliminar borra ambas caras).
+        self.assertEqual(mock_del.call_count, 2)
         doc = fake.documents[0]
         self.assertNotIn("documentoIdentidadConductor", doc)
         self.assertNotIn("documentoIdentidadPropietario", doc)
