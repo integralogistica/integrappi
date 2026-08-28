@@ -44,6 +44,7 @@ from rutas.indicadores_cliente import router as ruta_indicadores_cliente
 from rutas.disponibilidad import ruta_disponibilidad
 from rutas.conductores import ruta_conductores
 from rutas.otros_costos import router as ruta_otros_costos
+from rutas.cuentas_placa import router as ruta_cuentas_placa
 from rutas.sicetac import reanudar_jobs_excel, router as ruta_sicetac
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
@@ -197,6 +198,7 @@ app.include_router(ruta_indicadores_cliente)
 app.include_router(ruta_disponibilidad)
 app.include_router(ruta_conductores)
 app.include_router(ruta_otros_costos)
+app.include_router(ruta_cuentas_placa)
 app.include_router(ruta_sicetac)
 
 @app.get("/", tags=['Home'])

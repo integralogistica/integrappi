@@ -20,12 +20,16 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from typing import List, Literal, Optional
+from uuid import uuid4
 
 from bson import ObjectId
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator
+from google.cloud import storage
+from PIL import Image
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from bd.bd_cliente import bd_cliente
@@ -39,6 +43,15 @@ router = APIRouter(prefix="/otros-costos", tags=["Otros Costos"])
 _OFFSET_COLOMBIA = timedelta(hours=5)
 LIMITE_COORDINADOR = 500000  # Coordinador aprueba hasta este valor inclusive
 LIMITE_VALOR_SOLICITUD = 5_000_000  # Valor total máximo permitido por solicitud
+
+# ── Adjuntos (soportes) en Google Cloud Storage ───────────────────────────────
+# Mismo patrón que rutas/vehiculos.py: bucket compartido, carpeta propia del
+# módulo; en Mongo solo se guarda la URL pública de cada archivo.
+BUCKET_OC = "integrapp"
+CARPETA_OC = "OtrosCostos"
+MAX_ADJUNTOS_OC = 10                      # tope TOTAL por solicitud (existentes + nuevos)
+MAX_TAMANO_ADJUNTO_OC = 10 * 1024 * 1024  # 10 MB por archivo
+TIPOS_ADJUNTO_OC = {"image/jpeg", "image/jpg", "image/png", "application/pdf"}
 
 # ── Plantillas de notificación WhatsApp (Meta, es_CO) ─────────────────────────
 # Una plantilla por evento del flujo. Requieren crearse/aprobarse en Meta Business
@@ -668,6 +681,129 @@ def _serializar(doc: Optional[dict], perfil: str, usuario: Optional[str] = None)
     return _aplicar_visibilidad(_jsonable(doc), perfil, usuario)
 
 
+# ── Adjuntos: validación, optimización y subida a GCS ─────────────────────────
+def _parsear_payload_adjuntos(payload: str, modelo):
+    """Los endpoints multipart reciben el modelo como string JSON en un campo Form."""
+    try:
+        return modelo.model_validate_json(payload)
+    except ValidationError as e:
+        err = e.errors()[0] if e.errors() else {}
+        loc = ".".join(str(x) for x in err.get("loc", []))
+        raise HTTPException(status_code=422, detail=f"Payload inválido ({loc}): {err.get('msg', str(e))}")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Payload JSON inválido: {str(e)}")
+
+
+def _tamano_archivo(a: UploadFile) -> int:
+    """Tamaño en bytes; respalda a.size calculándolo desde el file handle."""
+    if a.size is not None:
+        return int(a.size)
+    a.file.seek(0, 2)
+    tamano = a.file.tell()
+    a.file.seek(0)
+    return tamano
+
+
+def _validar_adjuntos(archivos: Optional[List[UploadFile]], existentes: int = 0) -> None:
+    archivos = archivos or []
+    if not archivos:
+        return
+    if existentes + len(archivos) > MAX_ADJUNTOS_OC:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Máximo {MAX_ADJUNTOS_OC} adjuntos por solicitud "
+                   f"(ya hay {existentes} y se intentan agregar {len(archivos)}).",
+        )
+    for a in archivos:
+        nombre = str(a.filename or "")
+        tipo = (a.content_type or "").lower()
+        if tipo not in TIPOS_ADJUNTO_OC:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Archivo '{nombre}': tipo no permitido ({tipo or 'desconocido'}). "
+                       "Solo imágenes JPG/PNG o PDF.",
+            )
+        if _tamano_archivo(a) > MAX_TAMANO_ADJUNTO_OC:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Archivo '{nombre}' supera el máximo de "
+                       f"{MAX_TAMANO_ADJUNTO_OC // (1024 * 1024)} MB.",
+            )
+
+
+def _optimizar_imagen_oc(archivo: UploadFile) -> BytesIO:
+    """Redimensiona y comprime una imagen a WEBP (máx 1200×800, calidad 75)."""
+    try:
+        imagen = Image.open(archivo.file)
+        imagen.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+        buffer = BytesIO()
+        imagen.save(buffer, format="WEBP", optimize=True, quality=75)
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"No se pudo procesar la imagen '{archivo.filename}': {str(e)}")
+
+
+def _subir_adjunto_gcs(archivo: UploadFile, nombre_blob: str) -> str:
+    """Sube un adjunto al bucket: imágenes optimizadas como WEBP, PDF tal cual."""
+    cliente = storage.Client()
+    bucket = cliente.bucket(BUCKET_OC)
+    ruta = f"{CARPETA_OC}/{nombre_blob}"
+    blob = bucket.blob(ruta)
+    if (archivo.content_type or "").startswith("image/"):
+        blob.upload_from_file(_optimizar_imagen_oc(archivo), content_type="image/webp")
+    else:
+        archivo.file.seek(0)
+        blob.upload_from_file(archivo.file, content_type=archivo.content_type)
+    return f"https://storage.googleapis.com/{BUCKET_OC}/{ruta}"
+
+
+def _nombre_adjunto_bucket(consecutivo: str, nombre_original: str, es_imagen: bool) -> str:
+    """OtrosCostos/{CONSECUTIVO}/{AAAA-MM-DD}/{uuid8}_{nombre-saneado}.{webp|ext}
+    El uuid evita pisar blobs entre sesiones de edición del mismo consecutivo."""
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", str(nombre_original or "adjunto"))[:60] or "adjunto"
+    if es_imagen:
+        base = re.sub(r"\.[A-Za-z0-9]+$", "", base) + ".webp"
+    fecha = _hoy_colombia().strftime("%Y-%m-%d")
+    return f"{consecutivo}/{fecha}/{uuid4().hex[:8]}_{base}"
+
+
+def _eliminar_blob_oc(url: str) -> None:
+    """Best-effort: borra un blob del bucket a partir de su URL pública."""
+    try:
+        cliente = storage.Client()
+        bucket = cliente.bucket(BUCKET_OC)
+        prefijo = f"https://storage.googleapis.com/{BUCKET_OC}/"
+        bucket.blob(url.split(prefijo)[-1]).delete()
+    except Exception as e:
+        logger.warning("No se pudo eliminar el adjunto %s: %s", url, e)
+
+
+def _subir_adjuntos(archivos: List[UploadFile], consecutivo: str, info: dict) -> List[dict]:
+    """Sube todos los adjuntos y devuelve su metadata. Ante un error a mitad de
+    tanda revierte los blobs ya subidos para no dejar huérfanos en el bucket."""
+    subidos: List[dict] = []
+    try:
+        for a in archivos:
+            es_imagen = (a.content_type or "").startswith("image/")
+            url = _subir_adjunto_gcs(a, _nombre_adjunto_bucket(consecutivo, a.filename, es_imagen))
+            subidos.append({
+                "nombre": str(a.filename or "adjunto"),
+                "url": url,
+                "content_type": "image/webp" if es_imagen else (a.content_type or "application/octet-stream"),
+                "tamano": _tamano_archivo(a),
+                "subido_por": info.get("usuario", ""),
+                "fecha": _ahora_utc(),
+            })
+        return subidos
+    except Exception as e:
+        for adj in subidos:
+            _eliminar_blob_oc(adj["url"])
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Error subiendo adjuntos a Google Storage: {str(e)}")
+
+
 # ── Validaciones (spec §8) ────────────────────────────────────────────────────
 def _validar_solicitud(
     datos_servicio: "DatosServicio",
@@ -1186,9 +1322,17 @@ async def verificar_manifiesto(req: VerificarManifiestoRequest):
 
 
 @router.post("/crear")
-async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
+async def crear_solicitud(
+    request: Request,
+    payload: str = Form(...),
+    archivos: List[UploadFile] = File(default=None),
+):
+    req = _parsear_payload_adjuntos(payload, CrearOtroCostoRequest)
     info = _resolver_usuario(req.usuario)
     _requiere(info, {"OPERATIVO", "DESPACHADOR", "ADMIN"}, "crear solicitudes")
+
+    archivos = archivos or []
+    _validar_adjuntos(archivos)
 
     if not str(req.pedido_vulcano_original or "").strip():
         raise HTTPException(status_code=422, detail="El pedido de Vulcano es obligatorio.")
@@ -1199,6 +1343,7 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
     ahora = _ahora_utc()
     estado = "pendiente_aprobacion" if req.enviar else "borrador"
 
+    obs_creacion = f"Solicitud creada con {len(archivos)} adjunto(s)" if archivos else "Solicitud creada"
     doc = {
         "pedido_vulcano_original": str(req.pedido_vulcano_original).strip(),
         "pedidos_normalizados": pedidos_norm,
@@ -1221,14 +1366,22 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
         },
         "aprobacion": {},
         "pago": {},
+        "adjuntos": [],
         "historial_movimientos": [
-            _nuevo_movimiento("creacion", None, estado, info, "Solicitud creada", _ip(request))
+            _nuevo_movimiento("creacion", None, estado, info, obs_creacion, _ip(request))
         ],
         "created_at": ahora,
         "updated_at": ahora,
     }
 
     consecutivo = _insertar_con_reintento(doc)
+
+    # Subida de adjuntos después del insert (el blob lleva el consecutivo). En
+    # hilo aparte para no bloquear el event loop con Pillow/GCS.
+    if archivos:
+        adjuntos = await asyncio.to_thread(_subir_adjuntos, archivos, consecutivo, info)
+        col_activos.update_one({"consecutivo": consecutivo}, {"$set": {"adjuntos": adjuntos}})
+        doc["adjuntos"] = adjuntos
 
     posible_dup = _verificar_duplicado_interno(pedidos_norm, doc["manifiesto"], req.costos, excluir_consecutivo=consecutivo)
     manifiesto_ya_usado = _manifiestos_usados([doc["manifiesto"]]) if doc["manifiesto"] else []
@@ -1248,7 +1401,12 @@ async def crear_solicitud(req: CrearOtroCostoRequest, request: Request):
 
 
 @router.put("/editar")
-async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
+async def editar_solicitud(
+    request: Request,
+    payload: str = Form(...),
+    archivos: List[UploadFile] = File(default=None),
+):
+    req = _parsear_payload_adjuntos(payload, EditarOtroCostoRequest)
     info = _resolver_usuario(req.usuario)
     doc, col = _doc_por_consecutivo(req.consecutivo)
     if not doc or col is not col_activos:
@@ -1281,6 +1439,12 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
 
     valor_total = _validar_solicitud(datos_servicio, costos, datos_bancarios, conductor, doc.get("pedido_encontrado", True))
     requiere_control = valor_total > LIMITE_COORDINADOR
+
+    # Adjuntos: los existentes se conservan y los nuevos se agregan al array
+    # (tope total de MAX_ADJUNTOS_OC). Validados antes de cualquier mutación.
+    archivos = archivos or []
+    adjuntos_actuales = doc.get("adjuntos") or []
+    _validar_adjuntos(archivos, existentes=len(adjuntos_actuales))
 
     set_fields = {
         "datos_servicio": datos_servicio.model_dump(),
@@ -1316,10 +1480,21 @@ async def editar_solicitud(req: EditarOtroCostoRequest, request: Request):
     else:
         tipo_mov, motivo = "edicion", "Edición de la solicitud"
 
-    mov = _nuevo_movimiento(tipo_mov, estado_actual, nuevo_estado, info, motivo, _ip(request))
+    # Subida de adjuntos nuevos (hilo aparte: Pillow/GCS no bloquean el loop).
+    adjuntos_nuevos = []
+    if archivos:
+        adjuntos_nuevos = await asyncio.to_thread(_subir_adjuntos, archivos, req.consecutivo, info)
+        set_fields["adjuntos"] = adjuntos_actuales + adjuntos_nuevos
+
+    movimientos = [_nuevo_movimiento(tipo_mov, estado_actual, nuevo_estado, info, motivo, _ip(request))]
+    if adjuntos_nuevos:
+        movimientos.append(_nuevo_movimiento(
+            "adjuntos", None, None, info,
+            f"Se agregaron {len(adjuntos_nuevos)} adjunto(s)", _ip(request),
+        ))
     col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": estado_actual},
-        {"$set": set_fields, "$push": {"historial_movimientos": mov}},
+        {"$set": set_fields, "$push": {"historial_movimientos": {"$each": movimientos}}},
     )
     actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
     # Si la edición envió a aprobación, avisar a COORDINADOR/CONTROL (fire-and-forget).
