@@ -148,10 +148,10 @@ def _validar_digitos(valor: str, campo: str, minimo: int = 5, maximo: int = 20) 
 
 
 def _validar_telefono(valor: str) -> str:
-    """Teléfono del conductor: opcional, pero si viene debe ser 7-15 dígitos."""
+    """Teléfono del conductor: obligatorio, 7-15 dígitos."""
     v = re.sub(r"\D", "", str(valor or ""))
     if not v:
-        return ""
+        raise HTTPException(status_code=422, detail="El teléfono del conductor es obligatorio.")
     if not re.fullmatch(r"\d{7,15}", v):
         raise HTTPException(status_code=422, detail="El teléfono debe tener entre 7 y 15 dígitos.")
     return v

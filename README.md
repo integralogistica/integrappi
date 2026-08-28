@@ -137,6 +137,8 @@ if bodega:
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
 - **`clientes_otros_costos`** - Catálogo de clientes sugeridos en el formulario de Otros Costos (`GET /otros-costos/clientes`; auto-siembra 9 clientes por defecto la primera vez)
 - **`causales_otros_costos`** - Catálogo de causales/tipos de costo del formulario de Otros Costos (`GET /otros-costos/tipos-costo`; auto-siembra 14 causales por defecto la primera vez, editable en Mongo)
+- **`bancos_otros_costos`** - Catálogo de bancos del formulario de Otros Costos y de Cuentas por Placa (`GET /otros-costos/bancos`; auto-siembra `BANCOS_OTROS_COSTOS_DEFAULT`, 30 bancos con código)
+- **`cuentas_por_placa`** - Catálogo «Cuentas por Placa»: datos bancarios/conductor por placa scoped por regional (`rutas/cuentas_placa.py`). Índice unique `(placa, regional)` — una placa puede repetirse entre regionales, no dentro de la misma. `regional` guarda el código CO + `regional_info {co, regional, bodega}`
 
 > **⚠️ REGLA DE ORO — una colección = un propósito.** Nunca reuses el nombre de una colección existente para un módulo/ruta nuevo. Hasta el 2026-07-29 la configuración de Pedidos y las solicitudes de Otros Costos **compartían** `otros_costos`: cada recarga del Excel hacía `delete_many({})` y borraba las solicitudes, y la configuración terminó vacía (rompió la fusión con *"No hay configuración de 'otros_costos' para el tipo 'TRACTOMULA'"*). Antes de crear un módulo: (1) revisa los nombres de colección ya usados en esta lista y con `grep 'db\["' rutas/`; (2) antes de cualquier `delete_many({})`, confirma que la colección sea de **un único propósito**; (3) si necesitas una tabla de configuración/parámetros, usa su propia colección (`config_*`), nunca la de las solicitudes.
 
@@ -541,7 +543,7 @@ Gestión de costos adicionales posteriores al servicio (parqueadero, peaje, carg
 | Registrar pago (requiere `tramite_vulcano == "ok"`) | FINANCIERO, ADMIN |
 | Anular | ADMIN |
 
-**Trazabilidad**: cada acción agrega a `historial_movimientos` `{accion, estado_anterior, estado_nuevo, usuario, nombre_usuario, rol, fecha(UTC), observacion, ip}`. Datos bancarios (`numero_cuenta`, `cedula_titular`) enmascarados en las respuestas salvo FINANCIERO/ADMIN. **Sin soportes/archivos** (solo valores).
+**Trazabilidad**: cada acción agrega a `historial_movimientos` `{accion, estado_anterior, estado_nuevo, usuario, nombre_usuario, rol, fecha(UTC), observacion, ip}`. Datos bancarios (`numero_cuenta`, `cedula_titular`) enmascarados en las respuestas salvo FINANCIERO/ADMIN. **Adjuntos**: desde 2026-08-28 las solicitudes admiten hasta 10 archivos (ver sección de esa fecha).
 
 **Perfil FINANCIERO** agregado a `PERFILES_VALIDOS` en `baseusuarios.py`. Consecutivo `OC-AAAAMMDD-NNNN` (índice unique + reintento ante colisión).
 
@@ -671,3 +673,45 @@ Cada transición del flujo ahora dispara un WhatsApp al actor que debe actuar a 
 6. **`oc_rechazada_anulada`** (→ creador): `Hola {{1}}, tu solicitud de Otros Costos {{2}} fue {{3}}. Motivo: {{4}}.` — `{{1}}` nombre · `{{2}}` consecutivo · `{{3}}` la palabra `rechazada` o `anulada` · `{{4}}` motivo.
 
 El valor se formatea en COP con punto de miles (`320.000`). Requiere `WHATSAPP_API_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID` (las mismas vars que SolicitudVehiculos). Mientras las plantillas no estén aprobadas, los logs mostrarán `[NOTIF OC] WhatsApp NO enviado … revisar plantilla …` y el flujo seguirá funcionando. **Archivo**: `rutas/otros_costos.py`.
+
+## Actualizaciones Recientes (2026-08-28)
+
+### Otros Costos — Adjuntos (soportes) en Google Cloud Storage
+
+- `POST /otros-costos/crear` y `PUT /otros-costos/editar` pasaron de JSON a **multipart/form-data**: campo `payload` (string JSON del modelo anterior) + `archivos: List[UploadFile]` (opcional). Únicos consumidores: `crearSolicitud`/`editarSolicitud` del frontend.
+- **Hasta 10 adjuntos por solicitud** (tope total: existentes + nuevos), 10 MB por archivo, tipos `image/jpeg, image/jpg, image/png, application/pdf`. Validación ANTES de insertar en Mongo (422).
+- **Optimización** (patrón `rutas/vehiculos.py`): imágenes → WEBP con Pillow (thumbnail LANCZOS máx 1200×800, quality 75); PDF tal cual. Subidas con `asyncio.to_thread` (no bloquean el event loop). Bucket `integrapp`, carpeta `OtrosCostos/{CONSECUTIVO}/{AAAA-MM-DD}/{uuid8}_{nombre}.{webp|pdf}`; con rollback de blobs si falla a mitad de tanda.
+- En Mongo solo queda `adjuntos: [{nombre, url, content_type, tamano, subido_por, fecha}]` (`tamano` = original). Al editar se acumulan y se agrega un movimiento de acción `adjuntos`. El campo viaja solo al histórico (`_mover_documento` mueve el doc completo). Helpers: `_validar_adjuntos`, `_optimizar_imagen_oc`, `_subir_adjunto_gcs`, `_nombre_adjunto_bucket`, `_subir_adjuntos`, `_eliminar_blob_oc`, `_parsear_payload_adjuntos`.
+
+### Nuevo módulo: Cuentas por Placa (`rutas/cuentas_placa.py`)
+
+Catálogo de datos bancarios/conductor por placa, **scoped por regional**, para autollenar la sección bancaria del formulario de Otros Costos al digitar la placa. Router `/cuentas-placa`; **importa helpers de otros_costos** (`_resolver_usuario`, `_requiere`, `_normalizar_regional`, `BANCOS_OTROS_COSTOS_DEFAULT`, `TIPOS_CUENTA`, `CO_A_REGIONAL`) — un solo origen de bancos/tipos.
+
+- **Colección `cuentas_por_placa`**: `{placa, nombre_conductor, telefono (OBLIGATORIO, 7-15 dígitos), nombre_beneficiario, cedula, banco, tipo_cuenta, numero_cuenta, regional (código CO), regional_info, creado_por, actualizado_por, created_at, updated_at}`. Índice unique `(placa, regional)`.
+- **Placa**: `^[A-Z0-9]{4,6}$` (máx 6, sin espacios/guiones/símbolos), validada en frontend y backend.
+- **Perfiles**: ADMIN, OPERATIVO y DESPACHADOR. Los regionales quedan SIEMPRE en su regional (derivada de `baseusuarios`); ADMIN opera cualquier regional.
+- **Endpoints**: `GET /` (listado paginado + búsqueda placa), `GET /catalogos` (bancos/tipos/regionales por bodega), `GET /por-placa` (lookup de autollenado; scope regional del usuario; múltiples coincidencias → no sugiere), `POST /crear`, `PUT /editar` (regional no editable), `DELETE /eliminar`, `POST /importar-excel` (**solo ADMIN**: regional destino por Form, **upsert** por `(placa, regional)` con `$setOnInsert`, errores por fila sin abortar — patrón `/importar-pago`), `GET /plantilla` (xlsx con 8 columnas + hoja de valores válidos), `GET /exportar-excel`.
+- Columnas del Excel: `PLACA · NOMBRE CONDUCTOR · TELEFONO · NOMBRE BENEFICIARIO · CEDULA · BANCO · TIPO DE CUENTA · NUMERO CUENTA` (cabeceras tolerantes a acentos/variantes).
+- **Autollenado en Otros Costos** (frontend): al salir del campo Placa consulta `/por-placa` y llena SOLO campos vacíos (banco, tipo_cuenta, numero_cuenta, cedula_titular, nombre_titular ← nombre_beneficiario, conductor.nombre/telefono). Nunca pisa lo digitado.
+
+### Otros Costos — Pago manual con valor/observaciones y WhatsApp al conductor
+
+- `POST /registrar-pago` acepta **`valor_despues_retenciones`** (opcional, > 0) y ahora setea top-level `Referencia_bancaria`/`valor_despues_retenciones` igual que `/importar-pago` (histórico uniforme en ambas vías). El frontend captura referencia, valor tras retenciones y observaciones en el modal de pago.
+- **WhatsApp al CONDUCTOR** al registrar el pago (manual y archivo bancario): helper `_notificar_pago_conductor(doc)` con `_normalizar_celular_co(doc.conductor.telefono)`, fire-and-forget junto a `_notificar_pago` (que avisa al creador). Plantilla Meta **`oc_pago_conductor`** (`es_CO`, 6 vars):
+
+  ```
+  Hola {{1}},
+  Te informamos que se registró el pago de costos adicionales en tu manifiesto de la solicitud {{2}}
+
+  Manifiesto {{3}}
+
+  Por un valor de: {{4}}
+
+  Valor tras retenciones: {{5}}.
+
+  Observaciones: {{6}}.
+
+  Este mensaje es informativo, no responder
+  ```
+
+  `{{1}}` nombre conductor · `{{2}}` consecutivo · `{{3}}` manifiesto · `{{4}}` valor total (`$385.000`, el `$` lo manda el backend) · `{{5}}` valor tras retenciones (`$372.450`) o `No registrado` · `{{6}}` observaciones o `Ninguna`. Requiere aprobación en Meta; sin teléfono del conductor solo queda en log y el pago se completa igual.

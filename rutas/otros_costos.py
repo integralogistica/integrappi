@@ -63,6 +63,7 @@ PLANTILLA_OC_APROBACION = ("oc_solicitud_aprobacion", "es_CO")  # → COORDINADO
 PLANTILLA_OC_TRAMITE = ("oc_para_tramite", "es_CO")            # → ANALISTA
 PLANTILLA_OC_PAGO = ("oc_para_pago", "es_CO")                  # → FINANCIERO
 PLANTILLA_OC_PAGADA = ("oc_pago_realizado", "es_CO")           # → OPERATIVO creador
+PLANTILLA_OC_PAGA_COND = ("oc_pago_conductor", "es_CO")        # → CONDUCTOR (resumen del pago)
 PLANTILLA_OC_DEVUELTA = ("oc_devuelta", "es_CO")               # → OPERATIVO creador
 PLANTILLA_OC_RECH_ANUL = ("oc_rechazada_anulada", "es_CO")     # → OPERATIVO creador
 
@@ -605,6 +606,34 @@ def _notificar_pago(doc: dict) -> None:
     _enviar_a_creador(doc, PLANTILLA_OC_PAGADA, lambda n: [n, consec, valor])
 
 
+def _notificar_pago_conductor(doc: dict) -> None:
+    """→ pagado: avisa al CONDUCTOR con el resumen del pago de su manifiesto.
+
+    El número sale del documento (conductor.telefono, dígitos sin 57); si no hay,
+    solo queda en log. Fire-and-forget igual que las demás notificaciones."""
+    try:
+        conductor = doc.get("conductor") or {}
+        celular = _normalizar_celular_co(conductor.get("telefono"))
+        if not celular:
+            logger.info("[OTROS_COSTOS] Sin teléfono del conductor: no se envía WhatsApp de pago (%s).",
+                        doc.get("consecutivo", ""))
+            return
+        pago = doc.get("pago") or {}
+        vdr = pago.get("valor_despues_retenciones")
+        params = [
+            (conductor.get("nombre") or "Conductor").strip(),
+            doc.get("consecutivo", ""),
+            doc.get("manifiesto") or (doc.get("datos_servicio") or {}).get("manifiesto") or "(sin manifiesto)",
+            f"${_valor_cop(doc.get('valor_total', 0))}",
+            f"${_valor_cop(vdr)}" if vdr is not None else "No registrado",
+            ((pago.get("observaciones") or "").strip())[:200] or "Ninguna",
+        ]
+        enviar_template_sync(celular, PLANTILLA_OC_PAGA_COND[0], PLANTILLA_OC_PAGA_COND[1], params)
+    except Exception as e:
+        logger.warning("[OTROS_COSTOS] Falló el WhatsApp de pago al conductor (%s): %s",
+                       doc.get("consecutivo", ""), e)
+
+
 def _notificar_devolucion(doc: dict, motivo: str) -> None:
     """→ devuelto: avisa al creador con el motivo para que corrija."""
     consec = doc.get("consecutivo", "")
@@ -1129,6 +1158,7 @@ class RegistrarPagoRequest(BaseModel):
     fecha_pago: Optional[str] = None
     referencia: str = ""
     observaciones: str = ""
+    valor_despues_retenciones: Optional[float] = None
 
 
 class AnularRequest(BaseModel):
@@ -1719,6 +1749,9 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
 
     ahora = _ahora_utc()
     estado_prev = doc.get("estado")
+    valor_vdr = req.valor_despues_retenciones
+    if valor_vdr is not None and valor_vdr <= 0:
+        raise HTTPException(status_code=422, detail="El valor tras retenciones debe ser mayor que cero.")
     pago = {
         "usuario": info["usuario"], "nombre": info["nombre"], "rol": info["perfil"],
         "estado_pago": (req.estado_pago or "PAGADO").strip().upper(),
@@ -1726,21 +1759,30 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
         "fecha_pago_ingresada": req.fecha_pago or None,
         "referencia": req.referencia or "",
         "observaciones": req.observaciones or "",
+        "valor_despues_retenciones": valor_vdr,
     }
     mov_pago = _nuevo_movimiento("registro_pago", estado_prev, "pagado", info, req.observaciones, _ip(request))
-    # Guardar atómicamente el pago SOLO si sigue aprobada (anti-doble-pago).
+    # Guardar atómicamente el pago SOLO si sigue aprobada (anti-doble-pago). Los
+    # campos top-level (Referencia_bancaria / valor_despues_retenciones) se setean
+    # igual que en /importar-pago para que el histórico sea uniforme en ambas vías.
+    set_pago = {"estado": "pagado", "pago": pago, "Referencia_bancaria": req.referencia or "",
+                "updated_at": ahora}
+    if valor_vdr is not None:
+        set_pago["valor_despues_retenciones"] = valor_vdr
     res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": "aprobado", "tramite_vulcano": "ok"},
-        {"$set": {"estado": "pagado", "pago": pago, "updated_at": ahora},
+        {"$set": set_pago,
          "$push": {"historial_movimientos": mov_pago}},
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
 
     doc_final = col_activos.find_one({"consecutivo": req.consecutivo})
-    # Avisar al creador que se pagó su solicitud (fire-and-forget), antes de moverla.
+    # Avisar al creador (OPERATIVO) y al CONDUCTOR (resumen del pago) que se pagó,
+    # fire-and-forget, antes de moverla al histórico.
     if doc_final:
         await asyncio.to_thread(_notificar_pago, doc_final)
+        await asyncio.to_thread(_notificar_pago_conductor, doc_final)
     # Registrar el paso al histórico y mover
     mov_hist = _nuevo_movimiento("paso_historico", "pagado", "pagado", info, "Paso al histórico", _ip(request))
     col_activos.update_one({"consecutivo": req.consecutivo}, {"$push": {"historial_movimientos": mov_hist}})
@@ -2261,6 +2303,7 @@ async def importar_pago(
         doc_final = col_activos.find_one({"consecutivo": consecutivo})
         if doc_final:
             await asyncio.to_thread(_notificar_pago, doc_final)
+            await asyncio.to_thread(_notificar_pago_conductor, doc_final)
         mov_hist = _nuevo_movimiento("paso_historico", "pagado", "pagado", info,
                                      "Paso al histórico (archivo bancario)", _ip(request))
         col_activos.update_one({"consecutivo": consecutivo},
