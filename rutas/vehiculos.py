@@ -1307,6 +1307,97 @@ async def subir_documento(
     )
 
 
+def _copiar_blob_bucket(url_origen: str, nombre_destino: str) -> str:
+    """Copia un blob ya existente del bucket a otra ruta (server-side, sin
+    bajar/subir por el cliente). Devuelve la URL pública del destino."""
+    prefijo = f"https://storage.googleapis.com/{BUCKET_NAME}/"
+    nombre_origen = url_origen.split(prefijo)[-1]
+    cliente = storage.Client()
+    bucket = cliente.bucket(BUCKET_NAME)
+    bucket.copy_blob(bucket.blob(nombre_origen), bucket, f"{CARPETA_STORAGE}/{nombre_destino}")
+    return f"{prefijo}{CARPETA_STORAGE}/{nombre_destino}"
+
+
+@ruta_vehiculos.put("/reutilizar-cedula")
+async def reutilizar_cedula(
+    placa: str = Form(...),
+    figura: str = Form(...),
+    editado_por: Optional[str] = Form(None),
+):
+    """«Es la misma persona»: copia la cédula del CONDUCTOR como cédula del
+    propietario o del tenedor SIN volver a leer con IA (ahorra Gemini).
+
+    Copia el blob (frente + reverso si existe) con la nomenclatura PROPIA de
+    la figura destino ({tipo}_{cedula}.webp — cada figura conserva su archivo
+    y su campo en Mongo; NO es la replicación por gemelos, que comparte URL).
+    La lecturasIA del conductor se copia también al tipo destino para que el
+    formulario pueda autollenar la identidad de esa figura al montar."""
+    figura = figura.strip().lower()
+    tipo_destino = {"propietario": "documentoIdentidadPropietario", "tenedor": "documentoIdentidadTenedor"}.get(figura)
+    if not tipo_destino:
+        raise HTTPException(status_code=400, detail="Figura no válida: use propietario o tenedor.")
+
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    url_cond = vehiculo.get("documentoIdentidadConductor")
+    if not url_cond or not str(url_cond).startswith("https://"):
+        raise HTTPException(status_code=409, detail="El conductor no tiene cédula cargada todavía.")
+
+    try:
+        # Frente: mismo tipo de archivo que el original (webp o pdf).
+        extension = "pdf" if str(url_cond).lower().endswith(".pdf") else "webp"
+        nombre_frente = _nombre_doc_bucket(placa, tipo_destino, extension, vehiculo)
+        url_destino = await asyncio.to_thread(_copiar_blob_bucket, url_cond, nombre_frente)
+
+        # Reverso (si el conductor lo subió): también con campo propio.
+        url_reverso_destino = None
+        url_rev_cond = vehiculo.get("documentoIdentidadConductorReverso")
+        if url_rev_cond and str(url_rev_cond).startswith("https://"):
+            ext_rev = "pdf" if str(url_rev_cond).lower().endswith(".pdf") else "webp"
+            nombre_rev = _nombre_doc_bucket(placa, f"{tipo_destino}Reverso", ext_rev, vehiculo)
+            url_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, url_rev_cond, nombre_rev)
+
+        set_doc = {tipo_destino: url_destino}
+        if url_reverso_destino:
+            set_doc[f"{tipo_destino}Reverso"] = url_reverso_destino
+        coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_doc})
+
+        # La lectura IA del conductor queda disponible también para la figura
+        # destino (autollenado de identidad en el próximo montaje del form).
+        lectura_cond = (vehiculo.get("lecturasIA") or {}).get("documentoIdentidadConductor")
+        if lectura_cond and lectura_cond.get("datos"):
+            coleccion_vehiculos.update_one(
+                {"placa": placa},
+                {"$set": {f"lecturasIA.{tipo_destino}": {
+                    **lectura_cond,
+                    "reutilizada_de": "documentoIdentidadConductor",
+                    "fecha": datetime.utcnow(),
+                }}},
+            )
+
+        # Edición de un aprobado → baja a re-revisión con diff del documento.
+        campos_diff = [{"campo": tipo_destino, "antes": vehiculo.get(tipo_destino) or "(ninguno)", "despues": url_destino}]
+        if url_reverso_destino:
+            campos_diff.append({"campo": f"{tipo_destino}Reverso", "antes": vehiculo.get(f"{tipo_destino}Reverso") or "(ninguno)", "despues": url_reverso_destino})
+        _registrar_cambio_aprobado(vehiculo, editado_por or "", "documentos", campos_diff)
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "message": f"Cédula del conductor reutilizada como {figura}",
+                "url": url_destino,
+                "url_reverso": url_reverso_destino,
+                "lectura_ia": lectura_cond or None,
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al reutilizar la cédula: {str(e)}")
+
+
 @ruta_vehiculos.put("/subir-fotos")
 async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})

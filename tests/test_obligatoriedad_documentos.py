@@ -470,5 +470,108 @@ class EliminarDocumentoGemelosTests(unittest.TestCase):
         self.assertEqual(fake.documents[0]["documentoIdentidadPropietario"], "https://x/b")
 
 
+class ReutilizarCedulaTests(unittest.TestCase):
+    """PUT /reutilizar-cedula: copia la cédula del conductor como cédula de
+    propietario/tenedor sin re-leer con IA (blob copiado server-side con
+    nomenclatura propia + lecturasIA replicada)."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def _vehiculo(self):
+        v = vehiculo_completo(
+            condCedulaCiudadania="1.020.304.050",
+            documentoIdentidadConductor="https://storage.googleapis.com/integrapp/Vehiculos/TEST01/2026-08-29/documentoIdentidadConductor.webp",
+            documentoIdentidadConductorReverso="https://storage.googleapis.com/integrapp/Vehiculos/TEST01/2026-08-29/documentoIdentidadConductorReverso.webp",
+            lecturasIA={
+                "documentoIdentidadConductor": {
+                    "datos": {"numero": "1020304050", "nombres": "MARIA", "apellidos": "PEREZ SOTO"},
+                    "avisos": [],
+                }
+            },
+        )
+        # El doc destino debe estar VACÍO antes de reutilizar (sino el test no
+        # prueba que el endpoint lo crea).
+        v.pop("documentoIdentidadPropietario", None)
+        v.pop("documentoIdentidadPropietarioReverso", None)
+        v.pop("documentoIdentidadTenedor", None)
+        v.pop("documentoIdentidadTenedorReverso", None)
+        return v
+
+    @staticmethod
+    def _copias_urls(copias):
+        """Devuelve {nombre_destino: url} de las llamadas a _copiar_blob_bucket."""
+        return {args[1]: kwargs_or_url for args, kwargs_or_url in copias}
+
+    def test_copia_frente_reverso_y_lectura(self):
+        fake = FakeColeccionVehiculos([self._vehiculo()])
+        copias = []
+        def copiar_mock(url, nombre):
+            copias.append((url, nombre))
+            return f"https://storage.googleapis.com/integrapp/Vehiculos/{nombre}"
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=copiar_mock):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-cedula",
+                data={"placa": "TEST01", "figura": "propietario"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        # Nomenclatura propia de la figura (con cédula del conductor si se conoce).
+        self.assertIn("documentoIdentidadPropietario", body["url"].rsplit("/", 1)[-1])
+        self.assertIsNotNone(body["url_reverso"])
+        self.assertEqual(body["lectura_ia"]["datos"]["numero"], "1020304050")
+        # 2 copias: frente y reverso.
+        self.assertEqual(len(copias), 2)
+        # Mongo: campo propio de la figura + lectura replicada.
+        doc = fake.documents[0]
+        self.assertNotEqual(doc["documentoIdentidadPropietario"], doc["documentoIdentidadConductor"])
+        self.assertNotEqual(doc["documentoIdentidadPropietario"], doc["documentoIdentidadConductor"])
+        self.assertIn("documentoIdentidadPropietarioReverso", doc)
+        self.assertEqual(
+            doc["lecturasIA"]["documentoIdentidadPropietario"]["datos"]["numero"], "1020304050"
+        )
+        self.assertEqual(
+            doc["lecturasIA"]["documentoIdentidadPropietario"]["reutilizada_de"],
+            "documentoIdentidadConductor",
+        )
+
+    def test_sin_cedula_del_conductor_da_409(self):
+        v = self._vehiculo()
+        v["documentoIdentidadConductor"] = None
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket") as mock_copiar:
+            resp = self.client.put(
+                "/vehiculos/reutilizar-cedula",
+                data={"placa": "TEST01", "figura": "tenedor"},
+            )
+        self.assertEqual(resp.status_code, 409)
+        mock_copiar.assert_not_called()
+
+    def test_figura_invalida_da_400(self):
+        fake = FakeColeccionVehiculos([self._vehiculo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-cedula",
+                data={"placa": "TEST01", "figura": "conductor"},
+            )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_tenedor_sin_reverso_del_conductor(self):
+        v = self._vehiculo()
+        v.pop("documentoIdentidadConductorReverso")
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"https://storage.googleapis.com/integrapp/Vehiculos/{n}"):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-cedula",
+                data={"placa": "TEST01", "figura": "tenedor"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIsNone(resp.json()["url_reverso"])
+        self.assertNotIn("documentoIdentidadTenedorReverso", fake.documents[0])
+
+
 if __name__ == "__main__":
     unittest.main()
