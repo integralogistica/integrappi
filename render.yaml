@@ -24,8 +24,39 @@ services:
         value: "40000"
       - key: SISCORE_BOT_DOWNLOAD_DIR
         value: "/tmp/descargas_siscore"
+      # Módulo de estudios de seguridad (todas no sensibles; ver rutas/seguridad_estudios.py)
+      - key: SEGURIDAD_TOKEN_MINUTES
+        value: "480"
+      # Bucket PRIVADO (publicAccessPrevention enforced) — los PDF llevan datos
+      # personales y SOLO se sirven por el endpoint autenticado. No usar el
+      # bucket público integrapp aquí.
+      - key: SEGURIDAD_ESTUDIOS_BUCKET
+        value: "integrapp-privado"
+      - key: SEGURIDAD_ESTUDIOS_CARPETA
+        value: "SeguridadEstudios"
+      # Base del QR de verificación de los PDF (URL pública del backend).
+      - key: SEGURIDAD_ESTUDIOS_URL_PUBLICA
+        value: "https://integrappi-dvmh.onrender.com"
+      - key: SEGURIDAD_INTENTOS_FUENTE
+        value: "2"
+      - key: SEGURIDAD_BACKOFF_MS
+        value: "3000"
+      - key: SEGURIDAD_TIMEOUT_FUENTE_S
+        value: "150"
+      - key: SEGURIDAD_RETENCION_DIAS
+        value: "730"
+      - key: SEGURIDAD_MAX_VIAJES_PDF
+        value: "300"
+      - key: SEGURIDAD_MAX_VIAJES_DOC
+        value: "500"
+      - key: SEGURIDAD_CONSULTAS_MIN
+        value: "10"
       # Secretos: definir en el dashboard de Render (no se commitean)
       - key: MONGO_URI
+        sync: false
+      # JWT_SECRET compartido con baseusuarios — OBLIGATORIO fijar uno fuerte
+      # (el default es inseguro y el módulo lo reporta como CRITICAL al arrancar).
+      - key: JWT_SECRET
         sync: false
       - key: SISCORE_BOT_USER
         sync: false

@@ -11,8 +11,9 @@
   guardado y el veredicto se extrae del texto.
 
 Cada consulta real se audita/cachea en `consultas_seguridad` (24h).
-La identidad se resuelve por CORREO (login actual) o nombre de usuario contra
-baseusuarios, con perfil SEGURIDAD o ADMIN.
+Autenticación (desde 2026-08-29): Bearer JWT del módulo de seguridad
+(Funciones/auth_seguridad.py) — perfil SEGURIDAD o ADMIN con empresa activa.
+El API de estudios consolidados (cédula → PDF) vive en rutas/seguridad_estudios.py.
 """
 from __future__ import annotations
 
@@ -21,12 +22,12 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from bd.bd_cliente import bd_cliente
+from Funciones.auth_seguridad import actor_actual
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
-from rutas.otros_costos import _requiere
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/seguridad", tags=["Seguridad"])
@@ -52,30 +53,13 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _resolver_usuario(usuario_o_correo: str) -> dict:
-    """Resuelve la identidad por CORREO (login actual) o, como fallback,
-    por nombre de usuario — el patrón de otros_costos ampliado para el login
-    por correo de baseusuarios.
-    """
-    valor = str(usuario_o_correo or "").strip()
-    if not valor:
-        raise HTTPException(status_code=401, detail="No autenticado")
-    doc = None
-    if "@" in valor:
-        doc = col_usuarios.find_one({"correo": {"$regex": f"^{re.escape(valor.lower())}$", "$options": "i"}})
-    if doc is None:
-        doc = col_usuarios.find_one({"usuario": valor.upper()})
-    if not doc:
-        raise HTTPException(status_code=401, detail="Usuario no válido")
-    if not doc.get("activo", True):
-        raise HTTPException(status_code=403, detail="Usuario inactivo")
-    return {
-        "usuario": doc["usuario"],
-        "perfil": (doc.get("perfil") or "").strip().upper(),
-        "regional": doc.get("regional", ""),
-        "nombre": doc.get("nombre", ""),
-        "id": str(doc["_id"]),
-    }
+def _requiere_seguridad(actor: dict) -> None:
+    """El actor (ya autenticado por Bearer) debe ser SEGURIDAD o ADMIN."""
+    if actor["perfil"] not in PERFILES_SEGURIDAD:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Su perfil ({actor['perfil']}) no tiene permiso para usar el módulo de seguridad.",
+        )
 
 
 def _normalizar_cedula(valor: str) -> str:
@@ -111,12 +95,11 @@ def _nombre_del_certificado(texto: str) -> str:
 @router.get("/manifiestos")
 async def consultar_manifiestos(
     cedula: str = Query(..., min_length=3, max_length=20, description="Cédula del conductor"),
-    usuario: str | None = Query(None, description="Correo o usuario que consulta"),
     force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
 ):
     """Manifiestos RNDC de un conductor (último año) por cédula."""
-    info = _resolver_usuario(usuario)
-    _requiere(info, PERFILES_SEGURIDAD, "consultar manifiestos de seguridad")
+    _requiere_seguridad(actor)
 
     cedula_norm = _normalizar_cedula(cedula)
     cache = _buscar_cache("manifiestos_rndc", cedula_norm, force)
@@ -150,8 +133,9 @@ async def consultar_manifiestos(
         "viajes": viajes,
         "columnas": resultado.get("columnas", []),
         "total": len(viajes),
-        "usuario": info["usuario"],
-        "perfil": info["perfil"],
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
         "consultado_en": ahora,
         "expira_en": ahora + timedelta(hours=HORAS_CACHE),
         "forzado": bool(force),
@@ -176,8 +160,8 @@ async def consultar_manifiestos(
 @router.get("/procuraduria")
 async def consultar_procuraduria(
     cedula: str = Query(..., min_length=3, max_length=20, description="Cédula a consultar"),
-    usuario: str | None = Query(None, description="Correo o usuario que consulta"),
     force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
 ):
     """Certificado de antecedentes disciplinarios de la Procuraduría (ordinario).
 
@@ -185,8 +169,7 @@ async def consultar_procuraduria(
     este certificado de aspirantes a cargos/contratos. Retorna el veredicto
     (no_registra) y la ruta del PDF oficial descargado.
     """
-    info = _resolver_usuario(usuario)
-    _requiere(info, PERFILES_SEGURIDAD, "consultar antecedentes de la Procuraduría")
+    _requiere_seguridad(actor)
 
     cedula_norm = _normalizar_cedula(cedula)
     cache = _buscar_cache("procuraduria", cedula_norm, force)
@@ -208,8 +191,9 @@ async def consultar_procuraduria(
         "nombre_certificado": _nombre_del_certificado(resultado.get("texto_pdf", "")),
         "pdf_ruta": resultado.get("pdf_ruta"),
         "pdf_tamano": len(resultado["pdf_bytes"]) if resultado.get("pdf_bytes") else 0,
-        "usuario": info["usuario"],
-        "perfil": info["perfil"],
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
         "consultado_en": ahora,
         "expira_en": ahora + timedelta(hours=HORAS_CACHE),
         "forzado": bool(force),
@@ -234,15 +218,14 @@ async def consultar_procuraduria(
 
 @router.get("/historico")
 async def listar_historico(
-    usuario: str | None = Query(None, description="Correo o usuario que consulta"),
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
     tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
+    actor: dict = Depends(actor_actual),
 ):
     """Auditoría de consultas de seguridad. No consulta portales."""
-    info = _resolver_usuario(usuario)
-    _requiere(info, PERFILES_SEGURIDAD, "ver el histórico de seguridad")
+    _requiere_seguridad(actor)
     query: dict = {}
     if tipo:
         query["tipo"] = tipo

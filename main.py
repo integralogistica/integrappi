@@ -47,6 +47,7 @@ from rutas.otros_costos import router as ruta_otros_costos
 from rutas.cuentas_placa import router as ruta_cuentas_placa
 from rutas.sicetac import reanudar_jobs_excel, router as ruta_sicetac
 from rutas.seguridad import router as ruta_seguridad
+from rutas.seguridad_estudios import admin_router as ruta_seguridad_admin, router as ruta_seguridad_estudios
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,8 @@ app.include_router(ruta_otros_costos)
 app.include_router(ruta_cuentas_placa)
 app.include_router(ruta_sicetac)
 app.include_router(ruta_seguridad)
+app.include_router(ruta_seguridad_estudios)
+app.include_router(ruta_seguridad_admin)
 
 @app.get("/", tags=['Home'])
 async def root():
