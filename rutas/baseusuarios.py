@@ -68,6 +68,9 @@ class BaseUsuario(BaseModel):
     usuario: str
     clave: str
     clientes: Optional[List[str]] = None
+    # Módulo Estudios de Seguridad: solo aplican con perfil SEGURIDAD.
+    empresa_id_seguridad: Optional[str] = None  # _id de empresas_seguridad
+    rol_seguridad: Optional[str] = None  # CONSULTADOR | ADMIN_EMPRESA
 
 class ActualizarClientesInput(BaseModel):
     clientes: List[str]
@@ -125,7 +128,40 @@ def modelo_usuario(u) -> dict:
         "clientes": u["clientes"] if isinstance(u.get("clientes"), list) else ["KABI"],
         "activo": u.get("activo", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
+        # En BD puede ser ObjectId (scripts viejos) o string: normalizar.
+        "empresa_id_seguridad": str(u["empresa_id"]) if u.get("empresa_id") else None,
+        "rol_seguridad": u.get("rol_seguridad"),
     }
+
+
+def _campos_seguridad(data: BaseUsuario) -> dict:
+    """Campos de empresa/rol del módulo de Estudios de Seguridad.
+
+    Solo aplican al perfil CLIENTE_ESTUDIOS (cliente externo del portal):
+    empresa_id (ObjectId validado de empresas_seguridad) + rol_seguridad
+    (CONSULTADOR | ADMIN_EMPRESA). El perfil SEGURIDAD es personal interno
+    de Integra (aprobación de placas /revision) y NO lleva empresa aquí.
+    Devuelve {} para cualquier otro perfil (ignora los campos).
+    """
+    if data.perfil.upper() != "CLIENTE_ESTUDIOS":
+        return {}
+    empresa_id = (data.empresa_id_seguridad or "").strip()
+    if not empresa_id:
+        raise HTTPException(
+            status_code=422,
+            detail="El perfil CLIENTE_ESTUDIOS requiere seleccionar la empresa (módulo de Estudios de Seguridad)",
+        )
+    try:
+        oid = ObjectId(empresa_id)
+    except Exception:
+        raise HTTPException(status_code=422, detail="empresa_id_seguridad inválido")
+    empresas_seg = base_datos["empresas_seguridad"]
+    if not empresas_seg.find_one({"_id": oid, "activo": True}):
+        raise HTTPException(status_code=422, detail="La empresa de seguridad no existe o está inactiva")
+    rol = (data.rol_seguridad or "CONSULTADOR").strip().upper()
+    if rol not in ("CONSULTADOR", "ADMIN_EMPRESA"):
+        raise HTTPException(status_code=422, detail="rol_seguridad debe ser CONSULTADOR o ADMIN_EMPRESA")
+    return {"empresa_id": empresa_id, "rol_seguridad": rol}
 
 
 def _buscar_baseusuario_activo(usuario: str, clave: str):
@@ -375,6 +411,7 @@ async def crear_baseusuario(data: BaseUsuario):
         "usuario": data.usuario.upper(),
         "clave": crear_hash(data.clave.strip()),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
+        **_campos_seguridad(data),
     }
 
     id_insertado = coleccion_usuarios.insert_one(nuevo).inserted_id
@@ -388,7 +425,7 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD']
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
@@ -435,11 +472,19 @@ async def actualizar_baseusuario(usuario_id: str, data: BaseUsuario):
         "usuario": data.usuario.upper(),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
+    # Seguridad: si es SEGURIDAD setea empresa/rol (validados); si dejó de
+    # serlo limpia los campos para no dejar acceso huérfano al portal.
+    campos_seg = _campos_seguridad(data)
+    if campos_seg:
+        actualiza.update(campos_seg)
+    else:
+        actualiza["empresa_id"] = None
+        actualiza["rol_seguridad"] = None
     # Solo pisar la clave si viene una clave NUEVA en claro; si el cliente
     # reenvía el hash (que nunca debería tener) se conserva la existente.
     if data.clave and data.clave.strip() and not es_hash(data.clave.strip()):
         actualiza["clave"] = crear_hash(data.clave.strip())
-    
+
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     
     if result.matched_count == 0:

@@ -44,6 +44,14 @@ def ruta_blob(empresa_id: str, anio: int, consulta_id: str, sufijo: str = "") ->
     return f"{CARPETA_SEGURIDAD}/{str(empresa_id)}/{anio}/{consulta_id}{sufijo}.pdf"
 
 
+CARPETA_COBRO = os.getenv("SEGURIDAD_COBRO_CARPETA", "SeguridadCobro")
+
+
+def ruta_blob_cuenta(empresa_id: str, periodo: str) -> str:
+    """Ruta de la cuenta de cobro: SeguridadCobro/{empresa_id}/{YYYY-MM}/cuenta_cobro_{periodo}.pdf"""
+    return f"{CARPETA_COBRO}/{str(empresa_id)}/{periodo}/cuenta_cobro_{periodo}.pdf"
+
+
 def subir_pdf(contenido: bytes, ruta: str, cedula: str, content_type: str = "application/pdf") -> dict:
     """Sube (o pisa) un PDF privado. Retorna {gcs_ruta, sha256, tamano}."""
     blob = _obtener_cliente().bucket(BUCKET_SEGURIDAD).blob(ruta)

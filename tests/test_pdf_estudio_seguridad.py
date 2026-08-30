@@ -190,5 +190,44 @@ class TestGenerarPDF(unittest.TestCase):
         self.assertEqual(primero, segundo)
 
 
+class TestTablaViajes(unittest.TestCase):
+    """Regresión del bug 2026-08-29: la tabla de manifiestos usaba texto plano
+    (reportlab no lo parte) y los nombres largos de transportadora INVADÍAN la
+    columna siguiente. Ahora cada celda es un Paragraph que hace wrap."""
+
+    def test_celdas_son_paragraph(self):
+        from reportlab.platypus import Paragraph, Table
+
+        from Funciones.pdf_estudio_seguridad import _tabla_viajes
+
+        viajes = [{
+            "Nro. de Radicado": "123408537",
+            "Fecha Hora Radicación": "2026/08/28 15:15:21",
+            "Nombre Empresa Transportadora": "CORPORACION COLOMBIANA DE LOGISTICA S.A. C.C.L S.A.",
+            "Origen": "YUMBO VALLE DEL CAUCA",
+            "Destino": "DUITAMA BOYACA",
+            "Placa": "JUY439",
+            "Tipo Doc.": "Manifiesto",
+            "Estado": "CE",
+        }]
+        tabla = _tabla_viajes(viajes, list(viajes[0].keys()))
+        self.assertIsInstance(tabla, Table)
+        celdas = tabla._cellvalues
+        for fila in celdas:
+            for celda in fila:
+                self.assertIsInstance(celda, Paragraph, "toda celda debe ser Paragraph (wrap)")
+
+    def test_anchos_respetan_el_ancho_util(self):
+        from Funciones.pdf_estudio_seguridad import ANCHO, MARGEN, _tabla_viajes
+
+        viajes = [{
+            "Nro. de Radicado": "1", "Fecha Hora Radicación": "2",
+            "Nombre Empresa Transportadora": "3", "Origen": "4", "Destino": "5",
+            "Placa": "6", "Tipo Doc.": "7", "Estado": "8",
+        }]
+        tabla = _tabla_viajes(viajes, list(viajes[0].keys()))
+        self.assertAlmostEqual(sum(tabla._colWidths), ANCHO - 2 * MARGEN, places=1)
+
+
 if __name__ == "__main__":
     unittest.main()

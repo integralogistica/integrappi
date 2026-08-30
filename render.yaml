@@ -51,6 +51,12 @@ services:
         value: "500"
       - key: SEGURIDAD_CONSULTAS_MIN
         value: "10"
+      # Cobro postpago de estudios (planes/cupos/cuentas de cobro)
+      - key: SEGURIDAD_COBRO_CARPETA
+        value: "SeguridadCobro"
+      # true: exige plan+cupo para consultar; false: válvula para despliegue gradual
+      - key: SEGURIDAD_COBRO_EXIGIR_PLAN
+        value: "true"
       # Secretos: definir en el dashboard de Render (no se commitean)
       - key: MONGO_URI
         sync: false

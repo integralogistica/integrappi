@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 
 from bson import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from bd.bd_cliente import bd_cliente
@@ -101,15 +102,19 @@ def _requiere_rol(actor: dict, roles: set[str], accion: str) -> None:
 
 
 def _filtro_empresa(actor: dict) -> dict:
-    """Filtro de aislamiento multi-tenant para TODAS las consultas de estudios."""
+    """Filtro de aislamiento multi-tenant para TODAS las consultas de estudios.
+
+    Acepta empresa_id/usuario_id tanto ObjectId (lo correcto) como string —
+    documentos escritos antes del fix de tipos siguen siendo visibles.
+    """
     if actor["rol"] == ROL_ADMIN_INTEGRA:
         return {}
-    filtro = {"empresa_id": ObjectId(actor["empresa_id"])}
+    filtro: dict = {"empresa_id": {"$in": [ObjectId(actor["empresa_id"]), actor["empresa_id"]]}}
     if (
         actor["rol"] == ROL_CONSULTADOR
         and (actor.get("empresa_config") or {}).get("aislamiento_usuario")
     ):
-        filtro["usuario_id"] = ObjectId(actor["usuario_id"])
+        filtro["usuario_id"] = {"$in": [ObjectId(actor["usuario_id"]), actor["usuario_id"]]}
     return filtro
 
 
@@ -168,11 +173,18 @@ def _empresa_del_actor(actor: dict) -> dict:
 
 
 def _respuesta_estudio(doc: dict) -> dict:
-    """Vista de respuesta del estudio (sin _id, sin campos internos)."""
+    """Vista de respuesta del estudio: sin _id ni campos internos, con
+    ObjectId convertidos a string (FastAPI no los serializa)."""
     doc = {k: v for k, v in doc.items() if k != "_id"}
-    if doc.get("fuentes"):
-        for fuente in doc["fuentes"].values():
-            fuente.pop("_pdf_bytes", None)
+    for campo in ("empresa_id", "usuario_id"):
+        if isinstance(doc.get(campo), ObjectId):
+            doc[campo] = str(doc[campo])
+    for fuente in (doc.get("fuentes") or {}).values():
+        if not isinstance(fuente, dict):
+            continue  # p.ej. fuentes.error_global (str) tras fallo inesperado
+        fuente.pop("_pdf_bytes", None)
+        if isinstance(fuente.get("cache_id"), ObjectId):
+            fuente["cache_id"] = str(fuente["cache_id"])
     return doc
 
 
@@ -222,6 +234,27 @@ def login_estudios(datos: LoginEstudios, request: Request):
     }
 
 
+@router.post("/token")
+def token_estudios(
+    request: Request,
+    formulario=Depends(OAuth2PasswordRequestForm),
+):
+    """Variante OAuth2 (formulario username/password) para el botón Authorize
+    de Swagger — reusa el mismo login del módulo."""
+    try:
+        usuario_doc, rol, empresa_id, empresa_doc = autenticar(formulario.username, formulario.password)
+    except HTTPException as exc:
+        registrar_evento("login_fallido", detalle=f"{exc.status_code}: {exc.detail}", request=request)
+        raise
+    token = crear_token_estudios(usuario_doc, str(empresa_id) if empresa_id else None, rol)
+    registrar_evento("login_exitoso", actor={
+        "usuario_id": str(usuario_doc["_id"]),
+        "usuario": usuario_doc.get("usuario", ""),
+        "empresa_id": str(empresa_id) if empresa_id else None,
+    }, request=request)
+    return {"access_token": token, "token_type": "bearer"}
+
+
 # === 2. Identidad ==============================================================
 
 @router.get("/me")
@@ -242,12 +275,140 @@ def quien_soy(actor: dict = Depends(actor_actual)):
     }
 
 
+@router.get("/cupo")
+def consultar_cupo(
+    request: Request,
+    actor: dict = Depends(actor_actual),
+    empresa_id: str | None = Query(None, description="Solo ADMIN_INTEGRA: empresa a consultar"),
+):
+    """Cupo y plan de la empresa del actor (contrato del futuro portal cliente).
+
+    ADMIN_INTEGRA debe indicar empresa_id (o se reporta su propia empresa si
+    la tiene). No expone movimientos.
+    """
+    _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "consultar el cupo")
+    from Funciones import cobro_seguridad as cobro
+
+    objetivo = actor.get("empresa_id")
+    if actor["rol"] == ROL_ADMIN_INTEGRA:
+        objetivo = empresa_id or actor.get("empresa_id")
+        if not objetivo:
+            raise HTTPException(status_code=422, detail="Indique empresa_id para consultar su cupo")
+    empresa = col_empresas.find_one({"_id": ObjectId(objetivo)})
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+
+    plan_ref = empresa.get("plan") or {}
+    plan_doc = db["planes_seguridad"].find_one({"_id": plan_ref.get("plan_id")}) if plan_ref.get("plan_id") else None
+    plan_valido, _ = cobro._plan_vigente(plan_doc, asignado_en=plan_ref.get("asignado_en"))
+    periodo = cobro.periodo_colombia()
+    consumo_mes = cobro.totales_periodo(empresa["_id"], periodo)
+
+    # Multi-plan: desglose por fuente consolidando los planes de cada una
+    # (una fuente puede tener varios planes acumulados; los cupos se suman).
+    # `planes[]` = planes INDIVIDUALES asignados (para que el usuario elija
+    # bajo cuál consultar); `fuentes[]` = consolidado por fuente (cupos totales).
+    col_planes = db["planes_seguridad"]
+    por_fuente: dict[str, dict] = {}
+    planes_individuales: dict[str, dict] = {}  # plan_id → datos agregados del plan
+    for entrada in cobro._planes_efectivos(empresa, col_planes):
+        fuente = entrada.get("fuente")
+        if fuente not in FUENTES and fuente != "todas":
+            continue
+        doc = col_planes.find_one({"_id": entrada.get("plan_id")}) if entrada.get("plan_id") else None
+        valido, _ = cobro._plan_vigente(doc, asignado_en=entrada.get("asignado_en"))
+        if not valido:
+            continue
+        nombres = [n for n in (valido.get("nombre", ""),) if n]
+        ilimitado = entrada.get("cupo_autorizado") is None
+        precio_entrada = int(entrada.get("precio_congelado") or valido.get("precio_por_estudio") or 0)
+
+        pid = str(entrada.get("plan_id"))
+        if pid not in planes_individuales:
+            planes_individuales[pid] = {
+                "plan_id": pid,
+                "nombre": valido.get("nombre", ""),
+                "precio_por_estudio": precio_entrada,
+                "fuentes": [fuente],
+                "ilimitado": ilimitado,
+                "cupo_autorizado": None if ilimitado else int(entrada.get("cupo_autorizado") or 0),
+                "cupo_consumido": int(entrada.get("cupo_consumido") or 0),
+                "cupo_disponible": None if ilimitado else int(entrada.get("cupo_disponible") or 0),
+            }
+        else:
+            pind = planes_individuales[pid]
+            if fuente not in pind["fuentes"]:
+                pind["fuentes"].append(fuente)
+            if ilimitado:
+                pind["ilimitado"] = True
+                pind["cupo_autorizado"] = None
+                pind["cupo_disponible"] = None
+            elif not pind["ilimitado"]:
+                pind["cupo_autorizado"] = (pind["cupo_autorizado"] or 0) + int(entrada.get("cupo_autorizado") or 0)
+                pind["cupo_disponible"] = (pind["cupo_disponible"] or 0) + int(entrada.get("cupo_disponible") or 0)
+            pind["cupo_consumido"] += int(entrada.get("cupo_consumido") or 0)
+
+        if fuente not in por_fuente:
+            por_fuente[fuente] = {
+                "fuente": fuente,
+                "planes_nombres": nombres,
+                "ilimitado": ilimitado,
+                "cupo_autorizado": None if ilimitado else int(entrada.get("cupo_autorizado") or 0),
+                "cupo_consumido": int(entrada.get("cupo_consumido") or 0),
+                "cupo_disponible": None if ilimitado else int(entrada.get("cupo_disponible") or 0),
+                "precio_por_estudio": precio_entrada,
+            }
+        else:
+            agg = por_fuente[fuente]
+            for n in nombres:
+                if n not in agg["planes_nombres"]:
+                    agg["planes_nombres"].append(n)
+            if ilimitado:
+                # Un plan sin tope hace que toda la fuente quede sin tope.
+                agg["ilimitado"] = True
+                agg["cupo_autorizado"] = None
+                agg["cupo_disponible"] = None
+            elif not agg["ilimitado"]:
+                # Ambos con cupo: se suman.
+                agg["cupo_autorizado"] = (agg["cupo_autorizado"] or 0) + int(entrada.get("cupo_autorizado") or 0)
+                agg["cupo_disponible"] = (agg["cupo_disponible"] or 0) + int(entrada.get("cupo_disponible") or 0)
+            agg["cupo_consumido"] += int(entrada.get("cupo_consumido") or 0)
+            # Precio mostrado: el plan más barato (el primero que se consume FIFO no
+            # se puede prometer; el mínimo es el mejor caso para el cliente).
+            agg["precio_por_estudio"] = min(agg["precio_por_estudio"], precio_entrada)
+    fuentes_cupo = []
+    for fuente, agg in por_fuente.items():
+        fuentes_cupo.append({
+            **agg,
+            "plan_nombre": " + ".join(agg["planes_nombres"]),
+        })
+
+    return {
+        "empresa": empresa.get("nombre", ""),
+        "vigente": bool(fuentes_cupo),
+        "fuentes": fuentes_cupo,
+        # Planes individuales para el selector de "bajo qué plan consultar".
+        # Solo planes con cupo restante (o sin tope) son elegibles.
+        "planes": [
+            p for p in planes_individuales.values()
+            if p["ilimitado"] or (p["cupo_disponible"] or 0) > 0
+        ],
+        "consumo_mes": {
+            "periodo": periodo,
+            "unidades": consumo_mes.get("unidades", 0),
+            "cop": consumo_mes.get("subtotal_cop", 0),
+        },
+    }
+
+
 # === 3. Crear estudio ==========================================================
 
 class CrearEstudio(BaseModel):
     cedula: str
     forzar: bool = False
     empresa_id: str | None = None  # solo ADMIN_INTEGRA (attribución del estudio)
+    fuentes: list[str] | None = None  # fuentes a consultar; None = todas las del plan
+    plan_id: str | None = None  # plan con el que cobrar la consulta (elegido por el usuario)
 
 
 @router.post("", status_code=201)
@@ -267,6 +428,8 @@ async def crear_estudio(
 
     cedula = _normalizar_cedula(datos.cedula)
 
+    from Funciones import cobro_seguridad as cobro
+
     # ADMIN_INTEGRA sin empresa: puede atribuir el estudio a una empresa vía body.
     empresa = _empresa_del_actor(actor)
     if actor["rol"] == ROL_ADMIN_INTEGRA and not actor.get("empresa_id"):
@@ -283,14 +446,80 @@ async def crear_estudio(
         raise HTTPException(status_code=403, detail="Su usuario no tiene empresa asignada")
 
     habilitadas = list((empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES)
+    # Fuentes con plan: multi-plan por fuente — la consulta corre solo las
+    # fuentes que la empresa tenga con plan vigente (ej. solo compró RNDC).
+    # ADMIN_INTEGRA ve todo.
+    if actor["rol"] != ROL_ADMIN_INTEGRA:
+        con_plan = cobro.fuentes_con_plan(empresa, habilitadas, db["planes_seguridad"])
+        habilitadas = [f for f in habilitadas if f in con_plan]
+    # El usuario ELIGE qué fuentes consultar (debe tener plan para cada una).
+    fuentes_pedidas = getattr(datos, "fuentes", None)
+    if fuentes_pedidas is not None:
+        if not fuentes_pedidas:
+            raise HTTPException(status_code=422, detail="fuentes no puede estar vacía (omítala para consultar todas)")
+        invalidas = [f for f in fuentes_pedidas if f not in FUENTES]
+        if invalidas:
+            raise HTTPException(status_code=422, detail=f"Fuentes inválidas: {invalidas}. Válidas: {list(FUENTES)}")
+        sin_plan = [f for f in fuentes_pedidas if f not in habilitadas]
+        if sin_plan:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Su empresa no tiene plan activo para: {sin_plan}. "
+                       f"Fuentes disponibles: {habilitadas}",
+            )
+        habilitadas = list(fuentes_pedidas)
     if not any(f in habilitadas for f in FUENTES):
-        raise HTTPException(status_code=503, detail="Todas las fuentes están deshabilitadas para su empresa")
+        raise HTTPException(
+            status_code=503,
+            detail="Su empresa no tiene plan activo para ninguna fuente. Contacte a Integra Logística.",
+        )
+
+    # El usuario elige BAJO QUÉ PLAN consultar: el PLAN define las fuentes a
+    # correr (sus entradas ∩ fuentes habilitadas), no al revés. Sin plan_id
+    # se corren todas las fuentes habilitadas (comportamiento previo).
+    plan_preferido = None
+    plan_pedido = getattr(datos, "plan_id", None)
+    if plan_pedido:
+        if not re.fullmatch(r"[0-9a-fA-F]{24}", plan_pedido or ""):
+            raise HTTPException(status_code=422, detail="plan_id inválido")
+        entradas_empresa = cobro._planes_efectivos(empresa, db["planes_seguridad"])
+        fuentes_del_plan = [
+            f for f in habilitadas
+            if any(e.get("fuente") == f and str(e.get("plan_id")) == plan_pedido for e in entradas_empresa)
+        ]
+        if not fuentes_del_plan:
+            raise HTTPException(
+                422,
+                detail="Ese plan no está asignado a su empresa o no cubre ninguna fuente habilitada",
+            )
+        habilitadas = fuentes_del_plan
+        plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
     actor_doc = {**actor, "empresa_id": str(empresa["_id"])}
 
     consulta_id = nuevo_consulta_id()
+
+    # Consumo por fuente (postpago): un CONSUMO por fuente corrida; atómico y
+    # con compensación en cascada; sin plan/cupo → 402 antes de ejecutar.
+    # plan_id: el usuario eligió bajo qué plan cobrar (si no, FIFO).
+    consumos = cobro.reservar_consumos(
+        empresa, actor_doc, consulta_id, habilitadas,
+        plan_preferido_id=(plan_preferido or {}).get("plan_id"),
+    )
+    for consumo in consumos:
+        if consumo.get("monto_cop", 0) != 0:
+            registrar_evento(
+                "consumo_registrado",
+                actor=actor,
+                consulta_id=consulta_id,
+                fuente=consumo.get("fuente"),
+                detalle=f"{empresa.get('nombre')} · {consumo.get('fuente')} · "
+                        f"{consumo.get('plan_nombre')} · ${consumo.get('precio_unitario_cop', 0)}",
+                request=request,
+            )
+
     crear_documento_estudio(
         consulta_id=consulta_id,
         cedula=cedula,
@@ -309,6 +538,7 @@ async def crear_estudio(
             forzar=datos.forzar,
             auditoria=_auditoria_request(request),
             registrar_evento=lambda *a, **k: registrar_evento(*a, request=request, **k),
+            fuentes=habilitadas,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -317,6 +547,22 @@ async def crear_estudio(
             {"$set": {"estado": "ERROR", "finalizado_en": _utcnow(), "fuentes.error_global": str(exc)[:300]}},
         )
         estudio = col_estudios.find_one({"consulta_id": consulta_id})
+
+    # Reembolso automático: el estudio no entregó NADA (todas las fuentes
+    # falladas) → se devuelven TODOS los consumos de la consulta (cupos y COP).
+    # PARCIAL/ADVERTENCIAS NO reembolsan (entregaron algo).
+    if consumos and (estudio.get("estado") == "ERROR"):
+        try:
+            cobro.reembolsar_consumos_consulta(
+                consulta_id, empresa, actor_doc,
+                motivo="Consulta terminó en ERROR (sin resultados)", automatico=True,
+            )
+            registrar_evento(
+                "reembolso", actor=actor, consulta_id=consulta_id,
+                detalle="automático por consulta en ERROR", request=request,
+            )
+        except Exception as exc:
+            logger.error("Reembolso automático de %s falló: %s", consulta_id, exc)
 
     # PDF consolidado (desde el doc persistido → reproducible) + subida a GCS.
     try:
@@ -762,7 +1008,7 @@ def listar_usuarios_modulo(
     if perfil:
         query["perfil"] = perfil.upper()
     else:
-        query["perfil"] = {"$in": ["SEGURIDAD", "ADMIN"]}
+        query["perfil"] = {"$in": ["SEGURIDAD", "CLIENTE_ESTUDIOS", "ADMIN"]}
     usuarios = []
     for doc in col_usuarios.find(query).sort("usuario", 1):
         usuarios.append({
@@ -813,15 +1059,15 @@ def asignar_empresa_usuario(
             raise HTTPException(status_code=422, detail=f"Rol inválido: {rol}")
 
     perfil = str(usuario.get("perfil") or "").upper()
-    if perfil not in {"SEGURIDAD", "ADMIN"}:
+    if perfil not in {"SEGURIDAD", "CLIENTE_ESTUDIOS", "ADMIN"}:
         raise HTTPException(
             status_code=422,
             detail=f"El perfil {perfil} no participa del módulo de seguridad",
         )
-    if perfil == "SEGURIDAD" and not empresa_obj_id:
+    if perfil in ("SEGURIDAD", "CLIENTE_ESTUDIOS") and not empresa_obj_id:
         raise HTTPException(
             status_code=422,
-            detail="Un usuario SEGURIDAD requiere empresa asignada (no se puede desasignar)",
+            detail=f"Un usuario {perfil} requiere empresa asignada (no se puede desasignar)",
         )
 
     cambios = {}

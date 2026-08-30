@@ -28,7 +28,6 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas as canvas_module
 from reportlab.platypus import (
     BaseDocTemplate,
@@ -39,6 +38,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from xml.sax.saxutils import escape
 
 # PDF reproducible byte a byte: fija /CreationDate y el /ID del trailer.
 # Sin esto, el mismo doc de estudio generaría hashes distintos y la
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 MAX_VIAJES_PDF = int(os.getenv("SEGURIDAD_MAX_VIAJES_PDF", "300"))
 URL_PUBLICA = os.getenv("SEGURIDAD_ESTUDIOS_URL_PUBLICA", "http://localhost:8000")
 LOGO_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "imagenes", "logo_integra.png")
-_TZ_BOGOTA = timezone(timedelta(hours=5))
+_TZ_BOGOTA = timezone(timedelta(hours=-5))  # Colombia es UTC−5
 
 ANCHO, ALTO = A4
 MARGEN = 16 * mm
@@ -79,10 +79,17 @@ ESTADO_FUENTE_TEXTO = {
     "DESHABILITADA": ("NO HABILITADA", COLOR_NEUTRO),
 }
 
-# Columnas del portal RNDC que caben en A4 (las demás se omiten con nota).
+# Columnas del portal RNDC que caben en A4 (las demás se omiten con nota),
+# con su peso de ancho relativo (la tabla totaliza el ancho útil de la hoja).
 COLUMNAS_VIAJE = [
-    "Nro. de Radicado", "Fecha Hora Radicación", "Nombre Empresa Transportadora",
-    "Origen", "Destino", "Placa", "Tipo Doc.", "Estado",
+    ("Nro. de Radicado", 1.0),
+    ("Fecha Hora Radicación", 1.15),
+    ("Nombre Empresa Transportadora", 1.7),
+    ("Origen", 1.1),
+    ("Destino", 1.1),
+    ("Placa", 0.7),
+    ("Tipo Doc.", 0.7),
+    ("Estado", 0.6),
 ]
 
 
@@ -91,7 +98,7 @@ def _fecha_colombia(dt: datetime | None, con_hora: bool = True) -> str:
     if not dt:
         return "—"
     local = dt.replace(tzinfo=timezone.utc).astimezone(_TZ_BOGOTA)
-    return local.strftime("%d/%m/%Y %H:%M:%S (UTC-5)" if con_hora else "%d/%m/%Y")
+    return local.strftime("%d/%m/%Y %H:%M:%S hora Colombia" if con_hora else "%d/%m/%Y")
 
 
 class NumberedCanvas(canvas_module.Canvas):
@@ -236,6 +243,19 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     estilo_h2 = ParagraphStyle("h2", parent=estilos["Heading2"], textColor=COLOR_PRIMARIO, spaceBefore=10)
     estilo_normal = ParagraphStyle("normal", parent=estilos["Normal"], fontSize=9, leading=13)
     estilo_peq = ParagraphStyle("peq", parent=estilos["Normal"], fontSize=7.5, leading=10, textColor=COLOR_NEUTRO)
+    # Celda de tabla con word-wrap: los strings crudos en Table NO se parten y
+    # se desbordan (SHA-256, nombres de anexos, mensajes largos del portal).
+    # splitLongWords parte palabras sin espacios (hashes de 64 caracteres).
+    estilo_celda = ParagraphStyle(
+        "celda", parent=estilos["Normal"], fontSize=8.5, leading=11,
+        splitLongWords=1, splitLongChars=1, wordWrap="LTR",
+    )
+    estilo_celda_b = ParagraphStyle("celdaB", parent=estilo_celda, fontName="Helvetica-Bold")
+    # Cabecera de "Resumen por fuente": fondo azul → letra BLANCA.
+    estilo_celda_cab = ParagraphStyle("celdaCab", parent=estilo_celda_b, textColor=colors.white)
+
+    def celda(texto: str, negrita: bool = False) -> Paragraph:
+        return Paragraph(escape(str(texto or "—")), estilo_celda_b if negrita else estilo_celda)
 
     cuento: list = []
 
@@ -266,7 +286,10 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Usuario responsable", f"{estudio.get('usuario_nombre', '')} ({estudio.get('usuario', '')})"],
         ["Identificador de consulta", consulta_id],
     ]
-    tabla_persona = Table(datos_persona, colWidths=[45 * mm, 115 * mm])
+    tabla_persona = Table(
+        [[celda(k, negrita=True), celda(v)] for k, v in datos_persona],
+        colWidths=[45 * mm, 115 * mm],
+    )
     tabla_persona.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -293,7 +316,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         etiqueta_proc,
         _texto_veredicto(proc),
     ])
-    tabla_resumen = Table(filas_resumen, colWidths=[62 * mm, 38 * mm, 60 * mm])
+    tabla_resumen = Table(
+        [
+            [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
+        ] + [
+            [celda(v) for v in fila]
+            for fila in filas_resumen[1:]
+        ],
+        colWidths=[62 * mm, 38 * mm, 60 * mm],
+    )
     tabla_resumen.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
@@ -347,6 +378,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ))
         else:
             cuento.append(_tabla_viajes(viajes, rndc.get("columnas") or []))
+            if len(viajes) > MAX_VIAJES_PDF:
+                cuento.append(Paragraph(
+                    f"Se muestran los primeros {MAX_VIAJES_PDF} de {len(viajes)} viajes; "
+                    "el detalle completo queda en el registro del estudio.",
+                    estilo_peq,
+                ))
     else:
         cuento.append(_parrafo_estado_fuente(rndc, "RNDC"))
 
@@ -376,11 +413,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ["Mensaje del certificado", (proc.get("mensaje") or "—")[:300]],
             ["Certificado oficial (anexo)", (
                 f"Adjunto a este estudio ({_nombre_anexo(estudio)}) · SHA-256: "
-                f"{(proc.get('pdf_sha256') or '—')[:32]}…"
+                f"{proc.get('pdf_sha256') or '—'}"
             )],
             ["Origen de datos", _texto_origen(proc)],
         ]
-        tabla_proc = Table(detalle_proc, colWidths=[45 * mm, 115 * mm])
+        tabla_proc = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_proc],
+            colWidths=[45 * mm, 115 * mm],
+        )
         tabla_proc.setStyle(TableStyle([
             ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -410,7 +450,10 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             f"Generado {_fecha_colombia(pdf_info.get('generado_en'))}"
         )],
     ]
-    tabla_traza = Table(filas_traza, colWidths=[40 * mm, 120 * mm])
+    tabla_traza = Table(
+        [[celda(k, negrita=True), celda(v)] for k, v in filas_traza],
+        colWidths=[40 * mm, 120 * mm],
+    )
     tabla_traza.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
@@ -444,33 +487,48 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 # --- Helpers de tablas/estados ---------------------------------------------------
 
 def _tabla_viajes(viajes: list[dict], columnas_portal: list[str]) -> Table:
-    columnas = [c for c in COLUMNAS_VIAJE if c in columnas_portal] or columnas_portal[:8]
-    filas = [columnas]
-    for v in viajes[:MAX_VIAJES_PDF]:
-        filas.append([_cortar(str(v.get(c, "")), 28) for c in columnas])
+    """Tabla de manifiestos con celdas Paragraph: el texto largo se parte
+    DENTRO de su columna (wrap) en vez de dibujarse entero e invadir la
+    columna siguiente — era el bug visual de los nombres de transportadora.
+
+    Anchos ponderados por tipo de contenido (radicado corto, empresa larga).
+    """
+    seleccion = [(c, p) for c, p in COLUMNAS_VIAJE if c in columnas_portal]
+    if not seleccion:  # portal cambió los nombres: fallback a las primeras 8
+        seleccion = [(c, 1.0) for c in columnas_portal[:8]]
+    columnas = [c for c, _ in seleccion]
+    pesos = [p for _, p in seleccion]
+
     ancho_util = ANCHO - 2 * MARGEN
-    anchos = [ancho_util / len(columnas)] * len(columnas) if columnas else []
+    total = sum(pesos)
+    anchos = [ancho_util * p / total for p in pesos]
+
+    estilo_celda = ParagraphStyle(
+        "celda_viaje", fontName="Helvetica", fontSize=6.3, leading=7.6,
+    )
+    estilo_cabecera = ParagraphStyle(
+        "cab_viaje", parent=estilo_celda, fontName="Helvetica-Bold", textColor=colors.white,
+    )
+
+    def celda(texto: str, estilo=estilo_celda) -> Paragraph:
+        return Paragraph(escape(str(texto or "").strip()) or "&nbsp;", estilo)
+
+    filas = [[celda(c, estilo_cabecera) for c in columnas]]
+    for v in viajes[:MAX_VIAJES_PDF]:
+        filas.append([celda(v.get(c, "")) for c in columnas])
+
     tabla = Table(filas, colWidths=anchos, repeatRows=1)
     tabla.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2.5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
-    if len(viajes) > MAX_VIAJES_PDF:
-        tabla = Table([[tabla]], colWidths=[ancho_util])
-        tabla.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
     return tabla
-
-
-def _cortar(texto: str, maximo: int) -> str:
-    texto = (texto or "").strip()
-    return texto if len(texto) <= maximo else texto[: maximo - 1] + "…"
 
 
 def _texto_origen(fuente: dict) -> str:

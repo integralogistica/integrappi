@@ -28,6 +28,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from bson import ObjectId
+
 from bd.bd_cliente import bd_cliente
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
@@ -81,8 +83,15 @@ def enmascarar_cedula(cedula: str) -> str:
 
 
 def _ventana_rndc() -> tuple[str, str]:
-    """Ventana fija de DIAS_VENTANA días en el formato AAAA/MM/DD del portal."""
-    hasta = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)  # hora Colombia
+    """Ventana fija de DIAS_VENTANA días en el formato AAAA/MM/DD del portal.
+
+    La fecha tope es HOY en hora Colombia (UTC−5: RESTAR 5 horas). El código
+    viejo SUMABA 5 (hora UTC+5, Estambul): entre las 19:00 y las 24:00 de
+    Colombia la fecha caía en MAÑANA y el portal RNDC responde con la página
+    sin módulo de consulta (sin tabla ni "Consulta realizada") — respuesta
+    incompleta → fuente NO_DISPONIBLE. Nunca pedir una fecha futura.
+    """
+    hasta = (datetime.now(timezone.utc) - timedelta(hours=5)).replace(tzinfo=None)  # hora Colombia
     desde = hasta - timedelta(days=DIAS_VENTANA)
     return desde.strftime("%Y/%m/%d"), hasta.strftime("%Y/%m/%d")
 
@@ -99,6 +108,10 @@ async def _llamar_con_reintento(
     Retorna (resultado | None, intentos, duraciones_s, ultima_excepcion | None).
     NUNCA levanta: si todos los intentos fallan, el error viaja en el 4.º valor
     y el llamador lo convierte en estado de la fuente.
+
+    Un resultado RNDC 'vacío sin confirmación del portal' (respuesta Ajax
+    incompleta) también consume intento y se reintenta (fix 2026-08-29): no es
+    una excepción, pero tampoco es un resultado válido.
     """
     intentos = 0
     duraciones: list[float] = []
@@ -110,6 +123,17 @@ async def _llamar_con_reintento(
         try:
             resultado = await asyncio.wait_for(invocar(), timeout=max(5.0, presupuesto - time.monotonic()))
             duraciones.append(round(time.monotonic() - inicio, 2))
+            if _resultado_vacio_sin_confirmar(nombre, resultado):
+                ultima = BotRNDC2Incompleto("El portal no confirmó la consulta (respuesta incompleta)")
+                logger.warning(
+                    "Fuente %s respondió incompleta (intento %s/%s, %.1fs) — reintentando",
+                    nombre, intentos, INTENTOS_FUENTE, duraciones[-1],
+                )
+                queda_tiempo = time.monotonic() + BACKOFF_MS / 1000 < presupuesto
+                if intentos >= INTENTOS_FUENTE or not queda_tiempo:
+                    break
+                await asyncio.sleep(BACKOFF_MS / 1000)
+                continue
             return resultado, intentos, duraciones, None
         except Exception as exc:
             ultima = exc
@@ -125,10 +149,25 @@ async def _llamar_con_reintento(
     return None, intentos, duraciones, ultima
 
 
+class BotRNDC2Incompleto(Exception):
+    """El portal RNDC respondió sin tabla ni confirmación (Ajax incompleto)."""
+
+
+def _resultado_vacio_sin_confirmar(nombre: str, resultado: dict | None) -> bool:
+    """True si el resultado de RNDC llegó sin datos NI confirmación del portal."""
+    if nombre != "manifiestos_rndc" or not isinstance(resultado, dict):
+        return False
+    if resultado.get("viajes"):
+        return False
+    return "consulta realizada" not in (resultado.get("mensaje_portal") or "").lower()
+
+
 def _clasificar_error(exc: Exception) -> tuple[str, dict]:
     """(estado de la fuente, error {tipo, mensaje}) — NO_DISPONIBLE vs ERROR."""
     if isinstance(exc, asyncio.TimeoutError):
         return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
+    if isinstance(exc, BotRNDC2Incompleto):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
@@ -212,6 +251,27 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
             and len(str(v.get("Nro. de Radicado", "")).strip()) >= 6
         ]
         total = len(viajes)
+        # Cero viajes solo es EXITO si el portal CONFIRMÓ la consulta (mensaje
+        # "Consulta realizada"): un vacío sin confirmación es una respuesta
+        # Ajax tardía/incompleta — tratarla como éxito envenenaría la caché
+        # 24 h con datos que no son (fix 2026-08-29).
+        mensaje_portal = resultado.get("mensaje_portal") or ""
+        confirmado = "consulta realizada" in mensaje_portal.lower()
+        if total == 0 and not confirmado:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal RNDC no confirmó la consulta (sin tabla ni mensaje). Intente de nuevo.",
+                },
+                "viajes": [], "columnas": resultado.get("columnas", []),
+                "total": 0, "desde": fecha_inicio, "hasta": fecha_fin,
+            })
+            logger.warning(
+                "RNDC sin confirmación para %s (sin cachear): %s",
+                enmascarar_cedula(cedula), mensaje_portal[:150] or "(sin mensaje)",
+            )
+            return seccion
         doc_cache = {
             "tipo": nombre, "cedula": cedula,
             "desde": fecha_inicio, "hasta": fecha_fin,
@@ -219,6 +279,7 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
             "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
             "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+            "mensaje_portal": mensaje_portal[:MAX_MENSAJE],
         }
         try:
             col_consultas.insert_one(doc_cache)
@@ -296,21 +357,31 @@ async def ejecutar_estudio(
     forzar: bool,
     auditoria: dict,
     registrar_evento: Callable[..., None],
+    fuentes: list[str] | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
     El doc EN_PROGRESO ya fue creado por el endpoint ANTES de llamar esto.
+    `fuentes` (opcional) es la lista AUTORITATIVA de fuentes a correr — el
+    endpoint ya la calculó (config ∩ planes vigentes por fuente); si no llega,
+    se usa config.fuentes_habilitadas como antes.
     """
     inicio = time.monotonic()
-    habilitadas = list((empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES)
+    habilitadas = list(fuentes) if fuentes is not None else list(
+        (empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES
+    )
     _id = col_estudios.find_one({"consulta_id": consulta_id}, {"_id": 1})["_id"]
+
+    async def _deshabilitada(nombre: str) -> dict:
+        # gather solo acepta awaitables: envolver el resultado sincrónico.
+        return _fuente_deshabilitada(nombre)
 
     async with _SEMAFORO_ESTUDIOS:
         resultados = await asyncio.gather(
             *[
                 _ejecutar_fuente(nombre, cedula, actor, forzar)
                 if nombre in habilitadas
-                else _fuente_deshabilitada(nombre)
+                else _deshabilitada(nombre)
                 for nombre in FUENTES
             ]
         )
@@ -391,9 +462,10 @@ def crear_documento_estudio(consulta_id: str, cedula: str, actor: dict, empresa:
         {
             "consulta_id": consulta_id,
             "codigo_verificacion": codigo_verificacion(consulta_id),
-            "empresa_id": actor["empresa_id"],
+            # ObjectId nativo: los filtros de aislamiento comparan contra ObjectId.
+            "empresa_id": ObjectId(actor["empresa_id"]),
             "empresa_nombre": empresa.get("nombre", ""),
-            "usuario_id": actor["usuario_id"],
+            "usuario_id": ObjectId(actor["usuario_id"]),
             "usuario": actor["usuario"],
             "usuario_nombre": actor["usuario_nombre"],
             "usuario_correo": actor["usuario_correo"],

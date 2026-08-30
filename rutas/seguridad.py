@@ -70,13 +70,25 @@ def _normalizar_cedula(valor: str) -> str:
 
 
 def _buscar_cache(tipo: str, cedula: str, force: bool):
-    """Última consulta vigente (24h) del tipo+cédula, o None."""
+    """Última consulta vigente (24h) del tipo+cédula, o None.
+
+    RNDC con 0 viajes y sin confirmación del portal ('Consulta realizada')
+    NO cuenta como caché válida: fue una respuesta incompleta que jamás debió
+    guardarse (fix 2026-08-29) — se ignora y se vuelve al portal."""
     if force:
         return None
-    return col_consultas.find_one(
+    doc = col_consultas.find_one(
         {"tipo": tipo, "cedula": cedula, "expira_en": {"$gt": _utcnow()}},
         sort=[("consultado_en", -1)],
     )
+    if (
+        doc
+        and tipo == "manifiestos_rndc"
+        and not (doc.get("viajes") or [])
+        and "consulta realizada" not in (doc.get("mensaje_portal") or "").lower()
+    ):
+        return None
+    return doc
 
 
 def _envolver_cache(doc: dict) -> dict:
@@ -106,8 +118,10 @@ async def consultar_manifiestos(
     if cache:
         return _envolver_cache(cache)
 
-    # Ventana fija: último año en el formato AAAA/MM/DD del portal
-    hasta = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)  # hora Colombia
+    # Ventana fija: último año en el formato AAAA/MM/DD del portal.
+    # Hora Colombia = UTC−5 (RESTAR 5 h). Sumarlas producía una fecha FUTURA
+    # entre las 19:00–24:00 CO y el portal respondía sin módulo de consulta.
+    hasta = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)  # hora Colombia
     desde = hasta - timedelta(days=DIAS_VENTANA)
     fecha_inicio = desde.strftime("%Y/%m/%d")
     fecha_fin = hasta.strftime("%Y/%m/%d")

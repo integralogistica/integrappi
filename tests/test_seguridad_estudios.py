@@ -62,17 +62,39 @@ class TestRoles(unittest.TestCase):
 class TestFiltroEmpresa(unittest.TestCase):
     def test_consultador_ve_solo_su_empresa(self):
         filtro = se._filtro_empresa(actor_consultador())
-        self.assertEqual(filtro, {"empresa_id": EMPRESA_A})
+        # El filtro acepta ObjectId Y string: los docs deben persistir ObjectId
+        # (crear_documento_estudio lo garantiza) y el filtro tolera ambos.
+        self.assertEqual(filtro["empresa_id"]["$in"], [EMPRESA_A, str(EMPRESA_A)])
 
     def test_aislamiento_usuario_lo_limita_a_sus_estudios(self):
         actor = actor_consultador(aislamiento=True)
         filtro = se._filtro_empresa(actor)
-        self.assertEqual(filtro, {"empresa_id": EMPRESA_A, "usuario_id": USUARIO_1})
+        self.assertEqual(filtro["usuario_id"]["$in"], [USUARIO_1, str(USUARIO_1)])
 
     def test_admin_integra_ve_todo(self):
         actor = actor_consultador()
         actor["rol"] = ROL_ADMIN_INTEGRA
         self.assertEqual(se._filtro_empresa(actor), {})
+
+    def test_documento_estudio_persiste_objectid(self):
+        """Regresión del bug 2026-08-29: empresa_id/usuario_id como string
+        hacían invisible el estudio para su propio creador (filtro compara
+        contra ObjectId). El doc DEBE nacer con ObjectId."""
+        actor = actor_consultador()
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-TEST", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+            )
+        self.assertIsInstance(insertados["empresa_id"], ObjectId)
+        self.assertIsInstance(insertados["usuario_id"], ObjectId)
 
 
 class TestEstadoGlobal(unittest.TestCase):
@@ -207,12 +229,14 @@ class TestEjecutarFuente(unittest.TestCase):
         with patch.object(orch, "_buscar_cache") as buscar:
             buscar.return_value = None  # force=True hace que _buscar_cache retorne None
             with patch.object(orch, "consultar_historial_viajes_sync") as bot:
-                bot.return_value = {"columnas": [], "viajes": [], "mensaje_portal": ""}
+                # Vacío CONFIRMADO por el portal (respuesta Ajax completa).
+                bot.return_value = {"columnas": [], "viajes": [], "mensaje_portal": "Consulta realizada el 2026/08/29"}
                 with patch.object(orch, "col_consultas") as col:
                     col.insert_one.return_value = None
                     seccion = self._correr(orch._ejecutar_fuente("manifiestos_rndc", "1033688842", actor_consultador(), True))
             buscar.assert_called_once_with("manifiestos_rndc", "1033688842", True)
         self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["estado"], "EXITO")  # vacío confirmado es válido
         bot.assert_called_once()
 
     def test_fallo_de_fuente_no_levanta_y_queda_registrado(self):
@@ -318,3 +342,153 @@ class TestObtenerEstudio(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEjecutarEstudioFuentesParcial(unittest.TestCase):
+    """Regresión 2026-08-29: cuando SOLO algunas fuentes están habilitadas
+    (usuario eligió una, o plan mono-fuente), las demás van DESHABILITADA.
+    El gather debe aceptarlas (antes: TypeError unhashable dict) y el estado
+    global ignora las deshabilitadas."""
+
+    def test_fuente_no_elegida_queda_deshabilitada(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from Funciones import orquestador_estudios as orch
+
+        empresa = {"_id": "emp", "nombre": "E", "config": {}}
+        doc_inicial = {"_id": "x", "consulta_id": "ES-X"}
+        persistido: dict = {}
+
+        def _find_one(query=None, *a, **k):
+            # 1ª lectura (busca _id inicial) / 2ª (doc persistido tras el update).
+            return persistido.get("doc") or doc_inicial
+
+        def _update_one(query, update):
+            # Simular el $set del orquestador sobre el doc en memoria.
+            persistido["doc"] = {**doc_inicial, **update.get("$set", {})}
+            return None
+
+        async def _fuente_ok(nombre, cedula, actor, forzar):
+            return {"estado": "EXITO", "origen": "cache", "intentos": 1, "duraciones_s": [], "error": None}
+
+        with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \
+             patch.object(orch.col_estudios, "update_one", side_effect=_update_one), \
+             patch.object(orch, "_ejecutar_fuente", side_effect=_fuente_ok):
+            resultado = asyncio.run(orch.ejecutar_estudio(
+                consulta_id="ES-X", cedula="1033688842", actor={"usuario": "U", "usuario_id": "x", "empresa_id": "e"},
+                empresa=empresa, forzar=False, auditoria={},
+                registrar_evento=lambda *a, **k: None,
+                fuentes=["procuraduria"],  # SOLO procuraduría
+            ))
+        self.assertEqual(resultado["fuentes"]["procuraduria"]["estado"], "EXITO")
+        self.assertEqual(resultado["fuentes"]["manifiestos_rndc"]["estado"], "DESHABILITADA")
+        # El estado global se calcula SOLO sobre la fuente que corrió.
+        self.assertEqual(resultado["estado"], "COMPLETADA")
+
+
+class TestRNDCVacioSinConfirmacion(unittest.TestCase):
+    """Regresión 2026-08-29: RNDC con 0 viajes y SIN 'Consulta realizada' es
+    NO_DISPONIBLE y NO se cachea (un vacío sin confirmación era una respuesta
+    Ajax incompleta que envenenaba la caché 24 h)."""
+
+    def _correr(self, resultado_bot):
+        import asyncio
+        from unittest.mock import patch
+
+        from Funciones import orquestador_estudios as orch
+
+        async def invocar():
+            return resultado_bot
+
+        with patch.object(orch, "_buscar_cache", return_value=None), \
+             patch.object(orch, "_llamar_con_reintento",
+                          return_value=(resultado_bot, 1, [1.0], None)), \
+             patch.object(orch.col_consultas, "insert_one") as insert_cache:
+            seccion = asyncio.run(orch._ejecutar_fuente(
+                "manifiestos_rndc", "1033688842",
+                {"usuario": "U", "perfil": "SEGURIDAD", "empresa_id": "e", "usuario_id": "u"},
+                forzar=False,
+            ))
+        return seccion, insert_cache
+
+    def test_vacio_sin_confirmacion_no_cachea(self):
+        seccion, insert_cache = self._correr({"viajes": [], "columnas": [], "mensaje_portal": ""})
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["total"], 0)
+        insert_cache.assert_not_called()  # no envenena la caché
+
+    def test_vacio_confirmado_si_es_exito_y_cachea(self):
+        # El portal confirmó "sin resultados" y hay viajes reales de todos modos.
+        seccion, insert_cache = self._correr({
+            "viajes": [], "columnas": [],
+            "mensaje_portal": "Consulta realizada el 2026/08/29 a las 10:00:00",
+        })
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["total"], 0)
+        insert_cache.assert_called_once()  # vacío CONFIRMADO sí se cachea
+
+    def test_con_viajes_cachea_normal(self):
+        viaje = {"Nro. de Radicado": "123408537", "Placa": "ABC123"}
+        seccion, insert_cache = self._correr({
+            "viajes": [viaje], "columnas": ["Nro. de Radicado"],
+            "mensaje_portal": "Consulta realizada el 2026/08/29",
+        })
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["total"], 1)
+        insert_cache.assert_called_once()
+
+
+class TestReintentoVacioSinConfirmar(unittest.TestCase):
+    """Regresión 2026-08-29 (tarde): la respuesta RNDC incompleta (0 viajes sin
+    'Consulta realizada') NO es excepción — antes se aceptaba al primer intento
+    sin reintentar. Ahora consume intento y se reintenta; agotados, es
+    NO_DISPONIBLE con tipo portal_inconsistente."""
+
+    def test_vacio_sin_confirmar_reintenta_y_cede(self):
+        import asyncio
+
+        async def invocar():
+            return {"viajes": [], "columnas": [], "mensaje_portal": ""}  # incompleta SIEMPRE
+
+        with patch.object(orch, "BACKOFF_MS", 0):
+            resultado, intentos, _, error = asyncio.run(
+                orch._llamar_con_reintento("manifiestos_rndc", "123", invocar)
+            )
+        self.assertIsNone(resultado)
+        self.assertEqual(intentos, 2)  # usó los 2 intentos
+        self.assertIsInstance(error, orch.BotRNDC2Incompleto)
+        estado, detalle = orch._clasificar_error(error)
+        self.assertEqual(estado, "NO_DISPONIBLE")
+        self.assertEqual(detalle["tipo"], "portal_inconsistente")
+
+    def test_vacio_sin_confirmar_recupera_en_segundo_intento(self):
+        import asyncio
+
+        estado_interno = {"veces": 0}
+
+        async def invocar():
+            estado_interno["veces"] += 1
+            if estado_interno["veces"] == 1:
+                return {"viajes": [], "columnas": [], "mensaje_portal": ""}  # incompleta
+            return {"viajes": [{"Nro. de Radicado": "123408537"}], "mensaje_portal": "Consulta realizada"}  # OK
+
+        with patch.object(orch, "BACKOFF_MS", 0):
+            resultado, intentos, _, error = asyncio.run(
+                orch._llamar_con_reintento("manifiestos_rndc", "123", invocar)
+            )
+        self.assertIsNone(error)
+        self.assertEqual(intentos, 2)
+        self.assertEqual(len(resultado["viajes"]), 1)
+
+    def test_resultado_normal_no_reintenta(self):
+        import asyncio
+
+        async def invocar():
+            return {"viajes": [], "mensaje_portal": "Consulta realizada el 2026/08/29"}  # vacío CONFIRMADO
+
+        resultado, intentos, _, error = asyncio.run(
+            orch._llamar_con_reintento("manifiestos_rndc", "123", invocar)
+        )
+        self.assertIsNone(error)
+        self.assertEqual(intentos, 1)  # vacío confirmado es válido a la primera

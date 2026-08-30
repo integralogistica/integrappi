@@ -49,9 +49,10 @@ db = bd_cliente["integra"]
 col_usuarios = db["baseusuarios"]
 col_empresas = db["empresas_seguridad"]
 
-# El login del módulo también acepta el flujo OAuth2 de Swagger.
+# El flujo OAuth2 de Swagger usa el endpoint /token (formulario); el login
+# JSON (/login) es el que consume el frontend.
 oauth2_seguridad = OAuth2PasswordBearer(
-    tokenUrl="/seguridad/estudios/login",
+    tokenUrl="/seguridad/estudios/token",
     scheme_name="SeguridadEstudiosOAuth2",
 )
 
@@ -89,11 +90,16 @@ def crear_token_estudios(usuario: dict, empresa_id: str | None, rol: str) -> str
 
 
 def _derivar_rol(usuario_doc: dict) -> tuple[str, ObjectId | None]:
-    """(rol del módulo, empresa_id) según perfil baseusuarios y rol_seguridad."""
+    """(rol del módulo, empresa_id) según perfil baseusuarios y rol_seguridad.
+
+    CLIENTE_ESTUDIOS = cliente externo del portal de Estudios de Seguridad.
+    SEGURIDAD = personal interno de Integra (histórico; la vía actual para
+    clientes es CLIENTE_ESTUDIOS).
+    """
     perfil = str(usuario_doc.get("perfil") or "").strip().upper()
     if perfil == "ADMIN":
         return ROL_ADMIN_INTEGRA, usuario_doc.get("empresa_id")
-    if perfil == "SEGURIDAD":
+    if perfil in ("SEGURIDAD", "CLIENTE_ESTUDIOS"):
         rol = str(usuario_doc.get("rol_seguridad") or "").strip().upper()
         if rol == ROL_ADMIN_EMPRESA:
             return ROL_ADMIN_EMPRESA, usuario_doc.get("empresa_id")
