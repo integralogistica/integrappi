@@ -101,6 +101,34 @@ def _fecha_colombia(dt: datetime | None, con_hora: bool = True) -> str:
     return local.strftime("%d/%m/%Y %H:%M:%S hora Colombia" if con_hora else "%d/%m/%Y")
 
 
+def _enmascarar_cedula(cedula: str | None) -> str:
+    """Cédula parcialmente oculta para el PDF (minimización por defecto)."""
+    cedula = str(cedula or "")
+    if len(cedula) <= 4:
+        return "*" * len(cedula)
+    return f"{cedula[:2]}{'*' * (len(cedula) - 4)}{cedula[-2:]}"
+
+
+def _vehiculo_del_estudio(estudio: dict) -> dict:
+    """Vehículo validado por runt en este estudio (hoy 1; array en el doc).
+
+    Tolerante con docs previos a 2026-08-30 (sin `vehiculos`): se asume que la
+    consulta de runt se hizo con la cédula de la persona evaluada (que era el
+    comportamiento del sistema entonces).
+    """
+    vehiculo = ((estudio.get("vehiculos") or [{}]) or [{}])[0] or {}
+    ced_evaluada = estudio.get("cedula", "")
+    ced_prop = vehiculo.get("cedula_propietario") or ced_evaluada
+    es_evaluado = vehiculo.get("propietario_es_evaluado")
+    if es_evaluado is None:
+        es_evaluado = ced_prop == ced_evaluada
+    return {
+        "placa": estudio.get("placa") or vehiculo.get("placa") or "",
+        "cedula_propietario": ced_prop,
+        "propietario_es_evaluado": bool(es_evaluado),
+    }
+
+
 class NumberedCanvas(canvas_module.Canvas):
     """Canvas de dos pasadas para 'Página X de Y' (receta canónica de reportlab).
 
@@ -288,8 +316,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Usuario responsable", f"{estudio.get('usuario_nombre', '')} ({estudio.get('usuario', '')})"],
         ["Identificador de consulta", consulta_id],
     ]
-    if estudio.get("placa"):
-        datos_persona.insert(2, ["Placa consultada (RUNT)", estudio.get("placa")])
+    vehiculo = _vehiculo_del_estudio(estudio)
+    if vehiculo["placa"]:
+        datos_persona.insert(2, ["Placa consultada (RUNT)", vehiculo["placa"]])
+        # El propietario del vehículo puede ser OTRA persona: el informe debe
+        # diferenciar quién se evalúa (conductor) de quién es dueño del carro.
+        datos_persona.insert(3, ["Propietario del vehículo", (
+            f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — es la persona evaluada"
+            if vehiculo["propietario_es_evaluado"] else
+            f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — DISTINTA de la persona evaluada"
+        )])
     tabla_persona = Table(
         [[celda(k, negrita=True), celda(v)] for k, v in datos_persona],
         colWidths=[45 * mm, 115 * mm],
@@ -498,6 +534,25 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 4b. Detalle RUNT (vehículo) ─────────────────────────────────────────
     cuento.append(Paragraph("Vehículo — RUNT (Mintransporte)", estilo_h2))
+    if vehiculo["placa"] and not vehiculo["propietario_es_evaluado"]:
+        # El dueño del vehículo NO es la persona evaluada: sin este aviso, el
+        # lector atribuye al conductor un rechazo de propiedad del RUNT (o un
+        # SOAT ajeno). La cédula del propietario va enmascarada.
+        badge_prop = Table(
+            [[Paragraph(
+                f"<b>PROPIETARIO DEL VEHÍCULO (CÉDULA {_enmascarar_cedula(vehiculo['cedula_propietario'])}) "
+                "ES DISTINTO DE LA PERSONA EVALUADA</b>",
+                ParagraphStyle("badge_prop", fontName="Helvetica", fontSize=9.5, textColor=colors.white, alignment=1),
+            )]],
+            colWidths=[160 * mm],
+        )
+        badge_prop.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), COLOR_ADVERTENCIA),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        cuento.append(badge_prop)
+        cuento.append(Spacer(0, 2 * mm))
     if runt.get("estado") in {"EXITO", "ADVERTENCIA"}:
         soat = runt.get("soat") or {}
         no_registra_runt = runt.get("no_registra")
@@ -548,6 +603,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             )])
         if (runt.get("mensaje") or "").strip():
             detalle_runt.append(["Mensaje del portal", runt["mensaje"][:300]])
+        if no_registra_runt is False:
+            # El rechazo "no propietario activo" es sobre la CÉDULA con que se
+            # consultó: explicitarla evita leerlo como antecedente del vehículo.
+            detalle_runt.append(["Cédula consultada (propietario)", (
+                f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — el portal validó "
+                "la propiedad del vehículo contra esta cédula"
+            )])
         detalle_runt.append(["Origen de datos", _texto_origen(runt)])
         tabla_runt = Table(
             [[celda(k, negrita=True), celda(v)] for k, v in detalle_runt],
@@ -608,6 +670,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             f"Generado {_fecha_colombia(pdf_info.get('generado_en'))}"
         )],
     ]
+    if vehiculo["placa"]:
+        filas_traza.append(["Vehículo / propietario", (
+            f"Placa {vehiculo['placa']} · propietario cédula "
+            f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} "
+            + ("(es la persona evaluada)" if vehiculo["propietario_es_evaluado"]
+               else "(DISTINTA de la persona evaluada)")
+        )])
     tabla_traza = Table(
         [[celda(k, negrita=True), celda(v)] for k, v in filas_traza],
         colWidths=[40 * mm, 120 * mm],

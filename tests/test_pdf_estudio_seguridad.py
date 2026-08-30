@@ -369,6 +369,61 @@ class TestSeccionRunt(unittest.TestCase):
         )))
         self.assertIn("PROPIETARIOACTIVO", texto)
 
+    # ── Propietario ≠ persona evaluada (2026-08-30) ────────────────────────
+
+    def _con_vehiculo(self, propietario_es_evaluado, cedula_propietario=None):
+        estudio = self._con_runt()
+        estudio["vehiculos"] = [{
+            "placa": "MVX48E",
+            "cedula_propietario": cedula_propietario
+                or ("1033688842" if propietario_es_evaluado else "1010213062"),
+            "propietario_es_evaluado": propietario_es_evaluado,
+        }]
+        return estudio
+
+    def test_propietario_distinto_badge_y_fila_persona(self):
+        """El dueño del vehículo NO es el evaluado: badge ámbar en la sección
+        RUNT + fila 'Propietario del vehículo' en los datos de la persona."""
+        texto = _texto_plano(generar_pdf_estudio(self._con_vehiculo(False)))
+        self.assertIn("ESDISTINTODELAPERSONAEVALUADA", texto)
+        self.assertIn("DISTINTA delapersonaevaluada".replace(" ", ""), texto)
+        self.assertIn("10******62", texto)  # cédula propietario enmascarada
+        self.assertIn("Propietariodelvehículo", texto)
+
+    def test_propietario_distinto_en_trazabilidad(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_vehiculo(False)))
+        self.assertIn("Vehículo/propietario", texto)
+        self.assertIn("(DISTINTAdelapersonaevaluada)", texto.replace(" ", ""))
+
+    def test_propietario_es_el_evaluado_sin_badge(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_vehiculo(True)))
+        self.assertIn("eslapersonaevaluada", texto)
+        self.assertNotIn("ESDISTINTODELAPERSONAEVALUADA", texto)
+
+    def test_doc_viejo_sin_vehiculos_no_rompe(self):
+        """Docs previos a 2026-08-30 (solo placa top-level): se asume que el
+        propietario es el evaluado y el PDF se genera igual."""
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        self.assertIn("SOATVIGENTE", texto)
+        self.assertIn("Propietariodelvehículo", texto)
+        self.assertIn("eslapersonaevaluada", texto)
+
+    def test_rechazo_propietario_explica_cedula_consultada(self):
+        """'No propietario activo' debe decir CON QUÉ cédula se consultó para
+        no leerse como antecedente del vehículo ni del conductor."""
+        estudio = self._con_vehiculo(False)
+        estudio["fuentes"]["runt"] = _fuente_runt(
+            no_registra=False, soat=None, polizas=[], datos={},
+            mensaje="La cédula no corresponde a un propietario activo del vehículo",
+        )
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        # El label se parte con el wrap de la celda ("Cédula consultada
+        # (propietario)" → "(propietario)" cae tras el valor): afirmar los
+        # fragmentos estables, sin tildes (pdfplumber las extrae como mojibake).
+        self.assertIn("dulaconsultada", texto)
+        self.assertIn("elportalvalid", texto)
+        self.assertIn("10******62", texto)
+
     def test_historial_polizas(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
         self.assertIn("HistorialdepólizasSOAT", texto)

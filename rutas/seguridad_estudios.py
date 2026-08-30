@@ -78,8 +78,10 @@ def registrar_evento(
     doc = {
         "evento": evento,
         "empresa_id": ObjectId(actor["empresa_id"]) if actor and actor.get("empresa_id") else None,
-        "usuario_id": ObjectId(actor["usuario_id"]) if actor else None,
+        # API keys no tienen usuario humano detrás (usuario_id None).
+        "usuario_id": ObjectId(actor["usuario_id"]) if actor and actor.get("usuario_id") else None,
         "usuario": (actor or {}).get("usuario"),
+        "canal": (actor or {}).get("canal", "portal"),
         "consulta_id": consulta_id,
         "fuente": fuente,
         "ip": (request.client.host if request and request.client else (actor or {}).get("ip", "")),
@@ -112,7 +114,9 @@ def _filtro_empresa(actor: dict) -> dict:
     filtro: dict = {"empresa_id": {"$in": [ObjectId(actor["empresa_id"]), actor["empresa_id"]]}}
     if (
         actor["rol"] == ROL_CONSULTADOR
+        and actor.get("canal") != "api"  # una API key ve TODA la empresa (integración)
         and (actor.get("empresa_config") or {}).get("aislamiento_usuario")
+        and actor.get("usuario_id")
     ):
         filtro["usuario_id"] = {"$in": [ObjectId(actor["usuario_id"]), actor["usuario_id"]]}
     return filtro
@@ -414,6 +418,10 @@ class CrearEstudio(BaseModel):
     fuentes: list[str] | None = None  # fuentes a consultar; None = todas las del plan
     plan_id: str | None = None  # plan con el que cobrar la consulta (elegido por el usuario)
     placa: str | None = None  # solo la fuente runt: vehículo del propietario consultado
+    # cédula del PROPIETARIO del vehículo (solo runt): el RUNT valida contra
+    # el propietario ACTIVO de la placa, que muchas veces NO es el conductor
+    # evaluado. Vacía → se usa la cédula consultada (comportamiento previo).
+    cedula_propietario: str | None = None
 
 
 @router.post("", status_code=201)
@@ -517,10 +525,14 @@ async def crear_estudio(
         habilitadas = fuentes_del_plan
         plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
-    # La fuente runt consulta por placa + cédula del propietario: la placa es
-    # OBLIGATORIA si runt va a correr (con `habilitadas` ya definitiva), y se
-    # ignora/limpia si no (no se persiste nada de placa en ese caso).
+    # La fuente runt consulta por placa + cédula del PROPIETARIO ACTIVO: la
+    # placa es OBLIGATORIA si runt va a correr (con `habilitadas` ya definitiva),
+    # y se ignora/limpia si no (no se persiste nada del vehículo en ese caso).
+    # La cédula del propietario puede ser DISTINTA de la del conductor evaluado
+    # (dueño ≠ conductor): sin `cedula_propietario` se asume que el evaluado es
+    # el propietario (comportamiento previo a 2026-08-30).
     placa: str | None = None
+    cedula_propietario: str | None = None
     if "runt" in habilitadas:
         if not (datos.placa or "").strip():
             raise HTTPException(
@@ -528,6 +540,10 @@ async def crear_estudio(
                 detail="La fuente RUNT requiere la placa del vehículo (campo placa)",
             )
         placa = _normalizar_placa(datos.placa)
+        if (datos.cedula_propietario or "").strip():
+            cedula_propietario = _normalizar_cedula(datos.cedula_propietario)
+        else:
+            cedula_propietario = cedula
 
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
@@ -562,6 +578,7 @@ async def crear_estudio(
         forzar=datos.forzar,
         auditoria=_auditoria_request(request),
         placa=placa,
+        cedula_propietario=cedula_propietario,
     )
 
     try:
@@ -575,6 +592,7 @@ async def crear_estudio(
             registrar_evento=lambda *a, **k: registrar_evento(*a, request=request, **k),
             fuentes=habilitadas,
             placa=placa,
+            cedula_propietario=cedula_propietario,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)

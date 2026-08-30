@@ -25,8 +25,10 @@ de los estudios quedan predecibles.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -48,6 +50,7 @@ SEGURIDAD_TOKEN_MINUTES = int(os.getenv("SEGURIDAD_TOKEN_MINUTES", "480"))
 db = bd_cliente["integra"]
 col_usuarios = db["baseusuarios"]
 col_empresas = db["empresas_seguridad"]
+col_api_keys = db["api_keys_seguridad"]
 
 # El flujo OAuth2 de Swagger usa el endpoint /token (formulario); el login
 # JSON (/login) es el que consume el frontend.
@@ -69,6 +72,86 @@ ROL_CONSULTADOR = "CONSULTADOR"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# ── API keys (integraciones de clientes, 2026-08-30) ──────────────────────────
+# Canal de máquina a máquina para el servicio por API: el cliente manda
+# `Authorization: Bearer sek_…` (mismo header que el JWT del portal). La clave
+# se muestra UNA vez al crearla; en BD solo vive su SHA-256 (no reversible).
+# El actor derivado es CONSULTADOR de la empresa (jamás admin) con
+# canal="api": estudios, movimientos y eventos quedan marcados con el origen.
+
+PREFIJO_API_KEY = "sek_"
+# Throttle del update de ultimo_uso_en (evita 1 write por request).
+_SEGUNDOS_THROTTLE_USO = 60
+
+
+def generar_api_key(nombre: str, empresa_id, creado_por: str) -> tuple[str, dict]:
+    """(clave_plana para mostrar UNA vez, doc listo para insert).
+
+    Formato: sek_ + 40 hex (160 bits de entropía). Se persiste el hash
+    SHA-256 y un prefijo visible (`sek_ab12cd…`) para identificarla en el
+    panel sin exponer la clave.
+    """
+    clave = PREFIJO_API_KEY + secrets.token_hex(20)
+    doc = {
+        "empresa_id": empresa_id,
+        "nombre": nombre.strip(),
+        "prefijo": clave[:11] + "…",
+        "hash_sha256": hashlib.sha256(clave.encode("utf-8")).hexdigest(),
+        "activo": True,
+        "scopes": ["estudios:crear", "estudios:leer"],
+        "creado_por": creado_por,
+        "creado_en": _utcnow(),
+        "ultimo_uso_en": None,
+        "revocada_en": None,
+    }
+    return clave, doc
+
+
+def _actor_de_api_key(clave: str) -> dict:
+    """Resuelve una API key en actor CONSULTADOR de su empresa.
+
+    Anti-enumeración: clave inválida, revocada o empresa inactiva devuelven el
+    MISMO 401 genérico del JWT (no revela cuál falló).
+    """
+    error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="No se pudo validar las credenciales",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    doc = col_api_keys.find_one({
+        "hash_sha256": hashlib.sha256(clave.encode("utf-8")).hexdigest(),
+        "activo": True,
+    })
+    if not doc:
+        raise error
+    empresa = col_empresas.find_one({"_id": doc["empresa_id"]})
+    if not empresa or not empresa.get("activo", True):
+        raise error
+
+    # ultimo_uso_en con throttle: máx 1 write/min por key (best-effort).
+    ultimo = doc.get("ultimo_uso_en")
+    if not ultimo or (_utcnow() - ultimo).total_seconds() >= _SEGUNDOS_THROTTLE_USO:
+        try:
+            col_api_keys.update_one({"_id": doc["_id"]}, {"$set": {"ultimo_uso_en": _utcnow()}})
+        except Exception as exc:
+            logger.warning("ultimo_uso_en de la API key %s no se actualizó: %s", doc.get("prefijo"), exc)
+
+    return {
+        "usuario_id": None,  # no hay usuario humano detrás
+        "usuario": f"API:{doc.get('nombre', '')}",
+        "usuario_nombre": f"API {doc.get('nombre', '')}",
+        "usuario_correo": "",
+        "perfil": "CLIENTE_ESTUDIOS",
+        "rol": ROL_CONSULTADOR,  # una API key NUNCA es admin
+        "empresa_id": str(doc["empresa_id"]),
+        "empresa_nombre": empresa.get("nombre", ""),
+        "empresa_config": empresa.get("config", {}) or {},
+        "canal": "api",
+        "api_key_id": str(doc["_id"]),
+        "api_key_nombre": doc.get("nombre", ""),
+    }
 
 
 def crear_token_estudios(usuario: dict, empresa_id: str | None, rol: str) -> str:
@@ -185,16 +268,26 @@ def _cargar_actor(usuario_id: str) -> dict:
         "empresa_id": str(empresa_id) if empresa_id else None,
         "empresa_nombre": (empresa_doc or {}).get("nombre", ""),
         "empresa_config": (empresa_doc or {}).get("config", {}) or {},
+        "canal": "portal",  # sesión humana (portal/Swagger); "api" = API key
+        "api_key_id": None,
+        "api_key_nombre": None,
     }
 
 
 async def actor_actual(token: str = Depends(oauth2_seguridad)) -> dict:
-    """Dependencia FastAPI: valida el token y devuelve el actor (recargado de BD)."""
+    """Dependencia FastAPI: valida el token y devuelve el actor (recargado de BD).
+
+    Acepta DOS credenciales en el mismo header `Authorization: Bearer …`:
+      - JWT del login del portal (recarga el usuario de baseusuarios), o
+      - API key de integración (`sek_…`) → actor CONSULTADOR con canal="api".
+    """
     error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudo validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if token.startswith(PREFIJO_API_KEY):
+        return _actor_de_api_key(token)
     try:
         payload = jwt.decode(token, BASEUSUARIOS_JWT_SECRET, algorithms=[BASEUSUARIOS_JWT_ALGORITHM])
         if payload.get("auth_source") != "baseusuarios":

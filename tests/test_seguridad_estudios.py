@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from Funciones import orquestador_estudios as orch
 from rutas import seguridad_estudios as se
+from Funciones import auth_seguridad as auth
 from Funciones.auth_seguridad import (
     ROL_ADMIN_EMPRESA,
     ROL_ADMIN_INTEGRA,
@@ -57,6 +58,141 @@ class TestRoles(unittest.TestCase):
     def test_perfil_ajeno_sin_rol(self):
         rol, _ = _derivar_rol({"perfil": "CONDUCTOR"})
         self.assertEqual(rol, "")
+
+
+class TestApiKeyAuth(unittest.TestCase):
+    """API keys de integración (2026-08-30): mismo header Bearer con prefijo
+    sek_; actor CONSULTADOR de la empresa con canal="api". La clave plana solo
+    existe al crearla (en BD vive su SHA-256)."""
+
+    class ColFakeFind:
+        def __init__(self, doc):
+            self._doc = doc
+            self.updates = []
+
+        def find_one(self, filtro=None):
+            return self._doc
+
+        def update_one(self, filtro, cambios):
+            self.updates.append((filtro, cambios))
+
+    def _key(self, activo=True, empresa_id=EMPRESA_A):
+        clave, doc = auth.generar_api_key("Integración SILO", empresa_id, "EZARATE")
+        doc["_id"] = ObjectId()
+        doc["activo"] = activo
+        return clave, doc
+
+    def _empresa_doc(self, activo=True):
+        return {"_id": EMPRESA_A, "nombre": "EMPRESA A", "activo": activo, "config": {}}
+
+    def test_generar_api_key_hash_y_prefijo(self):
+        import hashlib
+
+        clave, doc = auth.generar_api_key("TEST", EMPRESA_A, "EZARATE")
+        self.assertTrue(clave.startswith("sek_"))
+        self.assertEqual(doc["hash_sha256"], hashlib.sha256(clave.encode("utf-8")).hexdigest())
+        self.assertTrue(doc["prefijo"].startswith("sek_"))
+        self.assertTrue(doc["prefijo"].endswith("…"))
+        # La clave plana jamás viaja en el doc persistible.
+        self.assertNotIn(clave, str(doc))
+        self.assertEqual(doc["scopes"], ["estudios:crear", "estudios:leer"])
+
+    def test_actor_de_api_key_valida(self):
+        clave, doc = self._key()
+        with patch.object(auth, "col_api_keys", self.ColFakeFind(doc)):
+            with patch.object(auth, "col_empresas", self.ColFakeFind(self._empresa_doc())):
+                actor = auth._actor_de_api_key(clave)
+        self.assertEqual(actor["rol"], ROL_CONSULTADOR)  # una API key NUNCA es admin
+        self.assertEqual(actor["canal"], "api")
+        self.assertEqual(actor["usuario"], "API:Integración SILO")
+        self.assertIsNone(actor["usuario_id"])  # no hay humano detrás
+        self.assertEqual(actor["empresa_id"], str(EMPRESA_A))
+        self.assertEqual(actor["api_key_nombre"], "Integración SILO")
+
+    def test_actor_de_api_key_revocada_401(self):
+        clave, doc = self._key(activo=False)
+        # El lookup filtra activo=True → la revocada no aparece (401 genérico).
+        col = self.ColFakeFind(None)
+        with patch.object(auth, "col_api_keys", col):
+            with self.assertRaises(HTTPException) as ctx:
+                auth._actor_de_api_key(clave)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_actor_de_api_key_empresa_inactiva_401(self):
+        clave, doc = self._key()
+        with patch.object(auth, "col_api_keys", self.ColFakeFind(doc)):
+            with patch.object(auth, "col_empresas", self.ColFakeFind(self._empresa_doc(activo=False))):
+                with self.assertRaises(HTTPException) as ctx:
+                    auth._actor_de_api_key(clave)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_actor_actual_enruta_por_prefijo(self):
+        """`actor_actual` con sek_… resuelve como API key (sin tocar el JWT);
+        con un JWT normal va por _cargar_actor (canal portal)."""
+        clave, doc = self._key()
+        with patch.object(auth, "col_api_keys", self.ColFakeFind(doc)):
+            with patch.object(auth, "col_empresas", self.ColFakeFind(self._empresa_doc())):
+                actor = asyncio.run(auth.actor_actual(clave))
+        self.assertEqual(actor["canal"], "api")
+
+        token = crear_token_estudios(
+            {"_id": USUARIO_1, "usuario": "JPEREZ", "perfil": "SEGURIDAD"}, str(EMPRESA_A), ROL_CONSULTADOR
+        )
+        actor_jwt = {"canal": "portal", "usuario_id": str(USUARIO_1)}
+        with patch.object(auth, "_cargar_actor", return_value=actor_jwt) as cargar:
+            resultado = asyncio.run(auth.actor_actual(token))
+        cargar.assert_called_once_with(str(USUARIO_1))
+        self.assertEqual(resultado["canal"], "portal")
+
+    def test_doc_estudio_marca_canal_api(self):
+        """El doc del estudio persiste canal="api" + api_key y SIN usuario_id."""
+        actor = actor_consultador()
+        actor.update({"canal": "api", "usuario_id": None, "usuario": "API:SILO",
+                      "api_key_id": "5f1c" * 6, "api_key_nombre": "SILO"})
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-API1", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+            )
+        self.assertEqual(insertados["canal"], "api")
+        self.assertEqual(insertados["api_key"]["nombre"], "SILO")
+        self.assertIsNone(insertados["usuario_id"])
+        self.assertEqual(insertados["usuario"], "API:SILO")
+
+    def test_doc_estudio_canal_portal_default(self):
+        """Actor humano (sin canal) → doc con canal="portal" y api_key None."""
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-PORTAL1", cedula="1033688842", actor=actor_consultador(),
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+            )
+        self.assertEqual(insertados["canal"], "portal")
+        self.assertIsNone(insertados["api_key"])
+        self.assertIsInstance(insertados["usuario_id"], ObjectId)
+
+    def test_filtro_empresa_api_ignora_aislamiento(self):
+        """Una API key es una integración de la EMPRESA: ve todos sus estudios
+        aunque la empresa tenga aislamiento_usuario (que aplica a humanos)."""
+        actor = actor_consultador(aislamiento=True)
+        actor.update({"canal": "api"})
+        filtro = se._filtro_empresa(actor)
+        self.assertNotIn("usuario_id", filtro)
+        # El humano con aislamiento sí lo tiene (regresión).
+        self.assertIn("usuario_id", se._filtro_empresa(actor_consultador(aislamiento=True)))
 
 
 class TestFiltroEmpresa(unittest.TestCase):
@@ -624,6 +760,110 @@ class TestFuenteRunt(unittest.TestCase):
                     )
         self.assertEqual(seccion["estado"], "ERROR")
         self.assertEqual(seccion["error"]["tipo"], "captcha")
+
+
+class TestFuenteRuntPropietario(unittest.TestCase):
+    """2026-08-30: el RUNT consulta con la cédula del PROPIETARIO ACTIVO de la
+    placa, que puede ser DISTINTA de la persona evaluada (conductor). La caché,
+    el bot y el doc de caché van con la cédula del propietario; el estudio
+    persiste vehiculos[] con la relación propietario/evaluado."""
+
+    RESULTADO_OK = TestFuenteRunt.RESULTADO_OK
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_runt_usa_cedula_propietario_en_cache_y_bot(self):
+        """Con cedula_propietario, la caché se busca y el bot se invoca con la
+        cédula del DUEÑO, no con la del conductor evaluado."""
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.return_value = self.RESULTADO_OK
+                seccion = self._correr(
+                    orch._ejecutar_fuente(
+                        "runt", "1033688842", actor_consultador(), False,
+                        placa="MVX48E", cedula_propietario="1010213062",
+                    )
+                )
+        buscar.assert_called_once_with("runt", "1010213062", False, placa="MVX48E")
+        bot.assert_called_once_with("MVX48E", "1010213062")
+        self.assertEqual(seccion["estado"], "EXITO")
+
+    def test_sin_cedula_propietario_usa_la_del_evaluado(self):
+        """Sin cedula_propietario se mantiene el comportamiento previo: la
+        consulta de runt va con la cédula de la persona evaluada."""
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.return_value = self.RESULTADO_OK
+                self._correr(
+                    orch._ejecutar_fuente(
+                        "runt", "1033688842", actor_consultador(), False, placa="MVX48E",
+                    )
+                )
+        buscar.assert_called_once_with("runt", "1033688842", False, placa="MVX48E")
+        bot.assert_called_once_with("MVX48E", "1033688842")
+
+    def test_documento_persiste_vehiculos_propietario_distinto(self):
+        actor = actor_consultador()
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-PROP1", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+                placa="MVX48E", cedula_propietario="1010213062",
+            )
+        self.assertEqual(insertados["vehiculos"], [{
+            "placa": "MVX48E",
+            "cedula_propietario": "1010213062",
+            "propietario_es_evaluado": False,
+        }])
+
+    def test_documento_persiste_vehiculos_propietario_evaluado(self):
+        """Sin cedula_propietario (dueño asumido = evaluado) o con la misma
+        cédula, la relación queda True."""
+        actor = actor_consultador()
+        for ced_prop in (None, "1033688842"):
+            insertados = {}
+
+            class ColFake:
+                def insert_one(self, doc):
+                    doc["_id"] = ObjectId()
+                    insertados.update(doc)
+
+            with patch.object(orch, "col_estudios", ColFake()):
+                orch.crear_documento_estudio(
+                    consulta_id="ES-PROP2", cedula="1033688842", actor=actor,
+                    empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+                    placa="MVX48E", cedula_propietario=ced_prop,
+                )
+            self.assertEqual(insertados["vehiculos"], [{
+                "placa": "MVX48E",
+                "cedula_propietario": "1033688842",
+                "propietario_es_evaluado": True,
+            }])
+
+    def test_documento_sin_runt_no_persiste_vehiculos(self):
+        actor = actor_consultador()
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-PROP3", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+            )
+        self.assertEqual(insertados["vehiculos"], [])
+        self.assertIsNone(insertados["placa"])
 
 
 class TestCacheRuntConPlaca(unittest.TestCase):

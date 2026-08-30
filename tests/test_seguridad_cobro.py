@@ -843,6 +843,25 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         self.assertEqual(cupos[self.RNDC], 9)
         self.assertEqual(cupos[RUNT], 4)
 
+    def test_consumo_marca_canal_portal_o_api(self):
+        """Canal del consumo (2026-08-30): actor humano → "portal"; actor de API
+        key (canal="api") → los CONSUMO quedan marcados para distinguir en
+        historial, movimientos y cuentas qué fue manual y qué por integración."""
+        empresa, col_emp, col_pla, col_mov = self._montaje(
+            [entrada_plan(self.RNDC, plan_doc(), cupo_autorizado=10)],
+        )
+        mov_portal = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-CANAL-1", [self.RNDC],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        actor_api = {**ACTOR, "canal": "api", "usuario": "API:SILO"}
+        mov_api = cobro.reservar_consumos(
+            empresa, actor_api, "ES-CANAL-2", [self.RNDC],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(mov_portal[0]["canal"], "portal")
+        self.assertEqual(mov_api[0]["canal"], "api")
+
     def test_multi_plan_misma_fuente_fifo(self):
         """Dos planes acumulados en la MISMA fuente: se consume primero el
         plan asignado más antiguo (FIFO) y cada consumo cobra SU precio

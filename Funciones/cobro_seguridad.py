@@ -49,6 +49,7 @@ col_planes = db["planes_seguridad"]
 col_movimientos = db["movimientos_cobro_seguridad"]
 col_periodos = db["periodos_cobro_seguridad"]
 col_empresas = db["empresas_seguridad"]
+col_api_keys = db["api_keys_seguridad"]
 
 _indices_creados = False
 
@@ -81,6 +82,13 @@ def asegurar_indices_cobro() -> None:
             pass  # no existía (deploy fresco)
         col_periodos.create_index(
             [("empresa_id", 1), ("periodo", 1)], name="idx_perseg_empresa_periodo", unique=True
+        )
+        # API keys: lookup por hash (login de integraciones) y listado por empresa.
+        col_api_keys.create_index(
+            [("hash_sha256", 1)], name="idx_apikey_hash", unique=True
+        )
+        col_api_keys.create_index(
+            [("empresa_id", 1), ("activo", 1)], name="idx_apikey_empresa_activa"
         )
         _indices_creados = True
     except Exception as exc:
@@ -357,6 +365,7 @@ def reservar_consumos(
             mov = _nuevo_movimiento(
                 empresa, actor, TIPO_CONSUMO, unidades=0, monto_cop=0, consulta_id=consulta_id,
                 plan=None, periodo=periodo, exento=True,
+                extra={"canal": actor.get("canal") or "portal"},
             )
             col_mov.insert_one(mov)
             return [mov]
@@ -450,6 +459,9 @@ def reservar_consumos(
         mov = _nuevo_movimiento(
             empresa, actor, TIPO_CONSUMO, unidades=1, monto_cop=precio, consulta_id=consulta_id,
             plan=plan_doc, periodo=periodo, fuente=fuente,
+            # Canal del consumo: "portal" (humano) | "api" (integración con API
+            # key) — visible en movimientos, historial del cliente y cuentas.
+            extra={"canal": actor.get("canal") or "portal"},
         )
         try:
             col_mov.insert_one(mov)

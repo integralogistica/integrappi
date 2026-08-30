@@ -216,11 +216,21 @@ def _estado_runt(seccion: dict) -> str:
     return "EXITO"
 
 
-async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None) -> dict:
+async def _ejecutar_fuente(
+    nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
+    cedula_propietario: str | None = None,
+) -> dict:
     """Ejecuta una fuente (caché → portal con reintento) y devuelve su sección
     lista para el doc del estudio. NUNCA lanza: una fuente caída queda
-    registrada como NO_DISPONIBLE/ERROR. `placa` solo lo usa la fuente runt
-    (consulta de vehículo: placa + cédula del propietario)."""
+    registrada como NO_DISPONIBLE/ERROR. `placa`/`cedula_propietario` solo los
+    usa la fuente runt (consulta de vehículo por placa + cédula del PROPIETARIO
+    ACTIVO, que puede ser distinta de la persona evaluada)."""
+    if nombre == "runt":
+        # El RUNT valida la cédula contra el PROPIETARIO ACTIVO de la placa:
+        # cuando el conductor evaluado no es el dueño, la consulta (y la caché,
+        # y el bot) van con la cédula del propietario. Sin `cedula_propietario`
+        # se asume que el evaluado es el propietario (comportamiento previo).
+        cedula = cedula_propietario or cedula
     seccion: dict[str, Any] = {
         "estado": "ERROR",
         "origen": None,
@@ -538,13 +548,15 @@ async def ejecutar_estudio(
     fuentes: list[str] | None = None,
     *,
     placa: str | None = None,
+    cedula_propietario: str | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
     El doc EN_PROGRESO ya fue creado por el endpoint ANTES de llamar esto.
     `fuentes` (opcional) es la lista AUTORITATIVA de fuentes a correr — el
     endpoint ya la calculó (config ∩ planes vigentes por fuente); si no llega,
-    se usa config.fuentes_habilitadas como antes.
+    se usa config.fuentes_habilitadas como antes. `placa`/`cedula_propietario`
+    solo los usa runt (vehículo del propietario, que puede ≠ persona evaluada).
     """
     inicio = time.monotonic()
     habilitadas = list(fuentes) if fuentes is not None else list(
@@ -559,7 +571,10 @@ async def ejecutar_estudio(
     async with _SEMAFORO_ESTUDIOS:
         resultados = await asyncio.gather(
             *[
-                _ejecutar_fuente(nombre, cedula, actor, forzar, placa=placa)
+                _ejecutar_fuente(
+                    nombre, cedula, actor, forzar,
+                    placa=placa, cedula_propietario=cedula_propietario,
+                )
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
                 for nombre in FUENTES
@@ -647,13 +662,15 @@ def _limpiar_seccion(seccion: dict) -> dict:
 
 def crear_documento_estudio(
     consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict,
-    *, placa: str | None = None,
+    *, placa: str | None = None, cedula_propietario: str | None = None,
 ) -> str:
     """Inserta el doc EN_PROGRESO y retorna el consulta_id. Se llama ANTES de
     ejecutar fuentes: la consulta queda trazada aunque todo falle después.
-    `placa` se persiste solo cuando la consulta incluye la fuente runt."""
+    `placa`/`vehiculos` se persisten solo cuando la consulta incluye runt; el
+    array `vehiculos` queda listo para soportar varios por estudio (hoy 1)."""
     ahora = _utcnow()
     retencion = int((empresa.get("config") or {}).get("retencion_dias") or RETENCION_DIAS)
+    ced_prop = cedula_propietario or cedula  # resuelta: dueño asumido = evaluado
     col_estudios.insert_one(
         {
             "consulta_id": consulta_id,
@@ -661,12 +678,30 @@ def crear_documento_estudio(
             # ObjectId nativo: los filtros de aislamiento comparan contra ObjectId.
             "empresa_id": ObjectId(actor["empresa_id"]),
             "empresa_nombre": empresa.get("nombre", ""),
-            "usuario_id": ObjectId(actor["usuario_id"]),
+            # API keys no tienen usuario humano (canal "api"); el doc queda
+            # atribuido a la integración ("API: SILO") sin usuario_id.
+            "usuario_id": ObjectId(actor["usuario_id"]) if actor.get("usuario_id") else None,
             "usuario": actor["usuario"],
             "usuario_nombre": actor["usuario_nombre"],
             "usuario_correo": actor["usuario_correo"],
+            # Origen de la consulta: "portal" (humano) | "api" (integración).
+            "canal": actor.get("canal") or "portal",
+            "api_key": (
+                {"id": actor["api_key_id"], "nombre": actor["api_key_nombre"]}
+                if actor.get("canal") == "api" else None
+            ),
             "cedula": cedula,
             "placa": placa,
+            # Vehículos validados por runt: cada uno con SU propietario (puede
+            # ser distinto de la persona evaluada). `placa` top-level queda
+            # como espejo de vehiculos[0] (compatibilidad con docs previos).
+            "vehiculos": (
+                [{
+                    "placa": placa,
+                    "cedula_propietario": ced_prop,
+                    "propietario_es_evaluado": ced_prop == cedula,
+                }] if placa else []
+            ),
             "nombre_consultado": "",
             "estado": "EN_PROGRESO",
             "creado_en": ahora,

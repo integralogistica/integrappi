@@ -35,6 +35,7 @@ col_movimientos = db["movimientos_cobro_seguridad"]
 col_periodos = db["periodos_cobro_seguridad"]
 col_empresas = db["empresas_seguridad"]
 col_estudios = db["estudios_seguridad"]
+col_api_keys = db["api_keys_seguridad"]
 
 cobro.asegurar_indices_cobro()
 
@@ -429,6 +430,77 @@ def quitar_plan_completo(empresa_id: str, plan_id: str, request: Request, actor:
         request=request,
     )
     return {"empresa": empresa.get("nombre"), "fuentes_retiradas": [e.get("fuente") for e in entradas]}
+
+
+# ═══════════════════════════ API keys (integraciones) ═══════════════════════════
+# Credenciales de máquina a máquina para que un cliente consuma el servicio por
+# API (`Authorization: Bearer sek_…`). El actor derivado es CONSULTADOR de la
+# empresa (jamás admin) y sus consultas/movimientos quedan con canal="api".
+
+class ApiKeyCrear(BaseModel):
+    nombre: str
+
+
+@router.get("/empresas/{empresa_id}/api-keys")
+def listar_api_keys(empresa_id: str, actor: dict = Depends(_requiere_admin_integra)):
+    """API keys de la empresa (sin hash; el prefijo identifica cada una)."""
+    empresa = _empresa_o_404(empresa_id)
+    items = []
+    for doc in col_api_keys.find({"empresa_id": empresa["_id"]}).sort("creado_en", -1):
+        items.append(_serializar(doc) | {"id": str(doc["_id"])})
+    return {"empresa": empresa.get("nombre"), "items": items}
+
+
+@router.post("/empresas/{empresa_id}/api-keys", status_code=201)
+def crear_api_key(empresa_id: str, datos: ApiKeyCrear, request: Request, actor: dict = Depends(_requiere_admin_integra)):
+    """Crea una API key. La clave completa se devuelve ESTA ÚNICA vez: guardarla
+    de inmediato (en BD solo queda su hash; no hay forma de recuperarla)."""
+    empresa = _empresa_o_404(empresa_id)
+    if not empresa.get("activo", True):
+        raise HTTPException(status_code=422, detail="La empresa está inactiva")
+    nombre = datos.nombre.strip()
+    if not 3 <= len(nombre) <= 40:
+        raise HTTPException(status_code=422, detail="El nombre debe tener entre 3 y 40 caracteres")
+    if col_api_keys.count_documents({"empresa_id": empresa["_id"], "activo": True}) >= 10:
+        raise HTTPException(status_code=422, detail="Máximo 10 API keys activas por empresa")
+
+    from Funciones.auth_seguridad import generar_api_key
+
+    clave, doc = generar_api_key(nombre, empresa["_id"], actor.get("usuario", ""))
+    resultado = col_api_keys.insert_one(doc)
+    registrar_evento(
+        "api_key_creada", actor=actor,
+        detalle=f"{empresa.get('nombre')} · {nombre} · {doc['prefijo']}",
+        request=request,
+    )
+    return {
+        "id": str(resultado.inserted_id),
+        "nombre": nombre,
+        "prefijo": doc["prefijo"],
+        # ÚNICO momento en que la clave existe en claro.
+        "api_key": clave,
+        "scopes": doc["scopes"],
+        "creado_en": doc["creado_en"],
+    }
+
+
+@router.delete("/empresas/{empresa_id}/api-keys/{key_id}")
+def revocar_api_key(empresa_id: str, key_id: str, request: Request, actor: dict = Depends(_requiere_admin_integra)):
+    """Revoca (soft: activo=False) una API key. Las consultas en vuelo con esa
+    clave fallan en el PRÓXIMO request (cada uso relee la BD)."""
+    empresa = _empresa_o_404(empresa_id)
+    doc = col_api_keys.find_one({"_id": _oid(key_id, "key_id"), "empresa_id": empresa["_id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="API key no encontrada en esta empresa")
+    if not doc.get("activo", True):
+        raise HTTPException(status_code=409, detail="La API key ya estaba revocada")
+    col_api_keys.update_one({"_id": doc["_id"]}, {"$set": {"activo": False, "revocada_en": _utcnow()}})
+    registrar_evento(
+        "api_key_revocada", actor=actor,
+        detalle=f"{empresa.get('nombre')} · {doc.get('nombre')} · {doc.get('prefijo')}",
+        request=request,
+    )
+    return {"empresa": empresa.get("nombre"), "revocada": doc.get("nombre"), "prefijo": doc.get("prefijo")}
 
 
 @router.get("/dashboard")
