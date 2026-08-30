@@ -234,7 +234,7 @@ class TestEjecutarFuente(unittest.TestCase):
                 with patch.object(orch, "col_consultas") as col:
                     col.insert_one.return_value = None
                     seccion = self._correr(orch._ejecutar_fuente("manifiestos_rndc", "1033688842", actor_consultador(), True))
-            buscar.assert_called_once_with("manifiestos_rndc", "1033688842", True)
+            buscar.assert_called_once_with("manifiestos_rndc", "1033688842", True, placa=None)
         self.assertEqual(seccion["origen"], "portal")
         self.assertEqual(seccion["estado"], "EXITO")  # vacío confirmado es válido
         bot.assert_called_once()
@@ -408,6 +408,262 @@ class TestFuentePolicia(unittest.TestCase):
         self.assertEqual(orch.calcular_estado_global(fuentes), "ERROR")
 
 
+class TestFuenteRunt(unittest.TestCase):
+    """Fuente "runt" (consulta de vehículo por placa + cédula del propietario):
+    caché con clave (tipo, cédula, PLACA), semáforo SOAT (vencido = ADVERTENCIA)
+    y anti-envenenamiento análogo al de policía."""
+
+    RESULTADO_OK = {
+        "placa": "MVX48E",
+        "cedula": "1010213062",
+        "no_registra": None,
+        "mensaje": "",
+        "datos_vehiculo": {
+            "placa": "MVX48E", "marca": "HONDA", "linea": "CB 160F DLX", "modelo": "2018",
+            "clase": "MOTOCICLETA", "numero_motor": "KC23E-7-3006584",
+        },
+        "soat": {
+            "numero": "3453028900", "aseguradora": "AXA COLPATRIA SEGUROS SA",
+            "fecha_inicio_vigencia": "2025-10-23", "fecha_fin_vigencia": "2099-10-22",
+            "estado_portal": "VIGENTE", "vigente": True,
+        },
+        "polizas": [
+            {
+                "numero": "3453028900", "fecha_expedicion": "2025-10-04",
+                "fecha_inicio_vigencia": "2025-10-23", "fecha_fin_vigencia": "2099-10-22",
+                "aseguradora": "AXA COLPATRIA SEGUROS SA", "codigo_tarifa": "112", "estado": "VIGENTE",
+            }
+        ],
+        "pdf_bytes": None,
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_cache_hit_no_llama_al_bot_y_recibe_placa(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "runt",
+            "cedula": "1010213062",
+            "placa": "MVX48E",
+            "no_registra": None,
+            "mensaje": "",
+            "datos_vehiculo": self.RESULTADO_OK["datos_vehiculo"],
+            "soat": self.RESULTADO_OK["soat"],
+            "polizas": self.RESULTADO_OK["polizas"],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache) as buscar:
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                )
+        buscar.assert_called_once_with("runt", "1010213062", False, placa="MVX48E")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["datos_vehiculo"]["marca"], "HONDA")
+        self.assertEqual(seccion["soat"]["vigente"], True)
+        bot.assert_not_called()
+
+    def test_exito_cachea_con_placa_y_datos(self):
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync", return_value=self.RESULTADO_OK):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["placa"], "MVX48E")
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "runt")
+        self.assertEqual(doc_cache["placa"], "MVX48E")
+        self.assertEqual(doc_cache["datos_vehiculo"]["marca"], "HONDA")
+        self.assertEqual(doc_cache["soat"]["numero"], "3453028900")
+
+    def test_placa_viaja_al_bot(self):
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.return_value = self.RESULTADO_OK
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        bot.assert_called_once_with("MVX48E", "1010213062")
+
+    def test_soat_vencido_es_advertencia(self):
+        resultado = {
+            **self.RESULTADO_OK,
+            "soat": {
+                "numero": "3306307200", "aseguradora": "AXA",
+                "fecha_inicio_vigencia": "2020-10-23", "fecha_fin_vigencia": "2021-10-22",
+                "estado_portal": "NO VIGENTE", "vigente": False,
+            },
+            "polizas": [
+                {
+                    "numero": "3306307200", "fecha_expedicion": "2020-10-22",
+                    "fecha_inicio_vigencia": "2020-10-23", "fecha_fin_vigencia": "2021-10-22",
+                    "aseguradora": "AXA", "codigo_tarifa": "112", "estado": "NO VIGENTE",
+                }
+            ],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        # Y contamina el estado global: con las demás EXITO → CON_ADVERTENCIAS.
+        fuentes = {
+            "manifiestos_rndc": {"estado": "EXITO"},
+            "procuraduria": {"estado": "EXITO"},
+            "policia": {"estado": "DESHABILITADA"},
+            "runt": {"estado": "ADVERTENCIA"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA_CON_ADVERTENCIAS")
+
+    def test_soat_vencido_en_cache_degrada_en_el_hit(self):
+        # Una caché de ayer con SOAT vigente ENTONCES puede estar vencida HOY:
+        # el estado se recalcula en cada hit con la fecha de vencimiento.
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "runt",
+            "cedula": "1010213062",
+            "placa": "MVX48E",
+            "no_registra": None,
+            "mensaje": "",
+            "datos_vehiculo": self.RESULTADO_OK["datos_vehiculo"],
+            "soat": {
+                "numero": "3306307200", "aseguradora": "AXA",
+                "fecha_inicio_vigencia": "2020-10-23", "fecha_fin_vigencia": "2021-10-22",
+                "estado_portal": "NO VIGENTE", "vigente": True,  # vencido hoy
+            },
+            "polizas": self.RESULTADO_OK["polizas"],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            seccion = self._correr(
+                orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+            )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+
+    def test_no_registra_se_cachea(self):
+        # "Placa sin información" / "no propietario activo" son respuestas
+        # DETERMINANTES del portal: se cachean (no son vacíos sospechosos).
+        resultado = {
+            "placa": "EYX243", "cedula": "15887928",
+            "no_registra": False,
+            "mensaje": "La cédula no corresponde a un propietario activo del vehículo",
+            "datos_vehiculo": {}, "soat": None, "polizas": [], "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "15887928", actor_consultador(), False, placa="EYX243")
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["no_registra"], False)
+        col.insert_one.assert_called_once()
+
+    def test_resultado_vacio_es_no_disponible_sin_cachear(self):
+        resultado = {
+            "placa": "AAA123", "cedula": "1010213062",
+            "no_registra": None, "mensaje": "",
+            "datos_vehiculo": {}, "soat": None, "polizas": [], "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="AAA123")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_runt import BotRuntSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.side_effect = BotRuntSinResultado("sin datos")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+    def test_sin_captcha_key_es_no_disponible_y_no_error(self):
+        from Funciones.bot_runt import BotRuntSinCaptchaKey
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.side_effect = BotRuntSinCaptchaKey("falta key")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "configuracion_faltante")
+
+    def test_captcha_fallido_es_error_de_tipo_captcha(self):
+        from Funciones.bot_runt import BotRuntCaptchaFallido
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                bot.side_effect = BotRuntCaptchaFallido("rechazado")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "ERROR")
+        self.assertEqual(seccion["error"]["tipo"], "captcha")
+
+
+class TestCacheRuntConPlaca(unittest.TestCase):
+    """La caché de runt discrimina por placa: sin placa en la llamada NUNCA hay
+    hit (evita cross-contaminación entre placas de la misma cédula)."""
+
+    def test_runt_sin_placa_nunca_hace_hit(self):
+        from rutas import seguridad as rseg
+
+        with patch.object(rseg, "col_consultas") as col:
+            col.find_one.return_value = {"_id": ObjectId(), "tipo": "runt"}
+            doc = rseg._buscar_cache("runt", "1010213062", False, placa=None)
+        self.assertIsNone(doc)
+        col.find_one.assert_not_called()  # el guard corta antes de ir a Mongo
+
+    def test_runt_con_placa_filtra_por_placa(self):
+        from rutas import seguridad as rseg
+
+        with patch.object(rseg, "col_consultas") as col:
+            col.find_one.return_value = None
+            rseg._buscar_cache("runt", "1010213062", False, placa="MVX48E")
+        filtro = col.find_one.call_args[0][0]
+        self.assertEqual(filtro["tipo"], "runt")
+        self.assertEqual(filtro["cedula"], "1010213062")
+        self.assertEqual(filtro["placa"], "MVX48E")
+
+    def test_normalizar_placa(self):
+        from fastapi import HTTPException
+
+        from rutas import seguridad as rseg
+
+        self.assertEqual(rseg._normalizar_placa("mvx 48e"), "MVX48E")
+        self.assertEqual(rseg._normalizar_placa("AAA-123"), "AAA123")
+        self.assertEqual(rseg._normalizar_placa("AB1234"), "AB1234")
+        with self.assertRaises(HTTPException):
+            rseg._normalizar_placa("123")
+        with self.assertRaises(HTTPException):
+            rseg._normalizar_placa("AAAAAA")
+
+
 
     def test_limite_por_empresa(self):
         se._RATE.clear()
@@ -497,7 +753,7 @@ class TestEjecutarEstudioFuentesParcial(unittest.TestCase):
             persistido["doc"] = {**doc_inicial, **update.get("$set", {})}
             return None
 
-        async def _fuente_ok(nombre, cedula, actor, forzar):
+        async def _fuente_ok(nombre, cedula, actor, forzar, **kwargs):
             return {"estado": "EXITO", "origen": "cache", "intentos": 1, "duraciones_s": [], "error": None}
 
         with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \

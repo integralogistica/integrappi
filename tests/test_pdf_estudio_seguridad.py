@@ -296,5 +296,106 @@ class TestSeccionPolicia(unittest.TestCase):
         self.assertIn("Ley1238de2008", texto)
 
 
+def _fuente_runt(estado="EXITO", no_registra=None, soat=None, datos=None, polizas=None, mensaje=""):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": no_registra,
+        "mensaje": mensaje,
+        "placa": "MVX48E",
+        "datos_vehiculo": datos if datos is not None else {
+            "placa": "MVX48E", "marca": "HONDA", "linea": "CB 160F DLX", "modelo": "2018",
+            "clase": "MOTOCICLETA", "numero_motor": "KC23E-7-3006584",
+            "numero_vin": "9FMKC2325JF002733", "cilindraje": "162",
+        },
+        "soat": soat if soat is not None else {
+            "numero": "3453028900", "aseguradora": "AXA COLPATRIA SEGUROS SA",
+            "fecha_inicio_vigencia": "2025-10-23", "fecha_fin_vigencia": "2099-10-22",
+            "estado_portal": "VIGENTE", "vigente": True,
+        },
+        "polizas": polizas if polizas is not None else [
+            {
+                "numero": "3453028900", "fecha_expedicion": "2025-10-04",
+                "fecha_inicio_vigencia": "2025-10-23", "fecha_fin_vigencia": "2099-10-22",
+                "aseguradora": "AXA COLPATRIA SEGUROS SA", "codigo_tarifa": "112", "estado": "VIGENTE",
+            }
+        ],
+        "intentos": 1,
+        "duraciones_s": [15.2],
+        "error": None,
+    }
+
+
+class TestSeccionRunt(unittest.TestCase):
+    """Fuente "runt" en el PDF: fila de resumen con placa, banner semaforizado
+    por SOAT, tabla de datos del vehículo, historial de pólizas y disposición
+    legal honesta (portal público, sin norma habilitante específica)."""
+
+    def _con_runt(self, **kw):
+        estudio = estudio_fixture()
+        estudio["placa"] = "MVX48E"
+        estudio["fuentes"]["runt"] = _fuente_runt(**kw)
+        return estudio
+
+    def test_soat_vigente_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        self.assertIn("Vehículo—RUNT", texto)
+        self.assertIn("SOATVIGENTE", texto)
+        self.assertIn("HONDA", texto)
+        self.assertIn("CB160FDLX", texto)
+        self.assertIn("MVX48E", texto)
+
+    def test_soat_vencido_banner_rojo(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt(
+            estado="ADVERTENCIA",
+            soat={
+                "numero": "3306307200", "aseguradora": "AXA",
+                "fecha_inicio_vigencia": "2020-10-23", "fecha_fin_vigencia": "2021-10-22",
+                "estado_portal": "NO VIGENTE", "vigente": False,
+            },
+        )))
+        self.assertIn("SOATVENCIDO", texto)
+
+    def test_placa_sin_informacion_neutro(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt(
+            no_registra=True, soat=None, polizas=[], datos={}, mensaje="La placa no registra información en el RUNT",
+        )))
+        self.assertIn("PLACASININFORMACIÓN", texto)
+
+    def test_no_propietario_activo(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt(
+            no_registra=False, soat=None, polizas=[], datos={},
+            mensaje="La cédula no corresponde a un propietario activo del vehículo",
+        )))
+        self.assertIn("PROPIETARIOACTIVO", texto)
+
+    def test_historial_polizas(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        self.assertIn("HistorialdepólizasSOAT", texto)
+        self.assertIn("AXACOLPATRIASEGUROSSA", texto.replace(" ", ""))
+
+    def test_fuente_fallida_muestra_estado(self):
+        estudio = self._con_runt(estado="NO_DISPONIBLE", soat=None, polizas=[], datos={})
+        estudio["fuentes"]["runt"]["error"] = {"tipo": "portal_inconsistente", "mensaje": "El portal del RUNT no entregó datos"}
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("RUNT", texto)
+        self.assertIn("noentregódatos", texto.replace("á", "a"))
+
+    def test_resumen_con_cuatro_fuentes(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        for frag in ("ManifiestosRNDC", "ProcuraduríaGeneraldelaNación", "PolicíaNacional", "RUNT—VehículoMVX48E"):
+            self.assertIn(frag, texto)
+
+    def test_disposicion_legal_runt(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        self.assertIn("PortalPúblicodeConsultaCiudadana", texto)
+        # La extracción de pdfplumber trae los acentos como mojibake según la
+        # codificación de la fuente: comparar sin tildes.
+        import unicodedata
+
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("noconstituyecertificaciondeaseguramiento", plano)
+
+
 if __name__ == "__main__":
     unittest.main()

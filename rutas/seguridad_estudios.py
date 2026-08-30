@@ -41,7 +41,7 @@ from Funciones.orquestador_estudios import (
     ejecutar_estudio,
     nuevo_consulta_id,
 )
-from rutas.seguridad import _normalizar_cedula
+from rutas.seguridad import _normalizar_cedula, _normalizar_placa
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/seguridad/estudios", tags=["Seguridad - Estudios"])
@@ -413,6 +413,7 @@ class CrearEstudio(BaseModel):
     empresa_id: str | None = None  # solo ADMIN_INTEGRA (attribución del estudio)
     fuentes: list[str] | None = None  # fuentes a consultar; None = todas las del plan
     plan_id: str | None = None  # plan con el que cobrar la consulta (elegido por el usuario)
+    placa: str | None = None  # solo la fuente runt: vehículo del propietario consultado
 
 
 @router.post("", status_code=201)
@@ -516,6 +517,18 @@ async def crear_estudio(
         habilitadas = fuentes_del_plan
         plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
+    # La fuente runt consulta por placa + cédula del propietario: la placa es
+    # OBLIGATORIA si runt va a correr (con `habilitadas` ya definitiva), y se
+    # ignora/limpia si no (no se persiste nada de placa en ese caso).
+    placa: str | None = None
+    if "runt" in habilitadas:
+        if not (datos.placa or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="La fuente RUNT requiere la placa del vehículo (campo placa)",
+            )
+        placa = _normalizar_placa(datos.placa)
+
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
     actor_doc = {**actor, "empresa_id": str(empresa["_id"])}
@@ -548,6 +561,7 @@ async def crear_estudio(
         empresa=empresa,
         forzar=datos.forzar,
         auditoria=_auditoria_request(request),
+        placa=placa,
     )
 
     try:
@@ -560,6 +574,7 @@ async def crear_estudio(
             auditoria=_auditoria_request(request),
             registrar_evento=lambda *a, **k: registrar_evento(*a, request=request, **k),
             fuentes=habilitadas,
+            placa=placa,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -678,6 +693,26 @@ def listar_estudios(
         doc["empresa_id"] = str(doc.get("empresa_id")) if doc.get("empresa_id") else None
         doc["usuario_id"] = str(doc.get("usuario_id")) if doc.get("usuario_id") else None
         items.append(doc)
+
+    # Costo de cada consulta (lo que el cliente quiere ver en su historial):
+    # suma de sus CONSUMOs − REEMBOLSOS (monto_cop ya viene CON SIGNO: consumo
+    # +, reembolso −). Una sola aggregation con $in sobre los consulta_id de la
+    # página (no N finds). Fallo de cálculo ≠ fallo del listado: sin costo.
+    ids = [it["consulta_id"] for it in items if it.get("consulta_id")]
+    costos: dict[str, int] = {}
+    if ids:
+        try:
+            pipeline = [
+                {"$match": {"consulta_id": {"$in": ids}, "tipo": {"$in": ["CONSUMO", "REEMBOLSO"]}}},
+                {"$group": {"_id": "$consulta_id", "total_cop": {"$sum": "$monto_cop"}}},
+            ]
+            for fila in db["movimientos_cobro_seguridad"].aggregate(pipeline):
+                costos[str(fila["_id"])] = int(fila.get("total_cop") or 0)
+        except Exception as exc:
+            logger.warning("Costos del historial no se pudieron calcular: %s", exc)
+    for it in items:
+        it["costo_cop"] = costos.get(it.get("consulta_id"), 0)
+
     return {"total": total, "items": items}
 
 
@@ -773,6 +808,28 @@ def descargar_anexo_procuraduria(consulta_id: str, request: Request, actor: dict
     )
 
 
+@router.get("/{consulta_id}/runt.pdf")
+def descargar_anexo_runt(consulta_id: str, request: Request, actor: dict = Depends(actor_actual)):
+    """Certificado/descarga oficial del RUNT si el portal llegó a entregarlo
+    (hoy no genera PDF consolidado: el anexo queda listo por si cambia)."""
+    doc = _obtener_estudio(consulta_id, actor, request)
+    if not doc.get("anexo_runt"):
+        raise HTTPException(status_code=404, detail="El estudio no tiene anexo del RUNT")
+    from Funciones import storage_seguridad
+
+    registrar_evento("pdf_descargado", actor=actor, consulta_id=consulta_id, detalle="anexo runt", request=request)
+    try:
+        contenido = storage_seguridad.descargar_blob(doc["anexo_runt"]["gcs_ruta"])
+    except Exception as exc:
+        logger.error("Anexo runt %s no se pudo descargar de GCS: %s", consulta_id, exc)
+        raise HTTPException(status_code=502, detail="No fue posible recuperar el anexo del almacenamiento")
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename=consulta_runt_{consulta_id}.pdf'},
+    )
+
+
 @router.post("/{consulta_id}/pdf/regenerar")
 def regenerar_pdf(consulta_id: str, request: Request, actor: dict = Depends(actor_actual)):
     """Reconstruye el PDF desde el doc persistido (SIN consultar portales)."""
@@ -853,6 +910,7 @@ def estadisticas_estudios(
                     {"$eq": ["$fuentes.manifiestos_rndc.origen", "cache"]},
                     {"$eq": ["$fuentes.procuraduria.origen", "cache"]},
                     {"$eq": ["$fuentes.policia.origen", "cache"]},
+                    {"$eq": ["$fuentes.runt.origen", "cache"]},
                 ]},
                 1, 0,
             ]}},
@@ -941,7 +999,10 @@ CONFIG_DEFAULT_EMPRESA = {
     # autoconsulta del titular (Decreto 019 de 2012) y prohíbe el acceso por
     # terceros; se activa POR EMPRESA (PATCH config) con autorización
     # documentada del titular bajo la Ley 1581 de 2012.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria"],
+    # runt SÍ va (2026-08-30): el portal público del RUNT es de consulta
+    # ciudadana abierta por placa + cédula del propietario (sin restricción de
+    # terceros); el gate real es el PLAN, no la config.
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt"],
 }
 
 

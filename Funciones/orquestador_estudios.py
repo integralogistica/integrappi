@@ -39,6 +39,12 @@ from Funciones.bot_policia import (
 )
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
+from Funciones.bot_runt import (
+    BotRuntCaptchaFallido,
+    BotRuntSinCaptchaKey,
+    BotRuntSinResultado,
+    consultar_vehiculo_runt_sync,
+)
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
 from rutas.seguridad import (
     DIAS_VENTANA,
@@ -59,7 +65,7 @@ RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt")
 
 # Evita apilar Chromium concurrentes en una instancia pequeña de Render.
 _SEMAFORO_ESTUDIOS = asyncio.Semaphore(2)
@@ -183,15 +189,38 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotPoliciaCaptchaFallido):
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRuntSinCaptchaKey):
+        return "NO_DISPONIBLE", {"tipo": "configuracion_faltante", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRuntSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRuntCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
 
 
-async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) -> dict:
+def _estado_runt(seccion: dict) -> str:
+    """Estado de la fuente runt a partir de su sección.
+
+    - SOAT vencido → ADVERTENCIA (el vehículo NO está asegurado: el estudio no
+      puede afirmar que todo está en orden, aunque los datos sí llegaron).
+    - "No propietario activo" (no_registra False) → EXITO: el portal dio una
+      respuesta determinante y negativa (no es un fallo de la fuente).
+    - Sin info de SOAT (portal sin tabla o placa sin pólizas) → EXITO con lo
+      que haya (no se inventa una advertencia que el portal no reportó).
+    """
+    soat = seccion.get("soat") or {}
+    if soat and soat.get("vigente") is False:
+        return "ADVERTENCIA"
+    return "EXITO"
+
+
+async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None) -> dict:
     """Ejecuta una fuente (caché → portal con reintento) y devuelve su sección
     lista para el doc del estudio. NUNCA lanza: una fuente caída queda
-    registrada como NO_DISPONIBLE/ERROR."""
+    registrada como NO_DISPONIBLE/ERROR. `placa` solo lo usa la fuente runt
+    (consulta de vehículo: placa + cédula del propietario)."""
     seccion: dict[str, Any] = {
         "estado": "ERROR",
         "origen": None,
@@ -204,7 +233,9 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
 
     # 1) Caché global 24h por (tipo, cédula): los datos del tercero son
     #    idénticos para cualquier empresa; la atribución vive en el estudio.
-    cache = _buscar_cache(nombre, cedula, forzar)
+    #    runt discrimina además por placa (una cédula puede tener varios
+    #    vehículos: sin placa en el filtro habría cross-contaminación).
+    cache = _buscar_cache(nombre, cedula, forzar, placa=placa)
     if cache:
         seccion.update({"estado": "EXITO", "origen": "cache", "intentos": 0, "cache_id": str(cache["_id"])})
         if nombre == "manifiestos_rndc":
@@ -214,6 +245,24 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
                 "viajes": viajes, "columnas": cache.get("columnas", []),
                 "total": cache.get("total", len(viajes)),
             })
+        elif nombre == "runt":
+            # El estado puede DEGRADAR desde que se cacheó: un SOAT vigente
+            # ayer puede estar vencido hoy → recalcular el semáforo en cada hit
+            # contra la fecha de vencimiento (no confiar en el flag cacheado).
+            from Funciones.bot_runt import _soat_vigente
+
+            soat = dict(cache.get("soat") or {})
+            if soat.get("fecha_fin_vigencia"):
+                soat["vigente"] = _soat_vigente(soat["fecha_fin_vigencia"])
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "datos_vehiculo": cache.get("datos_vehiculo") or {},
+                "soat": soat,
+                "polizas": (cache.get("polizas") or [])[:10],
+                "placa": cache.get("placa", ""),
+            })
+            seccion["estado"] = _estado_runt(seccion)
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -239,6 +288,12 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
 
         async def invocar() -> dict:
             return await asyncio.to_thread(consultar_antecedentes_policia_sync, cedula)
+    elif nombre == "runt":
+
+        async def invocar() -> dict:
+            # runt consulta por placa + cédula del PROPIETARIO (sin placa no hay
+            # consulta posible; el endpoint ya lo validó antes de llegar aquí).
+            return await asyncio.to_thread(consultar_vehiculo_runt_sync, placa or "", cedula)
     else:
 
         async def invocar() -> dict:
@@ -367,6 +422,54 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
         # Si el portal llegara a entregar PDF (hoy no lo hace), queda listo el
         # canal de anexo: se sube a GCS y se descarta.
         seccion["_pdf_bytes"] = pdf_bytes  # volátil: se sube a GCS y se descarta
+    elif nombre == "runt":
+        # Consulta de vehículo (placa + cédula del propietario). Sin PDF
+        # consolidado del portal: el informe lo genera Integra (como policía).
+        datos_vehiculo = resultado.get("datos_vehiculo") or {}
+        soat = resultado.get("soat")
+        polizas = (resultado.get("polizas") or [])[:10]
+        no_registra = resultado.get("no_registra")
+        mensaje = (resultado.get("mensaje") or "").strip()
+        # Anti-envenenamiento (segunda barrera: el bot ya lanza BotRuntSinResultado;
+        # esto cubre dicts vacíos que lleguen igual): sin datos, sin pólizas y sin
+        # mensaje determinante NO es una consulta válida.
+        if not datos_vehiculo and not polizas and no_registra is None:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal del RUNT no entregó datos del vehículo. Intente de nuevo.",
+                },
+            })
+            logger.warning("RUNT sin resultado legible para %s (sin cachear)", enmascarar_cedula(cedula))
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula, "placa": resultado.get("placa") or placa or "",
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "datos_vehiculo": datos_vehiculo,
+            "soat": soat,
+            "polizas": polizas,
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché runt %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        seccion.update({
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "datos_vehiculo": datos_vehiculo,
+            "soat": soat,
+            "polizas": polizas,
+            "placa": doc_cache["placa"],
+        })
+        # El semáforo de SOAT decide el estado: vencido = ADVERTENCIA (decisión
+        # de negocio 2026-08-30: el estudio no puede afirmar "todo en orden").
+        seccion["estado"] = _estado_runt(seccion)
     else:
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
@@ -433,6 +536,8 @@ async def ejecutar_estudio(
     auditoria: dict,
     registrar_evento: Callable[..., None],
     fuentes: list[str] | None = None,
+    *,
+    placa: str | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
@@ -454,7 +559,7 @@ async def ejecutar_estudio(
     async with _SEMAFORO_ESTUDIOS:
         resultados = await asyncio.gather(
             *[
-                _ejecutar_fuente(nombre, cedula, actor, forzar)
+                _ejecutar_fuente(nombre, cedula, actor, forzar, placa=placa)
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
                 for nombre in FUENTES
@@ -464,9 +569,10 @@ async def ejecutar_estudio(
     fuentes = dict(zip(FUENTES, resultados))
 
     # Anexos con certificado oficial (GCS privado) si llegaron. Hoy solo
-    # procuraduría genera PDF; policía mantiene el canal listo por si cambia.
+    # procuraduría genera PDF; policía/runt mantienen el canal listo por si
+    # el portal cambia.
     anexos: dict[str, dict] = {}
-    for nombre_fuente in ("procuraduria", "policia"):
+    for nombre_fuente in ("procuraduria", "policia", "runt"):
         bytes_anexo = (fuentes.get(nombre_fuente) or {}).pop("_pdf_bytes", None)
         if not bytes_anexo:
             continue
@@ -484,7 +590,8 @@ async def ejecutar_estudio(
     duracion = round(time.monotonic() - inicio, 2)
 
     # Nombre del consultado en cascada: la PGN es la confiable (regex sobre el
-    # certificado); policía lo trae de la línea "Apellidos y Nombres".
+    # certificado); policía lo trae de la línea "Apellidos y Nombres". RUNT no
+    # aporta nombre (la vista ciudadana no lo expone).
     nombre_consultado = (
         (fuentes.get("procuraduria") or {}).get("nombre_certificado")
         or (fuentes.get("policia") or {}).get("nombre_consultado")
@@ -501,6 +608,7 @@ async def ejecutar_estudio(
                 "fuentes": {k: _limpiar_seccion(v) for k, v in fuentes.items()},
                 "anexo_procuraduria": anexos.get("procuraduria"),
                 "anexo_policia": anexos.get("policia"),
+                "anexo_runt": anexos.get("runt"),
                 "nombre_consultado": nombre_consultado,
             }
         },
@@ -537,9 +645,13 @@ def _limpiar_seccion(seccion: dict) -> dict:
 
 # --- Doc inicial del estudio ------------------------------------------------------
 
-def crear_documento_estudio(consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict) -> str:
+def crear_documento_estudio(
+    consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict,
+    *, placa: str | None = None,
+) -> str:
     """Inserta el doc EN_PROGRESO y retorna el consulta_id. Se llama ANTES de
-    ejecutar fuentes: la consulta queda trazada aunque todo falle después."""
+    ejecutar fuentes: la consulta queda trazada aunque todo falle después.
+    `placa` se persiste solo cuando la consulta incluye la fuente runt."""
     ahora = _utcnow()
     retencion = int((empresa.get("config") or {}).get("retencion_dias") or RETENCION_DIAS)
     col_estudios.insert_one(
@@ -554,6 +666,7 @@ def crear_documento_estudio(consulta_id: str, cedula: str, actor: dict, empresa:
             "usuario_nombre": actor["usuario_nombre"],
             "usuario_correo": actor["usuario_correo"],
             "cedula": cedula,
+            "placa": placa,
             "nombre_consultado": "",
             "estado": "EN_PROGRESO",
             "creado_en": ahora,
@@ -564,6 +677,7 @@ def crear_documento_estudio(consulta_id: str, cedula: str, actor: dict, empresa:
             "pdf": None,
             "anexo_procuraduria": None,
             "anexo_policia": None,
+            "anexo_runt": None,
             "retencion_expira_en": ahora + timedelta(days=retencion),
             "auditoria": auditoria,
         }

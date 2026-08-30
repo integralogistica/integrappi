@@ -252,5 +252,10 @@ if __name__ == "__main__":
     r = consultar_antecedentes_sync(cedula)
     html = r.pop("html", "")
     r["pdf_bytes"] = f"<{len(r['pdf_bytes'])} bytes>" if r.get("pdf_bytes") else None
-    (Path(__file__).resolve().parents[1] / "descargas_procuraduria" / "resultado.html").write_text(html, encoding="utf-8")
+    try:
+        salida = Path(__file__).resolve().parents[1] / "descargas_procuraduria"
+        salida.mkdir(exist_ok=True)
+        (salida / "resultado.html").write_text(html, encoding="utf-8")
+    except Exception as exc:  # dump de debug: jamás tumbar el CLI
+        print(f"(dump no escrito: {exc})")
     print(json.dumps(r, ensure_ascii=False, indent=1))

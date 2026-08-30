@@ -33,6 +33,7 @@ from Funciones.bot_policia import (
 )
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
+from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/seguridad", tags=["Seguridad"])
@@ -74,18 +75,37 @@ def _normalizar_cedula(valor: str) -> str:
     return digitos
 
 
-def _buscar_cache(tipo: str, cedula: str, force: bool):
+def _normalizar_placa(valor: str) -> str:
+    """Placa colombiana normalizada: AAA123 (particular), AAA12A (moto) o
+    AA1234 (formato viejo). El portal es la autoridad final; esto solo evita
+    basura obvia en el input."""
+    placa = re.sub(r"[^A-Za-z0-9]", "", valor or "").upper()
+    if not re.fullmatch(r"[A-Z]{3}[0-9]{2}[0-9A-Z]|[A-Z]{2}[0-9]{4}", placa):
+        raise HTTPException(
+            status_code=422,
+            detail="Placa inválida. Formatos: AAA123 (particular) o AAA12A (moto)",
+        )
+    return placa
+
+
+def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = None):
     """Última consulta vigente (24h) del tipo+cédula, o None.
 
     RNDC con 0 viajes y sin confirmación del portal ('Consulta realizada')
     NO cuenta como caché válida: fue una respuesta incompleta que jamás debió
-    guardarse (fix 2026-08-29) — se ignora y se vuelve al portal."""
+    guardarse (fix 2026-08-29) — se ignora y se vuelve al portal.
+
+    runt discrimina además por PLACA (una cédula puede tener varios vehículos):
+    sin placa no hay identidad de caché → nunca hit (evita cross-contaminación
+    entre placas de la misma cédula)."""
     if force:
         return None
-    doc = col_consultas.find_one(
-        {"tipo": tipo, "cedula": cedula, "expira_en": {"$gt": _utcnow()}},
-        sort=[("consultado_en", -1)],
-    )
+    filtro = {"tipo": tipo, "cedula": cedula, "expira_en": {"$gt": _utcnow()}}
+    if tipo == "runt":
+        if not placa:
+            return None
+        filtro["placa"] = placa
+    doc = col_consultas.find_one(filtro, sort=[("consultado_en", -1)])
     if (
         doc
         and tipo == "manifiestos_rndc"
@@ -308,10 +328,84 @@ async def consultar_policia(
     }
 
 
+@router.get("/runt")
+async def consultar_runt(
+    placa: str = Query(..., min_length=4, max_length=10, description="Placa del vehículo (AAA123 / AAA12A)"),
+    cedula: str = Query(..., min_length=3, max_length=20, description="Cédula del propietario ACTIVO del vehículo"),
+    force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
+):
+    """Consulta ciudadana de vehículo del RUNT (por placa + cédula del propietario).
+
+    Canal: Portal Público de Consulta Ciudadana del RUNT (Mintransporte) —
+    consulta abierta por placa con verificación de la cédula del propietario
+    ACTIVO del vehículo. Devuelve los datos del vehículo (marca, línea, modelo,
+    motor, chasis, VIN...) y la póliza SOAT con su vigencia. El portal NO
+    genera un PDF consolidado (las descargas son por póliza/certificado).
+    Captcha de imagen propio resuelto por servicio externo
+    (SEGURIDAD_RUNT_CAPTCHA_KEY). El cacheo discrimina por (cedula, placa).
+    """
+    _requiere_seguridad(actor)
+
+    cedula_norm = _normalizar_cedula(cedula)
+    placa_norm = _normalizar_placa(placa)
+    cache = _buscar_cache("runt", cedula_norm, force, placa=placa_norm)
+    if cache:
+        return _envolver_cache(cache)
+
+    try:
+        resultado = await asyncio.to_thread(consultar_vehiculo_runt_sync, placa_norm, cedula_norm)
+    except BotRuntSinCaptchaKey as exc:
+        logger.error("Bot RUNT sin key de captcha: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Fuente runt no configurada: falta SEGURIDAD_RUNT_CAPTCHA_KEY en el servidor",
+        ) from exc
+    except BotRuntError as exc:
+        logger.error("Bot RUNT falló para placa %s: %s", placa_norm, exc)
+        raise HTTPException(status_code=502, detail=f"No fue posible consultar el RUNT: {exc}") from exc
+
+    ahora = _utcnow()
+    doc = {
+        "tipo": "runt",
+        "cedula": cedula_norm,
+        "placa": placa_norm,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "datos_vehiculo": resultado.get("datos_vehiculo") or {},
+        "soat": resultado.get("soat"),
+        "polizas": (resultado.get("polizas") or [])[:10],
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
+        "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE),
+        "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta runt %s no se pudo auditar: %s", placa_norm, exc)
+
+    doc.pop("_id", None)
+    return {
+        "tipo": "runt",
+        "cedula": cedula_norm,
+        "placa": placa_norm,
+        "cache": False,
+        "consultado_en": ahora,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "datos_vehiculo": resultado.get("datos_vehiculo") or {},
+        "soat": resultado.get("soat"),
+        "polizas": (resultado.get("polizas") or [])[:10],
+    }
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),

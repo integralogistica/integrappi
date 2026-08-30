@@ -236,7 +236,14 @@ async def consultar_antecedentes_policia(cedula: str, headed: bool = False) -> D
             html = await pagina.content()
             texto_resultado = " ".join((await pagina.inner_text("body")).split())
 
-            (SALIDA / f"resultado_{cedula_norm}.html").write_text(html, encoding="utf-8")
+            # Dump de debug: la carpeta se crea aquí (no en la rama del PDF) y
+            # JAMÁS tumba la consulta (fix 2026-08-30: FileNotFoundError por
+            # carpeta inexistente dejaba la fuente en ERROR).
+            try:
+                SALIDA.mkdir(exist_ok=True)
+                (SALIDA / f"resultado_{cedula_norm}.html").write_text(html, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("[BOT POLICIA] dump de debug no se pudo escribir: %s", exc)
 
             # 7) Veredicto. Primero el error del formulario (#j_idt10 en
             #    antecedentes, form:messages en el resultado): un error de

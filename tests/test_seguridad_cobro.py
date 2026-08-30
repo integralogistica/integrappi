@@ -821,6 +821,28 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         con_plan = cobro.fuentes_con_plan(empresa, [self.RNDC, self.PROC, POL], ColFake([plan_pol]))
         self.assertEqual(con_plan, [POL])
 
+    def test_plan_con_runt_consume_como_cualquier_fuente(self):
+        """La fuente "runt" es una más del catálogo (2026-08-30): un plan que la
+        incluye genera su CONSUMO con precio congelado como cualquier fuente."""
+        RUNT = "runt"
+        plan_runt = plan_doc(precio=1800, nombre="VEHICULOS RUNT", plan_id=ObjectId())
+        plan_runt["fuentes_incluidas"] = [self.RNDC, RUNT]
+        empresa, col_emp, col_pla, col_mov = self._montaje(
+            [entrada_plan(self.RNDC, plan_runt, cupo_autorizado=10), entrada_plan(RUNT, plan_runt, cupo_autorizado=5)],
+            planes=[plan_runt],
+        )
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-RUNT1", [self.RNDC, RUNT],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(movs), 2)
+        fuentes = {m["fuente"] for m in movs}
+        self.assertEqual(fuentes, {self.RNDC, RUNT})
+        self.assertTrue(all(m["monto_cop"] == 1800 for m in movs))
+        cupos = {e["fuente"]: e["cupo_disponible"] for e in col_emp.documents[0]["planes"]}
+        self.assertEqual(cupos[self.RNDC], 9)
+        self.assertEqual(cupos[RUNT], 4)
+
     def test_multi_plan_misma_fuente_fifo(self):
         """Dos planes acumulados en la MISMA fuente: se consume primero el
         plan asignado más antiguo (FIFO) y cada consumo cobra SU precio

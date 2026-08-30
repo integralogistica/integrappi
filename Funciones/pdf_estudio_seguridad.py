@@ -214,6 +214,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     rndc = fuentes.get("manifiestos_rndc") or {}
     proc = fuentes.get("procuraduria") or {}
     pol = fuentes.get("policia") or {}
+    runt = fuentes.get("runt") or {}
     pdf_info = estudio.get("pdf") or {}
 
     consulta_id = estudio.get("consulta_id", "")
@@ -287,6 +288,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Usuario responsable", f"{estudio.get('usuario_nombre', '')} ({estudio.get('usuario', '')})"],
         ["Identificador de consulta", consulta_id],
     ]
+    if estudio.get("placa"):
+        datos_persona.insert(2, ["Placa consultada (RUNT)", estudio.get("placa")])
     tabla_persona = Table(
         [[celda(k, negrita=True), celda(v)] for k, v in datos_persona],
         colWidths=[45 * mm, 115 * mm],
@@ -322,6 +325,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         "Policía Nacional — Antecedentes Judiciales",
         etiqueta_pol,
         _texto_veredicto_policia(pol),
+    ])
+    etiqueta_runt, _ = ESTADO_FUENTE_TEXTO.get(runt.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+    filas_resumen.append([
+        f"RUNT — Vehículo {estudio.get('placa') or (runt.get('placa') or '')}".rstrip(),
+        etiqueta_runt,
+        _texto_veredicto_runt(runt),
     ])
     tabla_resumen = Table(
         [
@@ -487,6 +496,100 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     else:
         cuento.append(_parrafo_estado_fuente(pol, "la Policía Nacional"))
 
+    # ── 4b. Detalle RUNT (vehículo) ─────────────────────────────────────────
+    cuento.append(Paragraph("Vehículo — RUNT (Mintransporte)", estilo_h2))
+    if runt.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        soat = runt.get("soat") or {}
+        no_registra_runt = runt.get("no_registra")
+        if no_registra_runt is True:
+            # Sobre la PLACA, no sobre la persona: nunca presentar como "limpio".
+            texto_runt, color_runt = "PLACA SIN INFORMACIÓN EN EL RUNT", COLOR_NEUTRO
+        elif no_registra_runt is False:
+            texto_runt, color_runt = "LA CÉDULA NO CORRESPONDE A UN PROPIETARIO ACTIVO DEL VEHÍCULO", COLOR_ADVERTENCIA
+        elif soat.get("vigente") is False:
+            texto_runt, color_runt = "SOAT VENCIDO — VEHÍCULO SIN SEGURO VIGENTE", COLOR_FALLO
+        elif soat and soat.get("vigente") is True:
+            texto_runt, color_runt = f"SOAT VIGENTE — VENCE {soat.get('fecha_fin_vigencia', '—')}", COLOR_EXITO
+        else:
+            texto_runt, color_runt = "VEHÍCULO SIN PÓLIZA SOAT REGISTRADA — VERIFICAR", COLOR_ADVERTENCIA
+        tabla_veredicto_runt = Table(
+            [[Paragraph(f"<b>{texto_runt}</b>", ParagraphStyle("veredicto_runt", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_runt.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_runt),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_runt)
+        cuento.append(Spacer(0, 2 * mm))
+        # Datos del vehículo: los campos que trajo el portal (dict libre).
+        etiquetas_runt = {
+            "placa": "Placa", "licencia_transito": "Licencia de tránsito",
+            "estado_vehiculo": "Estado del vehículo", "tipo_servicio": "Tipo de servicio",
+            "clase": "Clase", "marca": "Marca", "linea": "Línea", "modelo": "Modelo",
+            "color": "Color", "numero_motor": "Nro. motor", "numero_chasis": "Nro. chasis",
+            "numero_vin": "VIN", "cilindraje": "Cilindraje", "tipo_carroceria": "Carrocería",
+            "combustible": "Combustible", "fecha_matricula_inicial": "Matrícula inicial",
+            "autoridad_transito": "Autoridad de tránsito", "gravamenes": "Gravámenes",
+            "clasico_antiguo": "Clásico/antiguo", "repotenciado": "Repotenciado",
+        }
+        detalle_runt = []
+        for clave, etiqueta in etiquetas_runt.items():
+            valor = (runt.get("datos_vehiculo") or {}).get(clave)
+            if valor:
+                detalle_runt.append([etiqueta, valor])
+        if soat:
+            detalle_runt.append(["SOAT — póliza", soat.get("numero", "—")])
+            detalle_runt.append(["SOAT — aseguradora", soat.get("aseguradora", "—")])
+            detalle_runt.append(["SOAT — vigencia", (
+                f"{soat.get('fecha_inicio_vigencia', '—')} a {soat.get('fecha_fin_vigencia', '—')} "
+                f"({soat.get('estado_portal', '—')})"
+            )])
+        if (runt.get("mensaje") or "").strip():
+            detalle_runt.append(["Mensaje del portal", runt["mensaje"][:300]])
+        detalle_runt.append(["Origen de datos", _texto_origen(runt)])
+        tabla_runt = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_runt],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_runt.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_runt)
+        # Historial de pólizas (máx 5 más recientes).
+        polizas = runt.get("polizas") or []
+        if polizas:
+            cuento.append(Spacer(0, 2 * mm))
+            estilo_celda_pol = ParagraphStyle("celda_pol", parent=estilo_celda, fontSize=7.5, leading=9.5)
+            estilo_cab_pol = ParagraphStyle("cab_pol", parent=estilo_celda_pol, fontName="Helvetica-Bold", textColor=colors.white)
+            filas_pol = [[
+                Paragraph("Póliza", estilo_cab_pol), Paragraph("Vigencia", estilo_cab_pol),
+                Paragraph("Aseguradora", estilo_cab_pol), Paragraph("Estado", estilo_cab_pol),
+            ]]
+            for p in polizas[:5]:
+                filas_pol.append([
+                    Paragraph(escape(str(p.get("numero", "—"))), estilo_celda_pol),
+                    Paragraph(escape(f"{p.get('fecha_inicio_vigencia', '—')} → {p.get('fecha_fin_vigencia', '—')}"), estilo_celda_pol),
+                    Paragraph(escape(str(p.get("aseguradora", "—"))), estilo_celda_pol),
+                    Paragraph(escape(str(p.get("estado", "—"))), estilo_celda_pol),
+                ])
+            tabla_polizas = Table(filas_pol, colWidths=[38 * mm, 50 * mm, 52 * mm, 20 * mm])
+            tabla_polizas.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            cuento.append(Paragraph("Historial de pólizas SOAT (más recientes)", ParagraphStyle("h_pol", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4)))
+            cuento.append(tabla_polizas)
+    else:
+        cuento.append(_parrafo_estado_fuente(runt, "el RUNT"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
     auditoria = estudio.get("auditoria") or {}
@@ -498,7 +601,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt))
         )],
         ["Informe PDF", (
             f"Versión {pdf_info.get('version', 1)} · SHA-256 {(pdf_info.get('sha256') or '—')[:32]}… · "
@@ -527,6 +630,10 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         "titular. Este dato fue incorporado al estudio en el marco de un proceso de verificación con "
         "autorización previa, expresa e inequívoca del titular de la información conforme a la Ley 1581 de "
         "2012; la obligación de contar con dicha autorización es del solicitante del estudio. "
+        "<b>Vehículo (RUNT):</b> la información se obtuvo del Portal Público de Consulta Ciudadana del "
+        "Registro Único Nacional de Tránsito, servicio de consulta abierta por placa con verificación de la "
+        "cédula del propietario. Los datos corresponden a lo reportado por el Registro en la fecha de la "
+        "consulta; la vigencia del SOAT es informativa y no constituye certificación de aseguramiento. "
         "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
         "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas. "
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
@@ -620,6 +727,26 @@ def _texto_veredicto_policia(pol: dict) -> str:
     if no_registra is False:
         return "Requerido por autoridad judicial — ver detalle"
     return "Veredicto no concluyente — ver mensaje del portal"
+
+
+def _texto_veredicto_runt(runt: dict) -> str:
+    """Veredicto de la fuente runt para la fila resumen. OJO: el tri-estado es
+    sobre la PLACA/vehículo, no sobre la persona — "sin información" nunca se
+    presenta como "limpio"."""
+    if runt.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(runt)
+    no_registra = runt.get("no_registra")
+    if no_registra is True:
+        return "Placa sin información en el RUNT"
+    if no_registra is False:
+        return "Cédula no corresponde al propietario activo del vehículo"
+    soat = runt.get("soat") or {}
+    if soat.get("vigente") is False:
+        return "SOAT vencido — ver detalle"
+    if soat and soat.get("vigente") is True:
+        return f"SOAT vigente (vence {soat.get('fecha_fin_vigencia', '—')})"
+    marca = (runt.get("datos_vehiculo") or {}).get("marca", "")
+    return f"Vehículo identificado{f' ({marca})' if marca else ''} — sin póliza SOAT registrada"
 
 
 def _resumen_error(fuente: dict) -> str:
