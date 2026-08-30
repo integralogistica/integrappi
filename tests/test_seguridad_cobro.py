@@ -748,7 +748,7 @@ class TestPdfCuentaCobro(unittest.TestCase):
                 chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
                 partes.append("".join(c["text"] for c in chars))
             texto = "".join(partes).replace(" ", "")
-        for esperado in ("CUENTADECOBRO", "GLAMPEROSSAS", "ES-AA0", "10******42", "TOTALAPAGAR", "$152.500", "Página1de"):
+        for esperado in ("CUENTADECOBRO", "GLAMPEROSSAS", "ES-AA0", "1033688842", "TOTALAPAGAR", "$152.500", "Página1de"):
             self.assertIn(esperado, texto)
 
     def test_reproducible(self):
@@ -822,8 +822,10 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         self.assertEqual(con_plan, [POL])
 
     def test_plan_con_runt_consume_como_cualquier_fuente(self):
-        """La fuente "runt" es una más del catálogo (2026-08-30): un plan que la
-        incluye genera su CONSUMO con precio congelado como cualquier fuente."""
+        """v3.5 (2026-08-30): EL PLAN SE COBRA POR CONSULTA. Un plan de $1.800
+        que incluye RNDC+runt genera UN solo CONSUMO de $1.800 (las fuentes NO
+        multiplican el precio) y descuenta 1 unidad de TODAS sus entradas
+        (lockstep: el cupo del plan cuenta CONSULTAS)."""
         RUNT = "runt"
         plan_runt = plan_doc(precio=1800, nombre="VEHICULOS RUNT", plan_id=ObjectId())
         plan_runt["fuentes_incluidas"] = [self.RNDC, RUNT]
@@ -835,13 +837,36 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
             empresa, ACTOR, "ES-RUNT1", [self.RNDC, RUNT],
             col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
         )
-        self.assertEqual(len(movs), 2)
-        fuentes = {m["fuente"] for m in movs}
-        self.assertEqual(fuentes, {self.RNDC, RUNT})
-        self.assertTrue(all(m["monto_cop"] == 1800 for m in movs))
+        self.assertEqual(len(movs), 1)  # 1 consulta del plan = 1 consumo
+        self.assertEqual(movs[0]["monto_cop"], 1800)
+        self.assertEqual(movs[0]["fuentes"], [self.RNDC, RUNT])
+        self.assertEqual(movs[0]["fuentes_tocadas"], [self.RNDC, RUNT])
         cupos = {e["fuente"]: e["cupo_disponible"] for e in col_emp.documents[0]["planes"]}
-        self.assertEqual(cupos[self.RNDC], 9)
+        self.assertEqual(cupos[self.RNDC], 9)   # lockstep: ambas drenan
         self.assertEqual(cupos[RUNT], 4)
+
+    def test_plan_multifuente_un_consumo_por_consulta(self):
+        """Regresión v3.5 del caso del usuario: plan AVANZADO $3.000 con 4
+        fuentes → una consulta cuesta $3.000 (NO 4×$3.000=$12.000 como en
+        v3.1) y consume 1 unidad de consulta del plan."""
+        POL = "policia"
+        plan_av = plan_doc(precio=3000, nombre="AVANZADO", plan_id=ObjectId())
+        plan_av["fuentes_incluidas"] = [self.RNDC, self.PROC, POL, "runt"]
+        empresa, col_emp, col_pla, col_mov = self._montaje(
+            [entrada_plan(f, plan_av, cupo_autorizado=50) for f in (self.RNDC, self.PROC, POL, "runt")],
+            planes=[plan_av],
+        )
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-AV1", [self.RNDC, self.PROC, POL, "runt"],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(movs), 1)
+        self.assertEqual(movs[0]["monto_cop"], 3000)
+        self.assertEqual(movs[0]["unidades"], 1)
+        # Todas las entradas del plan drenaron 1 (quedan 49 de 50 consultas).
+        for e in col_emp.documents[0]["planes"]:
+            self.assertEqual(e["cupo_disponible"], 49)
+            self.assertEqual(e["cupo_consumido"], 1)
 
     def test_consumo_marca_canal_portal_o_api(self):
         """Canal del consumo (2026-08-30): actor humano → "portal"; actor de API
@@ -953,9 +978,14 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         self.assertEqual(movs[0]["monto_cop"], 0)
 
     def test_ilimitado_por_fuente(self):
+        """Plan ilimitado (RNDC) + plan con tope (PROC): cada fuente bajo SU
+        plan; agotado el de PROC, RNDC sigue consultando bajo el ilimitado."""
+        plan_proc = plan_doc(precio=1500, nombre="SOLO PROC", plan_id=ObjectId())
+        plan_proc["fuentes_incluidas"] = [self.PROC]
         empresa, col_emp, col_pla, col_mov = self._montaje(
             [entrada_plan(self.RNDC, cupo_autorizado=None, cupo_disponible=None),
-             entrada_plan(self.PROC, cupo_autorizado=2)]
+             entrada_plan(self.PROC, plan_proc, cupo_autorizado=2)],
+            planes=[plan_doc(), plan_proc],  # default (RNDC) + SOLO PROC
         )
         # 2 consultas con ambas fuentes agotan el cupo de PROC (2).
         for i in range(2):
@@ -1252,7 +1282,7 @@ class TestFuentesRetiradas(unittest.TestCase):
             "ES-RET3", empresa, ACTOR_ADMIN, "ERROR global", automatico=True,
             col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
         )
-        self.assertEqual(len(reembolsos), 2)
+        self.assertEqual(len(reembolsos), 1)  # v3.5: 1 consumo por consulta (el plan)
         planes_doc = col_emp.documents[0]["planes"]
         self.assertEqual(planes_doc[1]["cupo_disponible"], 5)  # cupo PROC devuelto
 

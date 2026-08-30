@@ -307,15 +307,24 @@ def reservar_consumos(
     col_emp: Any = None,
     col_pla: Any = None,
 ) -> list[dict]:
-    """Reserva 1 unidad por cada FUENTE a correr y registra un CONSUMO por una.
+    """v3.5 (2026-08-30): EL PLAN SE COBRA POR CONSULTA, no por fuente.
 
-    Multi-plan: cada fuente consume del plan asignado a esa fuente (cupo propio
-    o None = sin tope). Planes acumulables: varias entradas por fuente; el
-    consumo gasta FIFO por asignado_en, SALVO que el usuario haya elegido un
-    plan (plan_preferido_id): entonces se gasta ese primero (y si se agota,
-    cae al siguiente como fallback). Compensación en cascada: si la reserva de
-    la fuente N falla, se devuelven las ya hechas y se lanza 402 nombrando la
-    fuente.
+    Una consulta bajo un plan de $3.000 que incluye 4 fuentes = 1 CONSUMO de
+    $3.000 — las fuentes NO multiplican el precio (`precio_por_estudio`
+    siempre quiso decir eso; v3.1 lo degradó a precio-por-fuente y una
+    consulta de 4 fuentes salía 4× el precio del plan). El cupo cuenta
+    CONSULTAS del plan y se descuenta en LOCKSTEP: 1 unidad de TODAS las
+    entradas de ese plan (sus fuentes drenan juntas → "quedan N" es coherente
+    en cualquier vista).
+
+    Cobertura por fuente: cada fuente a correr debe estar cubierta por una
+    entrada consumible con cupo (FIFO por asignado_en; el plan elegido por el
+    usuario al frente, con fallback). Si la consulta mezcla varios planes
+    (legacy sin plan_id: fuentes cubiertas por planes distintos), se genera
+    1 CONSUMO por PLAN involucrado a SU precio congelado.
+
+    Compensación en cascada como en v3.1: si la reserva del plan N falla, se
+    devuelven todas las entradas tocadas y se borran los movimientos.
 
     ADMIN_INTEGRA sin planes vigentes → 1 movimiento exento (trazabilidad).
     Válvula EXIGIR_PLAN=false → no bloquea ni descuenta.
@@ -325,7 +334,7 @@ def reservar_consumos(
     col_pla = col_pla if col_pla is not None else col_planes
 
     # Empresa aún en el subdoc viejo (deploy antes del backfill): delegar en la
-    # reserva de subdoc único (1 unidad, 1 precio) sobre plan.*.
+    # reserva de subdoc único (1 unidad, 1 precio — que ya era por consulta).
     if not (empresa.get("planes") or []):
         consumo = reservar_consumo(empresa, actor, consulta_id, col_mov=col_mov, col_emp=col_emp, col_pla=col_pla)
         return [consumo] if consumo else []
@@ -334,32 +343,49 @@ def reservar_consumos(
     ahora = _utcnow()
     periodo = periodo_colombia(ahora)
 
-    # Resolver entradas vigentes por fuente. Multi-plan: una fuente puede
-    # tener VARIAS entradas (planes acumulables); se ordenan FIFO por
-    # asignado_en y el consumo gasta la primera con cupo.
-    resueltos: list[dict] = []  # {fuente, candidatos: [{entrada, plan_doc, pos}]}
+    # 1) Cobertura por fuente (SIN escribir): cada fuente a correr necesita una
+    #    entrada consumible CON cupo; FIFO con el plan elegido al frente. Una
+    #    fuente SIN entrada consumible se OMITE (contrato pre-v3.5: el endpoint
+    #    ya filtró); una fuente con entradas vigentes pero TODAS sin cupo → 402.
+    elegidos: dict[str, dict] = {}  # fuente -> {entrada, plan_doc}
+    sin_cupo: dict[str, list[str]] = {}  # fuente -> nombres de planes agotados
     for fuente in fuentes_a_correr:
         candidatos = []
-        for i, entrada in enumerate(planes):
+        agotados_f: list[str] = []
+        tiene_vigente = False
+        for entrada in planes:
             if entrada.get("fuente") != fuente:
                 continue
             plan_doc = col_pla.find_one({"_id": entrada.get("plan_id")}) if entrada.get("plan_id") else None
             consumible, plan_doc, _ = _entrada_consumible(entrada, plan_doc)
             if not consumible:
                 continue
-            candidatos.append({"entrada": entrada, "plan_doc": plan_doc, "pos": i})
-        # FIFO: la asignación más antigua se consume primero. Si el usuario
-        # eligió un plan, ese plan pasa al frente (elección explícita > FIFO).
+            tiene_vigente = True
+            if entrada.get("cupo_autorizado") is not None and int(entrada.get("cupo_disponible") or 0) <= 0:
+                agotados_f.append(entrada.get("plan_nombre") or str(entrada.get("plan_id")))
+                continue  # sin cupo: probar el siguiente candidato (fallback)
+            candidatos.append({"entrada": entrada, "plan_doc": plan_doc})
         candidatos.sort(key=lambda c: c["entrada"].get("asignado_en") or _utcnow())
         if plan_preferido_id is not None:
-            elegido = [c for c in candidatos if c["entrada"].get("plan_id") == plan_preferido_id]
+            preferido = [c for c in candidatos if c["entrada"].get("plan_id") == plan_preferido_id]
             resto = [c for c in candidatos if c["entrada"].get("plan_id") != plan_preferido_id]
-            if elegido:
-                candidatos = elegido + resto  # fallback si el elegido se agota
+            if preferido:
+                candidatos = preferido + resto  # fallback si el elegido se agota
         if candidatos:
-            resueltos.append({"fuente": fuente, "candidatos": candidatos})
+            elegidos[fuente] = candidatos[0]
+        elif tiene_vigente:
+            sin_cupo[fuente] = agotados_f
 
-    if not resueltos:
+    if sin_cupo and EXIGIR_PLAN:
+        fuentes_msg = ", ".join(sin_cupo)
+        planes_msg = ", ".join(sorted({p for nombres in sin_cupo.values() for p in nombres}))
+        raise HTTPException(
+            status_code=402,
+            detail=f"Cupo de consultas agotado para: {fuentes_msg} "
+                   f"(plan(es) {planes_msg}). Contacte a Integra Logística.",
+        )
+
+    if not elegidos:
         # Ninguna fuente con plan vigente.
         if actor.get("rol") == "ADMIN_INTEGRA":
             mov = _nuevo_movimiento(
@@ -377,108 +403,106 @@ def reservar_consumos(
                    "Contacte a Integra Logística para activar su servicio de consultas.",
         )
 
-    movimientos: list[dict] = []
-    reservados: list[dict] = []  # para compensación en cascada
+    # 2) Agrupar por PLAN: 1 consumo y 1 unidad de cupo por plan involucrado
+    #    (dict preserva el orden de llegada = orden de fuentes_a_correr).
+    por_plan: dict = {}  # plan_id -> {entrada, plan_doc, fuentes: []}
+    for fuente, cand in elegidos.items():
+        pid = cand["entrada"].get("plan_id")
+        grupo = por_plan.setdefault(
+            pid, {"entrada": cand["entrada"], "plan_doc": cand["plan_doc"], "fuentes": []}
+        )
+        grupo["fuentes"].append(fuente)
 
-    def _compensar():
-        # La consulta NO se va a ejecutar: revertir cupos y borrar los
-        # movimientos ya insertados (no puede quedar consumo de algo que no corrió).
-        for r in reservados:
-            entrada, pos = r["entrada"], r.get("pos", _posicion_plan(planes, r["entrada"].get("fuente")) or 0)
+    movimientos: list[dict] = []
+    reservados: list[dict] = []  # [{plan_id, tocadas: [(pos, ilimitado)]}]
+
+    def _revertir(reserva: dict) -> None:
+        for pos, ilimitado in reserva["tocadas"]:
             reversa = {f"planes.{pos}.cupo_consumido": -1}
-            if entrada.get("cupo_autorizado") is not None:
+            if not ilimitado:
                 reversa[f"planes.{pos}.cupo_disponible"] = 1
             try:
                 col_emp.update_one(
-                    {"_id": empresa["_id"], f"planes.{pos}.fuente": entrada.get("fuente")},
+                    {"_id": empresa["_id"], f"planes.{pos}.plan_id": reserva["plan_id"]},
                     {"$inc": reversa},
                 )
             except Exception as exc:
                 logger.critical(
-                    "Cupo de %s (fuente %s) quedó inconsistente tras compensación: %s",
-                    empresa.get("nombre"), entrada.get("fuente"), exc,
+                    "Cupo de %s (plan %s, pos %s) quedó inconsistente tras compensación: %s",
+                    empresa.get("nombre"), reserva["plan_id"], pos, exc,
                 )
+
+    def _compensar() -> None:
+        # La consulta NO se va a ejecutar: revertir cupos y borrar los
+        # movimientos ya insertados (no puede quedar consumo de algo que no corrió).
+        for reserva in reservados:
+            _revertir(reserva)
         for mov in movimientos:
             try:
                 col_mov.delete_one({"_id": mov["_id"]})
             except Exception as exc:
                 logger.critical("Movimiento huérfano %s tras compensación: %s", mov.get("_id"), exc)
 
-    for r in resueltos:
-        fuente = r["fuente"]
-        reservado = None
-        agotados: list[str] = []
-        for cand in r["candidatos"]:
-            entrada, plan_doc, pos = cand["entrada"], cand["plan_doc"], cand["pos"]
-            ilimitado = entrada.get("cupo_autorizado") is None
-            filtro: dict = {"_id": empresa["_id"], f"planes.{pos}.fuente": entrada.get("fuente")}
-            cambios: dict = {"$inc": {f"planes.{pos}.cupo_consumido": 1}}
+    for pid, grupo in por_plan.items():
+        entrada, plan_doc = grupo["entrada"], grupo["plan_doc"]
+        # Posiciones frescas de TODAS las entradas consumibles del plan: el
+        # cupo del plan cuenta CONSULTAS → 1 unidad de cada una (lockstep).
+        fresca = col_emp.find_one({"_id": empresa["_id"]}) or {}
+        planes_frescos = _planes_efectivos(fresca, col_pla)
+        tocadas: list[tuple[int, bool]] = []
+        fuentes_tocadas: list[str] = []  # para que el reembolso devuelva EXACTO
+        agotado = False
+        for i, ent in enumerate(planes_frescos):
+            if ent.get("plan_id") != pid:
+                continue
+            consumible, _, _ = _entrada_consumible(ent, plan_doc)
+            if not consumible:
+                continue
+            ilimitado = ent.get("cupo_autorizado") is None
+            filtro: dict = {"_id": empresa["_id"], f"planes.{i}.plan_id": pid}
+            cambios: dict = {"$inc": {f"planes.{i}.cupo_consumido": 1}}
             if not ilimitado:
-                filtro[f"planes.{pos}.cupo_disponible"] = {"$gt": 0}
-                cambios["$inc"][f"planes.{pos}.cupo_disponible"] = -1
+                filtro[f"planes.{i}.cupo_disponible"] = {"$gt": 0}
+                cambios["$inc"][f"planes.{i}.cupo_disponible"] = -1
             actualizada = col_emp.find_one_and_update(filtro, cambios, return_document=True)
-            if actualizada is not None:
-                reservado = cand
+            if actualizada is None:
+                agotado = True  # carrera o cupo agotado a mitad de reserva
                 break
-            # Este plan no tiene cupo (o hubo carrera del posicional): releer
-            # la posición por si el array se reordenó, y probar el siguiente.
-            fresca = col_emp.find_one({"_id": empresa["_id"]}) or {}
-            planes_frescos = _planes_efectivos(fresca, col_pla)
-            pos_fresca = None
-            for i, ent in enumerate(planes_frescos):
-                if ent.get("fuente") == entrada.get("fuente") and ent.get("plan_id") == entrada.get("plan_id"):
-                    pos_fresca = i
-                    break
-            if pos_fresca is not None and pos_fresca != pos:
-                cand["pos"] = pos = pos_fresca
-                filtro = {"_id": empresa["_id"], f"planes.{pos}.fuente": entrada.get("fuente")}
-                cambios = {"$inc": {f"planes.{pos}.cupo_consumido": 1}}
-                if not ilimitado:
-                    filtro[f"planes.{pos}.cupo_disponible"] = {"$gt": 0}
-                    cambios["$inc"][f"planes.{pos}.cupo_disponible"] = -1
-                actualizada = col_emp.find_one_and_update(filtro, cambios, return_document=True)
-                if actualizada is not None:
-                    reservado = cand
-                    break
-            agotados.append(entrada.get("plan_nombre") or str(entrada.get("plan_id")))
-
-        if reservado is None:
+            tocadas.append((i, ilimitado))
+            fuentes_tocadas.append(ent.get("fuente"))
+        if agotado or not tocadas:
+            _revertir({"plan_id": pid, "tocadas": tocadas})
             _compensar()
-            detalle = f" ({', '.join(agotados)} agotado(s))" if agotados else ""
+            nombre = (plan_doc or {}).get("nombre") or entrada.get("plan_nombre") or str(pid)
             raise HTTPException(
                 status_code=402,
-                detail=f"Cupo agotado para la fuente {fuente}{detalle}. Contacte a Integra Logística.",
+                detail=f"Cupo de consultas agotado para el plan {nombre}. Contacte a Integra Logística.",
             )
-
-        entrada, plan_doc, pos = reservado["entrada"], reservado["plan_doc"], reservado["pos"]
-        reservados.append(reservado)
-        ilimitado = entrada.get("cupo_autorizado") is None
+        reservados.append({"plan_id": pid, "tocadas": tocadas})
 
         # Precio: el CONGELADO de la asignación (no el del catálogo actual).
-        precio = int(entrada.get("precio_congelado") or plan_doc.get("precio_por_estudio") or 0)
+        # 1 consulta del plan = 1 unidad al precio del PLAN (v3.5).
+        precio = int(entrada.get("precio_congelado") or (plan_doc or {}).get("precio_por_estudio") or 0)
         mov = _nuevo_movimiento(
             empresa, actor, TIPO_CONSUMO, unidades=1, monto_cop=precio, consulta_id=consulta_id,
-            plan=plan_doc, periodo=periodo, fuente=fuente,
-            # Canal del consumo: "portal" (humano) | "api" (integración con API
-            # key) — visible en movimientos, historial del cliente y cuentas.
-            extra={"canal": actor.get("canal") or "portal"},
+            plan=plan_doc, periodo=periodo, fuente=grupo["fuentes"][0],
+            extra={
+                # Canal: "portal" (humano) | "api" (integración). v3.5: el
+                # consumo es por PLAN — `fuente` queda como la primera (compat
+                # lecturas viejas), `fuentes` = corridas en esta consulta y
+                # `fuentes_tocadas` = entradas cuyo cupo se descontó (lockstep)
+                # para que el REEMBOLSO devuelva exactamente lo descontado.
+                "canal": actor.get("canal") or "portal",
+                "fuentes": list(grupo["fuentes"]),
+                "fuentes_tocadas": fuentes_tocadas,
+            },
         )
         try:
             col_mov.insert_one(mov)
             movimientos.append(mov)
         except Exception as exc:
-            # Revertir ESTA reserva (el movimiento no existe) y las previas.
-            logger.error("Movimiento de consumo %s (%s) no se insertó: %s — compensando", consulta_id, fuente, exc)
-            reversa = {f"planes.{pos}.cupo_consumido": -1}
-            if not ilimitado:
-                reversa[f"planes.{pos}.cupo_disponible"] = 1
-            try:
-                col_emp.update_one(
-                    {"_id": empresa["_id"], f"planes.{pos}.fuente": fuente},
-                    {"$inc": reversa},
-                )
-            except Exception as exc2:
-                logger.critical("Cupo de %s inconsistente tras fallo de insert: %s", empresa.get("nombre"), exc2)
+            logger.error("Movimiento de consumo %s (plan %s) no se insertó: %s — compensando", consulta_id, pid, exc)
+            _revertir({"plan_id": pid, "tocadas": tocadas})
             _compensar()
             raise HTTPException(status_code=503, detail="No se pudo registrar el consumo. Intente de nuevo.")
     return movimientos
@@ -646,21 +670,27 @@ def reembolsar_consumo(
 
     if not consumo.get("cierre_id"):
         if fresca.get("planes"):
-            # Formato nuevo: array por fuente; multi-plan → localizar por
-            # (fuente, plan_id) porque puede haber varias entradas de la fuente.
-            pos = None
+            # v3.5 (movimientos con "fuentes_tocadas"): el consumo por PLAN
+            # descontó 1 unidad de las entradas tocadas (lockstep) → reintegrar
+            # EXACTAMENTE a esas (aunque la fuente se haya retirado del catálogo
+            # después del consumo). Movimientos viejos (pre-v3.5): solo a SU
+            # entrada (fuente, plan_id).
+            tocadas_fuentes = consumo.get("fuentes_tocadas")
+            es_por_plan = isinstance(tocadas_fuentes, list)
             for i, ent in enumerate(fresca["planes"]):
-                if ent.get("fuente") == fuente_consumo and ent.get("plan_id") == consumo.get("plan_id"):
-                    pos = i
-                    break
-            if pos is not None:
-                entrada = fresca["planes"][pos]
-                ilimitado = entrada.get("cupo_autorizado") is None
-                compensar = {f"planes.{pos}.cupo_consumido": -1}
+                if ent.get("plan_id") != consumo.get("plan_id"):
+                    continue
+                if es_por_plan:
+                    if ent.get("fuente") not in tocadas_fuentes:
+                        continue
+                elif ent.get("fuente") != fuente_consumo:
+                    continue
+                ilimitado = ent.get("cupo_autorizado") is None
+                compensar = {f"planes.{i}.cupo_consumido": -1}
                 if not ilimitado:
-                    compensar[f"planes.{pos}.cupo_disponible"] = 1
+                    compensar[f"planes.{i}.cupo_disponible"] = 1
                 col_emp.update_one(
-                    {"_id": empresa["_id"], f"planes.{pos}.fuente": fuente_consumo},
+                    {"_id": empresa["_id"], f"planes.{i}.plan_id": consumo.get("plan_id")},
                     {"$inc": compensar},
                 )
         else:

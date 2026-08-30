@@ -37,7 +37,11 @@ from Funciones.bot_policia import (
     BotPoliciaSinResultado,
     consultar_antecedentes_policia_sync,
 )
-from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
+from Funciones.bot_procuraduria import (
+    BotProcuraduriaError,
+    BotProcuraduriaSinResultado,
+    consultar_antecedentes_sync,
+)
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
@@ -179,6 +183,11 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
     if isinstance(exc, asyncio.TimeoutError):
         return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
     if isinstance(exc, BotRNDC2Incompleto):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotProcuraduriaSinResultado):
+        # Postback de la PGN sin respuesta (lento/caído): NO_DISPONIBLE para no
+        # disparar reembolso en cascada por pura lentitud, y el reintento del
+        # _llamar_con_reintento ya corrió (fix 2026-08-30).
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotPoliciaSinCaptchaKey):
         # Falta de configuración (no del portal): NO_DISPONIBLE para que una
@@ -484,6 +493,24 @@ async def _ejecutar_fuente(
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
         no_registra = resultado.get("no_registra")
+        # Anti-envenenamiento (fix 2026-08-30, análogo RNDC/Policía/RUNT): sin
+        # veredicto Y sin PDF no hay consulta válida — el portal quedó en el
+        # formulario o falló la descarga. Antes esto era ADVERTENCIA con
+        # mensaje "ver PDF" (¡sin PDF!) y quedaba CACHÉ 24 h: la cédula salía
+        # "no concluyente" todo el día aunque el portal respondiera bien luego.
+        if no_registra is None and not pdf_bytes:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal de la Procuraduría no entregó certificado ni veredicto. Intente de nuevo.",
+                },
+            })
+            logger.warning(
+                "Procuraduría sin veredicto ni PDF para %s (sin cachear): %s",
+                enmascarar_cedula(cedula), (resultado.get("texto_resultado") or "")[:150] or "(sin texto)",
+            )
+            return seccion
         doc_cache = {
             "tipo": nombre, "cedula": cedula,
             "no_registra": no_registra,

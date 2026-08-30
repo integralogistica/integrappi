@@ -352,9 +352,19 @@ def consultar_cupo(
                 pind["cupo_autorizado"] = None
                 pind["cupo_disponible"] = None
             elif not pind["ilimitado"]:
-                pind["cupo_autorizado"] = (pind["cupo_autorizado"] or 0) + int(entrada.get("cupo_autorizado") or 0)
-                pind["cupo_disponible"] = (pind["cupo_disponible"] or 0) + int(entrada.get("cupo_disponible") or 0)
-            pind["cupo_consumido"] += int(entrada.get("cupo_consumido") or 0)
+                # v3.5: el cupo del plan cuenta CONSULTAS y sus entradas drenan
+                # en LOCKSTEP → el cupo del plan es el de SUS entradas (mínimo
+                # por seguridad), NO la suma (4 fuentes × 50 no son 200
+                # consultas, son 50).
+                pind["cupo_autorizado"] = min(
+                    pind["cupo_autorizado"], int(entrada.get("cupo_autorizado") or 0)
+                )
+                pind["cupo_disponible"] = min(
+                    pind["cupo_disponible"], int(entrada.get("cupo_disponible") or 0)
+                )
+            pind["cupo_consumido"] = max(
+                pind["cupo_consumido"], int(entrada.get("cupo_consumido") or 0)
+            )
 
         if fuente not in por_fuente:
             por_fuente[fuente] = {

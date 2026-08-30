@@ -102,11 +102,12 @@ def _fecha_colombia(dt: datetime | None, con_hora: bool = True) -> str:
 
 
 def _enmascarar_cedula(cedula: str | None) -> str:
-    """Cédula parcialmente oculta para el PDF (minimización por defecto)."""
-    cedula = str(cedula or "")
-    if len(cedula) <= 4:
-        return "*" * len(cedula)
-    return f"{cedula[:2]}{'*' * (len(cedula) - 4)}{cedula[-2:]}"
+    """Cédula VISIBLE completa (decisión de negocio 2026-08-30: el cliente
+    necesita verla para cruzar con sus registros; antes iba enmascarada).
+    Se mantiene como función para que el punto de decisión sea explícito y
+    fácil de revertir, y para no confundirla con la que SÍ va enmascarada en
+    el endpoint público del QR y en los logs."""
+    return str(cedula or "").strip() or "—"
 
 
 def _vehiculo_del_estudio(estudio: dict) -> dict:
@@ -782,7 +783,11 @@ def _texto_veredicto(proc: dict) -> str:
         return "Sin sanciones ni inhabilidades vigentes"
     if no_registra is False:
         return "Registra anotaciones — ver certificado"
-    return "Veredicto no concluyente — ver certificado adjunto"
+    # No concluyente: solo remitir al anexo si el certificado EXISTE (con
+    # veredicto ilegible hay PDF adjunto; sin PDF no hay nada que ver).
+    if (proc.get("pdf_tamano") or 0) > 0:
+        return "Veredicto no concluyente — ver certificado adjunto"
+    return "Veredicto no concluyente (certificado no entregado por el portal)"
 
 
 def _texto_veredicto_policia(pol: dict) -> str:

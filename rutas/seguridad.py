@@ -95,6 +95,9 @@ def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = No
     NO cuenta como caché válida: fue una respuesta incompleta que jamás debió
     guardarse (fix 2026-08-29) — se ignora y se vuelve al portal.
 
+    Procuraduría SIN veredicto y SIN PDF (fix 2026-08-30): igual — una
+    respuesta vacía así jamás debió cachearse; se ignora al leer.
+
     runt discrimina además por PLACA (una cédula puede tener varios vehículos):
     sin placa no hay identidad de caché → nunca hit (evita cross-contaminación
     entre placas de la misma cédula)."""
@@ -111,6 +114,13 @@ def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = No
         and tipo == "manifiestos_rndc"
         and not (doc.get("viajes") or [])
         and "consulta realizada" not in (doc.get("mensaje_portal") or "").lower()
+    ):
+        return None
+    if (
+        doc
+        and tipo == "procuraduria"
+        and doc.get("no_registra") is None
+        and not (doc.get("pdf_tamano") or 0)
     ):
         return None
     return doc

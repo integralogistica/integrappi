@@ -22,7 +22,7 @@ from bd.bd_cliente import bd_cliente
 from Funciones import cobro_seguridad as cobro
 from Funciones import storage_seguridad
 from Funciones.auth_seguridad import ROL_ADMIN_INTEGRA
-from Funciones.orquestador_estudios import FUENTES, enmascarar_cedula
+from Funciones.orquestador_estudios import FUENTES
 from Funciones.pdf_cuenta_cobro import generar_pdf_cuenta
 from rutas.seguridad_estudios import _requiere_admin_integra, _utcnow, registrar_evento
 
@@ -664,7 +664,9 @@ def listar_movimientos(
             )
             if estudio:
                 mov["estado_estudio"] = estudio.get("estado")
-                mov["cedula"] = enmascarar_cedula(estudio.get("cedula", ""))
+                # Cédula COMPLETA (2026-08-30): el admin necesita verla para
+                # cruzar; el enmascarado queda solo en lo público (QR) y logs.
+                mov["cedula"] = estudio.get("cedula", "")
         items.append(mov)
     return {"total": total, "items": items}
 

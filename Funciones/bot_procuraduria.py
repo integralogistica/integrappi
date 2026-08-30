@@ -43,6 +43,14 @@ class BotProcuraduriaError(Exception):
     """Error del bot de antecedentes de la Procuraduría."""
 
 
+class BotProcuraduriaSinResultado(Exception):
+    """El portal no entregó la página del certificado (postback lento o caído).
+
+    Lanzar (en vez de retornar vacío) dispara el REINTENTO del orquestador y
+    NO se cachea nada (fix 2026-08-30: antes un resultado vacío silencioso era
+    ADVERTENCIA 'no concluyente' cacheada 24 h)."""
+
+
 def _resolver_captcha_texto(texto: str) -> Optional[str]:
     m = re.search(r"(\d+)\s*([+\-*x×])\s*(\d+)", texto or "")
     if not m:
@@ -153,9 +161,17 @@ async def consultar_antecedentes(cedula: str, headed: bool = False) -> Dict[str,
             tarea_descarga = asyncio.create_task(_esperar_descarga())
             await pagina.click("#btnExportar")
 
-            # Esperar: o la descarga del PDF o la página de resultados
+            # Esperar: o la descarga del PDF o la página de resultados. El
+            # postback a verpdf.aspx es LENTO e intermitente (2026-08-30:
+            # visto tardar >45 s o no llegar): esperar el BOTÓN de descarga
+            # de forma explícita, no un networkidle+3s que se rinde antes.
             try:
-                await pagina.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
+                await pagina.wait_for_selector("#btnDescargar", timeout=45000, state="attached")
+            except Exception:
+                pass  # puede ser error de captcha o descarga directa: leer la página
+            try:
+                # El botón ya cargó (o falló): networkidle corto, solo asentar
+                await pagina.wait_for_load_state("networkidle", timeout=20000)
             except Exception:
                 pass
             await pagina.wait_for_timeout(3000)
@@ -210,9 +226,22 @@ async def consultar_antecedentes(cedula: str, headed: bool = False) -> Dict[str,
                 if m2:
                     no_registra = False
                     mensaje = m2.group(0)[-160:].strip()
-                elif pdf_bytes or "certificado" in fuente_texto.lower():
-                    # PDF generado pero sin veredicto legible: se entrega crudo
+                elif pdf_bytes:
+                    # PDF generado pero con veredicto ilegible: se entrega crudo
+                    # (el anexo queda en el estudio). Solo prometer "ver PDF"
+                    # cuando el PDF EXISTE (fix 2026-08-30: decirlo sin PDF
+                    # llevaba a un ADVERTENCIA que apuntaba a un anexo vacío).
                     mensaje = "Certificado generado; ver PDF"
+
+            # Sin veredicto Y sin PDF el portal no entregó nada usable (postback
+            # lento/caído o descarga que no llegó): LANZAR para que el orquestador
+            # REINTENTE y no quede nada en caché (fix 2026-08-30 — antes esto
+            # retornaba silenciosamente y era ADVERTENCIA cacheada 24 h).
+            if no_registra is None and not pdf_bytes:
+                raise BotProcuraduriaSinResultado(
+                    "El portal de la Procuraduría no entregó el certificado "
+                    f"(postback sin respuesta). Texto visible: {texto_resultado[:120]!r}"
+                )
 
             return {
                 "cedula": cedula_norm,

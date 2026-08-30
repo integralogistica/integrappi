@@ -233,6 +233,70 @@ class TestFiltroEmpresa(unittest.TestCase):
         self.assertIsInstance(insertados["usuario_id"], ObjectId)
 
 
+class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
+    """Regresión del bug 2026-08-30 (cédula 1033688842, ES-8F34FEE82AAA): el
+    postback de la PGN quedó en el formulario (sin veredicto y SIN PDF) y el
+    bot lo retornaba silenciosamente → ADVERTENCIA 'no concluyente — ver PDF'
+    apuntando a un anexo INEXISTENTE, y quedaba CACHÉ 24 h que repetía el
+    resultado vacío aunque el portal respondiera bien después."""
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_sin_veredicto_y_sin_pdf_no_disponible_sin_cachear(self):
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_sync") as bot:
+                # El portal respondió la página pero sin certificado ni veredicto.
+                bot.return_value = {"pdf_bytes": b"", "no_registra": None, "mensaje": "", "texto_pdf": "", "texto_resultado": "inicio"}
+                with patch.object(orch, "col_consultas") as col:
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("procuraduria", "1033688842", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()  # nada de esto va a caché
+
+    def test_pdf_ilegible_sigue_advertencia_y_cachea(self):
+        """PDF presente pero veredicto ilegible: ADVERTENCIA legítima (hay
+        anexo que ver) y SÍ se cachea — ese caso funcionaba y no cambia."""
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_sync") as bot:
+                bot.return_value = {
+                    "pdf_bytes": b"%PDF-foto-escaneada", "no_registra": None,
+                    "mensaje": "Certificado generado; ver PDF", "texto_pdf": "",
+                }
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("procuraduria", "1033688842", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        self.assertGreater(seccion["pdf_tamano"], 0)
+        col.insert_one.assert_called_once()
+
+    def test_cache_venenida_ignorada_al_leer(self):
+        """Cachés ya escritas con el bug (no_registra None, sin PDF) se ignoran
+        al leer: el hit no puede devolver un 'no concluyente' fantasma."""
+        from rutas import seguridad as rseg
+
+        viciada = {"_id": ObjectId(), "tipo": "procuraduria", "no_registra": None, "pdf_tamano": 0}
+        with patch.object(rseg, "col_consultas") as col:
+            col.find_one.return_value = viciada
+            doc = rseg._buscar_cache("procuraduria", "1033688842", False)
+        self.assertIsNone(doc)
+
+    def test_excepcion_sin_resultado_es_no_disponible(self):
+        """BotProcuraduriaSinResultado (postback que no llegó) → NO_DISPONIBLE
+        portal_inconsistente (no ERROR: no dispara la cadena de reembolso)."""
+        from Funciones.bot_procuraduria import BotProcuraduriaSinResultado
+
+        estado, error = orch._clasificar_error(
+            BotProcuraduriaSinResultado("postback sin respuesta")
+        )
+        self.assertEqual(estado, "NO_DISPONIBLE")
+        self.assertEqual(error["tipo"], "portal_inconsistente")
+
+
 class TestEstadoGlobal(unittest.TestCase):
     def f(self, a, b):
         return orch.calcular_estado_global(

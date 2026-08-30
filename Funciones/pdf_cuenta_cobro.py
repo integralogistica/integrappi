@@ -235,7 +235,9 @@ def generar_pdf_cuenta(empresa: dict, cierre: dict, movimientos: list[dict]) -> 
             filas.append([
                 celda(_fecha_colombia(m.get("creado_en"))),
                 celda(m.get("consulta_id") or ("(exento)" if m.get("exento") else "—")),
-                celda(_enmascarar(m.get("cedula"))),
+                # Cédula COMPLETA (decisión de negocio 2026-08-30: el cliente
+                # la necesita para cruzar con sus registros; antes enmascarada).
+                celda(str(m.get("cedula") or "—")),
                 celda(m.get("estado_estudio") or "—"),
                 celda(m.get("plan_nombre") or "—"),
                 celda("EXENTO" if m.get("exento") else _pesos(precio), derecha=True),
@@ -346,7 +348,6 @@ def generar_pdf_cuenta(empresa: dict, cierre: dict, movimientos: list[dict]) -> 
 
 
 def _enmascarar(cedula) -> str:
-    cedula = str(cedula or "")
-    if len(cedula) <= 4:
-        return "*" * len(cedula) or "—"
-    return f"{cedula[:2]}{'*' * (len(cedula) - 4)}{cedula[-2:]}"
+    """Deprecated 2026-08-30: la cédula va COMPLETA en la cuenta de cobro.
+    Se conserva por si algún llamador viejo la referencia."""
+    return str(cedula or "") or "—"

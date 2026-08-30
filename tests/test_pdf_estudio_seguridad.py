@@ -387,7 +387,7 @@ class TestSeccionRunt(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(self._con_vehiculo(False)))
         self.assertIn("ESDISTINTODELAPERSONAEVALUADA", texto)
         self.assertIn("DISTINTA delapersonaevaluada".replace(" ", ""), texto)
-        self.assertIn("10******62", texto)  # cédula propietario enmascarada
+        self.assertIn("1010213062", texto)  # cédula propietario COMPLETA (2026-08-30)
         self.assertIn("Propietariodelvehículo", texto)
 
     def test_propietario_distinto_en_trazabilidad(self):
@@ -422,7 +422,7 @@ class TestSeccionRunt(unittest.TestCase):
         # fragmentos estables, sin tildes (pdfplumber las extrae como mojibake).
         self.assertIn("dulaconsultada", texto)
         self.assertIn("elportalvalid", texto)
-        self.assertIn("10******62", texto)
+        self.assertIn("1010213062", texto)
 
     def test_historial_polizas(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
