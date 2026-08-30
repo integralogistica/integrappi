@@ -298,9 +298,9 @@ def consultar_cupo(
     if not empresa:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
 
-    plan_ref = empresa.get("plan") or {}
-    plan_doc = db["planes_seguridad"].find_one({"_id": plan_ref.get("plan_id")}) if plan_ref.get("plan_id") else None
-    plan_valido, _ = cobro._plan_vigente(plan_doc, asignado_en=plan_ref.get("asignado_en"))
+    # El catálogo manda: materializar fuentes nuevas antes de consolidar.
+    empresa = cobro.sincronizar_fuentes_planes(empresa, db["planes_seguridad"], col_empresas)
+
     periodo = cobro.periodo_colombia()
     consumo_mes = cobro.totales_periodo(empresa["_id"], periodo)
 
@@ -318,6 +318,10 @@ def consultar_cupo(
         doc = col_planes.find_one({"_id": entrada.get("plan_id")}) if entrada.get("plan_id") else None
         valido, _ = cobro._plan_vigente(doc, asignado_en=entrada.get("asignado_en"))
         if not valido:
+            continue
+        # Fuente retirada del catálogo: la entrada sobrevive en la empresa pero
+        # no se ofrece (rompería precio=min e "ilimitado contagia" del consolidado).
+        if fuente != "todas" and fuente not in (valido.get("fuentes_incluidas") or []):
             continue
         nombres = [n for n in (valido.get("nombre", ""),) if n]
         ilimitado = entrada.get("cupo_autorizado") is None
@@ -445,13 +449,27 @@ async def crear_estudio(
     if not empresa.get("_id"):
         raise HTTPException(status_code=403, detail="Su usuario no tiene empresa asignada")
 
+    # El catálogo manda: materializar fuentes nuevas del plan antes de decidir
+    # qué correr (idempotente; para el cliente es transparente).
+    empresa = cobro.sincronizar_fuentes_planes(empresa, db["planes_seguridad"], col_empresas)
+
     habilitadas = list((empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES)
     # Fuentes con plan: multi-plan por fuente — la consulta corre solo las
     # fuentes que la empresa tenga con plan vigente (ej. solo compró RNDC).
-    # ADMIN_INTEGRA ve todo.
+    # ADMIN_INTEGRA ve todo, salvo fuentes con entrada RETIRADA del catálogo
+    # (dejaría correr sin CONSUMO una fuente que el plan ya no cubre).
     if actor["rol"] != ROL_ADMIN_INTEGRA:
         con_plan = cobro.fuentes_con_plan(empresa, habilitadas, db["planes_seguridad"])
         habilitadas = [f for f in habilitadas if f in con_plan]
+    else:
+        entradas_admin = cobro._planes_efectivos(empresa, db["planes_seguridad"])
+        retiradas = {
+            e.get("fuente") for e in entradas_admin
+            if e.get("fuente") in habilitadas
+            and (pd := db["planes_seguridad"].find_one({"_id": e.get("plan_id")}))
+            and (e.get("fuente") not in (pd.get("fuentes_incluidas") or []) or not pd.get("activo", True))
+        }
+        habilitadas = [f for f in habilitadas if f not in retiradas]
     # El usuario ELIGE qué fuentes consultar (debe tener plan para cada una).
     fuentes_pedidas = getattr(datos, "fuentes", None)
     if fuentes_pedidas is not None:
@@ -483,9 +501,12 @@ async def crear_estudio(
         if not re.fullmatch(r"[0-9a-fA-F]{24}", plan_pedido or ""):
             raise HTTPException(status_code=422, detail="plan_id inválido")
         entradas_empresa = cobro._planes_efectivos(empresa, db["planes_seguridad"])
+        plan_doc_pedido = db["planes_seguridad"].find_one({"_id": ObjectId(plan_pedido)})
+        fuentes_incluidas = (plan_doc_pedido or {}).get("fuentes_incluidas") or []
         fuentes_del_plan = [
             f for f in habilitadas
-            if any(e.get("fuente") == f and str(e.get("plan_id")) == plan_pedido for e in entradas_empresa)
+            if f in fuentes_incluidas  # fuente retirada del plan no corre
+            and any(e.get("fuente") == f and str(e.get("plan_id")) == plan_pedido for e in entradas_empresa)
         ]
         if not fuentes_del_plan:
             raise HTTPException(
@@ -831,6 +852,7 @@ def estadisticas_estudios(
                 {"$or": [
                     {"$eq": ["$fuentes.manifiestos_rndc.origen", "cache"]},
                     {"$eq": ["$fuentes.procuraduria.origen", "cache"]},
+                    {"$eq": ["$fuentes.policia.origen", "cache"]},
                 ]},
                 1, 0,
             ]}},
@@ -915,7 +937,11 @@ CONFIG_DEFAULT_EMPRESA = {
     "retencion_dias": 730,
     "aislamiento_usuario": False,
     "consultas_por_minuto": 10,
-    "fuentes_habilitadas": list(FUENTES),
+    # Policía NO va en el default: el portal de antecedentes judiciales es de
+    # autoconsulta del titular (Decreto 019 de 2012) y prohíbe el acceso por
+    # terceros; se activa POR EMPRESA (PATCH config) con autorización
+    # documentada del titular bajo la Ley 1581 de 2012.
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria"],
 }
 
 

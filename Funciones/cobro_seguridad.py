@@ -160,6 +160,106 @@ def _posicion_plan(planes: list[dict], fuente: str) -> int | None:
     return None
 
 
+def _entrada_consumible(entrada: dict, plan_doc: dict | None) -> tuple[bool, dict | None, str | None]:
+    """(consumible, plan_doc, motivo). Unifica vigencia + membresía de fuente.
+
+    Además de _plan_vigente, exige que la fuente de la entrada SIGA en
+    `plan_doc.fuentes_incluidas`: si el admin retiró la fuente del catálogo,
+    la entrada de la empresa sobrevive (historial de cobro) pero deja de ser
+    consumible. La fuente sintética "todas" (fallback pre-backfill del subdoc
+    viejo) nunca se bloquea: no representa una fuente real del catálogo.
+    """
+    plan_doc, rechazo = _plan_vigente(plan_doc, asignado_en=entrada.get("asignado_en"))
+    if rechazo or not plan_doc:
+        return False, plan_doc, rechazo
+    fuente = entrada.get("fuente")
+    if fuente and fuente != "todas" and fuente not in (plan_doc.get("fuentes_incluidas") or []):
+        return False, plan_doc, "fuente retirada del plan"
+    return True, plan_doc, None
+
+
+def sincronizar_fuentes_planes(
+    empresa: dict,
+    col_pla: Any = None,
+    col_emp: Any = None,
+) -> dict:
+    """Propaga las fuentes NUEVAS del catálogo a las entradas de la empresa.
+
+    El catálogo manda: si un plan pasó de 2 a 3 fuentes, toda empresa con ese
+    plan gana la 3ª entrada aquí — sin reasignar y sin tocar nada existente
+    (nada se resetea; para el cliente es transparente). Fuente RETIRADA del
+    catálogo no se escribe: la entrada sobrevive intacta y pasa a ser no
+    consumible vía _entrada_consumible.
+
+    Reglas de la entrada nueva:
+      - precio_congelado = precio ACTUAL del catálogo (decisión de negocio).
+      - cupo_autorizado/cupo_disponible clonados de la hermana más antigua
+        del mismo plan (menor asignado_en; None = hermana ilimitada).
+      - cupo_consumido 0, asignado_en ahora ⇒ ventana de vigencia completa
+        (heredar asignado_en crearía entradas nacidas vencidas).
+      - asignado_por "sync_catalogo" como marcador de auditoría.
+
+    Concurrencia: $push con guard $not $elemMatch — si dos consultas ven el
+    mismo hueco, solo el primer update modifica; el otro ve modified_count 0
+    y continúa. Sin duplicados, sin índice extra.
+
+    ⚠️ $push NUNCA reordena el array: los índices posicionales `planes.{pos}`
+    del $inc de reservar_consumos siguen válidos durante una carrera. NO
+    cambiar por $set del array completo: perdería $inc concurrentes.
+
+    Degradación: fallo de escritura → logger.warning y doc sin sincronizar
+    (un read path jamás propaga 5xx por el sync). Devuelve el doc FRESCO.
+    """
+    col_pla = col_pla if col_pla is not None else col_planes
+    col_emp = col_emp if col_emp is not None else col_empresas
+    entradas = list(empresa.get("planes") or [])
+    if not entradas:
+        # Subdoc viejo: ya deriva las fuentes del catálogo en runtime.
+        return empresa
+
+    cache: dict[Any, dict | None] = {}
+    ahora = _utcnow()
+    try:
+        for pid in {e.get("plan_id") for e in entradas if e.get("plan_id")}:
+            plan_doc = cache.get(pid) or col_pla.find_one({"_id": pid})
+            cache[pid] = plan_doc
+            if not plan_doc or not plan_doc.get("activo", True):
+                continue  # no agrega nada, no borra nada
+            hermanas = sorted(
+                (e for e in entradas if e.get("plan_id") == pid),
+                key=lambda e: e.get("asignado_en") or _utcnow(),
+            )
+            if not hermanas:
+                continue
+            molde = hermanas[0]  # la más antigua define el cupo del plan
+            for fuente in plan_doc.get("fuentes_incluidas") or []:
+                if any(e.get("fuente") == fuente for e in entradas):
+                    continue  # ya existe (de este u otro plan: acumulable)
+                nueva = {
+                    "plan_id": pid,
+                    "plan_nombre": plan_doc.get("nombre", ""),
+                    "fuente": fuente,
+                    "precio_congelado": int(plan_doc.get("precio_por_estudio") or 0),
+                    "cupo_autorizado": molde.get("cupo_autorizado"),
+                    "cupo_disponible": molde.get("cupo_autorizado"),
+                    "cupo_consumido": 0,
+                    "asignado_por": "sync_catalogo",
+                    "asignado_en": ahora,
+                }
+                resultado = col_emp.update_one(
+                    {"_id": empresa["_id"],
+                     "planes": {"$not": {"$elemMatch": {"plan_id": pid, "fuente": fuente}}}},
+                    {"$push": {"planes": nueva}},
+                )
+                if getattr(resultado, "modified_count", 0):
+                    entradas.append(nueva)  # reflejar localmente para las siguientes fuentes
+    except Exception as exc:
+        logger.warning("sync fuentes de %s degradado (%s); se continúa con las entradas actuales",
+                       empresa.get("nombre"), exc)
+    fresco = col_emp.find_one({"_id": empresa["_id"]})
+    return fresco if fresco else empresa
+
+
 def fuentes_con_plan(empresa: dict, fuentes: list[str], col_pla: Any = None) -> list[str]:
     """De las fuentes pedidas, cuáles tienen plan VIGENTE asignado a la empresa.
 
@@ -183,8 +283,8 @@ def fuentes_con_plan(empresa: dict, fuentes: list[str], col_pla: Any = None) -> 
         if fuente not in fuentes or fuente in resultado:
             continue
         plan_doc = col_pla.find_one({"_id": entrada.get("plan_id")}) if entrada.get("plan_id") else None
-        plan_doc, rechazo = _plan_vigente(plan_doc, asignado_en=entrada.get("asignado_en"))
-        if not rechazo and plan_doc:
+        consumible, plan_doc, _ = _entrada_consumible(entrada, plan_doc)
+        if consumible:
             resultado.append(fuente)
     return resultado
 
@@ -236,8 +336,8 @@ def reservar_consumos(
             if entrada.get("fuente") != fuente:
                 continue
             plan_doc = col_pla.find_one({"_id": entrada.get("plan_id")}) if entrada.get("plan_id") else None
-            plan_doc, rechazo = _plan_vigente(plan_doc, asignado_en=entrada.get("asignado_en"))
-            if rechazo:
+            consumible, plan_doc, _ = _entrada_consumible(entrada, plan_doc)
+            if not consumible:
                 continue
             candidatos.append({"entrada": entrada, "plan_doc": plan_doc, "pos": i})
         # FIFO: la asignación más antigua se consume primero. Si el usuario

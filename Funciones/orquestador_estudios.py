@@ -31,6 +31,12 @@ from typing import Any, Awaitable, Callable
 from bson import ObjectId
 
 from bd.bd_cliente import bd_cliente
+from Funciones.bot_policia import (
+    BotPoliciaCaptchaFallido,
+    BotPoliciaSinCaptchaKey,
+    BotPoliciaSinResultado,
+    consultar_antecedentes_policia_sync,
+)
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
@@ -53,7 +59,7 @@ RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia")
 
 # Evita apilar Chromium concurrentes en una instancia pequeña de Render.
 _SEMAFORO_ESTUDIOS = asyncio.Semaphore(2)
@@ -168,6 +174,15 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
     if isinstance(exc, BotRNDC2Incompleto):
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotPoliciaSinCaptchaKey):
+        # Falta de configuración (no del portal): NO_DISPONIBLE para que una
+        # causa pura de config no dispare la cadena "todas fallidas → ERROR
+        # → reembolso". El mensaje dice exactamente qué hacer.
+        return "NO_DISPONIBLE", {"tipo": "configuracion_faltante", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotPoliciaSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotPoliciaCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
@@ -206,6 +221,8 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
                 "nombre_certificado": cache.get("nombre_certificado", ""),
                 "pdf_tamano": cache.get("pdf_tamano", 0),
             })
+            if nombre == "policia":
+                seccion["nombre_consultado"] = cache.get("nombre_consultado", "")
         return seccion
 
     # 2) Consulta real al portal.
@@ -218,6 +235,10 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
                 consultar_historial_viajes_sync,
                 cedula=cedula, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
             )
+    elif nombre == "policia":
+
+        async def invocar() -> dict:
+            return await asyncio.to_thread(consultar_antecedentes_policia_sync, cedula)
     else:
 
         async def invocar() -> dict:
@@ -292,6 +313,60 @@ async def _ejecutar_fuente(nombre: str, cedula: str, actor: dict, forzar: bool) 
             "viajes": viajes[:MAX_VIAJES_DOC], "columnas": resultado.get("columnas", []),
             "total": total,
         })
+    elif nombre == "policia":
+        # Mismo shape que procuraduría (veredicto tri-estado), pero el portal
+        # no genera PDF: mensaje = leyenda oficial (SU-458) y el nombre del
+        # consultado viene de la línea "Apellidos y Nombres".
+        pdf_bytes = resultado.get("pdf_bytes") or b""
+        no_registra = resultado.get("no_registra")
+        mensaje = (resultado.get("mensaje") or "").strip()
+        nombre_consultado = (resultado.get("nombre_consultado") or "").strip()
+        # Anti-envenenamiento (segunda barrera: el bot ya lanza
+        # BotPoliciaSinResultado; esto cubre resultados vacíos que lleguen
+        # como dict): sin leyenda, sin nombre y sin PDF no hay consulta válida.
+        if no_registra is None and not nombre_consultado and not pdf_bytes:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal de la Policía no entregó veredicto ni datos. Intente de nuevo.",
+                },
+            })
+            logger.warning(
+                "Policía sin resultado legible para %s (sin cachear)",
+                enmascarar_cedula(cedula),
+            )
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "nombre_consultado": nombre_consultado,
+            "pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else None,
+            "pdf_tamano": len(pdf_bytes),
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché policía %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        # ADVERTENCIA si el veredicto no fue legible (no_registra None): el
+        # estudio no puede afirmar "limpio" (análogo a procuraduría).
+        estado = "EXITO" if no_registra is not None else "ADVERTENCIA"
+        seccion.update({
+            "estado": estado,
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "nombre_consultado": nombre_consultado,
+            "pdf_sha256": doc_cache["pdf_sha256"],
+            "pdf_tamano": len(pdf_bytes),
+        })
+        # Si el portal llegara a entregar PDF (hoy no lo hace), queda listo el
+        # canal de anexo: se sube a GCS y se descarta.
+        seccion["_pdf_bytes"] = pdf_bytes  # volátil: se sube a GCS y se descarta
     else:
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
@@ -388,25 +463,33 @@ async def ejecutar_estudio(
 
     fuentes = dict(zip(FUENTES, resultados))
 
-    # Anexo Procuraduría: subir el certificado oficial a GCS (privado) si llegó.
-    anexo = None
-    pdf_bytes_proc = fuentes.get("procuraduria", {}).pop("_pdf_bytes", None)
-    if pdf_bytes_proc:
+    # Anexos con certificado oficial (GCS privado) si llegaron. Hoy solo
+    # procuraduría genera PDF; policía mantiene el canal listo por si cambia.
+    anexos: dict[str, dict] = {}
+    for nombre_fuente in ("procuraduria", "policia"):
+        bytes_anexo = (fuentes.get(nombre_fuente) or {}).pop("_pdf_bytes", None)
+        if not bytes_anexo:
+            continue
         try:
             from Funciones import storage_seguridad
 
-            ruta = storage_seguridad.ruta_blob(actor["empresa_id"], _utcnow().year, consulta_id, "_procuraduria")
-            subido = storage_seguridad.subir_pdf(pdf_bytes_proc, ruta, cedula)
-            anexo = subido
+            ruta = storage_seguridad.ruta_blob(actor["empresa_id"], _utcnow().year, consulta_id, f"_{nombre_fuente}")
+            anexos[nombre_fuente] = storage_seguridad.subir_pdf(bytes_anexo, ruta, cedula)
         except Exception as exc:
-            logger.error("Anexo procuraduría no se pudo subir a GCS: %s", exc)
-            fuentes["procuraduria"]["anexo_error"] = str(exc)[:200]
+            logger.error("Anexo %s no se pudo subir a GCS: %s", nombre_fuente, exc)
+            fuentes[nombre_fuente]["anexo_error"] = str(exc)[:200]
 
     estado_global = calcular_estado_global(fuentes)
     finalizado = _utcnow()
     duracion = round(time.monotonic() - inicio, 2)
 
-    nombre_consultado = (fuentes.get("procuraduria") or {}).get("nombre_certificado") or ""
+    # Nombre del consultado en cascada: la PGN es la confiable (regex sobre el
+    # certificado); policía lo trae de la línea "Apellidos y Nombres".
+    nombre_consultado = (
+        (fuentes.get("procuraduria") or {}).get("nombre_certificado")
+        or (fuentes.get("policia") or {}).get("nombre_consultado")
+        or ""
+    )
 
     col_estudios.update_one(
         {"_id": _id},
@@ -416,7 +499,8 @@ async def ejecutar_estudio(
                 "finalizado_en": finalizado,
                 "duracion_s": duracion,
                 "fuentes": {k: _limpiar_seccion(v) for k, v in fuentes.items()},
-                "anexo_procuraduria": anexo,
+                "anexo_procuraduria": anexos.get("procuraduria"),
+                "anexo_policia": anexos.get("policia"),
                 "nombre_consultado": nombre_consultado,
             }
         },
@@ -479,6 +563,7 @@ def crear_documento_estudio(consulta_id: str, cedula: str, actor: dict, empresa:
             "fuentes": {},
             "pdf": None,
             "anexo_procuraduria": None,
+            "anexo_policia": None,
             "retencion_expira_en": ahora + timedelta(days=retencion),
             "auditoria": auditoria,
         }

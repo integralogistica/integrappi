@@ -161,7 +161,22 @@ def actualizar_plan(plan_id: str, datos: PlanActualizar, request: Request, actor
         raise HTTPException(status_code=422, detail="Nada que actualizar")
     cambios["actualizado_en"] = _utcnow()
     col_planes.update_one({"_id": doc["_id"]}, {"$set": cambios})
-    registrar_evento("plan_actualizado", actor=actor, detalle=f"{doc.get('nombre')} → {cambios}", request=request)
+    # Auditoría del diff de fuentes: las NUEVAS se propagarán solas a cada
+    # empresa en su próxima consulta (sync read-time); las RETIRADAS dejan de
+    # ser consumibles al instante (validación de membresía en el motor).
+    sufijo = ""
+    if "fuentes_incluidas" in cambios:
+        viejas = set(doc.get("fuentes_incluidas") or [])
+        nuevas = set(cambios["fuentes_incluidas"])
+        agregadas, retiradas = sorted(nuevas - viejas), sorted(viejas - nuevas)
+        partes = []
+        if agregadas:
+            partes.append(f"+{agregadas}")
+        if retiradas:
+            partes.append(f"-{retiradas}")
+        if partes:
+            sufijo = f" · fuentes: {' '.join(partes)} (se propaga a empresas en su próxima consulta)"
+    registrar_evento("plan_actualizado", actor=actor, detalle=f"{doc.get('nombre')} → {cambios}{sufijo}", request=request)
     actualizado = col_planes.find_one({"_id": doc["_id"]})
     actualizado["id"] = str(actualizado.pop("_id"))
     return actualizado
@@ -261,6 +276,8 @@ def listar_empresas_cobro(actor: dict = Depends(_requiere_admin_integra)):
     periodo_actual = cobro.periodo_colombia()
     items = []
     for empresa in col_empresas.find().sort("nombre", 1):
+        # El catálogo manda: materializar fuentes nuevas antes de listar.
+        empresa = cobro.sincronizar_fuentes_planes(empresa, col_planes, col_empresas)
         consumo_mes = cobro.totales_periodo(empresa["_id"], periodo_actual)
         saldo = 0
         for cierre in col_periodos.find({"empresa_id": empresa["_id"], "estado": "PENDIENTE_COBRO"}):
@@ -277,6 +294,9 @@ def listar_empresas_cobro(actor: dict = Depends(_requiere_admin_integra)):
                 "precio_por_estudio": plan_doc.get("precio_por_estudio", 0),
                 "fuentes_incluidas": plan_doc.get("fuentes_incluidas", []),
                 "fuente": entrada.get("fuente"),
+                # Entrada de fuente retirada del catálogo: sobrevive (historial)
+                # pero ya no es consumible — el panel la pinta gris.
+                "retirada": entrada.get("fuente") not in (plan_doc.get("fuentes_incluidas") or []),
                 "ilimitado": entrada.get("cupo_autorizado") is None,
                 "cupo_autorizado": entrada.get("cupo_autorizado"),
                 "cupo_consumido": entrada.get("cupo_consumido", 0),
@@ -416,11 +436,21 @@ def dashboard(actor: dict = Depends(_requiere_admin_integra)):
     periodo_actual = cobro.periodo_colombia()
     empresas = list(col_empresas.find({"activo": True}))
     con_plan = sum(1 for e in empresas if (e.get("planes") or e.get("plan")))
+    # Catálogo una sola vez: excluir del cupo global las entradas cuya fuente
+    # fue retirada del plan (cupos no consumibles que sobrerreportarían).
+    catalogo = {p["_id"]: p for p in col_planes.find()}
+
+    def _cupo_consumible(entrada: dict) -> bool:
+        if entrada.get("fuente") == "todas":
+            return True
+        plan_doc = catalogo.get(entrada.get("plan_id"))
+        return bool(plan_doc) and entrada.get("fuente") in (plan_doc.get("fuentes_incluidas") or [])
+
     cupo_global = sum(
         int(p.get("cupo_disponible") or 0)
         for e in empresas
         for p in (e.get("planes") or [])
-        if p.get("cupo_disponible") is not None
+        if p.get("cupo_disponible") is not None and _cupo_consumible(p)
     )
     consumo_mes = 0
     cartera = 0

@@ -280,7 +280,135 @@ class TestEjecutarFuente(unittest.TestCase):
         self.assertEqual(len(seccion["viajes"]), 1)
 
 
-class TestRateLimit(unittest.TestCase):
+class TestFuentePolicia(unittest.TestCase):
+    """Fuente "policia" (antecedentes judiciales): tri-estado de procuraduría,
+    sin PDF (el portal no genera), nombre del consultado y anti-envenenamiento."""
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_cache_hit_no_llama_al_bot(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "policia",
+            "cedula": "1033688842",
+            "no_registra": True,
+            "mensaje": "NO TIENE ASUNTOS PENDIENTES CON LAS AUTORIDADES JUDICIALES",
+            "nombre_consultado": "AMAYA TOVAR JHOAM ORLANDO",
+            "pdf_tamano": 0,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            with patch.object(orch, "consultar_antecedentes_policia_sync") as bot:
+                seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["no_registra"], True)
+        self.assertEqual(seccion["nombre_consultado"], "AMAYA TOVAR JHOAM ORLANDO")
+        bot.assert_not_called()
+
+    def test_exito_cachea_con_leyenda_y_nombre(self):
+        resultado = {
+            "no_registra": True,
+            "mensaje": "NO TIENE ASUNTOS PENDIENTES CON LAS AUTORIDADES JUDICIALES",
+            "nombre_consultado": "AMAYA TOVAR JHOAM ORLANDO",
+            "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["no_registra"], True)
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "policia")
+        self.assertEqual(doc_cache["nombre_consultado"], "AMAYA TOVAR JHOAM ORLANDO")
+
+    def test_sin_veredicto_con_nombre_es_advertencia(self):
+        # El portal respondió (trajo nombre) pero sin leyenda legible.
+        resultado = {"no_registra": None, "mensaje": "", "nombre_consultado": "NOMBRE APELLIDO", "pdf_bytes": None}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+
+    def test_resultado_vacio_es_no_disponible_sin_cachear(self):
+        # Segunda barrera anti-envenenamiento: dict sin leyenda, sin nombre y
+        # sin PDF → NO_DISPONIBLE y NO se escribe caché.
+        resultado = {"no_registra": None, "mensaje": "", "nombre_consultado": "", "pdf_bytes": None}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_policia import BotPoliciaSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync") as bot:
+                bot.side_effect = BotPoliciaSinResultado("sin veredicto")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+    def test_sin_captcha_key_es_no_disponible_y_no_error(self):
+        # Falta de configuración NO debe ser ERROR: una causa de config no
+        # puede disparar la cadena "todas fallidas → ERROR → reembolso".
+        from Funciones.bot_policia import BotPoliciaSinCaptchaKey
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync") as bot:
+                bot.side_effect = BotPoliciaSinCaptchaKey("falta key")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "configuracion_faltante")
+
+    def test_captcha_fallido_es_error_de_tipo_captcha(self):
+        from Funciones.bot_policia import BotPoliciaCaptchaFallido
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_policia_sync") as bot:
+                bot.side_effect = BotPoliciaCaptchaFallido("rechazado")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(orch._ejecutar_fuente("policia", "1033688842", actor_consultador(), False))
+        self.assertEqual(seccion["estado"], "ERROR")
+        self.assertEqual(seccion["error"]["tipo"], "captcha")
+
+    def test_deshabilitada_no_cuenta_para_estado_global(self):
+        fuentes = {
+            "manifiestos_rndc": {"estado": "EXITO"},
+            "procuraduria": {"estado": "EXITO"},
+            "policia": {"estado": "DESHABILITADA"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA")
+
+    def test_todas_exitosa_con_policia_es_completada(self):
+        fuentes = {
+            "manifiestos_rndc": {"estado": "EXITO"},
+            "procuraduria": {"estado": "EXITO"},
+            "policia": {"estado": "EXITO"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA")
+
+    def test_policia_sola_con_error_no_pasa_a_completada(self):
+        fuentes = {
+            "manifiestos_rndc": {"estado": "DESHABILITADA"},
+            "procuraduria": {"estado": "DESHABILITADA"},
+            "policia": {"estado": "ERROR"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "ERROR")
+
+
+
     def test_limite_por_empresa(self):
         se._RATE.clear()
         actor = actor_consultador()

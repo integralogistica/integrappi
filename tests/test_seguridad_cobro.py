@@ -128,7 +128,7 @@ class ColFake:
         return FakeCursor(list(self.documents))
 
     # -- helpers -------------------------------------------------------------
-    def _match(self, doc, query):
+    def _match(self, doc, query, _raiz=None):
         for k, v in query.items():
             valor = self._obtener(doc, k)
             if isinstance(v, dict):
@@ -143,6 +143,17 @@ class ColFake:
                         return False
                     if op == "$gte" and not (valor is not None and valor >= esperado):
                         return False
+                    if op == "$not":
+                        # Niega el dict interno: se evalúa el mismo campo contra
+                        # las condiciones internas y se invierte (p.ej.
+                        # {"planes": {"$not": {"$elemMatch": {...}}}}).
+                        if self._match({k: valor}, {k: esperado}):
+                            return False
+                    if op == "$elemMatch":
+                        if not isinstance(valor, list) or not isinstance(esperado, dict):
+                            return False
+                        if not any(self._match(el, esperado) for el in valor):
+                            return False
             elif valor != v:
                 return False
         return True
@@ -195,6 +206,33 @@ class ColFake:
                     padre = _bajar(doc, partes)
                     hijo = partes[-1]
                     padre[hijo] = padre.get(hijo, 0) + v
+        if "$push" in update:
+            # $push NUNCA reordena: append al final (semántica crítica para
+            # los índices posicionales planes.{pos} de reservar_consumos).
+            for k, v in update["$push"].items():
+                partes = k.split(".")
+                if len(partes) == 1:
+                    doc.setdefault(k, [])
+                    if isinstance(doc[k], list):
+                        doc[k].append(v)
+                else:
+                    padre = _bajar(doc, partes)
+                    hijo = partes[-1]
+                    padre.setdefault(hijo, [])
+                    if isinstance(padre[hijo], list):
+                        padre[hijo].append(v)
+        if "$pull" in update:
+            # Quita los elementos que matcheen el criterio (dict de condiciones
+            # o igualdad escalar, p.ej. {"plan_id": pid}).
+            for k, criterio in update["$pull"].items():
+                lista = doc.get(k)
+                if not isinstance(lista, list):
+                    continue
+                doc[k] = [el for el in lista
+                          if not (self._match(el, criterio) if isinstance(criterio, dict) else el == criterio)]
+        if "$unset" in update:
+            for k in update["$unset"]:
+                doc.pop(k, None)
 
     def _validar_unicos(self, doc):
         for campo, tipos in self.unique_parcial.items():
@@ -756,6 +794,33 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         self.assertEqual(planes_doc[0]["cupo_consumido"], 1)
         self.assertEqual(planes_doc[1]["cupo_consumido"], 1)
 
+    def test_plan_solo_policia_cobra_una_fuente(self):
+        """La fuente "policia" es una más del catálogo: un plan mono-fuente
+        genera exactamente 1 CONSUMO con su precio congelado."""
+        POL = "policia"
+        plan_pol = plan_doc(precio=2500, nombre="SOLO POLICIA", plan_id=ObjectId())
+        plan_pol["fuentes_incluidas"] = [POL]
+        empresa, col_emp, col_pla, col_mov = self._montaje(
+            [entrada_plan(POL, plan_pol, cupo_autorizado=8)],
+            planes=[plan_pol],
+        )
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-POL1", [POL],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(movs), 1)
+        self.assertEqual(movs[0]["fuente"], POL)
+        self.assertEqual(movs[0]["monto_cop"], 2500)
+        self.assertEqual(col_emp.documents[0]["planes"][0]["cupo_disponible"], 7)
+
+    def test_fuentes_con_plan_incluye_policia(self):
+        POL = "policia"
+        plan_pol = plan_doc(precio=2500, nombre="SOLO POLICIA", plan_id=ObjectId())
+        plan_pol["fuentes_incluidas"] = [POL]
+        empresa = empresa_planes_doc([entrada_plan(POL, plan_pol, cupo_autorizado=8)])
+        con_plan = cobro.fuentes_con_plan(empresa, [self.RNDC, self.PROC, POL], ColFake([plan_pol]))
+        self.assertEqual(con_plan, [POL])
+
     def test_multi_plan_misma_fuente_fifo(self):
         """Dos planes acumulados en la MISMA fuente: se consume primero el
         plan asignado más antiguo (FIFO) y cada consumo cobra SU precio
@@ -925,6 +990,366 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
         self.assertEqual(movs[0]["monto_cop"], 3500)
         # El cupo del subdoc se descontó 1.
         self.assertEqual(col_emp.documents[0]["plan"]["cupo_disponible"], 3)
+
+
+class TestSincronizarFuentes(unittest.TestCase):
+    """Sync read-time: el catálogo manda, append-only sin tocar entradas."""
+
+    RNDC, PROC, POL = "manifiestos_rndc", "procuraduria", "policia"
+
+    def _montaje(self, entradas, planes):
+        empresa = empresa_planes_doc(entradas)
+        col_emp = ColFake([empresa])
+        return empresa, col_emp, ColFake(planes)
+
+    def _plan_tres_fuentes(self, precio=4000):
+        p = plan_doc(precio=precio, nombre="AVANZADO")
+        p["fuentes_incluidas"] = [self.RNDC, self.PROC, self.POL]
+        return p
+
+    def test_agrega_fuente_nueva_con_precio_actual(self):
+        plan = self._plan_tres_fuentes(precio=4000)
+        # Hermanas congeladas a 3000 (precio viejo): la nueva debe congelar el
+        # PRECIO ACTUAL del catálogo (4000), no el de las hermanas.
+        entradas = [
+            entrada_plan(self.RNDC, plan, cupo_autorizado=6, cupo_disponible=4, cupo_consumido=2),
+            entrada_plan(self.PROC, plan, cupo_autorizado=6, cupo_disponible=4, cupo_consumido=2),
+        ]
+        empresa, col_emp, col_pla = self._montaje(entradas, [plan])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        planes_doc = fresco["planes"]
+        self.assertEqual(len(planes_doc), 3)
+        nueva = planes_doc[2]
+        self.assertEqual(nueva["fuente"], self.POL)
+        self.assertEqual(nueva["precio_congelado"], 4000)
+        self.assertEqual(nueva["cupo_autorizado"], 6)
+        self.assertEqual(nueva["cupo_disponible"], 6)
+        self.assertEqual(nueva["cupo_consumido"], 0)
+        self.assertEqual(nueva["asignado_por"], "sync_catalogo")
+
+    def test_no_resetea_entradas_hermanas(self):
+        plan = self._plan_tres_fuentes()
+        hermanas = [
+            entrada_plan(self.RNDC, plan, cupo_autorizado=6, cupo_disponible=4, cupo_consumido=2),
+            entrada_plan(self.PROC, plan, cupo_autorizado=6, cupo_disponible=1, cupo_consumido=5),
+        ]
+        empresa, col_emp, col_pla = self._montaje(hermanas, [plan])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        self.assertEqual(fresco["planes"][0], hermanas[0])
+        self.assertEqual(fresco["planes"][1], hermanas[1])
+
+    def test_idempotente(self):
+        plan = self._plan_tres_fuentes()
+        entradas = [entrada_plan(self.RNDC, plan), entrada_plan(self.PROC, plan)]
+        empresa, col_emp, col_pla = self._montaje(entradas, [plan])
+        cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        self.assertEqual(len(fresco["planes"]), 3)
+
+    def test_carrera_dos_syncs_una_entrada(self):
+        """Dos syncs paralelos ven el mismo hueco: el guard $not $elemMatch
+        hace que solo el primer $push modifique; el segundo no duplica."""
+        plan = self._plan_tres_fuentes()
+        empresa = empresa_planes_doc([entrada_plan(self.RNDC, plan)])
+
+        class ColFakeCarrera(ColFake):
+            """El update_one del guard ya ve la entrada que OTRO sync
+            insertó entre la lectura y la escritura (la carrera real)."""
+            def __init__(self, documentos=None):
+                super().__init__(documentos)
+                self._ya_inserto_otro = {}
+
+            def update_one(self, query, update):
+                # Antes de aplicar el push, simular que otro proceso ya metió
+                # una entrada POL para el primer push que llegue.
+                if "$push" in update and update["$push"].get("planes", {}).get("fuente") == self.__class__.POL_NAME:
+                    if not self._ya_inserto_otro.get("pol"):
+                        self._ya_inserto_otro["pol"] = True
+                        self._push_real(query, update)
+                        class R:  # el guard NO matchea: Mongo no modifica.
+                            modified_count = 0
+                        return R()
+                return super().update_one(query, update)
+
+            def _push_real(self, query, update):
+                super().update_one({"_id": {"$ne": None}}, update)  # fuerza append
+
+        ColFakeCarrera.POL_NAME = self.POL
+        col_emp = ColFakeCarrera([empresa])
+        col_pla = ColFake([plan])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        fuentes_pol = [e for e in fresco["planes"] if e["fuente"] == self.POL]
+        self.assertEqual(len(fuentes_pol), 1)  # sin duplicado
+
+    def test_plan_inactivo_no_agrega(self):
+        plan = self._plan_tres_fuentes()
+        plan["activo"] = False
+        empresa, col_emp, col_pla = self._montaje([entrada_plan(self.RNDC, plan)], [plan])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        self.assertEqual(len(fresco["planes"]), 1)
+
+    def test_plan_inexistente_no_agrega(self):
+        plan = self._plan_tres_fuentes()
+        empresa, col_emp, col_pla = self._montaje([entrada_plan(self.RNDC, plan)], [])  # catálogo vacío
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        self.assertEqual(len(fresco["planes"]), 1)
+
+    def test_hermana_ilimitada_clona_ilimitada(self):
+        plan = self._plan_tres_fuentes()
+        entradas = [entrada_plan(self.RNDC, plan, cupo_autorizado=None, cupo_disponible=None)]
+        empresa, col_emp, col_pla = self._montaje(entradas, [plan])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        nueva = [e for e in fresco["planes"] if e["fuente"] != self.RNDC][0]
+        self.assertIsNone(nueva["cupo_autorizado"])
+        self.assertIsNone(nueva["cupo_disponible"])
+
+    def test_clona_de_la_hermana_mas_antigua(self):
+        plan = self._plan_tres_fuentes()
+        # Dos hermanas del mismo plan con cupos distintos: manda la más antigua.
+        empresa = empresa_planes_doc([
+            entrada_plan(self.RNDC, plan, cupo_autorizado=9, asignado_en=datetime(2026, 3, 1)),
+            entrada_plan(self.PROC, plan, cupo_autorizado=4, asignado_en=datetime(2026, 1, 1)),
+        ])
+        col_emp = ColFake([empresa])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, ColFake([plan]), col_emp)
+        nueva = [e for e in fresco["planes"] if e["fuente"] == self.POL][0]
+        self.assertEqual(nueva["cupo_autorizado"], 4)  # hermana más antigua (PROC)
+
+    def test_subdoc_viejo_no_op(self):
+        empresa = empresa_doc()  # subdoc viejo sin array
+        col_emp = ColFake([empresa])
+        col_pla = ColFake([plan_doc()])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        self.assertNotIn("planes", fresco)
+        self.assertIn("plan", fresco)
+
+    def test_error_de_escritura_degrada(self):
+        plan = self._plan_tres_fuentes()
+
+        class ColRota(ColFake):
+            def update_one(self, query, update):
+                raise RuntimeError("mongo caído")
+
+        empresa = empresa_planes_doc([entrada_plan(self.RNDC, plan)])
+        col_emp = ColRota([empresa])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, ColFake([plan]), col_emp)
+        # Degrada: devuelve el doc que tiene (sin la fuente nueva), sin 5xx.
+        self.assertEqual(len(fresco["planes"]), 1)
+
+
+class TestFuentesRetiradas(unittest.TestCase):
+    """Fuente retirada del catálogo: entrada sobrevive, no consumible."""
+
+    RNDC, PROC = "manifiestos_rndc", "procuraduria"
+
+    def _plan_solo_rndc(self):
+        p = plan_doc(nombre="REDUCIDO")
+        p["fuentes_incluidas"] = [self.RNDC]
+        return p
+
+    def _montaje(self, entradas, planes, movimientos=None):
+        empresa = empresa_planes_doc(entradas)
+        col_emp = ColFake([empresa])
+        col_pla = ColFake(planes)
+        col_mov = ColFake(movimientos or [], unique_compuesto=(["consulta_id", "consumo_id"], {"REEMBOLSO"}))
+        return empresa, col_emp, col_pla, col_mov
+
+    def test_fuentes_con_plan_excluye_retirada(self):
+        # El plan retiró PROC del catálogo, pero la empresa tiene su entrada.
+        plan = self._plan_solo_rndc()
+        empresa = empresa_planes_doc([
+            entrada_plan(self.RNDC, plan, cupo_autorizado=5),
+            entrada_plan(self.PROC, plan, cupo_autorizado=5),
+        ])
+        con_plan = cobro.fuentes_con_plan(empresa, [self.RNDC, self.PROC], ColFake([plan]))
+        self.assertEqual(con_plan, [self.RNDC])
+
+    def test_reservar_consumos_no_consume_retirada(self):
+        plan = self._plan_solo_rndc()
+        empresa, col_emp, col_pla, col_mov = self._montaje([
+            entrada_plan(self.RNDC, plan, cupo_autorizado=5),
+            entrada_plan(self.PROC, plan, cupo_autorizado=5),
+        ], [plan])
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-RET1", [self.RNDC, self.PROC],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual([m["fuente"] for m in movs], [self.RNDC])
+        planes_doc = col_emp.documents[0]["planes"]
+        self.assertEqual(planes_doc[1]["cupo_disponible"], 5)   # PROC intacta
+        self.assertEqual(planes_doc[1]["cupo_consumido"], 0)
+
+    def test_admin_con_todo_retirado_sigue_exento(self):
+        # Todas las entradas retiradas → 0 candidatos → flujo exento ADMIN.
+        plan = self._plan_solo_rndc()
+        empresa, col_emp, col_pla, col_mov = self._montaje([
+            entrada_plan(self.PROC, plan, cupo_autorizado=5),
+        ], [plan])
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR_ADMIN, "ES-RET2", [self.PROC],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(movs), 1)
+        self.assertTrue(movs[0]["exento"])
+
+    def test_reembolso_devuelve_cupo_a_entrada_retirada(self):
+        """Regresión: aunque la fuente se retiró del catálogo DESPUÉS del
+        consumo, el reembolso sigue devolviendo cupo y COP (el consumo fue
+        legítimo cuando se hizo)."""
+        plan_completo = plan_doc(nombre="COMPLETO")  # incluye RNDC + PROC
+        empresa, col_emp, col_pla, col_mov = self._montaje([
+            entrada_plan(self.RNDC, plan_completo, cupo_autorizado=5),
+            entrada_plan(self.PROC, plan_completo, cupo_autorizado=5),
+        ], [plan_completo])
+        cobro.reservar_consumos(
+            empresa, ACTOR, "ES-RET3", [self.RNDC, self.PROC],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        # El admin retira PROC del catálogo.
+        plan_completo["fuentes_incluidas"] = [self.RNDC]
+        reembolsos = cobro.reembolsar_consumos_consulta(
+            "ES-RET3", empresa, ACTOR_ADMIN, "ERROR global", automatico=True,
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(reembolsos), 2)
+        planes_doc = col_emp.documents[0]["planes"]
+        self.assertEqual(planes_doc[1]["cupo_disponible"], 5)  # cupo PROC devuelto
+
+    def test_fuente_todas_no_se_bloquea(self):
+        """La fuente sintética "todas" del fallback pre-backfill no debe
+        bloquearse por la validación de membresía."""
+        plan = plan_doc()
+        plan["fuentes_incluidas"] = []  # _planes_efectivos sintetiza "todas"
+        empresa = {"_id": EMPRESA_ID, "nombre": "E", "plan": {
+            "plan_id": PLAN_ID, "plan_nombre": "ESTÁNDAR", "cupo_autorizado": 5,
+            "cupo_disponible": 5, "asignado_en": datetime(2026, 1, 1),
+        }}
+        col_pla = ColFake([plan])
+        con_plan = cobro.fuentes_con_plan(empresa, [self.RNDC, self.PROC], col_pla)
+        self.assertEqual(con_plan, [self.RNDC, self.PROC])  # comportamiento pre-existente
+
+
+class TestEndpointsSync(unittest.TestCase):
+    """GET /empresas y dashboard con sync read-time y campo retirada."""
+
+    def _plan(self, fuentes, precio=3000):
+        p = plan_doc(precio=precio, nombre="AVANZADO")
+        p["fuentes_incluidas"] = fuentes
+        return p
+
+    def test_listar_empresas_sincroniza_y_marca_retirada(self):
+        from types import SimpleNamespace
+
+        from rutas import seguridad_cobro as sc
+
+        # Plan con 3 fuentes; la empresa tiene 2 (una de ellas PROC, que el
+        # plan YA NO incluye en este catálogo → retirada).
+        plan = self._plan(["manifiestos_rndc", "policia"], precio=4000)
+        empresa = empresa_planes_doc([
+            entrada_plan("manifiestos_rndc", plan, cupo_autorizado=6, cupo_disponible=4, cupo_consumido=2),
+            entrada_plan("procuraduria", plan, cupo_autorizado=5),  # fuente retirada
+        ])
+        col_emp = ColFake([empresa])
+        col_pla = ColFake([plan])
+        col_per = ColFake([])
+        with patch.object(sc, "col_empresas", col_emp), \
+             patch.object(sc, "col_planes", col_pla), \
+             patch.object(sc, "col_periodos", col_per), \
+             patch.object(sc, "registrar_evento"), \
+             patch.object(sc.cobro, "totales_periodo", return_value={"unidades": 0, "subtotal_cop": 0}):
+            respuesta = sc.listar_empresas_cobro(actor={"usuario": "EZARATE"})
+        planes_salida = respuesta["items"][0]["planes"]
+        # El sync agregó policia (3ª fuente del catálogo) con precio actual.
+        self.assertEqual(len(planes_salida), 3)
+        policia = [p for p in planes_salida if p["fuente"] == "policia"][0]
+        self.assertEqual(policia["precio_por_estudio"], 4000)
+        self.assertFalse(policia["retirada"])
+        # PROC sigue listada pero marcada retirada.
+        proc = [p for p in planes_salida if p["fuente"] == "procuraduria"][0]
+        self.assertTrue(proc["retirada"])
+        # La entrada quedó persistida en la colección (no solo en la respuesta).
+        fuentes_bd = [e["fuente"] for e in col_emp.documents[0]["planes"]]
+        self.assertIn("policia", fuentes_bd)
+
+    def test_dashboard_excluye_cupo_retirado(self):
+        from rutas import seguridad_cobro as sc
+
+        plan = self._plan(["manifiestos_rndc"])  # PROC retirada
+        empresa = empresa_planes_doc([
+            entrada_plan("manifiestos_rndc", plan, cupo_autorizado=10, cupo_disponible=7),
+            entrada_plan("procuraduria", plan, cupo_autorizado=5, cupo_disponible=5),  # no contable
+        ])
+        col_emp = ColFake([{**empresa, "activo": True}])
+        with patch.object(sc, "col_empresas", col_emp), \
+             patch.object(sc, "col_planes", ColFake([plan])), \
+             patch.object(sc, "col_periodos", ColFake([])), \
+             patch.object(sc.cobro, "totales_periodo", return_value={"subtotal_cop": 0}):
+            respuesta = sc.dashboard(actor={"usuario": "EZARATE"})
+        self.assertEqual(respuesta["cupo_global_disponible"], 7)  # solo RNDC
+
+    def test_crear_estudio_sincroniza_antes_de_reservar(self):
+        """crear_estudio debe materializar la fuente nueva ANTES de que
+        fuentes_con_plan/reservar_consumos decidan qué correr."""
+        from types import SimpleNamespace
+
+        from rutas import seguridad_estudios as se
+
+        plan = self._plan(["manifiestos_rndc", "procuraduria", "policia"], precio=3000)
+        empresa = {
+            "_id": EMPRESA_ID, "nombre": "EMPRESA A", "activo": True,
+            "config": {"fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "policia"]},
+            "planes": [
+                entrada_plan("manifiestos_rndc", plan, cupo_autorizado=5),
+                entrada_plan("procuraduria", plan, cupo_autorizado=5),
+            ],
+        }
+        estudio_doc = {"consulta_id": "ES-SYNC1", "estado": "COMPLETADA",
+                       "fuentes": {"manifiestos_rndc": {"estado": "EXITO"}}, "empresa_id": EMPRESA_ID}
+        consumo = {
+            "tipo": "CONSUMO", "monto_cop": 3000, "plan_nombre": "AVANZADO",
+            "precio_unitario_cop": 3000, "consulta_id": "ES-SYNC1",
+            "_id": ObjectId(), "exento": False, "unidades": 1, "plan_id": plan["_id"],
+            "periodo": cobro.periodo_colombia(),
+        }
+        col_emp = ColFake([empresa])
+        col_pla = ColFake([plan])
+
+        class ColMovFake(ColFake):
+            pass
+
+        col_mov = ColMovFake([], unique_compuesto=(["consulta_id", "consumo_id"], {"REEMBOLSO"}))
+
+        def _fuentes_con_plan_fake(empresa_arg, fuentes, col=None):
+            # Misma lógica que la real, contra el catálogo fake (patrón de los
+            # tests existentes: no se parchea el motor, solo la colección).
+            return cobro.fuentes_con_plan(empresa_arg, fuentes, col_pla)
+
+        with patch.object(se, "col_empresas", col_emp), \
+             patch.object(se, "db", {"planes_seguridad": col_pla}), \
+             patch.object(se, "_verificar_rate_limit"), \
+             patch.object(se, "crear_documento_estudio"), \
+             patch.object(se, "ejecutar_estudio", new=lambda **k: _asyncio_ok(estudio_doc)), \
+             patch.object(se, "registrar_evento"), \
+             patch.object(se, "_respuesta_estudio", side_effect=lambda d: d), \
+             patch("Funciones.storage_seguridad.subir_pdf", return_value={"gcs_ruta": "x", "sha256": "y", "tamano": 1}), \
+             patch("Funciones.pdf_estudio_seguridad.generar_pdf_estudio", return_value=b"%PDF-test"), \
+             patch("Funciones.cobro_seguridad.reservar_consumos", return_value=[consumo]) as reservar, \
+             patch("Funciones.cobro_seguridad.reembolsar_consumos_consulta"):
+            respuesta = asyncio.run(se.crear_estudio(
+                datos=SimpleNamespace(cedula="1033688842", forzar=False, empresa_id=None,
+                                      plan_id=None, fuentes=None),
+                request=SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={}),
+                actor={**ACTOR, "rol": "CONSULTADOR"},
+            ))
+        self.assertEqual(respuesta["estado"], "COMPLETADA")
+        # El sync materializó la 3ª fuente ANTES de que reservar_consumos
+        # corriera: la empresa que recibió el motor ya tenía policia.
+        empresa_recibida = reservar.call_args[0][0]
+        fuentes_recibidas = [e["fuente"] for e in empresa_recibida["planes"]]
+        self.assertIn("policia", fuentes_recibidas)
+        # Y quedó persistida en la colección.
+        fuentes_bd = [e["fuente"] for e in col_emp.documents[0]["planes"]]
+        self.assertIn("policia", fuentes_bd)
 
 
 if __name__ == "__main__":

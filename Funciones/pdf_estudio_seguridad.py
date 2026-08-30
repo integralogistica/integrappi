@@ -213,6 +213,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     fuentes = estudio.get("fuentes") or {}
     rndc = fuentes.get("manifiestos_rndc") or {}
     proc = fuentes.get("procuraduria") or {}
+    pol = fuentes.get("policia") or {}
     pdf_info = estudio.get("pdf") or {}
 
     consulta_id = estudio.get("consulta_id", "")
@@ -316,6 +317,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         etiqueta_proc,
         _texto_veredicto(proc),
     ])
+    etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+    filas_resumen.append([
+        "Policía Nacional — Antecedentes Judiciales",
+        etiqueta_pol,
+        _texto_veredicto_policia(pol),
+    ])
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -366,7 +373,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     if rndc.get("estado") == "EXITO":
         cuento.append(Paragraph(
             f"Ventana consultada: {rndc.get('desde', '—')} a {rndc.get('hasta', '—')} · "
-            f"Total de viajes: <b>{rndc.get('total', 0)}</b> · Origen de datos: {_texto_origen(rndc)}",
+            f"Últimos <b>{rndc.get('total', 0)}</b> viajes:  · Origen de datos: {_texto_origen(rndc)}",
             estilo_normal,
         ))
         cuento.append(Spacer(0, 2 * mm))
@@ -432,7 +439,55 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     else:
         cuento.append(_parrafo_estado_fuente(proc, "la Procuraduría"))
 
-    # ── 4. Trazabilidad / auditoría ──────────────────────────────────────────
+    # ── 4. Detalle Policía (antecedentes judiciales) ────────────────────────
+    cuento.append(Paragraph("Antecedentes judiciales — Policía Nacional", estilo_h2))
+    if pol.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        no_registra_pol = pol.get("no_registra")
+        if no_registra_pol is True:
+            texto_pol, color_pol = "NO REGISTRA ANTECEDENTES JUDICIALES", COLOR_EXITO
+        elif no_registra_pol is False:
+            texto_pol, color_pol = "REGISTRA REQUERIMIENTO JUDICIAL — VER DETALLE", COLOR_FALLO
+        else:
+            # El portal no genera PDF (Decreto 19/2012 art. 93): sin veredicto
+            # legible el resultado no es concluyente, sin certificado adjunto.
+            texto_pol, color_pol = "VEREDICTO NO CONCLUSIVO — VER MENSAJE DEL PORTAL", COLOR_ADVERTENCIA
+        tabla_veredicto_pol = Table(
+            [[Paragraph(f"<b>{texto_pol}</b>", ParagraphStyle("veredicto_pol", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_pol.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_pol),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_pol)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_pol = [
+            ["Leyenda oficial del portal", (pol.get("mensaje") or "—")[:300]],
+            ["Nombre según el portal", pol.get("nombre_consultado") or "No disponible"],
+        ]
+        if estudio.get("anexo_policia"):
+            detalle_pol.append(["Documento oficial (anexo)", (
+                f"Adjunto a este estudio ({(estudio['anexo_policia'].get('gcs_ruta') or 'documento').split('/')[-1]}) · "
+                f"SHA-256: {pol.get('pdf_sha256') or '—'}"
+            )])
+        detalle_pol.append(["Origen de datos", _texto_origen(pol)])
+        tabla_pol = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_pol],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_pol.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_pol)
+    else:
+        cuento.append(_parrafo_estado_fuente(pol, "la Policía Nacional"))
+
+    # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
     auditoria = estudio.get("auditoria") or {}
     filas_traza = [
@@ -443,7 +498,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol))
         )],
         ["Informe PDF", (
             f"Versión {pdf_info.get('version', 1)} · SHA-256 {(pdf_info.get('sha256') or '—')[:32]}… · "
@@ -463,9 +518,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     ]))
     cuento.append(tabla_traza)
 
-    # ── 5. Disposiciones legales ─────────────────────────────────────────────
+    # ── 6. Disposiciones legales ─────────────────────────────────────────────
     cuento.append(Paragraph("Disposiciones legales y alcance", estilo_h2))
     cuento.append(Paragraph(
+        "<b>Antecedentes judiciales (Policía Nacional):</b> el portal de consulta en línea es un servicio de "
+        "autoconsulta dispuesto por el artículo 94 del Decreto 019 de 2012 para que el titular valide su "
+        "información judicial personal, y sus términos de uso prohíben el acceso por personas distintas del "
+        "titular. Este dato fue incorporado al estudio en el marco de un proceso de verificación con "
+        "autorización previa, expresa e inequívoca del titular de la información conforme a la Ley 1581 de "
+        "2012; la obligación de contar con dicha autorización es del solicitante del estudio. "
         "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
         "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas. "
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
@@ -546,6 +607,19 @@ def _texto_veredicto(proc: dict) -> str:
     if no_registra is False:
         return "Registra anotaciones — ver certificado"
     return "Veredicto no concluyente — ver certificado adjunto"
+
+
+def _texto_veredicto_policia(pol: dict) -> str:
+    """Espejo de _texto_veredicto con los textos del portal de la Policía
+    (el portal no genera certificado PDF: el detalle es la leyenda oficial)."""
+    if pol.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(pol)
+    no_registra = pol.get("no_registra")
+    if no_registra is True:
+        return "Sin asuntos pendientes con las autoridades judiciales"
+    if no_registra is False:
+        return "Requerido por autoridad judicial — ver detalle"
+    return "Veredicto no concluyente — ver mensaje del portal"
 
 
 def _resumen_error(fuente: dict) -> str:

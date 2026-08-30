@@ -26,6 +26,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from bd.bd_cliente import bd_cliente
 from Funciones.auth_seguridad import actor_actual
+from Funciones.bot_policia import (
+    BotPoliciaError,
+    BotPoliciaSinCaptchaKey,
+    consultar_antecedentes_policia_sync,
+)
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 
@@ -230,10 +235,83 @@ async def consultar_procuraduria(
     }
 
 
+@router.get("/policia")
+async def consultar_policia(
+    cedula: str = Query(..., min_length=3, max_length=20, description="Cédula a consultar"),
+    force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
+):
+    """Consulta de antecedentes judiciales de la Policía Nacional (por cédula).
+
+    ⚠️ El portal (art. 94 del Decreto 019 de 2012) es de AUTOCONSULTA del
+    titular y sus términos prohíben el acceso por terceros: la consulta se
+    realiza bajo autorización previa del titular (Ley 1581 de 2012), cuya
+    obligación de contar con ella es del solicitante. La fuente no viene
+    habilitada por defecto en los estudios (opt-in por empresa).
+
+    El resultado son las leyendas oficiales (Sentencia SU-458 de 2012):
+    "NO TIENE ASUNTOS PENDIENTES CON LAS AUTORIDADES JUDICIALES" (no_registra
+    true) o "ACTUALMENTE NO ES REQUERIDO POR AUTORIDAD JUDICIAL" (false). El
+    portal NO genera PDF (Decreto 19 de 2012 art. 93). Captcha reCAPTCHA v2
+    resuelto por servicio externo (SEGURIDAD_POLICIA_CAPTCHA_KEY).
+    """
+    _requiere_seguridad(actor)
+
+    cedula_norm = _normalizar_cedula(cedula)
+    cache = _buscar_cache("policia", cedula_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+
+    try:
+        resultado = await asyncio.to_thread(consultar_antecedentes_policia_sync, cedula_norm)
+    except BotPoliciaSinCaptchaKey as exc:
+        logger.error("Bot Policía sin key de captcha: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Fuente policía no configurada: falta SEGURIDAD_POLICIA_CAPTCHA_KEY en el servidor",
+        ) from exc
+    except BotPoliciaError as exc:
+        logger.error("Bot Policía falló para cédula %s: %s", cedula_norm, exc)
+        raise HTTPException(status_code=502, detail=f"No fue posible consultar la Policía: {exc}") from exc
+
+    ahora = _utcnow()
+    doc = {
+        "tipo": "policia",
+        "cedula": cedula_norm,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "nombre_consultado": resultado.get("nombre_consultado", ""),
+        "pdf_ruta": resultado.get("pdf_ruta"),
+        "pdf_tamano": len(resultado["pdf_bytes"]) if resultado.get("pdf_bytes") else 0,
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
+        "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE),
+        "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta policía %s no se pudo auditar: %s", cedula_norm, exc)
+
+    doc.pop("_id", None)
+    return {
+        "tipo": "policia",
+        "cedula": cedula_norm,
+        "cache": False,
+        "consultado_en": ahora,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "nombre_consultado": resultado.get("nombre_consultado", ""),
+        "pdf_ruta": resultado.get("pdf_ruta"),
+    }
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),

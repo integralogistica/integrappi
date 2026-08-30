@@ -53,6 +53,9 @@ EMPRESA_INICIAL = {
         "retencion_dias": 730,
         "aislamiento_usuario": False,
         "consultas_por_minuto": 10,
+        # "policia" (antecedentes judiciales) NO va aquí: portal de autoconsulta
+        # del titular (Decreto 019 de 2012) — se activa por empresa vía admin
+        # con autorización documentada del titular (Ley 1581 de 2012).
         "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria"],
     },
 }

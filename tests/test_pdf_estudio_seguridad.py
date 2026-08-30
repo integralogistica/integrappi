@@ -229,5 +229,72 @@ class TestTablaViajes(unittest.TestCase):
         self.assertAlmostEqual(sum(tabla._colWidths), ANCHO - 2 * MARGEN, places=1)
 
 
+def _fuente_policia(estado="EXITO", no_registra=True, mensaje=None, nombre="AMAYA TOVAR JHOAM ORLANDO"):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": no_registra,
+        "mensaje": mensaje or "NO TIENE ASUNTOS PENDIENTES CON LAS AUTORIDADES JUDICIALES",
+        "nombre_consultado": nombre,
+        "pdf_sha256": None,
+        "pdf_tamano": 0,
+        "intentos": 1,
+        "duraciones_s": [20.5],
+        "error": None,
+    }
+
+
+class TestSeccionPolicia(unittest.TestCase):
+    """Fuente "policia" en el PDF: fila de resumen, banner semaforizado,
+    detalle con leyenda y nombre, y disposición legal honesta (sin norma
+    habilitante de terceros — el portal es de autoconsulta del titular)."""
+
+    def _con_policia(self, **kw):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["policia"] = _fuente_policia(**kw)
+        return estudio
+
+    def test_exito_no_registra_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
+        self.assertIn("Antecedentesjudiciales", texto)
+        self.assertIn("NOREGISTRAANTECEDENTESJUDICIALES", texto)
+        self.assertIn("AMAYATOVARJHOAMORLANDO", texto)
+
+    def test_registra_banner_rojo(self):
+        estudio = self._con_policia(
+            no_registra=False,
+            mensaje="ACTUALMENTE NO ES REQUERIDO POR AUTORIDAD JUDICIAL",
+        )
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("REGISTRAREQUERIMIENTOJUDICIAL", texto)
+        self.assertIn("ACTUALMENTENOESREQUERIDO", texto)
+
+    def test_no_conclusivo_advertencia(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia(estado="ADVERTENCIA", no_registra=None, mensaje="", nombre="")))
+        self.assertIn("VEREDICTONOCONCLUSIVO", texto)
+
+    def test_fuente_fallida_muestra_estado(self):
+        estudio = self._con_policia(
+            estado="NO_DISPONIBLE", mensaje=None,
+        )
+        estudio["fuentes"]["policia"]["error"] = {"tipo": "portal_inconsistente", "mensaje": "El portal de la Policía no entregó veredicto"}
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("noentregóveredicto", texto.replace("á", "a").replace("é", "e"))
+
+    def test_resumen_con_tres_fuentes(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
+        # Las 3 fuentes en la tabla "Resumen por fuente".
+        for frag in ("ManifiestosRNDC", "ProcuraduríaGeneraldelaNación", "PolicíaNacional"):
+            self.assertIn(frag, texto)
+
+    def test_disposiciones_legales_honestas(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
+        # Autoconsulta del titular + autorización Ley 1581.
+        self.assertIn("autoconsulta", texto)
+        self.assertIn("Decreto019de2012", texto)
+        # La cita de la 1238 sigue presente pero SOLO para la Procuraduría.
+        self.assertIn("Ley1238de2008", texto)
+
+
 if __name__ == "__main__":
     unittest.main()
