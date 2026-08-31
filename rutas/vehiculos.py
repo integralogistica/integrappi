@@ -1477,7 +1477,12 @@ async def reutilizar_cedula(
                 "ruta": ruta_destino,
                 "url": _url_para_cliente(ruta_destino),
                 "url_reverso": _url_para_cliente(ruta_reverso_destino) if ruta_reverso_destino else None,
-                "lectura_ia": lectura_cond or None,
+                # _json_seguro: lecturasIA.{tipo}.fecha es datetime en Mongo y
+                # JSONResponse no lo serializa (bug real 2026-08-31 en MVX48E:
+                # 500 "object of type datetime is not json serializable" y el
+                # front mostraba "no pudimos reutilizar la cédula" aunque la
+                # copia del blob y el $set YA habían quedado hechos).
+                "lectura_ia": _json_seguro(lectura_cond) or None,
             },
         )
     except HTTPException:

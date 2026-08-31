@@ -9,6 +9,7 @@ Cubre:
 """
 import json
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from fastapi import FastAPI, HTTPException
@@ -489,6 +490,9 @@ class ReutilizarCedulaTests(unittest.TestCase):
                 "documentoIdentidadConductor": {
                     "datos": {"numero": "1020304050", "nombres": "MARIA", "apellidos": "PEREZ SOTO"},
                     "avisos": [],
+                    # Como viene de Mongo: datetime crudo. El response debe
+                    # serializarlo (regresión del 500 en MVX48E, 2026-08-31).
+                    "fecha": datetime(2026, 8, 30, 12, 0, 0),
                 }
             },
         )
@@ -524,6 +528,9 @@ class ReutilizarCedulaTests(unittest.TestCase):
         self.assertTrue(body["ruta"].startswith("Vehiculos/"))
         self.assertIsNotNone(body["url_reverso"])
         self.assertEqual(body["lectura_ia"]["datos"]["numero"], "1020304050")
+        # Regresión del 500: la fecha de la lectura llega como STRING ISO,
+        # no como datetime (json serializable).
+        self.assertEqual(body["lectura_ia"]["fecha"], "2026-08-30T12:00:00")
         # 2 copias: frente y reverso.
         self.assertEqual(len(copias), 2)
         # Mongo: campo propio de la figura + lectura replicada.
