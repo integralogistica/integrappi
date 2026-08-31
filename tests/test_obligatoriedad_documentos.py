@@ -546,6 +546,48 @@ class ReutilizarCedulaTests(unittest.TestCase):
             "documentoIdentidadConductor",
         )
 
+    def test_certificado_bancario_se_reutiliza_sin_reverso(self):
+        """documento=certificado_bancario: copia el cert del conductor al
+        propietario (UNA cara — nunca busca reverso) y replica lecturasIA."""
+        v = self._vehiculo()
+        v["condCertificacionBancaria"] = "Vehiculos/TEST01/2026-08-29/condCertificacionBancaria.pdf"
+        v.pop("propCertificacionBancaria", None)
+        v["lecturasIA"]["condCertificacionBancaria"] = {
+            "datos": {"banco": "BANCOLOMBIA", "numero_cuenta": "123456789"},
+            "avisos": [],
+        }
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"Vehiculos/{n}") as mock_copiar:
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "propietario", "documento": "certificado_bancario"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertIn("propCertificacionBancaria", body["ruta"].rsplit("/", 1)[-1])
+        self.assertIsNone(body["url_reverso"])
+        # UNA sola copia (una cara) con el origen correcto.
+        self.assertEqual(len(mock_copiar.call_args_list), 1)
+        self.assertTrue(mock_copiar.call_args_list[0][0][0].endswith("condCertificacionBancaria.pdf"))
+        # Mongo: campo propio + lectura replicada con marca de origen.
+        doc = fake.documents[0]
+        self.assertTrue(doc["propCertificacionBancaria"].startswith("Vehiculos/"))
+        self.assertNotIn("propCertificacionBancariaReverso", doc)
+        self.assertEqual(
+            doc["lecturasIA"]["propCertificacionBancaria"]["reutilizada_de"],
+            "condCertificacionBancaria",
+        )
+
+    def test_documento_invalido_da_400(self):
+        fake = FakeColeccionVehiculos([self._vehiculo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "propietario", "documento": "rut"},
+            )
+        self.assertEqual(resp.status_code, 400)
+
     def test_sin_cedula_del_conductor_da_409(self):
         v = self._vehiculo()
         v["documentoIdentidadConductor"] = None
@@ -632,6 +674,76 @@ class StoragePrivadoTests(unittest.TestCase):
 
     def test_bucket_configurado_es_el_privado(self):
         self.assertEqual(vehiculos.BUCKET_NAME, "integrapp-privado")
+
+
+class ReferenciasAdicionalesTests(unittest.TestCase):
+    """actualizar-informacion: saneamiento del array referenciasAdicionales
+    (2026-08-31) — claves permitidas, tope, sin vacías, [] no cuenta como
+    cambio para el diff de aprobados."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def test_sanea_claves_y_descarta_vacias(self):
+        saneadas = vehiculos._sanear_refs_adicionales([
+            {"empresa": "  TRANSPORTES X  ", "celular": "3001234567", "intruso": "fuera"},
+            {"celular": ""},  # vacía: fuera
+            "no soy dict",   # basura: fuera
+        ])
+        self.assertEqual(len(saneadas), 1)
+        self.assertEqual(saneadas[0]["empresa"], "TRANSPORTES X")
+        self.assertNotIn("intruso", saneadas[0])
+
+    def test_tope_de_entradas(self):
+        muchas = [{"empresa": f"E{i}", "celular": "3001234567"} for i in range(30)]
+        self.assertEqual(len(vehiculos._sanear_refs_adicionales(muchas)), vehiculos.MAX_REFERENCIAS_ADICIONALES)
+
+    def test_array_vacio_no_es_cambio_ni_se_escribe_en_doc_nuevo(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="aprobado")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/actualizar-informacion/TEST01",
+                json={"referenciasAdicionales": []},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        # El [] no se escribió (el doc nunca tuvo el array)...
+        self.assertNotIn("referenciasAdicionales", doc)
+        # ...y el aprobado NO bajó a re-revisión (el [] no cuenta como cambio).
+        self.assertEqual(doc["estadoIntegra"], "aprobado")
+
+    def test_borrar_referencias_persiste_el_array_vacio(self):
+        v = vehiculo_completo(estadoIntegra="aprobado")
+        v["referenciasAdicionales"] = [{"empresa": "VIEJA SAS", "celular": "3001112223"}]
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/actualizar-informacion/TEST01",
+                json={"referenciasAdicionales": []},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["referenciasAdicionales"], [])
+        # Quitar una referencia real SÍ es cambio → baja a re-revisión.
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "completado_revision")
+
+    def test_guarda_referencias_y_registra_diff(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="aprobado")])
+        refs = [{"empresa": "NUEVA SAS", "celular": "3009998877", "antiguedad": "5"}]
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/actualizar-informacion/TEST01",
+                json={"referenciasAdicionales": refs},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        self.assertEqual(doc["referenciasAdicionales"][0]["empresa"], "NUEVA SAS")
+        self.assertEqual(doc["estadoIntegra"], "completado_revision")
+        # El diff viaja en el $push de historialCambios (el Fake no aplica
+        # $push: se verifica sobre los updates registrados).
+        pushes = [c["$push"] for _, c in fake.updates if "$push" in c]
+        self.assertTrue(any("historialCambios" in p for p in pushes))
+        campos_diff = [c["campo"] for p in pushes for c in p["historialCambios"]["campos"]]
+        self.assertIn("referenciasAdicionales", campos_diff)
 
 
 if __name__ == "__main__":

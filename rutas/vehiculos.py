@@ -1124,6 +1124,34 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
 }
 
+# Referencias laborales adicionales (2026-08-31): la #1 son los campos planos
+# cond*Ref; las extra viven en el array `referenciasAdicionales` — opcionales,
+# tope 10, claves y tipos controlados (el endpoint acepta cualquier clave).
+CLAVES_REF_ADICIONAL = {
+    "empresa", "celular", "departamento", "ciudad", "nroViajes", "antiguedad", "mercancia",
+}
+MAX_REFERENCIAS_ADICIONALES = 10
+
+
+def _sanear_refs_adicionales(valor):
+    """Normaliza referenciasAdicionales: lista de dicts con claves permitidas y
+    valores string; descarta vacías y recorta al tope. None si no aplica."""
+    if not isinstance(valor, list):
+        return None
+    saneadas = []
+    for entrada in valor[:MAX_REFERENCIAS_ADICIONALES]:
+        if not isinstance(entrada, dict):
+            continue
+        limpia = {
+            k: str(v).strip()[:120]
+            for k, v in entrada.items()
+            if k in CLAVES_REF_ADICIONAL and v is not None
+        }
+        # Solo referencias con algo diligenciado (empresa o celular).
+        if limpia.get("empresa") or limpia.get("celular"):
+            saneadas.append(limpia)
+    return saneadas
+
 
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: Optional[str] = None):
@@ -1137,6 +1165,18 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
         k: v for k, v in datos.items()
         if k not in CLAVES_PROTEGIDAS and k not in CAMPOS_DOCUMENTO_PROTEGIDOS
     }
+
+    # Referencias adicionales: saneadas (claves permitidas, tope, sin vacías).
+    # Un array vacío en un doc que NUNCA tuvo referencias extra no se escribe
+    # (evita regar `referenciasAdicionales: []` por todos los históricos); si
+    # el doc SÍ tenía, el [] vacío ES el borrado (persistir la eliminación).
+    if "referenciasAdicionales" in datos_limpios:
+        refs = _sanear_refs_adicionales(datos_limpios["referenciasAdicionales"])
+        if refs is None or (not refs and "referenciasAdicionales" not in vehiculo):
+            datos_limpios.pop("referenciasAdicionales", None)
+        else:
+            datos_limpios["referenciasAdicionales"] = refs
+
     if not datos_limpios:
         return JSONResponse(status_code=200, content={"message": "Información actualizada"})
 
@@ -1146,6 +1186,10 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
         {"campo": k, "antes": vehiculo.get(k) if vehiculo.get(k) is not None else "(vacío)", "despues": v}
         for k, v in datos_limpios.items()
         if vehiculo.get(k) != v
+        # «Sin referencias adicionales» es lo mismo que «campo ausente»: el
+        # front manda el array SIEMPRE (vacío incluido) para que quitar
+        # referencias persista; eso no debe contar como cambio.
+        and not (k == "referenciasAdicionales" and not v and not vehiculo.get(k))
     ]
 
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": datos_limpios})
@@ -1405,24 +1449,61 @@ def _copiar_blob_bucket(ruta_origen: str, nombre_destino: str) -> str:
     return f"{CARPETA_STORAGE}/{nombre_destino}"
 
 
+# Documentos reutilizables del conductor hacia propietario/tenedor («es la
+# misma persona»): copia el blob server-side SIN re-leer con IA (ahorra
+# Gemini). 2026-08-31: además de la cédula, el certificado bancario.
+DOCUMENTOS_REUTILIZABLES = {
+    "cedula": {
+        "origen": "documentoIdentidadConductor",
+        "destinos": {
+            "propietario": "documentoIdentidadPropietario",
+            "tenedor": "documentoIdentidadTenedor",
+        },
+        "dos_caras": True,
+        "nombre": "Cédula",
+    },
+    "certificado_bancario": {
+        "origen": "condCertificacionBancaria",
+        "destinos": {
+            "propietario": "propCertificacionBancaria",
+            "tenedor": "tenedCertificacionBancaria",
+        },
+        "dos_caras": False,  # una sola cara
+        "nombre": "Certificado bancario",
+    },
+}
+
+
+@ruta_vehiculos.put("/reutilizar-documento")
 @ruta_vehiculos.put("/reutilizar-cedula")
-async def reutilizar_cedula(
+async def reutilizar_documento(
     placa: str = Form(...),
     figura: str = Form(...),
+    documento: str = Form("cedula"),
     editado_por: Optional[str] = Form(None),
 ):
-    """«Es la misma persona»: copia la cédula del CONDUCTOR como cédula del
-    propietario o del tenedor SIN volver a leer con IA (ahorra Gemini).
+    """«Es la misma persona»: copia un documento del CONDUCTOR (cédula o
+    certificado bancario) al propietario o tenedor SIN volver a leer con IA
+    (ahorra Gemini). `documento` = cedula (default) | certificado_bancario.
 
-    Copia el blob (frente + reverso si existe) con la nomenclatura PROPIA de
+    Copia el blob (frente + reverso si aplica) con la nomenclatura PROPIA de
     la figura destino — cada figura conserva su archivo y su campo en Mongo;
     NO es la replicación por gemelos, que comparte la ruta).
     La lecturasIA del conductor se copia también al tipo destino para que el
-    formulario pueda autollenar la identidad de esa figura al montar."""
+    formulario pueda autollenar los datos de esa figura al montar.
+    (La ruta /reutilizar-cedula se mantiene por compatibilidad con el front
+    desplegado; el nuevo nombre es /reutilizar-documento.)"""
     figura = figura.strip().lower()
-    tipo_destino = {"propietario": "documentoIdentidadPropietario", "tenedor": "documentoIdentidadTenedor"}.get(figura)
+    spec = DOCUMENTOS_REUTILIZABLES.get((documento or "cedula").strip().lower())
+    if not spec:
+        raise HTTPException(
+            status_code=400,
+            detail="Documento no válido: use cedula o certificado_bancario.",
+        )
+    tipo_destino = spec["destinos"].get(figura)
     if not tipo_destino:
         raise HTTPException(status_code=400, detail="Figura no válida: use propietario o tenedor.")
+    tipo_origen = spec["origen"]
 
     # Normalización server-side + fallback insensible a mayúsculas/espacios:
     # el 404 real de prod (2026-08-31, MVX48E) solo puede venir de un valor
@@ -1441,9 +1522,12 @@ async def reutilizar_cedula(
         print(f"[reutilizar-cedula] 404: placa recibida={placa!r} (normalizada={placa_norm!r})")
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    url_cond = vehiculo.get("documentoIdentidadConductor")
+    url_cond = vehiculo.get(tipo_origen)
     if not url_cond or not (_es_ruta_documento(url_cond) or str(url_cond).startswith("https://")):
-        raise HTTPException(status_code=409, detail="El conductor no tiene cédula cargada todavía.")
+        raise HTTPException(
+            status_code=409,
+            detail=f"El conductor no tiene {spec['nombre'].lower()} cargado todavía.",
+        )
 
     try:
         # Frente: mismo tipo de archivo que el original (webp o pdf).
@@ -1451,13 +1535,14 @@ async def reutilizar_cedula(
         nombre_frente = _nombre_doc_bucket(placa, tipo_destino, extension, vehiculo)
         ruta_destino = await asyncio.to_thread(_copiar_blob_bucket, url_cond, nombre_frente)
 
-        # Reverso (si el conductor lo subió): también con campo propio.
+        # Reverso (solo docs de dos caras, si el conductor lo subió): campo propio.
         ruta_reverso_destino = None
-        ruta_rev_cond = vehiculo.get("documentoIdentidadConductorReverso")
-        if ruta_rev_cond and (_es_ruta_documento(ruta_rev_cond) or str(ruta_rev_cond).startswith("https://")):
-            ext_rev = "pdf" if str(ruta_rev_cond).lower().endswith(".pdf") else "webp"
-            nombre_rev = _nombre_doc_bucket(placa, f"{tipo_destino}Reverso", ext_rev, vehiculo)
-            ruta_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, ruta_rev_cond, nombre_rev)
+        if spec["dos_caras"]:
+            ruta_rev_cond = vehiculo.get(f"{tipo_origen}Reverso")
+            if ruta_rev_cond and (_es_ruta_documento(ruta_rev_cond) or str(ruta_rev_cond).startswith("https://")):
+                ext_rev = "pdf" if str(ruta_rev_cond).lower().endswith(".pdf") else "webp"
+                nombre_rev = _nombre_doc_bucket(placa, f"{tipo_destino}Reverso", ext_rev, vehiculo)
+                ruta_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, ruta_rev_cond, nombre_rev)
 
         # Placa CANÓNICA del doc (no la recibida): si el fallback fue quien
         # encontró el vehículo, los $set deben filtrar por la placa real.
@@ -1468,14 +1553,14 @@ async def reutilizar_cedula(
         coleccion_vehiculos.update_one({"placa": placa_doc}, {"$set": set_doc})
 
         # La lectura IA del conductor queda disponible también para la figura
-        # destino (autollenado de identidad en el próximo montaje del form).
-        lectura_cond = (vehiculo.get("lecturasIA") or {}).get("documentoIdentidadConductor")
+        # destino (autollenado de identidad/bancario en el próximo montaje).
+        lectura_cond = (vehiculo.get("lecturasIA") or {}).get(tipo_origen)
         if lectura_cond and lectura_cond.get("datos"):
             coleccion_vehiculos.update_one(
                 {"placa": placa_doc},
                 {"$set": {f"lecturasIA.{tipo_destino}": {
                     **lectura_cond,
-                    "reutilizada_de": "documentoIdentidadConductor",
+                    "reutilizada_de": tipo_origen,
                     "fecha": datetime.utcnow(),
                 }}},
             )
@@ -1489,7 +1574,7 @@ async def reutilizar_cedula(
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
-                "message": f"Cédula del conductor reutilizada como {figura}",
+                "message": f"{spec['nombre']} del conductor reutilizado como {figura}",
                 "ruta": ruta_destino,
                 "url": _url_para_cliente(ruta_destino),
                 "url_reverso": _url_para_cliente(ruta_reverso_destino) if ruta_reverso_destino else None,
@@ -1504,7 +1589,7 @@ async def reutilizar_cedula(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al reutilizar la cédula: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al reutilizar el documento: {str(e)}")
 
 
 @ruta_vehiculos.put("/subir-fotos")
