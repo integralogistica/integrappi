@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from io import BytesIO
 from typing import List, Optional
 import resend
@@ -32,8 +32,15 @@ if not MONGO_URI:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
 
 # Configuración Google Cloud
-BUCKET_NAME = "integrapp"
-CARPETA_STORAGE = "Vehiculos"
+# 2026-08-31: los documentos del vehículo (cédulas de 3 figuras con ambas
+# caras, RUT, licencia, tarjeta de propiedad, certificados bancarios, firma
+# electrónica...) son PII pesada y van al bucket PRIVADO (mismo criterio que
+# los estudios de seguridad). Mongo guarda la RUTA del blob (no URL pública)
+# y los endpoints de lectura la convierten en URL firmada temporal.
+BUCKET_NAME = os.getenv("VEHICULOS_BUCKET", "integrapp-privado")
+CARPETA_STORAGE = os.getenv("VEHICULOS_CARPETA", "Vehiculos")
+# Vigencia de las URLs firmadas que reciben los fronts (panel, revisión, HV).
+VEHICULOS_URL_FIRMADA_MIN = int(os.getenv("VEHICULOS_URL_FIRMADA_MIN", "60"))
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 # Zona Colombia para las fechas de la nomenclatura del bucket (el server es UTC).
 _TZ_BOGOTA = pytz.timezone("America/Bogota")
@@ -140,9 +147,25 @@ def optimizar_imagen(archivo: UploadFile, formato: str = "WEBP", max_width: int 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al optimizar la imagen: {str(e)}")
 
+_cliente_storage = None
+
+def _obtener_cliente_storage():
+    """Cliente GCS perezoso y compartido (uno por request es caro; patrón de
+    storage_seguridad.py)."""
+    global _cliente_storage
+    if _cliente_storage is None:
+        _cliente_storage = storage.Client()
+    return _cliente_storage
+
+
 def subir_a_google_storage(archivo: UploadFile, nombre_archivo: str) -> str:
+    """
+    Sube un archivo al bucket PRIVADO y devuelve la RUTA del blob
+    (Vehiculos/{nombre_archivo}). La ruta — nunca una URL pública — es lo que
+    persiste en Mongo; los endpoints de lectura la firman (URL v4 temporal).
+    """
     try:
-        cliente = storage.Client()
+        cliente = _obtener_cliente_storage()
         bucket = cliente.bucket(BUCKET_NAME)
         ruta_archivo = f"{CARPETA_STORAGE}/{nombre_archivo}"
 
@@ -155,33 +178,97 @@ def subir_a_google_storage(archivo: UploadFile, nombre_archivo: str) -> str:
             archivo.file.seek(0)
             blob.upload_from_file(archivo.file, content_type=archivo.content_type)
 
-        return f"https://storage.googleapis.com/{BUCKET_NAME}/{ruta_archivo}"
+        return ruta_archivo
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al subir el archivo a Google Storage: {str(e)}")
 
 
 def _nombre_doc_bucket(placa: str, tipo: str, extension: str, vehiculo: dict = None, sufijo: str = "") -> str:
     """
-    Nomenclatura estándar de archivos en el bucket (2026-08-27):
-        {PLACA}/{AAAA-MM-DD}/{tipo}{_cedula}{sufijo}.{ext}
-    Ej: Vehiculos/MX48E/2026-08-27/soat_1020304050.pdf
-    — Agrupado por placa → fecha → documento; la cédula (si ya se conoce)
-    identifica al conductor; si no, se omite (ej. la primera subida de la
-    cédula se hace ANTES de que la IA lea el número). Re-subir el mismo doc
-    el mismo día pisa el archivo (sin duplicados); otro día crea versión
-    nueva y Mongo queda con la URL vigente (la anterior queda como histórico).
+    Nomenclatura estándar de archivos en el bucket (2026-08-27; SIN cédula
+    desde 2026-08-31 — minimización: las rutas llegan a logs de GCS y proxies,
+    mismo criterio que los estudios de seguridad):
+        {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}.{ext}
+    Ej: Vehiculos/MX48E/2026-08-27/soat.pdf
+    — Agrupado por placa → fecha → documento. Re-subir el mismo doc el mismo
+    día pisa el archivo (sin duplicados); otro día crea versión nueva y Mongo
+    queda con la ruta vigente (la anterior queda como histórico).
+    (El parámetro `vehiculo` se mantiene por compatibilidad de firma y ya no
+    aporta nada a la nomenclatura.)
     """
     fecha = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
-    cedula = re.sub(r"\D", "", str((vehiculo or {}).get("condCedulaCiudadania") or ""))
-    identificador = f"_{cedula}" if cedula else ""
-    return f"{placa.strip().upper()}/{fecha}/{tipo}{identificador}{sufijo}.{extension}"
+    return f"{placa.strip().upper()}/{fecha}/{tipo}{sufijo}.{extension}"
 
-def eliminar_de_google_storage(url: str):
+
+_RE_URL_PUBLICA_GCS = re.compile(r"^https://storage\.googleapis\.com/[^/]+/")
+
+
+def _nombre_blob_de_ruta(valor: str) -> str:
+    """
+    Normaliza lo guardado en Mongo a nombre de blob. Lo nuevo son rutas
+    (`Vehiculos/...`); lo histórico (URLs públicas del bucket viejo) se
+    tolera recortando el prefijo https://storage.googleapis.com/{bucket}/.
+    """
+    return _RE_URL_PUBLICA_GCS.sub("", str(valor or ""))
+
+
+def _es_ruta_documento(valor) -> bool:
+    """True si el valor es una ruta de blob de este módulo (Vehiculos/...)."""
+    return isinstance(valor, str) and valor.startswith(f"{CARPETA_STORAGE}/")
+
+
+def _url_firmada_documento(ruta: str) -> str:
+    """
+    URL firmada v4 temporal (VEHICULOS_URL_FIRMADA_MIN) para que el
+    navegador abra el documento privado sin exponerlo permanentemente.
+    Defensiva: si el signing falla (GCS caído, entorno sin credenciales),
+    devuelve la ruta plana — jamás tumba el endpoint que la llama.
+    """
     try:
-        cliente = storage.Client()
+        blob = _obtener_cliente_storage().bucket(BUCKET_NAME).blob(_nombre_blob_de_ruta(ruta))
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=VEHICULOS_URL_FIRMADA_MIN),
+            method="GET",
+        )
+    except Exception as e:
+        print(f"[storage] No se pudo firmar {ruta}: {e}")
+        return ruta
+
+
+def _url_para_cliente(ruta: str):
+    """URL para entregar al front: firma las rutas de blob de este módulo y
+    deja pasar cualquier otro valor tal cual (URLs históricas, mocks)."""
+    return _url_firmada_documento(ruta) if _es_ruta_documento(ruta) else ruta
+
+
+def _firmar_documentos(valor):
+    """
+    Recorre un documento Mongo y convierte TODAS las rutas de blobs de
+    documentos (Vehiculos/...) en URLs firmadas temporales. Se aplica a los
+    payloads de lectura; Mongo siempre queda con la ruta plana (el hash de la
+    firma electrónica se calcula sobre las rutas, así que no cambia).
+    """
+    if isinstance(valor, dict):
+        return {k: _firmar_documentos(v) for k, v in valor.items()}
+    if isinstance(valor, list):
+        return [_firmar_documentos(v) for v in valor]
+    if _es_ruta_documento(valor):
+        return _url_firmada_documento(valor)
+    return valor
+
+
+def _descargar_blob(ruta: str) -> bytes:
+    """Descarga el contenido de un blob privado (server-side)."""
+    blob = _obtener_cliente_storage().bucket(BUCKET_NAME).blob(_nombre_blob_de_ruta(ruta))
+    return blob.download_as_bytes()
+
+
+def eliminar_de_google_storage(ruta: str):
+    try:
+        cliente = _obtener_cliente_storage()
         bucket = cliente.bucket(BUCKET_NAME)
-        nombre_archivo = url.split(f"https://storage.googleapis.com/{BUCKET_NAME}/")[-1]
-        blob = bucket.blob(nombre_archivo)
+        blob = bucket.blob(_nombre_blob_de_ruta(ruta))
         blob.delete()
     except Exception as e:
         print(f"Advertencia al eliminar archivo: {str(e)}")
@@ -898,7 +985,7 @@ def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
     vehiculos = list(coleccion_vehiculos.find(filtro, {"_id": 0}))
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Búsqueda finalizada", "vehiculos": _json_seguro(vehiculos)}
+        content={"message": "Búsqueda finalizada", "vehiculos": _json_seguro(_firmar_documentos(vehiculos))}
     )
 
 
@@ -908,7 +995,7 @@ async def obtener_vehiculo(placa: str):
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": _json_seguro(vehiculo)})
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": _json_seguro(_firmar_documentos(vehiculo))})
 
 # Transiciones permitidas de estadoIntegra (2026-08-27): todo pasa por
 # actualizar-estado, que antes aceptaba cualquier string. `inactivo` es un
@@ -1122,7 +1209,7 @@ async def subir_estudio_seguridad(
         )
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"message": "Estudio de seguridad subido correctamente", "url": url_archivo}
+            content={"message": "Estudio de seguridad subido correctamente", "ruta": url_archivo, "url": _url_para_cliente(url_archivo)}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
@@ -1152,7 +1239,7 @@ async def subir_foto_seguridad(
         )
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"message": "Foto de seguridad subida correctamente", "url": url_archivo}
+            content={"message": "Foto de seguridad subida correctamente", "ruta": url_archivo, "url": _url_para_cliente(url_archivo)}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar la foto de seguridad: {str(e)}")
@@ -1299,23 +1386,23 @@ async def subir_documento(
         status_code=status.HTTP_200_OK,
         content={
             "message": f"{tipo} subido correctamente",
-            "url": url_archivo,
+            "ruta": url_archivo,
+            "url": _url_para_cliente(url_archivo),
             "lectura_ia": lectura_ia,
             "replicado_en": gemelos,
-            "url_reverso": url_reverso,
+            "ruta_reverso": url_reverso,
+            "url_reverso": _url_para_cliente(url_reverso) if url_reverso else None,
         }
     )
 
 
-def _copiar_blob_bucket(url_origen: str, nombre_destino: str) -> str:
+def _copiar_blob_bucket(ruta_origen: str, nombre_destino: str) -> str:
     """Copia un blob ya existente del bucket a otra ruta (server-side, sin
-    bajar/subir por el cliente). Devuelve la URL pública del destino."""
-    prefijo = f"https://storage.googleapis.com/{BUCKET_NAME}/"
-    nombre_origen = url_origen.split(prefijo)[-1]
-    cliente = storage.Client()
-    bucket = cliente.bucket(BUCKET_NAME)
+    bajar/subir por el cliente). Devuelve la RUTA del blob destino."""
+    nombre_origen = _nombre_blob_de_ruta(ruta_origen)
+    bucket = _obtener_cliente_storage().bucket(BUCKET_NAME)
     bucket.copy_blob(bucket.blob(nombre_origen), bucket, f"{CARPETA_STORAGE}/{nombre_destino}")
-    return f"{prefijo}{CARPETA_STORAGE}/{nombre_destino}"
+    return f"{CARPETA_STORAGE}/{nombre_destino}"
 
 
 @ruta_vehiculos.put("/reutilizar-cedula")
@@ -1328,8 +1415,8 @@ async def reutilizar_cedula(
     propietario o del tenedor SIN volver a leer con IA (ahorra Gemini).
 
     Copia el blob (frente + reverso si existe) con la nomenclatura PROPIA de
-    la figura destino ({tipo}_{cedula}.webp — cada figura conserva su archivo
-    y su campo en Mongo; NO es la replicación por gemelos, que comparte URL).
+    la figura destino — cada figura conserva su archivo y su campo en Mongo;
+    NO es la replicación por gemelos, que comparte la ruta).
     La lecturasIA del conductor se copia también al tipo destino para que el
     formulario pueda autollenar la identidad de esa figura al montar."""
     figura = figura.strip().lower()
@@ -1342,26 +1429,26 @@ async def reutilizar_cedula(
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
     url_cond = vehiculo.get("documentoIdentidadConductor")
-    if not url_cond or not str(url_cond).startswith("https://"):
+    if not url_cond or not (_es_ruta_documento(url_cond) or str(url_cond).startswith("https://")):
         raise HTTPException(status_code=409, detail="El conductor no tiene cédula cargada todavía.")
 
     try:
         # Frente: mismo tipo de archivo que el original (webp o pdf).
         extension = "pdf" if str(url_cond).lower().endswith(".pdf") else "webp"
         nombre_frente = _nombre_doc_bucket(placa, tipo_destino, extension, vehiculo)
-        url_destino = await asyncio.to_thread(_copiar_blob_bucket, url_cond, nombre_frente)
+        ruta_destino = await asyncio.to_thread(_copiar_blob_bucket, url_cond, nombre_frente)
 
         # Reverso (si el conductor lo subió): también con campo propio.
-        url_reverso_destino = None
-        url_rev_cond = vehiculo.get("documentoIdentidadConductorReverso")
-        if url_rev_cond and str(url_rev_cond).startswith("https://"):
-            ext_rev = "pdf" if str(url_rev_cond).lower().endswith(".pdf") else "webp"
+        ruta_reverso_destino = None
+        ruta_rev_cond = vehiculo.get("documentoIdentidadConductorReverso")
+        if ruta_rev_cond and (_es_ruta_documento(ruta_rev_cond) or str(ruta_rev_cond).startswith("https://")):
+            ext_rev = "pdf" if str(ruta_rev_cond).lower().endswith(".pdf") else "webp"
             nombre_rev = _nombre_doc_bucket(placa, f"{tipo_destino}Reverso", ext_rev, vehiculo)
-            url_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, url_rev_cond, nombre_rev)
+            ruta_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, ruta_rev_cond, nombre_rev)
 
-        set_doc = {tipo_destino: url_destino}
-        if url_reverso_destino:
-            set_doc[f"{tipo_destino}Reverso"] = url_reverso_destino
+        set_doc = {tipo_destino: ruta_destino}
+        if ruta_reverso_destino:
+            set_doc[f"{tipo_destino}Reverso"] = ruta_reverso_destino
         coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_doc})
 
         # La lectura IA del conductor queda disponible también para la figura
@@ -1378,17 +1465,18 @@ async def reutilizar_cedula(
             )
 
         # Edición de un aprobado → baja a re-revisión con diff del documento.
-        campos_diff = [{"campo": tipo_destino, "antes": vehiculo.get(tipo_destino) or "(ninguno)", "despues": url_destino}]
-        if url_reverso_destino:
-            campos_diff.append({"campo": f"{tipo_destino}Reverso", "antes": vehiculo.get(f"{tipo_destino}Reverso") or "(ninguno)", "despues": url_reverso_destino})
+        campos_diff = [{"campo": tipo_destino, "antes": vehiculo.get(tipo_destino) or "(ninguno)", "despues": ruta_destino}]
+        if ruta_reverso_destino:
+            campos_diff.append({"campo": f"{tipo_destino}Reverso", "antes": vehiculo.get(f"{tipo_destino}Reverso") or "(ninguno)", "despues": ruta_reverso_destino})
         _registrar_cambio_aprobado(vehiculo, editado_por or "", "documentos", campos_diff)
 
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "message": f"Cédula del conductor reutilizada como {figura}",
-                "url": url_destino,
-                "url_reverso": url_reverso_destino,
+                "ruta": ruta_destino,
+                "url": _url_para_cliente(ruta_destino),
+                "url_reverso": _url_para_cliente(ruta_reverso_destino) if ruta_reverso_destino else None,
                 "lectura_ia": lectura_cond or None,
             },
         )
@@ -1445,7 +1533,10 @@ async def subir_fotos(archivos: List[UploadFile], placa: str = Form(...)):
     # $set (no $push): escribe el array saneado (sin duplicados) + las nuevas,
     # reparando de paso los docs con URLs repetidas del bug de numeración.
     coleccion_vehiculos.update_one({"placa": placa}, {"$set": {"fotos": actuales + urls_fotos}})
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Fotos subidas correctamente", "urls": urls_fotos})
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": "Fotos subidas correctamente", "rutas": urls_fotos, "urls": _firmar_documentos(urls_fotos)}
+    )
 
 
 @ruta_vehiculos.post("/extraer-datos-documento")
@@ -1509,7 +1600,7 @@ async def subir_firma(
 
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"message": "Firma subida correctamente", "url": url_archivo}
+            content={"message": "Firma subida correctamente", "ruta": url_archivo, "url": _url_para_cliente(url_archivo)}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error subiendo firma: {str(e)}")
@@ -1607,7 +1698,8 @@ async def firmar(
         status_code=status.HTTP_200_OK,
         content={
             "message": "Firma registrada y sellada",
-            "url": url_archivo,
+            "ruta": url_archivo,
+            "url": _url_para_cliente(url_archivo),
             "firmado_en": ahora.isoformat(),
             "hash_datos": hash_datos,
             "version": version,
@@ -1634,7 +1726,7 @@ async def verificar_firma(placa: str):
         "placa": placa,
         "coincide": hash_actual == evidencia.get("hash_datos"),
         "hash_actual": hash_actual,
-        "evidencia": _json_seguro({k: v for k, v in evidencia.items() if k != "_id"}),
+        "evidencia": _json_seguro(_firmar_documentos({k: v for k, v in evidencia.items() if k != "_id"})),
     }
 
 @ruta_vehiculos.get("/obtener-firma")
@@ -1647,35 +1739,33 @@ async def obtener_firma(placa: str):
     url_firma = vehiculo.get("firmaUrl")
 
     try:
-        respuesta_imagen = requests.get(url_firma)
-        
-        if respuesta_imagen.status_code == 200:
-            
-            try:
-                # 1. Abrir la imagen binaria (sin importar el formato original)
-                imagen_pil = Image.open(io.BytesIO(respuesta_imagen.content))
-                
-                # 2. Convertir y guardar en un buffer como PNG
-                buffer = io.BytesIO()
-                imagen_pil.save(buffer, format="PNG")
-                
-                # 3. Codificar el buffer PNG a Base64
-                b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                
-                # 4. Crear la Data URL completa
-                imagen_final_base64 = f"data:image/png;base64,{b64_data}"
+        # El blob es privado: se descarga server-side (antes era una URL
+        # pública levantada con requests.get).
+        contenido_firma = _descargar_blob(url_firma)
+        try:
+            # 1. Abrir la imagen binaria (sin importar el formato original)
+            imagen_pil = Image.open(io.BytesIO(contenido_firma))
 
-                # Retornar el Base64 dentro de un JSON
-                return {"firma_b64": imagen_final_base64}
-            
-            except Exception as convert_error:
-                print(f"Error al convertir la firma a Base64/PNG: {convert_error}")
-                # Si falla la conversión
-                raise HTTPException(status_code=500, detail="Error al procesar y codificar la imagen de firma")
+            # 2. Convertir y guardar en un buffer como PNG
+            buffer = io.BytesIO()
+            imagen_pil.save(buffer, format="PNG")
 
-        else:
-            raise HTTPException(status_code=404, detail="No se pudo descargar la imagen remota")
-            
+            # 3. Codificar el buffer PNG a Base64
+            b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+            # 4. Crear la Data URL completa
+            imagen_final_base64 = f"data:image/png;base64,{b64_data}"
+
+            # Retornar el Base64 dentro de un JSON
+            return {"firma_b64": imagen_final_base64}
+
+        except Exception as convert_error:
+            print(f"Error al convertir la firma a Base64/PNG: {convert_error}")
+            # Si falla la conversión
+            raise HTTPException(status_code=500, detail="Error al procesar y codificar la imagen de firma")
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error general en el proxy de firma: {e}")
         raise HTTPException(status_code=500, detail="Error al procesar la imagen")
@@ -1759,14 +1849,16 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
             k: v for k, v in veh.items()
             # SE HA MODIFICADO AQUÍ PARA QUE NO DEVUELVA estudioSeguridad NI fotoconductorseguridad
             # SI NO QUIERES QUE EL CONDUCTOR LOS VEA (Opcional, pero recomendado por seguridad)
-            if isinstance(v, str) and v.startswith("https://storage.googleapis.com") and k not in ["estudioSeguridad", "fotoconductorseguridad"]
+            if (isinstance(v, str) and (
+                _es_ruta_documento(v) or v.startswith("https://storage.googleapis.com")
+            )) and k not in ["estudioSeguridad", "fotoconductorseguridad"]
         }
         veh["documentos"] = documentos
         vehiculos_final.append(veh)
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Vehículos encontrados", "vehicles": _json_seguro(vehiculos_final)}
+        content={"message": "Vehículos encontrados", "vehicles": _json_seguro(_firmar_documentos(vehiculos_final))}
     )
 
 
@@ -1787,12 +1879,14 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
         veh["_id"] = str(veh["_id"])
         documentos = {
             k: v for k, v in veh.items()
-            if isinstance(v, str) and v.startswith("https://storage.googleapis.com") and k != "estudioSeguridad"
+            if isinstance(v, str) and (
+                _es_ruta_documento(v) or v.startswith("https://storage.googleapis.com")
+            ) and k != "estudioSeguridad"
         }
         veh["documentos"] = documentos
         vehiculos_final.append(veh)
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"vehiculos": _json_seguro(vehiculos_final)}
+        content={"vehiculos": _json_seguro(_firmar_documentos(vehiculos_final))}
     )

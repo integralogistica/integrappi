@@ -201,20 +201,22 @@ class JsonSeguroTests(unittest.TestCase):
 
 
 class NombreDocBucketTests(unittest.TestCase):
-    """Nomenclatura de archivos en el bucket: {PLACA}/{AAAA-MM-DD}/{tipo}[_{cedula}][sufijo].{ext}"""
+    """Nomenclatura de archivos en el bucket: {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}.{ext}
+    (Desde 2026-08-31 SIN cédula en el nombre: minimización — las rutas llegan
+    a logs de GCS y proxies, mismo criterio que los estudios de seguridad.)"""
 
-    def test_con_cedula(self):
+    def test_cedula_no_va_en_el_nombre(self):
         v = {"condCedulaCiudadania": "1.020.304.050"}
         nombre = vehiculos._nombre_doc_bucket("mx48e", "soat", "pdf", v)
-        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/soat_1020304050\.pdf$")
+        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/soat\.pdf$")
 
-    def test_sin_cedula_se_omite_sufijo(self):
+    def test_nombre_simple(self):
         nombre = vehiculos._nombre_doc_bucket("MX48E", "firma", "webp", {})
         self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/firma\.webp$")
 
     def test_sufijo_fotos(self):
         nombre = vehiculos._nombre_doc_bucket("ABC123", "foto", "webp", None, sufijo="_002")
-        self.assertRegex(nombre, r"^ABC123/\d{4}-\d{2}-\d{2}/foto(_\d+)?_002\.webp$")
+        self.assertRegex(nombre, r"^ABC123/\d{4}-\d{2}-\d{2}/foto_002\.webp$")
 
 
 class CamposDocumentoProtegidosTests(unittest.TestCase):
@@ -481,8 +483,8 @@ class ReutilizarCedulaTests(unittest.TestCase):
     def _vehiculo(self):
         v = vehiculo_completo(
             condCedulaCiudadania="1.020.304.050",
-            documentoIdentidadConductor="https://storage.googleapis.com/integrapp/Vehiculos/TEST01/2026-08-29/documentoIdentidadConductor.webp",
-            documentoIdentidadConductorReverso="https://storage.googleapis.com/integrapp/Vehiculos/TEST01/2026-08-29/documentoIdentidadConductorReverso.webp",
+            documentoIdentidadConductor="Vehiculos/TEST01/2026-08-29/documentoIdentidadConductor.webp",
+            documentoIdentidadConductorReverso="Vehiculos/TEST01/2026-08-29/documentoIdentidadConductorReverso.webp",
             lecturasIA={
                 "documentoIdentidadConductor": {
                     "datos": {"numero": "1020304050", "nombres": "MARIA", "apellidos": "PEREZ SOTO"},
@@ -506,9 +508,9 @@ class ReutilizarCedulaTests(unittest.TestCase):
     def test_copia_frente_reverso_y_lectura(self):
         fake = FakeColeccionVehiculos([self._vehiculo()])
         copias = []
-        def copiar_mock(url, nombre):
-            copias.append((url, nombre))
-            return f"https://storage.googleapis.com/integrapp/Vehiculos/{nombre}"
+        def copiar_mock(ruta, nombre):
+            copias.append((ruta, nombre))
+            return f"Vehiculos/{nombre}"
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "_copiar_blob_bucket", side_effect=copiar_mock):
             resp = self.client.put(
@@ -517,8 +519,9 @@ class ReutilizarCedulaTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 200, resp.text)
         body = resp.json()
-        # Nomenclatura propia de la figura (con cédula del conductor si se conoce).
-        self.assertIn("documentoIdentidadPropietario", body["url"].rsplit("/", 1)[-1])
+        # Nomenclatura propia de la figura (campo con su ruta de blob).
+        self.assertIn("documentoIdentidadPropietario", body["ruta"].rsplit("/", 1)[-1])
+        self.assertTrue(body["ruta"].startswith("Vehiculos/"))
         self.assertIsNotNone(body["url_reverso"])
         self.assertEqual(body["lectura_ia"]["datos"]["numero"], "1020304050")
         # 2 copias: frente y reverso.
@@ -563,7 +566,7 @@ class ReutilizarCedulaTests(unittest.TestCase):
         v.pop("documentoIdentidadConductorReverso")
         fake = FakeColeccionVehiculos([v])
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
-             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"https://storage.googleapis.com/integrapp/Vehiculos/{n}"):
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"Vehiculos/{n}"):
             resp = self.client.put(
                 "/vehiculos/reutilizar-cedula",
                 data={"placa": "TEST01", "figura": "tenedor"},
@@ -571,6 +574,57 @@ class ReutilizarCedulaTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertIsNone(resp.json()["url_reverso"])
         self.assertNotIn("documentoIdentidadTenedorReverso", fake.documents[0])
+
+
+class StoragePrivadoTests(unittest.TestCase):
+    """2026-08-31: los documentos del vehículo van al bucket PRIVADO — Mongo
+    guarda la RUTA del blob (nunca una URL pública) y las respuestas al front
+    llevan la URL firmada temporal."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def test_subir_documento_persiste_ruta_y_responde_firmada(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="registro_incompleto")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage", return_value="Vehiculos/TEST01/2026-08-31/soat.pdf"), \
+             patch.object(vehiculos, "extraer_datos_con_llm", side_effect=lambda *a, **k: {}), \
+             patch.object(vehiculos, "_url_firmada_documento", return_value="https://firmada/soat") as mock_firmar:
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "soat", "extraer": "false"},
+                files={"archivo": ("soat.pdf", b"%PDF", "application/pdf")},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["ruta"], "Vehiculos/TEST01/2026-08-31/soat.pdf")
+        self.assertEqual(body["url"], "https://firmada/soat")
+        # Mongo queda con la RUTA plana, jamás con una URL (firmada o pública).
+        self.assertEqual(fake.documents[0]["soat"], "Vehiculos/TEST01/2026-08-31/soat.pdf")
+        mock_firmar.assert_called_once_with("Vehiculos/TEST01/2026-08-31/soat.pdf")
+
+    def test_firmar_documentos_convierte_solo_rutas(self):
+        with patch.object(vehiculos, "_url_firmada_documento", side_effect=lambda r: f"https://firmada/{r}"):
+            doc = vehiculos._firmar_documentos({
+                "soat": "Vehiculos/T1/2026-08-31/soat.pdf",
+                "vehMarca": "VOLVO",
+                "condCorreo": "A@B.C",
+                "fotos": ["Vehiculos/T1/2026-08-31/foto_001.webp", None],
+            })
+        self.assertEqual(doc["soat"], "https://firmada/Vehiculos/T1/2026-08-31/soat.pdf")
+        self.assertEqual(doc["vehMarca"], "VOLVO")
+        self.assertEqual(doc["condCorreo"], "A@B.C")
+        self.assertEqual(doc["fotos"][0], "https://firmada/Vehiculos/T1/2026-08-31/foto_001.webp")
+        self.assertIsNone(doc["fotos"][1])
+
+    def test_url_para_cliente_deja_pasar_valores_externos(self):
+        # Valores que no son rutas de este módulo (URLs históricas, mocks) se
+        # devuelven tal cual: el signing es solo para blobs del bucket privado.
+        self.assertEqual(vehiculos._url_para_cliente("https://x/legacy.webp"), "https://x/legacy.webp")
+        self.assertEqual(vehiculos._url_para_cliente(""), "")
+
+    def test_bucket_configurado_es_el_privado(self):
+        self.assertEqual(vehiculos.BUCKET_NAME, "integrapp-privado")
 
 
 if __name__ == "__main__":
