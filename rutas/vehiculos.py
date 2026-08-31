@@ -1424,8 +1424,21 @@ async def reutilizar_cedula(
     if not tipo_destino:
         raise HTTPException(status_code=400, detail="Figura no válida: use propietario o tenedor.")
 
-    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    # Normalización server-side + fallback insensible a mayúsculas/espacios:
+    # el 404 real de prod (2026-08-31, MVX48E) solo puede venir de un valor
+    # que no coincide byte a byte con la placa del doc; se loguea el valor
+    # RECIBIDO para diagnosticarlo desde el log de Render.
+    placa_norm = (placa or "").strip().upper()
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa_norm})
     if not vehiculo:
+        try:
+            vehiculo = coleccion_vehiculos.find_one({
+                "placa": {"$regex": f"^{re.escape(placa_norm)}$", "$options": "i"}
+            })
+        except Exception as e:
+            print(f"[reutilizar-cedula] Fallback de placa falló: {e}")
+    if not vehiculo:
+        print(f"[reutilizar-cedula] 404: placa recibida={placa!r} (normalizada={placa_norm!r})")
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
     url_cond = vehiculo.get("documentoIdentidadConductor")
@@ -1446,17 +1459,20 @@ async def reutilizar_cedula(
             nombre_rev = _nombre_doc_bucket(placa, f"{tipo_destino}Reverso", ext_rev, vehiculo)
             ruta_reverso_destino = await asyncio.to_thread(_copiar_blob_bucket, ruta_rev_cond, nombre_rev)
 
+        # Placa CANÓNICA del doc (no la recibida): si el fallback fue quien
+        # encontró el vehículo, los $set deben filtrar por la placa real.
+        placa_doc = vehiculo["placa"]
         set_doc = {tipo_destino: ruta_destino}
         if ruta_reverso_destino:
             set_doc[f"{tipo_destino}Reverso"] = ruta_reverso_destino
-        coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_doc})
+        coleccion_vehiculos.update_one({"placa": placa_doc}, {"$set": set_doc})
 
         # La lectura IA del conductor queda disponible también para la figura
         # destino (autollenado de identidad en el próximo montaje del form).
         lectura_cond = (vehiculo.get("lecturasIA") or {}).get("documentoIdentidadConductor")
         if lectura_cond and lectura_cond.get("datos"):
             coleccion_vehiculos.update_one(
-                {"placa": placa},
+                {"placa": placa_doc},
                 {"$set": {f"lecturasIA.{tipo_destino}": {
                     **lectura_cond,
                     "reutilizada_de": "documentoIdentidadConductor",
