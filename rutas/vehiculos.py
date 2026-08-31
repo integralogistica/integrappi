@@ -17,6 +17,10 @@ import re
 import requests
 import base64
 import pdfplumber
+# Excepción de pdfminer (motor de pdfplumber) cuando el PDF exige contraseña
+# de apertura: se usa para detectar PDFs con clave y rechazarlos con un
+# mensaje accionable en vez de mandarlos cifrados a Gemini.
+from pdfminer.pdfdocument import PDFPasswordIncorrect
 import pytz
 from PIL import Image
 import io
@@ -308,7 +312,7 @@ ESQUEMAS_EXTRACCION = {
             "numero_documento": "Número de identificación del campo 26 (NIT sin dígito de verificación o cédula), SOLO dígitos",
             "digito_verificacion": "Dígito de verificación del NIT (un dígito) o null",
             "direccion": "Dirección principal (campo 41)",
-            "ciudad": "Municipio (campo 40)",
+            "ciudad": "Ciudad/Municipio (campo 40) — en el RUT el campo se llama 'Ciudad/Municipio'",
             "departamento": "Departamento (campo 39)",
             "correo": "Correo electrónico (campo 42)",
             "telefono": "Teléfono, SOLO dígitos (campo 44)",
@@ -475,6 +479,18 @@ def _extraer_texto_pdf(datos: bytes) -> str:
                 if texto.strip():
                     textos.append(texto.strip())
         return "\n".join(textos)[:8000]
+    except PDFPasswordIncorrect:
+        # PDF protegido con contraseña de apertura (típico en certificados
+        # bancarios): ni pdfplumber ni Gemini pueden descifrarlo. Mensaje
+        # accionable en vez del 409 engañoso de "documento equivocado".
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "El PDF está protegido con contraseña, por eso no pudimos leerlo con IA. "
+                "Ábrelo con la clave y guárdalo/exportalo de nuevo como PDF sin contraseña "
+                "(o tómale una foto) y vuelve a subirlo."
+            ),
+        )
     except Exception as e:
         # Sin emoji: en consolas Windows (cp1252) el print con emoji revienta y
         # rompería el propio except. ASCII siempre es seguro.
@@ -687,14 +703,22 @@ FAMILIAS_FIGURA = {
 # "fotos"), máximo 10 (tope en subir-fotos).
 # TODAS las cédulas exigen reverso (2026-08-27, orden del usuario: siempre
 # dos caras, ya no solo la cédula amarilla del conductor).
+# OPCIONALES (2026-08-31, orden del usuario): la Póliza de Responsabilidad
+# Civil deja de exigirse (sigue cargable en el paso 3, no bloquea «Finalizar»).
+# ELIMINADOS DEL PEDIDO por completo (2026-08-31): Certificación Bancaria del
+# PROPIETARIO y RUT del PROPIETARIO — ninguna UI los pide; los tipos siguen
+# válidos en subir-documento por compatibilidad con históricos.
+# "documentoAcreditacionTenedor" SOLO se exige cuando el tenedor NO es el
+# propietario (ver _documentos_faltantes): si tenedor=propietario, la propia
+# tarjeta de propiedad lo acredita.
 DOCUMENTOS_REQUERIDOS = [
     "tarjetaPropiedad", "tarjetaPropiedadReverso", "soat", "revisionTecnomecanica",
-    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadConductorReverso",
+    "documentoIdentidadConductor", "documentoIdentidadConductorReverso",
     "documentoIdentidadPropietario", "documentoIdentidadPropietarioReverso",
     "documentoIdentidadTenedor", "documentoIdentidadTenedorReverso",
     "licencia", "licenciaReverso", "planillaEpsArl", "condFoto",
-    "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
-    "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "fotos",
+    "condCertificacionBancaria", "tenedCertificacionBancaria",
+    "documentoAcreditacionTenedor", "rutTenedor", "fotos",
 ]
 
 # Tope de fotos del vehículo por placa (mínimo 1 = "fotos" requerida arriba).
@@ -796,9 +820,14 @@ def _documentos_faltantes(vehiculo: dict) -> list:
     Documentos obligatorios que faltan para pasar a completado_revision.
     Un documento de figura se satisface si su campo está lleno O si el de una
     figura igual (gemelo de la misma familia) lo está.
+    La acreditación como Tenedor NO se exige cuando el tenedor ES el
+    propietario (2026-08-31): la tarjeta de propiedad ya lo acredita.
     """
+    figuras = _figuras_iguales(vehiculo)
     faltantes = []
     for campo in DOCUMENTOS_REQUERIDOS:
+        if campo == "documentoAcreditacionTenedor" and figuras["tened_igual_prop"]:
+            continue
         if _doc_lleno(vehiculo, campo):
             continue
         if any(_doc_lleno(vehiculo, gemelo) for gemelo in _gemelos_documento(campo, vehiculo)):
@@ -1371,10 +1400,17 @@ async def subir_documento(
             if e.status_code == 409:
                 # Documento equivocado (meme/factura/otro doc): NO guardar nada.
                 raise
-            # Ilegible o servicio caído: el archivo SÍ se guarda, campos a mano.
-            print(f"[lecturaIA] Fallo leyendo {tipo} de {placa}: {e.detail}")
-            lectura_ia = None
-            archivo.file.seek(0)
+            if e.status_code == 400:
+                # PDF con contraseña (2026-08-31): el documento es legítimo,
+                # solo ilegible para la IA → se guarda y el motivo viaja como
+                # aviso para que el conductor sepa qué hacer.
+                lectura_ia = {"datos": {}, "avisos": [str(e.detail)]}
+                archivo.file.seek(0)
+            else:
+                # Ilegible o servicio caído: el archivo SÍ se guarda, campos a mano.
+                print(f"[lecturaIA] Fallo leyendo {tipo} de {placa}: {e.detail}")
+                lectura_ia = None
+                archivo.file.seek(0)
         except Exception as e:
             print(f"[lecturaIA] Error inesperado leyendo {tipo} de {placa}: {e}")
             lectura_ia = None

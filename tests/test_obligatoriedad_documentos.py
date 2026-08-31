@@ -169,10 +169,44 @@ class DocumentosFaltantesTests(unittest.TestCase):
         v = vehiculo_completo(tarjetaRemolque=None)
         self.assertEqual(vehiculos._documentos_faltantes(v), [])
 
+    def test_poliza_rc_y_cert_bancaria_propietario_opcionales(self):
+        # 2026-08-31: dejan de exigirse; siguen cargables pero no bloquean.
+        v = vehiculo_completo(polizaResponsabilidad=None, propCertificacionBancaria=None)
+        self.assertEqual(vehiculos._documentos_faltantes(v), [])
+
+    def test_rut_propietario_no_se_exige(self):
+        # 2026-08-31 (tarde): ELIMINADO del pedido por completo.
+        v = vehiculo_completo(rutPropietario=None, tenedorIgualPropietario=False)
+        self.assertEqual(vehiculos._documentos_faltantes(v), [])
+
+    def test_acreditacion_tenedor_no_exigida_si_tenedor_es_propietario(self):
+        # tenedor == propietario: la tarjeta de propiedad ya lo acredita (2026-08-31).
+        v = vehiculo_completo(documentoAcreditacionTenedor=None, tenedorIgualPropietario=True)
+        self.assertEqual(vehiculos._documentos_faltantes(v), [])
+
+    def test_acreditacion_tenedor_exigida_con_figuras_distintas(self):
+        v = vehiculo_completo(documentoAcreditacionTenedor=None, tenedorIgualPropietario=False)
+        self.assertIn("documentoAcreditacionTenedor", vehiculos._documentos_faltantes(v))
+
     def test_fotos_minimo_una(self):
         # Fotos del vehículo: se exige al menos 1 (máximo 10 lo valida subir-fotos).
         v = vehiculo_completo(fotos=None)
         self.assertIn("fotos", vehiculos._documentos_faltantes(v))
+
+
+class PdfConClaveTests(unittest.TestCase):
+    """Un PDF con contraseña de apertura (típico: certificados bancarios) no
+    puede leerse ni con pdfplumber ni con Gemini. Antes el fallo era silencioso
+    y terminaba en un 409 engañoso («documento equivocado») que RECHAZABA la
+    subida. Ahora: 400 accionable y el archivo se guarda igual (2026-08-31)."""
+
+    def test_pdf_con_clave_da_400_accionable(self):
+        from pdfminer.pdfdocument import PDFPasswordIncorrect
+        with patch.object(vehiculos.pdfplumber, "open", side_effect=PDFPasswordIncorrect):
+            with self.assertRaises(HTTPException) as ctx:
+                vehiculos._extraer_texto_pdf(b"%PDF-1.4-basura")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("contraseña", str(ctx.exception.detail))
 
 
 class JsonSeguroTests(unittest.TestCase):

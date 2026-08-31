@@ -216,6 +216,12 @@ DECLARACIONES_V2 = [
 
 POLITICA_DATOS_TITULO_V2 = "Declaraciones de Vinculación y Autorización de Tratamiento de Datos Personales"
 
+# Declaraciones que NO se exigen para activar la cuenta (2026-08-31, orden del
+# usuario): si el titular no las marca, el flujo continúa igual; si las marca,
+# la evidencia se registra como con las demás. En la UI NO se comunican como
+# opcionales (se ven iguales a las exigidas).
+DECLARACIONES_NO_EXIGIDAS = {"tratamiento_datos"}
+
 
 def _politica_vigente() -> Optional[dict]:
     """
@@ -570,20 +576,24 @@ class AceptarPoliticaInput(BaseModel):
     version_politica: int
     acepta: bool
     # Modelo declaraciones: ids de las declaraciones marcadas como aceptadas.
-    # Deben ser TODAS las de la política vigente (validado en el endpoint).
+    # Deben ser todas las EXIGIDAS de la política vigente (validado en el
+    # endpoint; las de DECLARACIONES_NO_EXIGIDAS no bloquean).
     declaraciones_aceptadas: Optional[list] = None
 
 
 def _validar_declaraciones_completas(politica: dict, declaraciones_aceptadas: Optional[list]):
     """
     Con el modelo de declaraciones (v2+): exige que el usuario haya aceptado
-    TODAS las declaraciones de la política vigente. Retorna la lista saneada
-    de ids, o None si la política no usa declaraciones (modelo v1).
+    todas las declaraciones EXIGIDAS de la política vigente (las de
+    DECLARACIONES_NO_EXIGIDAS no bloquean). Retorna la lista saneada de ids
+    MARCADOS (solo las realmente aceptadas, para evidencia honesta), o None
+    si la política no usa declaraciones (modelo v1).
     """
     declaraciones = politica.get("declaraciones") or []
     if not declaraciones:
         return None
-    ids_exigidas = [d["id"] for d in declaraciones]
+    ids_todas = [d["id"] for d in declaraciones]
+    ids_exigidas = [i for i in ids_todas if i not in DECLARACIONES_NO_EXIGIDAS]
     marcadas = set(declaraciones_aceptadas or [])
     faltantes = [i for i in ids_exigidas if i not in marcadas]
     if faltantes:
@@ -591,7 +601,7 @@ def _validar_declaraciones_completas(politica: dict, declaraciones_aceptadas: Op
             status_code=400,
             detail="Debes aceptar todas las declaraciones para continuar. Faltan: " + ", ".join(faltantes),
         )
-    return ids_exigidas
+    return [i for i in ids_todas if i in marcadas]
 
 
 def _registrar_aceptacion(doc: dict, politica: dict, request: Request, ahora, canal: str, declaraciones_aceptadas: Optional[list] = None):
@@ -612,7 +622,8 @@ def _registrar_aceptacion(doc: dict, politica: dict, request: Request, ahora, ca
         aceptacion_ids = []
         for decl in declaraciones:
             # Solo las que el usuario marcó; por diseño el endpoint valida que
-            # sean TODAS antes de llegar aquí.
+            # estén todas las EXIGIDAS antes de llegar aquí (las no exigidas
+            # solo dejan evidencia si se marcaron).
             if declaraciones_aceptadas is not None and decl["id"] not in declaraciones_aceptadas:
                 continue
             evidencia = {

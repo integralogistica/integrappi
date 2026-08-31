@@ -227,6 +227,28 @@ class PoliticasConductoresTests(unittest.TestCase):
         # Cero escrituras.
         self.assertEqual(self.col_aceptaciones.inserts, [])
 
+    def test_post_sin_declaracion_no_exigida_pasa(self):
+        # tratamiento_datos NO se exige (2026-08-31): sin marcar, la cuenta se
+        # activa igual y la evidencia registra SOLO las marcadas (6).
+        sin_tratamiento = [i for i in self._ids_declaraciones()
+                           if i not in conductores.DECLARACIONES_NO_EXIGIDAS]
+        resp = self._post(declaraciones=sin_tratamiento)
+        self.assertEqual(resp["estado"], "verificado")
+        self.assertEqual(len(self.col_aceptaciones.inserts), 6)
+        for evidencia in self.col_aceptaciones.inserts:
+            self.assertNotIn(evidencia["declaracion_id"], conductores.DECLARACIONES_NO_EXIGIDAS)
+        doc = self.col_conductores.documents[0]
+        self.assertTrue(doc["correo_verificado"])
+        self.assertNotIn("tratamiento_datos", doc["declaraciones_aceptadas"])
+
+    def test_post_declaracion_no_exigida_marcada_deja_evidencia(self):
+        # Si el titular SÍ la marca, la evidencia se registra como las demás.
+        resp = self._post(declaraciones=self._ids_declaraciones())
+        self.assertEqual(resp["estado"], "verificado")
+        self.assertEqual(len(self.col_aceptaciones.inserts), 7)
+        doc = self.col_conductores.documents[0]
+        self.assertIn("tratamiento_datos", doc["declaraciones_aceptadas"])
+
     def test_post_idempotente(self):
         self._post()
         resp = self._post()  # doble click / refresh
