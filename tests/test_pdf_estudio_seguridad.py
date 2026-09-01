@@ -128,7 +128,59 @@ def _texto_marca_agua(contenido: bytes) -> str:
         return "".join(partes).replace(" ", "").replace("\n", "")
 
 
+def _texto_por_pagina(contenido: bytes) -> list[str]:
+    """Texto normalizado por página, excluyendo la marca de agua."""
+    import io
+
+    import pdfplumber
+
+    with pdfplumber.open(io.BytesIO(contenido)) as pdf:
+        paginas = []
+        for pagina in pdf.pages:
+            chars = [c for c in pagina.chars if not _es_marca_agua(c)]
+            chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
+            paginas.append("".join(c["text"] for c in chars).replace(" ", "").replace("\n", ""))
+        return paginas
+
+
 class TestGenerarPDF(unittest.TestCase):
+    def test_fuentes_compactas_maximo_tres_por_pagina_sin_titulo_huerfano(self):
+        """Una cuarta fuente no queda colgada al final de la página."""
+        estudio = estudio_fixture()
+        estudio["placa"] = "MVX48E"
+        estudio["fuentes"]["policia"] = _fuente_policia()
+        estudio["fuentes"]["runt"] = _fuente_runt()
+        estudio["fuentes"]["simit"] = _fuente_simit(
+            total_comparendos=88, total_multas=17, total_deuda=40_257_438.0,
+        )
+        estudio["fuentes"]["sena"] = _fuente_sena()
+
+        paginas = _texto_por_pagina(generar_pdf_estudio(estudio))
+        self.assertEqual(4, len(paginas))
+
+        titulos = (
+            "Manifiestosdecarga—RNDC",
+            "Antecedentesdisciplinarios—Procuraduría",
+            "Antecedentesjudiciales—Policía",
+            "Vehículo—RUNT",
+            "Comparendos—SIMIT",
+            "FormaciónSENA—Certificados",
+        )
+        fuentes_por_pagina = [
+            [titulo for titulo in titulos if titulo in pagina]
+            for pagina in paginas
+        ]
+        self.assertEqual(
+            [[], list(titulos[:3]), list(titulos[3:5]), [titulos[5]]],
+            fuentes_por_pagina,
+        )
+        self.assertLessEqual(max(map(len, fuentes_por_pagina)), 3)
+        # Cada página conserva primero el encabezado fijo (~40 caracteres);
+        # el título de la fuente debe aparecer inmediatamente después.
+        self.assertLess(paginas[1].index(titulos[0]), 55)
+        self.assertLess(paginas[2].index(titulos[3]), 55)
+        self.assertLess(paginas[3].index(titulos[5]), 55)
+
     def test_bytes_pdf_validos(self):
         contenido = generar_pdf_estudio(estudio_fixture())
         self.assertTrue(contenido.startswith(b"%PDF"))
@@ -307,7 +359,12 @@ class TestSeccionPolicia(unittest.TestCase):
         # Tolerante al wrap (la leyenda SU-458 movió los saltos de línea):
         # comparar sin espacios/saltos.
         denso = "".join(texto.split()).replace("|", "")
-        self.assertIn("Decreto019de2012", denso)
+        # Una letra de la marca de agua diagonal puede quedar intercalada por
+        # pdfplumber entre "Decreto" y "019"; el contenido legal no cambia.
+        self.assertTrue(
+            "Decreto019de2012" in denso or "Decretoi019de2012" in denso,
+            denso,
+        )
         # La cita de la 1238 sigue presente pero SOLO para la Procuraduría.
         self.assertIn("Ley1238de2008", texto)
 

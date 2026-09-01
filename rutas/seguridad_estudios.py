@@ -809,12 +809,28 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
     )
     if not valido:
         return {"valido": False}
+    etiquetas = {
+        "manifiestos_rndc": "RNDC — Historial de viajes",
+        "procuraduria": "Procuraduría — Antecedentes disciplinarios",
+        "policia": "Policía — Antecedentes judiciales",
+        "runt": "RUNT — Información del vehículo",
+        "simit": "SIMIT — Estado de cuenta de la placa",
+        "sena": "SENA — Certificados de formación",
+    }
+    fuentes = []
+    for clave, nombre in etiquetas.items():
+        estado_fuente = ((doc.get("fuentes") or {}).get(clave) or {}).get("estado")
+        if estado_fuente and estado_fuente != "DESHABILITADA":
+            fuentes.append({"codigo": clave, "nombre": nombre, "estado": estado_fuente})
     return {
         "valido": True,
+        "consulta_id": doc.get("consulta_id"),
         "estado": doc.get("estado"),
         "fecha": doc.get("creado_en"),
         "empresa": doc.get("empresa_nombre"),
         "cedula": enmascarar_cedula(doc.get("cedula", "")),
+        "fuentes": fuentes,
+        "huella_documento": ((doc.get("pdf") or {}).get("sha256") or ""),
     }
 
 

@@ -1528,6 +1528,11 @@ class TestVerificacion(unittest.TestCase):
             "creado_en": datetime(2026, 8, 29),
             "empresa_nombre": "EMPRESA A",
             "cedula": "1033688842",
+            "fuentes": {
+                "procuraduria": {"estado": "EXITO"},
+                "policia": {"estado": "DESHABILITADA"},
+            },
+            "pdf": {"sha256": "ab12" * 16},
         }
         with patch.object(se, "col_estudios") as col:
             col.find_one.return_value = doc
@@ -1535,6 +1540,9 @@ class TestVerificacion(unittest.TestCase):
                 respuesta = se.verificar_estudio("ES-ABC", "XYZ1234567")
         self.assertTrue(respuesta["valido"])
         self.assertEqual(respuesta["cedula"], "10******42")
+        self.assertEqual(respuesta["consulta_id"], "ES-ABC")
+        self.assertEqual([f["codigo"] for f in respuesta["fuentes"]], ["procuraduria"])
+        self.assertEqual(respuesta["huella_documento"], "ab12" * 16)
 
     def test_codigo_invalido_no_revela(self):
         with patch.object(se, "col_estudios") as col:

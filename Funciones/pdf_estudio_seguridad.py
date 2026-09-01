@@ -31,6 +31,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas as canvas_module
 from reportlab.platypus import (
     BaseDocTemplate,
+    CondPageBreak,
     Frame,
     PageTemplate,
     Paragraph,
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 # --- Configuración -------------------------------------------------------------
 MAX_VIAJES_PDF = int(os.getenv("SEGURIDAD_MAX_VIAJES_PDF", "300"))
 URL_PUBLICA = os.getenv("SEGURIDAD_ESTUDIOS_URL_PUBLICA", "http://localhost:8000")
+URL_VERIFICACION_PUBLICA = os.getenv("SEGURIDAD_VERIFICACION_URL_PUBLICA", "").rstrip("/")
 LOGO_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "imagenes", "logo_integra.png")
 _TZ_BOGOTA = timezone(timedelta(hours=-5))  # Colombia es UTC−5
 
@@ -321,6 +323,21 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     cuento: list = []
 
+    def _antes_de_seccion(fuente: dict | None = None, exito_mm: float = 110, fallo_mm: float = 35) -> None:
+        """Salto condicional ANTES del título de una sección de fuente
+        (2026-09-01, pedido del usuario): si en la página actual no queda
+        espacio para el bloque inicial de la sección (título + banner de
+        veredicto + tabla de resumen), la sección empieza en la página
+        SIGUIENTE — nunca más un título colgado al pie de página que
+        continúa en la otra. Con ~267 mm útiles por página y un bloque
+        mínimo de 110 mm quedan máximo ~3 fuentes por página (lo que pidió
+        el usuario); las secciones largas (tabla de viajes) siguen fluyendo
+        con salto interno de reportlab. Una fuente FALLIDA es solo título
+        + un párrafo: pide mucho menos espacio (fallo_mm)."""
+        minimo = fallo_mm if (fuente or {}).get("estado") in {"NO_DISPONIBLE", "ERROR"} else exito_mm
+        cuento.append(CondPageBreak(minimo * mm))
+
+
     # ── 1. Portada / resumen ejecutivo ──────────────────────────────────────
     cuento.append(Paragraph("ESTUDIO DE SEGURIDAD", estilo_titulo))
     cuento.append(Paragraph("Informe consolidado de consultas en fuentes públicas — Integra Logística", estilo_sub))
@@ -448,9 +465,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     cuento.append(Spacer(0, 4 * mm))
 
     # QR de verificación de autenticidad (como la referencia TusDatos).
+    codigo_verificacion = estudio.get("codigo_verificacion", "")
+    # Los despliegues nuevos llevan el QR a una vista pública, responsive y
+    # pensada para auditores. Sin la variable nueva conservamos el endpoint
+    # JSON anterior para no romper instalaciones existentes.
     url_verificacion = (
-        f"{URL_PUBLICA}/seguridad/estudios/verificar/{consulta_id}"
-        f"?codigo={estudio.get('codigo_verificacion', '')}"
+        f"{URL_VERIFICACION_PUBLICA}?consulta={consulta_id}&codigo={codigo_verificacion}"
+        if URL_VERIFICACION_PUBLICA else
+        f"{URL_PUBLICA}/seguridad/estudios/verificar/{consulta_id}?codigo={codigo_verificacion}"
     )
     try:
         tabla_qr = Table(
@@ -471,6 +493,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 2. Detalle manifiestos RNDC ──────────────────────────────────────────
     if _corrio(rndc):
+        _antes_de_seccion(rndc)
         cuento.append(Paragraph("Manifiestos de carga — RNDC (Mintransporte)", estilo_h2))
     if rndc.get("estado") == "EXITO":
         cuento.append(Paragraph(
@@ -498,6 +521,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 3. Detalle Procuraduría ──────────────────────────────────────────────
     if _corrio(proc):
+        _antes_de_seccion(proc)
         cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
     if proc.get("estado") in {"EXITO", "ADVERTENCIA"}:
         no_registra = proc.get("no_registra")
@@ -544,6 +568,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 4. Detalle Policía (antecedentes judiciales) ────────────────────────
     if _corrio(pol):
+        _antes_de_seccion(pol)
         cuento.append(Paragraph("Antecedentes judiciales — Policía Nacional", estilo_h2))
     if pol.get("estado") in {"EXITO", "ADVERTENCIA"}:
         no_registra_pol = pol.get("no_registra")
@@ -602,6 +627,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 4b. Detalle RUNT (vehículo) ─────────────────────────────────────────
     if _corrio(runt):
+        _antes_de_seccion(runt)
         cuento.append(Paragraph("Vehículo — RUNT (Mintransporte)", estilo_h2))
     # El badge exige propietario CONOCIDO (runt): con solo simit no hay tríada
     # y propietario_es_evaluado es None (no "distinto").
@@ -725,6 +751,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 4c. Detalle SIMIT (comparendos de la placa) ─────────────────────────
     if _corrio(simit):
+        _antes_de_seccion(simit)
         cuento.append(Paragraph("Comparendos — SIMIT (Federación Colombiana de Municipios)", estilo_h2))
     if simit.get("estado") in {"EXITO", "ADVERTENCIA"}:
         total_a_pagar = simit.get("total_a_pagar") or 0
@@ -817,6 +844,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 4d. Detalle SENA (certificados de formación) ─────────────────────────
     if _corrio(sena):
+        _antes_de_seccion(sena)
         cuento.append(Paragraph("Formación SENA — Certificados (Servicio Nacional de Aprendizaje)", estilo_h2))
     if sena.get("estado") in {"EXITO", "ADVERTENCIA"}:
         total_certs = int(sena.get("total_certificados") or 0)
@@ -887,6 +915,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(_parrafo_estado_fuente(sena, "el SENA"))
 
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
+    cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
     auditoria = estudio.get("auditoria") or {}
     filas_traza = [
