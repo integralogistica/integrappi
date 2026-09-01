@@ -33,6 +33,7 @@ from Funciones.bot_policia import (
 )
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
+from Funciones.bot_ofac import BotOfacError, consultar_ofac_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
 from Funciones.bot_sena import BotSenaError, BotSenaSinCaptchaKey, consultar_sena_sync
 from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
@@ -543,10 +544,45 @@ async def consultar_sena(
     return doc
 
 
+@router.get("/ofac")
+async def consultar_ofac(
+    cedula: str = Query(..., min_length=3, max_length=20, description="Número de identificación"),
+    force: bool = Query(False, description="Ignorar caché de consulta"),
+    actor: dict = Depends(actor_actual),
+):
+    """Coincidencia exacta por identificación en la lista SDN oficial de OFAC."""
+    _requiere_seguridad(actor)
+    cedula_norm = _normalizar_cedula(cedula)
+    cache = _buscar_cache("ofac", cedula_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+    try:
+        resultado = await asyncio.to_thread(consultar_ofac_sync, cedula_norm)
+    except BotOfacError as exc:
+        raise HTTPException(status_code=503, detail=f"No fue posible consultar OFAC: {exc}") from exc
+    ahora = _utcnow()
+    doc = {
+        "tipo": "ofac", "cedula": cedula_norm,
+        **{k: resultado.get(k) for k in (
+            "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
+            "fecha_publicacion", "total_registros_lista", "sha256_dataset", "metodo",
+        )},
+        "usuario": actor["usuario"], "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"), "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE), "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta OFAC %s no se pudo auditar: %s", cedula_norm, exc)
+    doc.pop("_id", None)
+    return doc
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit, sena)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit, sena, ofac)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),

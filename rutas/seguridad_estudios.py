@@ -816,6 +816,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "runt": "RUNT — Información del vehículo",
         "simit": "SIMIT — Estado de cuenta de la placa",
         "sena": "SENA — Certificados de formación",
+        "ofac": "OFAC — Lista SDN (Lista Clinton)",
     }
     fuentes = []
     for clave, nombre in etiquetas.items():
@@ -1097,7 +1098,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac"],
 }
 
 

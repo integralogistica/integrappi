@@ -764,5 +764,44 @@ class TestSeccionSena(unittest.TestCase):
         self.assertIn("Noconsultada", texto.replace(" ", ""))
 
 
+class TestSeccionOfac(unittest.TestCase):
+    def _con_ofac(self, aplica=False):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["ofac"] = {
+            "estado": "ADVERTENCIA" if aplica else "EXITO",
+            "origen": "portal",
+            "aplica": aplica,
+            "no_registra": not aplica,
+            "total_coincidencias": 1 if aplica else 0,
+            "fecha_publicacion": "08/28/2026",
+            "total_registros_lista": 19321,
+            "sha256_dataset": "a" * 64,
+            "coincidencias": ([{
+                "uid": "56062",
+                "nombre": "Gustavo Francisco PETRO URREGO",
+                "programas": ["ILLICIT-DRUGS-EO14059"],
+            }] if aplica else []),
+            "intentos": 1,
+            "duraciones_s": [0.1],
+            "error": None,
+        }
+        return estudio
+
+    def test_coincidencia_exacta_exige_revision_humana(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_ofac(aplica=True)))
+        plano = texto.replace(" ", "")
+        self.assertIn("COINCIDENCIAEXACTADEIDENTIFICACIÓN", plano)
+        self.assertIn("REQUIEREREVISIÓNHUMANA", plano)
+        self.assertIn("PETROURREGO", plano)
+        self.assertIn("56062", plano)
+        self.assertIn("ILLICIT-DRUGS-EO14059", plano)
+        self.assertIn("OFAC:1intento(s)", plano)
+
+    def test_sin_coincidencia_exacta(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_ofac()))
+        self.assertIn("SINCOINCIDENCIAEXACTADEIDENTIFICACIÓN", texto.replace(" ", ""))
+        self.assertNotIn("REQUIEREREVISIÓNHUMANA", texto.replace(" ", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

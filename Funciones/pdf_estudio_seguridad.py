@@ -268,6 +268,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     runt = fuentes.get("runt") or {}
     simit = fuentes.get("simit") or {}
     sena = fuentes.get("sena") or {}
+    ofac = fuentes.get("ofac") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -440,6 +441,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "SENA — Certificados de formación",
             etiqueta_sena,
             _texto_veredicto_sena(sena),
+        ])
+    if _corrio(ofac):
+        etiqueta_ofac, _ = ESTADO_FUENTE_TEXTO.get(ofac.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "OFAC — Lista SDN (Lista Clinton)",
+            etiqueta_ofac,
+            _texto_veredicto_ofac(ofac),
         ])
     tabla_resumen = Table(
         [
@@ -914,6 +922,56 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     elif _corrio(sena):
         cuento.append(_parrafo_estado_fuente(sena, "el SENA"))
 
+    # ── 4e. OFAC / Lista SDN ─────────────────────────────────────────────────
+    if _corrio(ofac):
+        _antes_de_seccion(ofac)
+        cuento.append(Paragraph("Lista de sanciones OFAC — SDN (Lista Clinton)", estilo_h2))
+    if ofac.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        aplica = bool(ofac.get("aplica"))
+        texto_ofac = (
+            "COINCIDENCIA EXACTA DE IDENTIFICACIÓN — REQUIERE REVISIÓN HUMANA"
+            if aplica else "SIN COINCIDENCIA EXACTA DE IDENTIFICACIÓN EN LA LISTA SDN"
+        )
+        color_ofac = COLOR_ADVERTENCIA if aplica else COLOR_EXITO
+        tabla_ofac_banner = Table([[Paragraph(f"<b>{texto_ofac}</b>", ParagraphStyle(
+            "veredicto_ofac", fontName="Helvetica", fontSize=10.5,
+            textColor=colors.white, alignment=1,
+        ))]], colWidths=[160 * mm])
+        tabla_ofac_banner.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_ofac),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        cuento.append(tabla_ofac_banner)
+        filas_ofac = [
+            ["Método", "Coincidencia exacta del número de identificación (sin búsqueda difusa por nombre)"],
+            ["Publicación OFAC", ofac.get("fecha_publicacion") or "—"],
+            ["Registros de la lista", str(ofac.get("total_registros_lista") or "—")],
+            ["Coincidencias", str(ofac.get("total_coincidencias") or 0)],
+            ["SHA-256 del dataset", ofac.get("sha256_dataset") or "—"],
+        ]
+        tabla_ofac = Table([[celda(k, True), celda(v)] for k, v in filas_ofac], colWidths=[45 * mm, 115 * mm])
+        tabla_ofac.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_ofac)
+        for coincidencia in (ofac.get("coincidencias") or [])[:10]:
+            cuento.append(Paragraph(
+                "<b>Coincidencia:</b> "
+                f"{escape(str(coincidencia.get('nombre') or '—'))} · UID {escape(str(coincidencia.get('uid') or '—'))} · "
+                f"programa(s) {escape(', '.join(coincidencia.get('programas') or []) or '—')}",
+                estilo_normal,
+            ))
+        if aplica:
+            cuento.append(Paragraph(
+                "Una coincidencia técnica no sustituye el análisis de identidad, homonimia, alcance del programa "
+                "ni la decisión de cumplimiento. Debe ser revisada por una persona responsable.", estilo_peq,
+            ))
+    elif _corrio(ofac):
+        cuento.append(_parrafo_estado_fuente(ofac, "OFAC"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -926,7 +984,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC", ofac))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -999,6 +1057,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Nacional de Aprendizaje, consulta abierta por documento de identidad. El listado corresponde a los "
             "certificados de formación reportados como disponibles por el SENA en la fecha de consulta y NO "
             "constituye verificación de títulos ni credencial educacional de la persona evaluada."
+        )
+    if _corrio(ofac):
+        bloques_legal.append(
+            "<b>OFAC — Lista SDN:</b> la verificación se efectuó contra el dataset oficial de Specially "
+            "Designated Nationals and Blocked Persons publicado por la Office of Foreign Assets Control del "
+            "Departamento del Tesoro de los Estados Unidos. El resultado compara de manera exacta el número "
+            "de identificación; una coincidencia requiere validación humana y análisis de identidad, programa "
+            "y alcance, y no constituye por sí sola una decisión automática de rechazo."
         )
     bloques_legal.append(
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
@@ -1139,6 +1205,14 @@ def _texto_veredicto_simit(simit: dict) -> str:
     if (simit.get("total_comparendos") or 0) > 0 or (simit.get("total_multas") or 0) > 0:
         return "Sin saldo exigible — registra antecedentes históricos"
     return "Sin comparendos ni multas registradas"
+
+
+def _texto_veredicto_ofac(ofac: dict) -> str:
+    if ofac.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(ofac)
+    if ofac.get("aplica"):
+        return f"Coincidencia exacta de identificación ({int(ofac.get('total_coincidencias') or 1)}) — revisar"
+    return "Sin coincidencia exacta de identificación en SDN"
 
 
 def _texto_veredicto_sena(sena: dict) -> str:

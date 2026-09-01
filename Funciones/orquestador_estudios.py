@@ -43,6 +43,7 @@ from Funciones.bot_procuraduria import (
     consultar_antecedentes_sync,
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
+from Funciones.bot_ofac import BotOfacError, consultar_ofac_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
     BotRuntSinCaptchaKey,
@@ -81,7 +82,7 @@ MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -220,6 +221,8 @@ def _resultado_vacio_sin_confirmar(nombre: str, resultado: dict | None) -> bool:
 
 def _clasificar_error(exc: Exception) -> tuple[str, dict]:
     """(estado de la fuente, error {tipo, mensaje}) — NO_DISPONIBLE vs ERROR."""
+    if isinstance(exc, BotOfacError):
+        return "NO_DISPONIBLE", {"tipo": "ofac_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, asyncio.TimeoutError):
         return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
     if isinstance(exc, BotRNDC2Incompleto):
@@ -305,6 +308,11 @@ def _estado_sena(seccion: dict) -> str:
     portal reporta como disponible, sin validación cruzada con la persona).
     """
     return "EXITO"
+
+
+def _estado_ofac(seccion: dict) -> str:
+    """Una coincidencia exacta de identificación requiere revisión humana."""
+    return "ADVERTENCIA" if seccion.get("aplica") else "EXITO"
 
 
 async def _ejecutar_fuente(
@@ -396,6 +404,19 @@ async def _ejecutar_fuente(
                 "certificados": (cache.get("certificados") or [])[:MAX_CERTIFICADOS_DOC],
             })
             seccion["estado"] = _estado_sena(seccion)
+        elif nombre == "ofac":
+            seccion.update({
+                "aplica": bool(cache.get("aplica")),
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "total_coincidencias": int(cache.get("total_coincidencias") or 0),
+                "coincidencias": (cache.get("coincidencias") or [])[:10],
+                "fecha_publicacion": cache.get("fecha_publicacion"),
+                "total_registros_lista": cache.get("total_registros_lista"),
+                "sha256_dataset": cache.get("sha256_dataset"),
+                "metodo": cache.get("metodo"),
+            })
+            seccion["estado"] = _estado_ofac(seccion)
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -438,6 +459,10 @@ async def _ejecutar_fuente(
             # sena consulta por cédula (portal público del SENA, captcha de
             # imagen propio resuelto por 2Captcha dentro del bot).
             return await asyncio.to_thread(consultar_sena_sync, cedula)
+    elif nombre == "ofac":
+
+        async def invocar() -> dict:
+            return await asyncio.to_thread(consultar_ofac_sync, cedula)
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
@@ -712,6 +737,40 @@ async def _ejecutar_fuente(
         })
         # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_sena(seccion)
+    elif nombre == "ofac":
+        coincidencias = (resultado.get("coincidencias") or [])[:10]
+        aplica = bool(resultado.get("aplica"))
+        mensaje = (resultado.get("mensaje") or "").strip()
+        if resultado.get("fecha_publicacion") is None or resultado.get("total_registros_lista") is None:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {"tipo": "dataset_incompleto", "mensaje": "OFAC no entregó metadatos de la lista SDN."},
+            })
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "aplica": aplica, "no_registra": not aplica,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "total_coincidencias": len(coincidencias), "coincidencias": coincidencias,
+            "fecha_publicacion": resultado.get("fecha_publicacion"),
+            "total_registros_lista": resultado.get("total_registros_lista"),
+            "sha256_dataset": resultado.get("sha256_dataset"),
+            "metodo": resultado.get("metodo"),
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché OFAC %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        for campo in (
+            "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
+            "fecha_publicacion", "total_registros_lista", "sha256_dataset", "metodo",
+        ):
+            seccion[campo] = doc_cache[campo]
+        seccion["estado"] = _estado_ofac(seccion)
     else:
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
