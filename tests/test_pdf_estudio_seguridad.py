@@ -260,6 +260,19 @@ class TestSeccionPolicia(unittest.TestCase):
         self.assertIn("NOREGISTRAANTECEDENTESJUDICIALES", texto)
         self.assertIn("AMAYATOVARJHOAMORLANDO", texto)
 
+    def test_leyenda_oficial_su458_completa(self):
+        """2026-09-01: la leyenda oficial COMPLETA de la SU-458 se imprime en
+        la sección Policía (texto fijo — el `mensaje` del bot es solo la línea
+        del veredicto)."""
+        import unicodedata
+
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
+        self.assertIn("Leyendaoficial", texto.replace(" ", ""))
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("EncumplimientodelaSentenciaSU-458del21de juniode2012".replace(" ", ""), plano.replace(" ", ""))
+        self.assertIn("extinciondelacondenaolaprescripciondelapena".replace(" ", ""), plano.replace(" ", ""))
+        self.assertIn("soloaplicaparaelterritoriocolombiano".replace(" ", ""), plano.replace(" ", ""))
+
     def test_registra_banner_rojo(self):
         estudio = self._con_policia(
             no_registra=False,
@@ -291,7 +304,10 @@ class TestSeccionPolicia(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
         # Autoconsulta del titular + autorización Ley 1581.
         self.assertIn("autoconsulta", texto)
-        self.assertIn("Decreto019de2012", texto)
+        # Tolerante al wrap (la leyenda SU-458 movió los saltos de línea):
+        # comparar sin espacios/saltos.
+        denso = "".join(texto.split()).replace("|", "")
+        self.assertIn("Decreto019de2012", denso)
         # La cita de la 1238 sigue presente pero SOLO para la Procuraduría.
         self.assertIn("Ley1238de2008", texto)
 
@@ -591,6 +607,104 @@ class TestSeccionSimit(unittest.TestCase):
             self.assertIn(frag, texto)
         # Policía no corrió en este estudio: sin fila fantasma.
         self.assertNotIn("PolicíaNacional", texto)
+
+
+def _fuente_sena(estado="EXITO", no_registra=False, certificados=None, mensaje=""):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": no_registra,
+        "mensaje": mensaje,
+        "total_certificados": len(certificados) if certificados is not None else (0 if no_registra else 2),
+        "certificados": certificados if certificados is not None else ([] if no_registra else [
+            {
+                "registro": "921100151013CC1010213062A",
+                "titulo": "TECNÓLOGO EN",
+                "tipo": "Acta",
+                "programa": "GESTIÓN DE LA PRODUCCIÓN INDUSTRIAL",
+                "fecha_certificacion": "2013-02-09",
+                "fecha_firma": "2013-02-11",
+            },
+            {
+                "registro": "9303002878307CC1010213062C",
+                "titulo": "CURSO ESPECIAL EN",
+                "tipo": "Certificado Aprobación",
+                "programa": "HIGIENE Y MANIPULACION DE ALIMENTOS.",
+                "fecha_certificacion": "2023-11-14",
+                "fecha_firma": "2023-11-30",
+            },
+        ]),
+        "intentos": 1,
+        "duraciones_s": [12.3],
+        "error": None,
+    }
+
+
+class TestSeccionSena(unittest.TestCase):
+    """Fuente "sena" en el PDF: fila de resumen, sección Formación SENA con
+    banner informativo (con certificados / sin certificados), tabla de
+    certificados y disposición legal honesta (formación, no credencial
+    verificada)."""
+
+    def _con_sena(self, **kw):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["sena"] = _fuente_sena(**kw)
+        return estudio
+
+    def test_con_certificados_banner_y_tabla(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sena()))
+        self.assertIn("FormaciónSENA—Certificados", texto.replace(" ", ""))
+        self.assertIn("REGISTRA2CERTIFICADO(S)DEFORMACIÓN", texto.replace(" ", ""))
+        self.assertIn("Detalledecertificados", texto.replace(" ", ""))
+        # (wrap-tolerante: el programa largo se parte entre líneas de la celda)
+        self.assertIn("PRODUCCIÓN", texto)
+        self.assertIn("ALIMENTOS", texto)
+        self.assertIn("TECNÓLOGOEN", texto.replace(" ", ""))
+        # Las fechas caben enteras en su columna (23 mm): sin wrap del guion.
+        self.assertIn("2013-02-09", texto)
+        self.assertIn("2023-11-30", texto)
+
+    def test_sin_certificados_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sena(
+            no_registra=True,
+            mensaje="La cédula no registra certificados disponibles en el SENA",
+        )))
+        # (wrap-tolerante: el banner puede partirse entre líneas del PDF)
+        self.assertIn("SINCERTIFICADOS", texto.replace(" ", ""))
+        self.assertIn("REGISTRADOS", texto.replace(" ", ""))
+        self.assertNotIn("Detalledecertificados", texto.replace(" ", ""))
+        self.assertIn("noregistracertificados", texto.replace(" ", ""))
+
+    def test_fila_de_resumen(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sena()))
+        self.assertIn("SENA—Certificadosdeformación".replace(" ", ""), texto.replace(" ", ""))
+        self.assertIn("2certificado(s)deformación", texto.replace(" ", ""))
+
+    def test_resumen_solo_fuentes_corridas(self):
+        """Un estudio SIN sena (clave ausente, fuente posterior): su sección no
+        aparece — sin fila fantasma ni sección vacía."""
+        estudio = estudio_fixture()
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertNotIn("FormaciónSENA", texto.replace(" ", ""))
+        self.assertNotIn("SENA—Certificados", texto.replace(" ", ""))
+
+    def test_disposicion_legal_sena(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sena()))
+        import unicodedata
+
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("NacionaldeAprendizaje", plano.replace(" ", ""))
+        # Formación ≠ credencial verificada: el informe NO promete validación de títulos.
+        self.assertIn("constituyeverificaciondetitulos", plano.replace(" ", ""))
+
+    def test_fuente_fallida_muestra_estado(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sena(
+            estado="NO_DISPONIBLE", no_registra=None, certificados=[],
+        )))
+        # La fuente fallida SIGUE mostrándose (honestidad): párrafo de estado.
+        self.assertIn("FormaciónSENA", texto.replace(" ", ""))
+        self.assertIn("NODISPONIBLE", texto.replace(" ", ""))
+        self.assertIn("Noconsultada", texto.replace(" ", ""))
 
 
 if __name__ == "__main__":

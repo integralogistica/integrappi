@@ -632,11 +632,13 @@ class TestCrearEstudioIntegraConsumo(unittest.TestCase):
              patch.object(se, "_respuesta_estudio", side_effect=lambda d: d), \
              patch("Funciones.storage_seguridad.subir_pdf", return_value={"gcs_ruta": "x", "sha256": "y", "tamano": 1}), \
              patch("Funciones.pdf_estudio_seguridad.generar_pdf_estudio", return_value=b"%PDF-test"), \
-             patch("Funciones.cobro_seguridad.fuentes_con_plan", side_effect=lambda emp, fs, col=None: fs), \
+             patch("Funciones.cobro_seguridad.fuentes_con_plan", side_effect=lambda emp, fs, col=None: [
+                 f for f in fs if f in ("manifiestos_rndc", "procuraduria")  # plan subdoc viejo: 2 fuentes
+             ]), \
              patch("Funciones.cobro_seguridad.reservar_consumos", return_value=[consumo]) as reservar, \
              patch("Funciones.cobro_seguridad.reembolsar_consumos_consulta") as reembolsar:
             respuesta = self._correr(se.crear_estudio(
-                datos=SimpleNamespace(cedula="1033688842", forzar=False, empresa_id=None),
+                datos=SimpleNamespace(cedula="1033688842", forzar=False, empresa_id=None, placa=None),
                 request=SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={}),
                 actor=actor,
             ))
@@ -680,11 +682,13 @@ class TestCrearEstudioIntegraConsumo(unittest.TestCase):
              patch.object(se, "_respuesta_estudio", side_effect=lambda d: d), \
              patch("Funciones.storage_seguridad.subir_pdf", return_value={"gcs_ruta": "x", "sha256": "y", "tamano": 1}), \
              patch("Funciones.pdf_estudio_seguridad.generar_pdf_estudio", return_value=b"%PDF-test"), \
-             patch("Funciones.cobro_seguridad.fuentes_con_plan", side_effect=lambda emp, fs, col=None: fs), \
+             patch("Funciones.cobro_seguridad.fuentes_con_plan", side_effect=lambda emp, fs, col=None: [
+                 f for f in fs if f in ("manifiestos_rndc", "procuraduria")  # plan subdoc viejo: 2 fuentes
+             ]), \
              patch("Funciones.cobro_seguridad.reservar_consumos", return_value=[consumo]), \
              patch("Funciones.cobro_seguridad.reembolsar_consumos_consulta") as reembolsar:
             self._correr(se.crear_estudio(
-                datos=SimpleNamespace(cedula="1033688842", forzar=False, empresa_id=None),
+                datos=SimpleNamespace(cedula="1033688842", forzar=False, empresa_id=None, placa=None),
                 request=SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={}),
                 actor=actor,
             ))
@@ -1137,6 +1141,31 @@ class TestSincronizarFuentes(unittest.TestCase):
         cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
         fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
         self.assertEqual(len(fresco["planes"]), 3)
+
+    def test_fuente_de_otro_plan_no_bloquea_la_entrada(self):
+        """Regresión 2026-09-01: el skip de la sync debe ser por PAR (plan,
+        fuente), no por fuente sola — BASICO·simit impedía materializar
+        AVANZADO·simit y el acordeón del portal no mostraba simit en AVANZADO
+        aunque el catálogo la incluyera."""
+        avanzado = plan_doc(precio=3000, nombre="AVANZADO", plan_id=ObjectId())
+        avanzado["fuentes_incluidas"] = [self.RNDC, self.PROC, "simit"]
+        basico = plan_doc(precio=1200, nombre="BASICO", plan_id=ObjectId())
+        basico["fuentes_incluidas"] = [self.PROC, "simit"]
+        entradas = [
+            entrada_plan(self.RNDC, avanzado),
+            entrada_plan(self.PROC, avanzado),
+            # simit YA existe en la empresa, pero vía OTRO plan (BASICO).
+            entrada_plan(self.PROC, basico),
+            entrada_plan("simit", basico),
+        ]
+        empresa, col_emp, col_pla = self._montaje(entradas, [avanzado, basico])
+        fresco = cobro.sincronizar_fuentes_planes(empresa, col_pla, col_emp)
+        pares = {(e["plan_nombre"], e["fuente"]) for e in fresco["planes"]}
+        self.assertIn(("AVANZADO", "simit"), pares)  # la entrada faltante
+        self.assertEqual(len(fresco["planes"]), 5)   # sin duplicados
+        # Idempotente: no crea más entradas en una segunda pasada.
+        fresco2 = cobro.sincronizar_fuentes_planes(fresco, col_pla, col_emp)
+        self.assertEqual(len(fresco2["planes"]), 5)
 
     def test_carrera_dos_syncs_una_entrada(self):
         """Dos syncs paralelos ven el mismo hueco: el guard $not $elemMatch

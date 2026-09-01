@@ -241,8 +241,13 @@ def sincronizar_fuentes_planes(
                 continue
             molde = hermanas[0]  # la más antigua define el cupo del plan
             for fuente in plan_doc.get("fuentes_incluidas") or []:
-                if any(e.get("fuente") == fuente for e in entradas):
-                    continue  # ya existe (de este u otro plan: acumulable)
+                # El skip es por PAR (plan, fuente) — igual que el guard del
+                # $elemMatch del update. Por fuente SOLA saltaría la entrada
+                # cuando OTRA plan de la empresa ya cubre esa fuente (bug
+                # 2026-09-01: BASICO·simit impedía materializar AVANZADO·simit
+                # y el acordeón del portal no mostraba simit en AVANZADO).
+                if any(e.get("fuente") == fuente and e.get("plan_id") == pid for e in entradas):
+                    continue  # ya existe ESTE plan en ESTA fuente
                 nueva = {
                     "plan_id": pid,
                     "plan_nombre": plan_doc.get("nombre", ""),

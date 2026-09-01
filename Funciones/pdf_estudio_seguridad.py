@@ -79,6 +79,21 @@ ESTADO_FUENTE_TEXTO = {
     "DESHABILITADA": ("NO HABILITADA", COLOR_NEUTRO),
 }
 
+# Leyenda oficial COMPLETA del portal de la Policía (2026-09-01): texto fijo
+# que acompaña todo resultado — se imprime VERBATIM en la sección Policía.
+# El `mensaje` que captura el bot es solo la LÍNEA del veredicto; este
+# disclaimer legal no depende de la consulta.
+LEYENDA_SU458_POLICIA = (
+    "En cumplimiento de la Sentencia SU-458 del 21 de junio de 2012, proferida por la Honorable "
+    "Corte Constitucional, la leyenda “NO TIENE ASUNTOS PENDIENTES CON LAS AUTORIDADES "
+    "JUDICIALES” aplica para todas aquellas personas que no registran antecedentes y para quienes "
+    "la autoridad judicial competente haya decretado la extinción de la condena o la prescripción "
+    "de la pena.\n"
+    "Esta consulta es válida siempre y cuando el número de identificación y nombres, correspondan "
+    "con el documento de identidad registrado y solo aplica para el territorio colombiano de "
+    "acuerdo a lo establecido en el ordenamiento constitucional."
+)
+
 # Columnas del portal RNDC que caben en A4 (las demás se omiten con nota),
 # con su peso de ancho relativo (la tabla totaliza el ancho útil de la hoja).
 COLUMNAS_VIAJE = [
@@ -250,6 +265,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     pol = fuentes.get("policia") or {}
     runt = fuentes.get("runt") or {}
     simit = fuentes.get("simit") or {}
+    sena = fuentes.get("sena") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -400,6 +416,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             f"SIMIT — Comparendos placa {estudio.get('placa') or (simit.get('placa') or '')}".rstrip(),
             etiqueta_simit,
             _texto_veredicto_simit(simit),
+        ])
+    if _corrio(sena):
+        etiqueta_sena, _ = ESTADO_FUENTE_TEXTO.get(sena.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "SENA — Certificados de formación",
+            etiqueta_sena,
+            _texto_veredicto_sena(sena),
         ])
     tabla_resumen = Table(
         [
@@ -565,6 +588,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
         cuento.append(tabla_pol)
+        # Leyenda oficial COMPLETA del portal (verificada 2026-09-01 a pedido
+        # del usuario): igual para toda consulta — texto fijo, no depende de
+        # lo que el bot capture en `mensaje` (que es solo la línea del
+        # veredicto).
+        cuento.append(Spacer(0, 2 * mm))
+        cuento.append(Paragraph("<b>Leyenda oficial — Sentencia SU-458 de 2012</b>", ParagraphStyle(
+            "h_leyenda_pol", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=2,
+        )))
+        cuento.append(Paragraph(escape(LEYENDA_SU458_POLICIA).replace("\n", "<br/><br/>"), estilo_peq))
     elif _corrio(pol):
         cuento.append(_parrafo_estado_fuente(pol, "la Policía Nacional"))
 
@@ -783,6 +815,77 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     elif _corrio(simit):
         cuento.append(_parrafo_estado_fuente(simit, "el SIMIT"))
 
+    # ── 4d. Detalle SENA (certificados de formación) ─────────────────────────
+    if _corrio(sena):
+        cuento.append(Paragraph("Formación SENA — Certificados (Servicio Nacional de Aprendizaje)", estilo_h2))
+    if sena.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        total_certs = int(sena.get("total_certificados") or 0)
+        if total_certs > 0:
+            texto_sena, color_sena = f"REGISTRA {total_certs} CERTIFICADO(S) DE FORMACIÓN DISPONIBLE(S)", COLOR_PRIMARIO
+        else:
+            texto_sena, color_sena = "SIN CERTIFICADOS DE FORMACIÓN REGISTRADOS", COLOR_EXITO
+        tabla_veredicto_sena = Table(
+            [[Paragraph(f"<b>{texto_sena}</b>", ParagraphStyle("veredicto_sena", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_sena.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_sena),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_sena)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_sena = [
+            ["Certificados disponibles", total_certs],
+            ["Origen de datos", _texto_origen(sena)],
+        ]
+        if (sena.get("mensaje") or "").strip():
+            detalle_sena.insert(1, ["Mensaje del portal", sena["mensaje"][:300]])
+        tabla_sena_resumen = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_sena],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_sena_resumen.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_sena_resumen)
+        certificados = sena.get("certificados") or []
+        if certificados:
+            cuento.append(Spacer(0, 2 * mm))
+            estilo_celda_sena = ParagraphStyle("celda_sena", parent=estilo_celda, fontSize=7.5, leading=9.5)
+            estilo_cab_sena = ParagraphStyle("cab_sena", parent=estilo_celda_sena, fontName="Helvetica-Bold", textColor=colors.white)
+            filas_sena = [[
+                Paragraph("Programa", estilo_cab_sena), Paragraph("Título", estilo_cab_sena),
+                Paragraph("Tipo", estilo_cab_sena), Paragraph("Certificación", estilo_cab_sena),
+                Paragraph("Firma", estilo_cab_sena),
+            ]]
+            for c in certificados[:10]:
+                filas_sena.append([
+                    Paragraph(escape(str(c.get("programa") or "—")), estilo_celda_sena),
+                    Paragraph(escape(str(c.get("titulo") or "—")), estilo_celda_sena),
+                    Paragraph(escape(str(c.get("tipo") or "—")), estilo_celda_sena),
+                    Paragraph(escape(str(c.get("fecha_certificacion") or "—")), estilo_celda_sena),
+                    Paragraph(escape(str(c.get("fecha_firma") or "—")), estilo_celda_sena),
+                ])
+            tabla_certs = Table(filas_sena, colWidths=[56 * mm, 28 * mm, 30 * mm, 23 * mm, 23 * mm])
+            tabla_certs.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            cuento.append(Paragraph(
+                f"Detalle de certificados ({min(10, len(certificados))} de {total_certs or len(certificados)} — primera página del portal)",
+                ParagraphStyle("h_sena", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4),
+            ))
+            cuento.append(tabla_certs)
+    elif _corrio(sena):
+        cuento.append(_parrafo_estado_fuente(sena, "el SENA"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
     auditoria = estudio.get("auditoria") or {}
@@ -794,7 +897,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -860,6 +963,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         bloques_legal.append(
             "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
             "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas."
+        )
+    if _corrio(sena):
+        bloques_legal.append(
+            "<b>Formación (SENA):</b> la información se obtuvo del portal público Certificado Digital del Servicio "
+            "Nacional de Aprendizaje, consulta abierta por documento de identidad. El listado corresponde a los "
+            "certificados de formación reportados como disponibles por el SENA en la fecha de consulta y NO "
+            "constituye verificación de títulos ni credencial educacional de la persona evaluada."
         )
     bloques_legal.append(
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
@@ -1000,6 +1110,18 @@ def _texto_veredicto_simit(simit: dict) -> str:
     if (simit.get("total_comparendos") or 0) > 0 or (simit.get("total_multas") or 0) > 0:
         return "Sin saldo exigible — registra antecedentes históricos"
     return "Sin comparendos ni multas registradas"
+
+
+def _texto_veredicto_sena(sena: dict) -> str:
+    """Veredicto de la fuente sena para la fila resumen. Es información de
+    FORMACIÓN, no un antecedente: el conteo es informativo y jamás se
+    presenta como credencial verificada."""
+    if sena.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(sena)
+    total = int(sena.get("total_certificados") or 0)
+    if total > 0:
+        return f"{total} certificado(s) de formación — ver detalle"
+    return "Sin certificados de formación registrados"
 
 
 def _resumen_error(fuente: dict) -> str:

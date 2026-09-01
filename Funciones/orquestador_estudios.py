@@ -49,6 +49,12 @@ from Funciones.bot_runt import (
     BotRuntSinResultado,
     consultar_vehiculo_runt_sync,
 )
+from Funciones.bot_sena import (
+    BotSenaCaptchaFallido,
+    BotSenaSinCaptchaKey,
+    BotSenaSinResultado,
+    consultar_sena_sync,
+)
 from Funciones.bot_simit import (
     BotSimitSinResultado,
     consultar_comparendos_simit_sync,
@@ -72,9 +78,38 @@ TIMEOUT_FUENTE_S = float(os.getenv("SEGURIDAD_TIMEOUT_FUENTE_S", "150"))
 RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
+MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena")
+
+# Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
+# porque su legalidad de canal depende de decisión de cada empresa (hoy solo
+# policia: portal de autoconsulta del titular que prohíbe terceros).
+FUENTES_OPT_IN = frozenset({"policia"})
+
+
+def fuentes_habilitadas_efectivas(empresa: dict | None) -> list[str]:
+    """Fuentes que la empresa puede correr (semántica 2026-09-01, pedido del
+    usuario): **EL PLAN ES EL GATE** — editar `fuentes_incluidas` de un plan
+    (o agregar una fuente nueva al catálogo) queda disponible para TODA
+    empresa con ese plan INMEDIATAMENTE, sin migrar configs ni correr scripts
+    de habilitación (el paso que se olvidaba en cada deploy de fuente).
+
+    `config.fuentes_habilitadas` ya NO es un whitelist que mantener:
+      - fuentes DEFAULT (portales públicos): habilitadas de facto para todas;
+      - fuentes OPT-IN (FUENTES_OPT_IN): exigen estar listadas explícitamente;
+      - `config.fuentes_excluidas` (opcional): apaga una fuente por empresa
+        (control negativo puntual, ej. un cliente que no quiere simit).
+    Una fuente listada en el whitelist viejo sigue habilitada (retro-compatible).
+    """
+    config = ((empresa or {}).get("config")) or {}
+    persistidas = set(config.get("fuentes_habilitadas") or [])
+    excluidas = set(config.get("fuentes_excluidas") or [])
+    return [
+        f for f in FUENTES
+        if f not in excluidas and (f in persistidas or f not in FUENTES_OPT_IN)
+    ]
 
 # Evita apilar Chromium concurrentes en una instancia pequeña de Render.
 _SEMAFORO_ESTUDIOS = asyncio.Semaphore(2)
@@ -209,6 +244,12 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotRuntCaptchaFallido):
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSenaSinCaptchaKey):
+        return "NO_DISPONIBLE", {"tipo": "configuracion_faltante", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSenaSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSenaCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotSimitSinResultado):
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
@@ -250,6 +291,19 @@ def _estado_simit(seccion: dict) -> str:
     """
     if (seccion.get("total_a_pagar") or 0) > 0:
         return "ADVERTENCIA"
+    return "EXITO"
+
+
+def _estado_sena(seccion: dict) -> str:
+    """Estado de la fuente sena a partir de su sección: SIEMPRE EXITO
+    (decisión de negocio 2026-09-01).
+
+    El SENA es información de FORMACIÓN (certificados de programas y cursos),
+    no un antecedente: registrar N certificados o ninguno son respuestas
+    determinantes e informativas del portal — no existe la "mala" noticia y
+    jamás se presenta como credencial verificada (el listado es lo que el
+    portal reporta como disponible, sin validación cruzada con la persona).
+    """
     return "EXITO"
 
 
@@ -332,6 +386,16 @@ async def _ejecutar_fuente(
                 "placa": cache.get("placa", ""),
             })
             seccion["estado"] = _estado_simit(seccion)
+        elif nombre == "sena":
+            # Formación SENA (listado de certificados): informativo, sin
+            # semáforo — la misma función pura del post-portal.
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "total_certificados": cache.get("total_certificados"),
+                "certificados": (cache.get("certificados") or [])[:MAX_CERTIFICADOS_DOC],
+            })
+            seccion["estado"] = _estado_sena(seccion)
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -368,6 +432,12 @@ async def _ejecutar_fuente(
         async def invocar() -> dict:
             # simit consulta SOLO por placa (portal público FCM, sin captcha).
             return await asyncio.to_thread(consultar_comparendos_simit_sync, placa or "")
+    elif nombre == "sena":
+
+        async def invocar() -> dict:
+            # sena consulta por cédula (portal público del SENA, captcha de
+            # imagen propio resuelto por 2Captcha dentro del bot).
+            return await asyncio.to_thread(consultar_sena_sync, cedula)
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
@@ -600,6 +670,48 @@ async def _ejecutar_fuente(
         })
         # Saldo exigible = ADVERTENCIA (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_simit(seccion)
+    elif nombre == "sena":
+        # Certificados de formación del SENA por cédula (portal público, sin
+        # PDF consolidado: solo el LISTADO — decisión de negocio 2026-09-01).
+        certificados = (resultado.get("certificados") or [])[:MAX_CERTIFICADOS_DOC]
+        no_registra = resultado.get("no_registra")
+        mensaje = (resultado.get("mensaje") or "").strip()
+        # Anti-envenenamiento (segunda barrera; el bot ya lanza
+        # BotSenaSinResultado): sin certificados, sin mensaje de vacío y sin
+        # no_registra determinante NO es una consulta válida.
+        if not certificados and no_registra is None and not mensaje:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal del SENA no entregó el listado de certificados. Intente de nuevo.",
+                },
+            })
+            logger.warning("SENA sin resultado legible para %s (sin cachear)", enmascarar_cedula(cedula))
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "total_certificados": resultado.get("total_certificados", len(certificados)),
+            "certificados": certificados,
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché sena %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        seccion.update({
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "total_certificados": doc_cache["total_certificados"],
+            "certificados": certificados,
+        })
+        # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
+        seccion["estado"] = _estado_sena(seccion)
     else:
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
@@ -720,9 +832,7 @@ async def ejecutar_estudio(
     `nombres`/`apellidos` (SIN tildes, mayúsculas) son pista del captcha PGN.
     """
     inicio = time.monotonic()
-    habilitadas = list(fuentes) if fuentes is not None else list(
-        (empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES
-    )
+    habilitadas = list(fuentes) if fuentes is not None else fuentes_habilitadas_efectivas(empresa)
     _id = col_estudios.find_one({"consulta_id": consulta_id}, {"_id": 1})["_id"]
 
     async def _deshabilitada(nombre: str) -> dict:

@@ -34,6 +34,7 @@ from Funciones.bot_policia import (
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
+from Funciones.bot_sena import BotSenaError, BotSenaSinCaptchaKey, consultar_sena_sync
 from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
 
 logger = logging.getLogger(__name__)
@@ -482,10 +483,70 @@ async def consultar_simit(
     return doc
 
 
+@router.get("/sena")
+async def consultar_sena(
+    cedula: str = Query(..., min_length=3, max_length=20, description="Cédula de la persona consultada"),
+    force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
+):
+    """Certificados de formación del SENA por cédula (Certificado Digital).
+
+    Canal: https://certificados.sena.edu.co/CertificadoDigital/com.sena.consultacer
+    — portal público de consulta (sin restricción de terceros). Devuelve el
+    listado de certificados disponibles para descarga (programa, tipo Acta/
+    Título/Certificado, fechas de certificación y firma). Es información de
+    FORMACIÓN, no un antecedente. El PDF de cada certificado se descarga por
+    link propio en el portal — aquí SOLO el listado (decisión de negocio
+    2026-09-01). Captcha de imagen propio resuelto por servicio externo
+    (SEGURIDAD_SENA_CAPTCHA_KEY). Cacheo por cédula (24 h).
+    """
+    _requiere_seguridad(actor)
+
+    cedula_norm = _normalizar_cedula(cedula)
+    cache = _buscar_cache("sena", cedula_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+
+    try:
+        resultado = await asyncio.to_thread(consultar_sena_sync, cedula_norm)
+    except BotSenaSinCaptchaKey as exc:
+        logger.error("Bot SENA sin key de captcha: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Fuente sena no configurada: falta SEGURIDAD_SENA_CAPTCHA_KEY en el servidor",
+        ) from exc
+    except BotSenaError as exc:
+        logger.error("Bot SENA falló para cédula %s: %s", cedula_norm, exc)
+        raise HTTPException(status_code=502, detail=f"No fue posible consultar el SENA: {exc}") from exc
+
+    ahora = _utcnow()
+    doc = {
+        "tipo": "sena",
+        "cedula": cedula_norm,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "total_certificados": resultado.get("total_certificados"),
+        "certificados": (resultado.get("certificados") or [])[:20],
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
+        "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE),
+        "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta sena %s no se pudo auditar: %s", cedula_norm, exc)
+
+    doc.pop("_id", None)
+    return doc
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit, sena)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),

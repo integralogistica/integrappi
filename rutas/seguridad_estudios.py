@@ -39,6 +39,7 @@ from Funciones.orquestador_estudios import (
     codigo_verificacion,
     enmascarar_cedula,
     ejecutar_estudio,
+    fuentes_habilitadas_efectivas,
     mayoria_fuentes_fallidas,
     nuevo_consulta_id,
 )
@@ -495,7 +496,11 @@ async def crear_estudio(
     # qué correr (idempotente; para el cliente es transparente).
     empresa = cobro.sincronizar_fuentes_planes(empresa, db["planes_seguridad"], col_empresas)
 
-    habilitadas = list((empresa.get("config") or {}).get("fuentes_habilitadas") or FUENTES)
+    # EL PLAN ES EL GATE (2026-09-01): fuentes default habilitadas de facto
+    # para toda empresa — editar un plan se refleja INMEDIATAMENTE en todos
+    # los clientes; solo policia (opt-in) y las exclusiones explícitas pasan
+    # por el config de la empresa.
+    habilitadas = fuentes_habilitadas_efectivas(empresa)
     # Fuentes con plan: multi-plan por fuente — la consulta corre solo las
     # fuentes que la empresa tenga con plan vigente (ej. solo compró RNDC).
     # ADMIN_INTEGRA ve todo, salvo fuentes con entrada RETIRADA del catálogo
@@ -569,7 +574,8 @@ async def crear_estudio(
     placa: str | None = None
     cedula_propietario: str | None = None
     if "runt" in habilitadas or "simit" in habilitadas:
-        if not (datos.placa or "").strip():
+        # getattr: SimpleNamespace de tests/integraciones puede omitir campos.
+        if not (getattr(datos, "placa", None) or "").strip():
             fuentes_placa = " y ".join(
                 f for f in ("RUNT", "SIMIT") if f.lower() in habilitadas
             )
@@ -579,7 +585,7 @@ async def crear_estudio(
             )
         placa = _normalizar_placa(datos.placa)
         if "runt" in habilitadas:
-            if (datos.cedula_propietario or "").strip():
+            if (getattr(datos, "cedula_propietario", None) or "").strip():
                 cedula_propietario = _normalizar_cedula(datos.cedula_propietario)
             else:
                 cedula_propietario = cedula
@@ -982,6 +988,7 @@ def estadisticas_estudios(
                     {"$eq": ["$fuentes.policia.origen", "cache"]},
                     {"$eq": ["$fuentes.runt.origen", "cache"]},
                     {"$eq": ["$fuentes.simit.origen", "cache"]},
+                    {"$eq": ["$fuentes.sena.origen", "cache"]},
                 ]},
                 1, 0,
             ]}},
@@ -1066,17 +1073,15 @@ CONFIG_DEFAULT_EMPRESA = {
     "retencion_dias": 730,
     "aislamiento_usuario": False,
     "consultas_por_minuto": 10,
-    # Policía NO va en el default: el portal de antecedentes judiciales es de
-    # autoconsulta del titular (Decreto 019 de 2012) y prohíbe el acceso por
-    # terceros; se activa POR EMPRESA (PATCH config) con autorización
-    # documentada del titular bajo la Ley 1581 de 2012.
-    # runt SÍ va (2026-08-30): el portal público del RUNT es de consulta
-    # ciudadana abierta por placa + cédula del propietario (sin restricción de
-    # terceros); el gate real es el PLAN, no la config.
-    # simit SÍ va (2026-09-01): el estado de cuenta de la FCM es un portal
-    # público de consulta ciudadana (sin captcha, sin restricción de
-    # terceros); mismo gate: el PLAN.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit"],
+    # ⚠️ SEMÁNTICA 2026-09-01 (ver `fuentes_habilitadas_efectivas` del
+    # orquestador): EL PLAN ES EL GATE — las fuentes default (portales
+    # públicos) corren para TODA empresa sin tocar config, y editar un plan
+    # se refleja inmediatamente en todos los clientes. Este listado SOLO
+    # persiste las opt-in (policia: autoconsulta del titular, Decreto 019 de
+    # 2012 — requiere autorización documentada del titular, Ley 1581) y
+    # documenta el estado inicial; para apagar una fuente puntual por empresa
+    # usar `config.fuentes_excluidas`.
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena"],
 }
 
 

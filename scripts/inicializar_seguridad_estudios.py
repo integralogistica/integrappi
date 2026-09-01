@@ -56,11 +56,11 @@ EMPRESA_INICIAL = {
         # "policia" (antecedentes judiciales) NO va aquí: portal de autoconsulta
         # del titular (Decreto 019 de 2012) — se activa por empresa vía admin
         # con autorización documentada del titular (Ley 1581 de 2012).
-        # "runt" SÍ va: portal público de consulta ciudadana por placa + cédula
-        # del propietario (sin restricción de terceros). "simit" SÍ va
-        # (2026-09-01): estado de cuenta público de la FCM por placa (sin
-        # captcha, sin restricción de terceros).
-        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit"],
+        # "runt"/"simit"/"sena" van (portales públicos). ⚠️ Desde 2026-09-01
+        # el gate real es el PLAN (fuentes_habilitadas_efectivas): las fuentes
+        # default corren para toda empresa SIN tocar este config — este
+        # listado solo persiste las opt-in y documenta el estado inicial.
+        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena"],
     },
 }
 

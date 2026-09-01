@@ -1106,6 +1106,192 @@ class TestFuenteSimit(unittest.TestCase):
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
 
 
+class TestFuentesHabilitadasEfectivas(unittest.TestCase):
+    """2026-09-01 (pedido del usuario): EL PLAN ES EL GATE — editar
+    `fuentes_incluidas` de un plan (o agregar una fuente al catálogo) queda
+    disponible para TODA empresa con ese plan INMEDIATAMENTE, sin migrar
+    configs. `config.fuentes_habilitadas` deja de ser un whitelist: solo
+    policia (opt-in) exige presencia explícita y `fuentes_excluidas` apaga
+    por empresa."""
+
+    def test_config_viejo_sin_sena_la_deja_correr(self):
+        # El caso real que lo motivó: empresa con config persistido pre-sena
+        # (GLAMPEROS) + plan BASICO editado con sena → antes DESHABILITADA
+        # por la intersección con el whitelist; ahora corre sin script.
+        empresa = {"config": {"fuentes_habilitadas": [
+            "manifiestos_rndc", "procuraduria", "policia", "runt", "simit",
+        ]}}
+        efectivas = orch.fuentes_habilitadas_efectivas(empresa)
+        self.assertIn("sena", efectivas)
+        self.assertIn("policia", efectivas)  # estaba listada explícitamente
+
+    def test_sin_config_todas_las_default(self):
+        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena"]
+        self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
+        self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
+        self.assertEqual(
+            orch.fuentes_habilitadas_efectivas({"config": {"fuentes_habilitadas": None}}),
+            esperadas,
+        )
+
+    def test_policia_sigue_siendo_opt_in(self):
+        self.assertNotIn("policia", orch.fuentes_habilitadas_efectivas({"config": {}}))
+        self.assertIn(
+            "policia",
+            orch.fuentes_habilitadas_efectivas({"config": {"fuentes_habilitadas": ["policia"]}}),
+        )
+
+    def test_exclusion_por_empresa(self):
+        empresa = {"config": {"fuentes_excluidas": ["simit"]}}
+        efectivas = orch.fuentes_habilitadas_efectivas(empresa)
+        self.assertNotIn("simit", efectivas)
+        self.assertIn("sena", efectivas)
+
+    def test_exclusion_pisa_al_whitelist(self):
+        empresa = {"config": {"fuentes_habilitadas": ["procuraduria"], "fuentes_excluidas": ["procuraduria"]}}
+        self.assertNotIn("procuraduria", orch.fuentes_habilitadas_efectivas(empresa))
+
+
+class TestFuenteSena(unittest.TestCase):
+    """Fuente "sena" (certificados de formación por CÉDULA): caché con clave
+    (tipo, cédula) — el default del módulo —, SIEMPRE EXITO informativo
+    (formación no es antecedente) y anti-envenenamiento análogo."""
+
+    RESULTADO_CERTS = {
+        "cedula": "1010213062",
+        "no_registra": False,
+        "mensaje": "",
+        "total_certificados": 2,
+        "certificados": [
+            {
+                "registro": "921100151013CC1010213062A",
+                "titulo": "TECNÓLOGO EN",
+                "tipo": "Acta",
+                "programa": "GESTIÓN DE LA PRODUCCIÓN INDUSTRIAL",
+                "fecha_certificacion": "2013-02-09",
+                "fecha_firma": "2013-02-11",
+            },
+            {
+                "registro": "9303002878307CC1010213062C",
+                "titulo": "CURSO ESPECIAL EN",
+                "tipo": "Certificado Aprobación",
+                "programa": "HIGIENE Y MANIPULACION DE ALIMENTOS.",
+                "fecha_certificacion": "2023-11-14",
+                "fecha_firma": "2023-11-30",
+            },
+        ],
+        "pdf_bytes": None,
+    }
+
+    RESULTADO_VACIO = {
+        "cedula": "1033688842",
+        "no_registra": True,
+        "mensaje": "La cédula no registra certificados disponibles en el SENA",
+        "total_certificados": 0,
+        "certificados": [],
+        "pdf_bytes": None,
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_exito_con_certificados_cachea_por_cedula(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_sena_sync", return_value=self.RESULTADO_CERTS) as bot:
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sena", "1010213062", actor_consultador(), False)
+                    )
+        # Caché por cédula (default del módulo: sena no conoce placas).
+        buscar.assert_called_once_with("sena", "1010213062", False, placa=None)
+        bot.assert_called_once_with("1010213062")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["total_certificados"], 2)
+        self.assertEqual(len(seccion["certificados"]), 2)
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "sena")
+        self.assertEqual(doc_cache["cedula"], "1010213062")
+        self.assertEqual(doc_cache["no_registra"], False)
+
+    def test_sin_certificados_tambien_es_exito(self):
+        # Formación ≠ antecedente: registrar 0 certificados es determinante e
+        # informativo (nunca ADVERTENCIA, nunca "limpio").
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sena_sync", return_value=self.RESULTADO_VACIO):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sena", "1033688842", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertTrue(seccion["no_registra"])
+        self.assertEqual(seccion["total_certificados"], 0)
+        # El vacío legítimo SÍ se cachea (24 h) como los demás determinantes.
+        self.assertEqual(col.insert_one.call_args[0][0]["no_registra"], True)
+
+    def test_solo_sena_no_degrada_el_estado_global(self):
+        fuentes = {
+            "manifiestos_rndc": {"estado": "DESHABILITADA"},
+            "procuraduria": {"estado": "DESHABILITADA"},
+            "policia": {"estado": "DESHABILITADA"},
+            "runt": {"estado": "DESHABILITADA"},
+            "simit": {"estado": "DESHABILITADA"},
+            "sena": {"estado": "EXITO"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA")
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "sena", "cedula": "1010213062",
+            "no_registra": False,
+            "mensaje": "",
+            "total_certificados": 2,
+            "certificados": self.RESULTADO_CERTS["certificados"],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache) as buscar:
+            with patch.object(orch, "consultar_sena_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("sena", "1010213062", actor_consultador(), False)
+                )
+        buscar.assert_called_once_with("sena", "1010213062", False, placa=None)
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["total_certificados"], 2)
+        bot.assert_not_called()
+
+    def test_resultado_vacio_sin_determinante_es_no_disponible(self):
+        resultado = {
+            "cedula": "1033688842", "no_registra": None, "mensaje": "",
+            "total_certificados": None, "certificados": [], "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sena_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sena", "1033688842", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_sena import BotSenaSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sena_sync") as bot:
+                bot.side_effect = BotSenaSinResultado("sin datos")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sena", "1033688842", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
 class TestFuenteSimitSoloPlaca(unittest.TestCase):
     """Estudio con SOLO simit: la placa se persiste (espejo) pero NO hay
     vehiculos[] ni cedula_propietario (simit no valida propiedad)."""
