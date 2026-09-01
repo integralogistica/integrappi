@@ -795,12 +795,24 @@ class TestSeccionOfac(unittest.TestCase):
         self.assertIn("PETROURREGO", plano)
         self.assertIn("56062", plano)
         self.assertIn("ILLICIT-DRUGS-EO14059", plano)
-        self.assertIn("OFAC:1intento(s)", plano)
+        self.assertIn("OFACcédula:1intento(s)", plano)
 
     def test_sin_coincidencia_exacta(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_ofac()))
         self.assertIn("SINCOINCIDENCIAEXACTADEIDENTIFICACIÓN", texto.replace(" ", ""))
         self.assertNotIn("REQUIEREREVISIÓNHUMANA", texto.replace(" ", ""))
+
+    def test_ofac_nit_es_seccion_empresarial_separada(self):
+        estudio = self._con_ofac(aplica=True)
+        estudio["nit"] = "9001234567"
+        estudio["cedula"] = ""
+        estudio["fuentes"]["ofac_nit"] = estudio["fuentes"].pop("ofac")
+        estudio["fuentes"]["ofac_nit"]["coincidencias"][0]["nombre"] = "EMPRESA DE PRUEBA S.A.S."
+        texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        self.assertIn("NITconsultado9001234567", texto)
+        self.assertIn("OFAC—EmpresaporNIT", texto)
+        self.assertIn("COINCIDENCIAEXACTADENIT", texto)
+        self.assertIn("EMPRESADEPRUEBA", texto)
 
 
 if __name__ == "__main__":

@@ -438,7 +438,8 @@ def _normalizar_nombre(valor: str | None) -> str | None:
 
 
 class CrearEstudio(BaseModel):
-    cedula: str
+    cedula: str | None = None
+    nit: str | None = None  # fuente empresarial ofac_nit; separado de la cédula
     forzar: bool = False
     empresa_id: str | None = None  # solo ADMIN_INTEGRA (attribución del estudio)
     fuentes: list[str] | None = None  # fuentes a consultar; None = todas las del plan
@@ -473,7 +474,7 @@ async def crear_estudio(
     _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "crear estudios de seguridad")
     _verificar_rate_limit(actor)
 
-    cedula = _normalizar_cedula(datos.cedula)
+    cedula = _normalizar_cedula(datos.cedula) if (datos.cedula or "").strip() else ""
 
     from Funciones import cobro_seguridad as cobro
 
@@ -563,6 +564,19 @@ async def crear_estudio(
         habilitadas = fuentes_del_plan
         plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
+    # OFAC empresarial usa NIT, nunca reutiliza la cédula. Las demás fuentes
+    # continúan siendo consultas de la persona evaluada.
+    if any(f != "ofac_nit" for f in habilitadas) and not cedula:
+        raise HTTPException(status_code=422, detail="Las fuentes personales requieren el campo cedula")
+    nit: str | None = None
+    if "ofac_nit" in habilitadas:
+        nit = re.sub(r"\D", "", getattr(datos, "nit", None) or "")
+        if len(nit) < 6 or len(nit) > 15:
+            raise HTTPException(
+                status_code=422,
+                detail="La fuente OFAC NIT requiere el NIT con dígito de verificación (campo nit)",
+            )
+
     # Las fuentes de vehículo (runt, simit) consultan por PLACA: es OBLIGATORIA
     # si alguna va a correr (con `habilitadas` ya definitiva), y se ignora/limpia
     # si no (no se persiste nada del vehículo en ese caso).
@@ -633,6 +647,7 @@ async def crear_estudio(
         cedula_propietario=cedula_propietario,
         nombres=nombres,
         apellidos=apellidos,
+        nit=nit,
     )
 
     try:
@@ -649,6 +664,7 @@ async def crear_estudio(
             cedula_propietario=cedula_propietario,
             nombres=nombres,
             apellidos=apellidos,
+            nit=nit,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -816,7 +832,8 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "runt": "RUNT — Información del vehículo",
         "simit": "SIMIT — Estado de cuenta de la placa",
         "sena": "SENA — Certificados de formación",
-        "ofac": "OFAC — Lista SDN (Lista Clinton)",
+        "ofac": "OFAC — Personas por cédula",
+        "ofac_nit": "OFAC — Empresas por NIT",
     }
     fuentes = []
     for clave, nombre in etiquetas.items():
@@ -1098,7 +1115,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit"],
 }
 
 

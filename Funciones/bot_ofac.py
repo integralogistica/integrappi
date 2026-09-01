@@ -22,9 +22,17 @@ OFAC_DATASET_TTL_S = int(os.getenv("SEGURIDAD_OFAC_DATASET_TTL_S", "21600"))
 OFAC_TIMEOUT_S = float(os.getenv("SEGURIDAD_OFAC_TIMEOUT_S", "60"))
 _NS = "{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}"
 _TIPOS_DOCUMENTO = {"cedula no.", "national id no.", "identification number", "citizenship no."}
+# Identificadores inequívocamente tributarios. No incluimos "Registration
+# Number": OFAC lo usa para muchos registros mercantiles/no fiscales y podría
+# producir un falso positivo numérico al compararlo con un NIT colombiano.
+_TIPOS_NIT = {
+    "tax id no.", "tax no.", "fiscal code", "italian fiscal code",
+    "paraguayan tax identification number", "romanian tax registration",
+}
 
 _LOCK = threading.Lock()
 _INDICE: dict[str, list[dict]] = {}
+_INDICE_NIT: dict[str, list[dict]] = {}
 _METADATA: dict = {}
 _CARGADO_EN = 0.0
 
@@ -41,8 +49,9 @@ def _texto(nodo: ET.Element, etiqueta: str) -> str:
     return (nodo.findtext(_NS + etiqueta) or "").strip()
 
 
-def _construir_indice(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict]:
+def _construir_indices(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict]:
     indice: dict[str, list[dict]] = {}
+    indice_nit: dict[str, list[dict]] = {}
     metadata = {"sha256_dataset": hashlib.sha256(xml_bytes).hexdigest()}
     try:
         contexto = ET.iterparse(io.BytesIO(xml_bytes), events=("end",))
@@ -65,24 +74,32 @@ def _construir_indice(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict]:
                     tipo = _texto(documento, "idType")
                     numero = _texto(documento, "idNumber")
                     normalizado = _normalizar_documento(numero)
-                    if normalizado and tipo.lower() in _TIPOS_DOCUMENTO:
+                    tipo_normalizado = tipo.lower()
+                    destino = indice if tipo_normalizado in _TIPOS_DOCUMENTO else indice_nit if tipo_normalizado in _TIPOS_NIT else None
+                    if normalizado and destino is not None:
                         coincidencia = {
                             **entrada_base,
                             "tipo_documento": tipo,
                             "numero_documento": numero,
                             "pais_documento": _texto(documento, "idCountry"),
                         }
-                        indice.setdefault(normalizado, []).append(coincidencia)
+                        destino.setdefault(normalizado, []).append(coincidencia)
                 nodo.clear()
     except (ET.ParseError, ValueError) as exc:
         raise BotOfacError(f"El dataset XML de OFAC no es válido: {exc}") from exc
     if not metadata.get("fecha_publicacion") or not metadata.get("total_registros"):
         raise BotOfacError("El dataset de OFAC no incluyó metadatos de publicación")
+    return indice, indice_nit, metadata
+
+
+def _construir_indice(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict]:
+    """Compatibilidad: índice de documentos personales usado por pruebas."""
+    indice, _, metadata = _construir_indices(xml_bytes)
     return indice, metadata
 
 
 def _actualizar_dataset() -> None:
-    global _INDICE, _METADATA, _CARGADO_EN
+    global _INDICE, _INDICE_NIT, _METADATA, _CARGADO_EN
     try:
         respuesta = requests.get(
             OFAC_SDN_URL,
@@ -92,8 +109,8 @@ def _actualizar_dataset() -> None:
         respuesta.raise_for_status()
     except requests.RequestException as exc:
         raise BotOfacError(f"OFAC no permitió descargar la lista SDN: {exc}") from exc
-    indice, metadata = _construir_indice(respuesta.content)
-    _INDICE, _METADATA, _CARGADO_EN = indice, metadata, time.monotonic()
+    indice, indice_nit, metadata = _construir_indices(respuesta.content)
+    _INDICE, _INDICE_NIT, _METADATA, _CARGADO_EN = indice, indice_nit, metadata, time.monotonic()
 
 
 def consultar_ofac_sync(cedula: str) -> dict:
@@ -124,3 +141,31 @@ def consultar_ofac_sync(cedula: str) -> dict:
         ),
     }
 
+
+def consultar_ofac_nit_sync(nit: str) -> dict:
+    """Retorna coincidencias EXACTAS de un identificador tributario empresarial."""
+    documento = _normalizar_documento(nit)
+    if not documento:
+        raise BotOfacError("El NIT está vacío")
+    with _LOCK:
+        if not _INDICE or time.monotonic() - _CARGADO_EN >= OFAC_DATASET_TTL_S:
+            _actualizar_dataset()
+        coincidencias = [dict(item) for item in _INDICE_NIT.get(documento, [])]
+        metadata = dict(_METADATA)
+    aplica = bool(coincidencias)
+    return {
+        "nit": documento,
+        "aplica": aplica,
+        "no_registra": not aplica,
+        "coincidencias": coincidencias,
+        "total_coincidencias": len(coincidencias),
+        "fecha_publicacion": metadata.get("fecha_publicacion"),
+        "total_registros_lista": metadata.get("total_registros"),
+        "sha256_dataset": metadata.get("sha256_dataset"),
+        "metodo": "coincidencia_exacta_identificacion_tributaria",
+        "mensaje": (
+            f"Coincidencia exacta del NIT en la lista SDN de OFAC ({len(coincidencias)} registro(s))."
+            if aplica else
+            "No se encontró coincidencia exacta del NIT en la lista SDN de OFAC."
+        ),
+    }

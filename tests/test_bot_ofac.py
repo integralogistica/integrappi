@@ -15,12 +15,18 @@ XML = b'''<?xml version="1.0"?>
       <id><uid>124</uid><idType>Gender</idType><idNumber>Male</idNumber></id>
     </idList>
   </sdnEntry>
+  <sdnEntry>
+    <uid>90001</uid><lastName>EMPRESA DE PRUEBA S.A.S.</lastName><sdnType>Entity</sdnType>
+    <programList><program>TEST-PROGRAM</program></programList>
+    <idList><id><idType>Tax ID No.</idType><idNumber>900.123.456-7</idNumber><idCountry>Colombia</idCountry></id></idList>
+  </sdnEntry>
 </sdnList>'''
 
 
 class TestBotOfac(unittest.TestCase):
     def setUp(self):
         bot_ofac._INDICE = {}
+        bot_ofac._INDICE_NIT = {}
         bot_ofac._METADATA = {}
         bot_ofac._CARGADO_EN = 0.0
 
@@ -53,6 +59,15 @@ class TestBotOfac(unittest.TestCase):
         bot_ofac.consultar_ofac_sync("208079")
         bot_ofac.consultar_ofac_sync("1033688842")
         get.assert_called_once()
+
+    @patch.object(bot_ofac.requests, "get")
+    def test_nit_empresarial_es_fuente_separada(self, get):
+        get.return_value = self._respuesta()
+        empresa = bot_ofac.consultar_ofac_nit_sync("900123456-7")
+        persona = bot_ofac.consultar_ofac_sync("9001234567")
+        self.assertTrue(empresa["aplica"])
+        self.assertEqual(empresa["coincidencias"][0]["tipo"], "Entity")
+        self.assertFalse(persona["aplica"])
 
 
 if __name__ == "__main__":

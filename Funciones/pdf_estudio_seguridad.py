@@ -269,6 +269,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     simit = fuentes.get("simit") or {}
     sena = fuentes.get("sena") or {}
     ofac = fuentes.get("ofac") or {}
+    ofac_nit = fuentes.get("ofac_nit") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -359,7 +360,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     cuento.append(Spacer(0, 4 * mm))
 
     datos_persona = [
-        ["Cédula consultada", estudio.get("cedula", "")],
+        ["Cédula consultada" if estudio.get("cedula") else "NIT consultado", estudio.get("cedula") or estudio.get("nit", "")],
         ["Nombre consultado", estudio.get("nombre_consultado") or "No disponible en fuentes"],
         ["Fecha y hora de consulta", _fecha_colombia(creado)],
         ["Empresa solicitante", estudio.get("empresa_nombre", "")],
@@ -449,6 +450,9 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             etiqueta_ofac,
             _texto_veredicto_ofac(ofac),
         ])
+    if _corrio(ofac_nit):
+        etiqueta_ofac_nit, _ = ESTADO_FUENTE_TEXTO.get(ofac_nit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append(["OFAC — Empresas por NIT", etiqueta_ofac_nit, _texto_veredicto_ofac(ofac_nit)])
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -972,6 +976,29 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     elif _corrio(ofac):
         cuento.append(_parrafo_estado_fuente(ofac, "OFAC"))
 
+    # ── 4f. OFAC empresarial por NIT ───────────────────────────────────────
+    if _corrio(ofac_nit):
+        _antes_de_seccion(ofac_nit)
+        cuento.append(Paragraph("OFAC — Empresa por NIT (Lista SDN)", estilo_h2))
+        if ofac_nit.get("estado") in {"EXITO", "ADVERTENCIA"}:
+            aplica_nit = bool(ofac_nit.get("aplica"))
+            veredicto_nit = ("COINCIDENCIA EXACTA DE NIT — REQUIERE REVISIÓN HUMANA" if aplica_nit
+                             else "SIN COINCIDENCIA EXACTA DEL NIT EN LA LISTA SDN")
+            cuento.append(Paragraph(f"<b>{veredicto_nit}</b>", estilo_normal))
+            cuento.append(Paragraph(
+                f"NIT consultado: {escape(str(estudio.get('nit') or '—'))} · "
+                f"Publicación OFAC: {escape(str(ofac_nit.get('fecha_publicacion') or '—'))} · "
+                f"Coincidencias: {int(ofac_nit.get('total_coincidencias') or 0)}", estilo_normal,
+            ))
+            for coincidencia in (ofac_nit.get("coincidencias") or [])[:10]:
+                cuento.append(Paragraph(
+                    "<b>Entidad:</b> "
+                    f"{escape(str(coincidencia.get('nombre') or '—'))} · UID {escape(str(coincidencia.get('uid') or '—'))} · "
+                    f"programa(s) {escape(', '.join(coincidencia.get('programas') or []) or '—')}", estilo_normal,
+                ))
+        else:
+            cuento.append(_parrafo_estado_fuente(ofac_nit, "OFAC por NIT"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -984,7 +1011,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC", ofac))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (

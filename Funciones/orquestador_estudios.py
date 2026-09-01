@@ -43,7 +43,7 @@ from Funciones.bot_procuraduria import (
     consultar_antecedentes_sync,
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
-from Funciones.bot_ofac import BotOfacError, consultar_ofac_sync
+from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
     BotRuntSinCaptchaKey,
@@ -82,7 +82,7 @@ MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -319,6 +319,7 @@ async def _ejecutar_fuente(
     nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
     cedula_propietario: str | None = None,
     nombres: str | None = None, apellidos: str | None = None,
+    nit: str | None = None,
 ) -> dict:
     """Ejecuta una fuente (caché → portal con reintento) y devuelve su sección
     lista para el doc del estudio. NUNCA lanza: una fuente caída queda
@@ -335,6 +336,8 @@ async def _ejecutar_fuente(
         # y el bot) van con la cédula del propietario. Sin `cedula_propietario`
         # se asume que el evaluado es el propietario (comportamiento previo).
         cedula = cedula_propietario or cedula
+    elif nombre == "ofac_nit":
+        cedula = nit or ""
     seccion: dict[str, Any] = {
         "estado": "ERROR",
         "origen": None,
@@ -404,7 +407,7 @@ async def _ejecutar_fuente(
                 "certificados": (cache.get("certificados") or [])[:MAX_CERTIFICADOS_DOC],
             })
             seccion["estado"] = _estado_sena(seccion)
-        elif nombre == "ofac":
+        elif nombre in {"ofac", "ofac_nit"}:
             seccion.update({
                 "aplica": bool(cache.get("aplica")),
                 "no_registra": cache.get("no_registra"),
@@ -463,6 +466,10 @@ async def _ejecutar_fuente(
 
         async def invocar() -> dict:
             return await asyncio.to_thread(consultar_ofac_sync, cedula)
+    elif nombre == "ofac_nit":
+
+        async def invocar() -> dict:
+            return await asyncio.to_thread(consultar_ofac_nit_sync, cedula)
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
@@ -737,7 +744,7 @@ async def _ejecutar_fuente(
         })
         # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_sena(seccion)
-    elif nombre == "ofac":
+    elif nombre in {"ofac", "ofac_nit"}:
         coincidencias = (resultado.get("coincidencias") or [])[:10]
         aplica = bool(resultado.get("aplica"))
         mensaje = (resultado.get("mensaje") or "").strip()
@@ -880,6 +887,7 @@ async def ejecutar_estudio(
     cedula_propietario: str | None = None,
     nombres: str | None = None,
     apellidos: str | None = None,
+    nit: str | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
@@ -905,6 +913,7 @@ async def ejecutar_estudio(
                     nombre, cedula, actor, forzar,
                     placa=placa, cedula_propietario=cedula_propietario,
                     nombres=nombres, apellidos=apellidos,
+                    nit=nit,
                 )
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
@@ -957,6 +966,7 @@ async def ejecutar_estudio(
                 "anexo_runt": anexos.get("runt"),
                 "anexo_simit": anexos.get("simit"),
                 "nombre_consultado": nombre_consultado,
+                "nit": nit,
             }
         },
     )
@@ -996,6 +1006,7 @@ def crear_documento_estudio(
     consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict,
     *, placa: str | None = None, cedula_propietario: str | None = None,
     nombres: str | None = None, apellidos: str | None = None,
+    nit: str | None = None,
 ) -> str:
     """Inserta el doc EN_PROGRESO y retorna el consulta_id. Se llama ANTES de
     ejecutar fuentes: la consulta queda trazada aunque todo falle después.
@@ -1026,6 +1037,7 @@ def crear_documento_estudio(
                 if actor.get("canal") == "api" else None
             ),
             "cedula": cedula,
+            "nit": nit,
             # Nombres/apellidos que informó el CONSULTANTE (captcha PGN y
             # pre-carga del nombre): SIN tildes y en mayúsculas — no es el
             # nombre verificado (ese llega por la cascada PGN→Policía).

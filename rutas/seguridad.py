@@ -33,7 +33,7 @@ from Funciones.bot_policia import (
 )
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
-from Funciones.bot_ofac import BotOfacError, consultar_ofac_sync
+from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
 from Funciones.bot_sena import BotSenaError, BotSenaSinCaptchaKey, consultar_sena_sync
 from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
@@ -579,10 +579,47 @@ async def consultar_ofac(
     return doc
 
 
+@router.get("/ofac-nit")
+async def consultar_ofac_nit(
+    nit: str = Query(..., min_length=6, max_length=25, description="NIT empresarial con dígito de verificación"),
+    force: bool = Query(False, description="Ignorar caché de consulta"),
+    actor: dict = Depends(actor_actual),
+):
+    """Coincidencia exacta de NIT en la lista SDN oficial de OFAC."""
+    _requiere_seguridad(actor)
+    nit_norm = re.sub(r"\D", "", nit)
+    if len(nit_norm) < 6 or len(nit_norm) > 15:
+        raise HTTPException(status_code=422, detail="NIT inválido")
+    cache = _buscar_cache("ofac_nit", nit_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+    try:
+        resultado = await asyncio.to_thread(consultar_ofac_nit_sync, nit_norm)
+    except BotOfacError as exc:
+        raise HTTPException(status_code=503, detail=f"No fue posible consultar OFAC por NIT: {exc}") from exc
+    ahora = _utcnow()
+    doc = {
+        "tipo": "ofac_nit", "cedula": nit_norm, "nit": nit_norm,
+        **{k: resultado.get(k) for k in (
+            "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
+            "fecha_publicacion", "total_registros_lista", "sha256_dataset", "metodo",
+        )},
+        "usuario": actor["usuario"], "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"), "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE), "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta OFAC NIT %s no se pudo auditar: %s", nit_norm, exc)
+    doc.pop("_id", None)
+    return doc
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit, sena, ofac)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit, sena, ofac, ofac_nit)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),
