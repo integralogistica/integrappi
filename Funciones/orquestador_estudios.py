@@ -49,6 +49,10 @@ from Funciones.bot_runt import (
     BotRuntSinResultado,
     consultar_vehiculo_runt_sync,
 )
+from Funciones.bot_simit import (
+    BotSimitSinResultado,
+    consultar_comparendos_simit_sync,
+)
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
 from rutas.seguridad import (
     DIAS_VENTANA,
@@ -67,9 +71,10 @@ BACKOFF_MS = int(os.getenv("SEGURIDAD_BACKOFF_MS", "3000"))
 TIMEOUT_FUENTE_S = float(os.getenv("SEGURIDAD_TIMEOUT_FUENTE_S", "150"))
 RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
+MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit")
 
 # Evita apilar Chromium concurrentes en una instancia pequeña de Render.
 _SEMAFORO_ESTUDIOS = asyncio.Semaphore(2)
@@ -204,6 +209,8 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotRuntCaptchaFallido):
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSimitSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
@@ -225,15 +232,41 @@ def _estado_runt(seccion: dict) -> str:
     return "EXITO"
 
 
+def _estado_simit(seccion: dict) -> str:
+    """Estado de la fuente simit a partir de su sección.
+
+    - Saldo EXIGIBLE (total_a_pagar > 0, el agregado #valorTotal del portal)
+      → ADVERTENCIA (decisión de negocio 2026-09-01, análogo SOAT vencido: el
+      estudio no puede afirmar que todo está en orden).
+    - Deuda histórica sin saldo exigible (comparendos prescritos/condonados,
+      verificado con ZZZ999: 105 pendientes de 1999-2000 con $0 a pagar) →
+      EXITO: el detalle queda en la sección/PDF, pero no es deuda vigente.
+      OJO: las FILAS pueden traer "valor a pagar" > 0 aunque el agregado diga
+      $0 (inconsistencia vista en ZZZ999): el semáforo se fía del AGREGADO del
+      portal, no de las filas.
+    - Sin comparendos ("No tienes comparendos ni multas registradas en Simit")
+      → EXITO. El portal NO distingue placa inexistente de placa limpia: el
+      mensaje es determinante y nunca se presenta como antecedente personal.
+    """
+    if (seccion.get("total_a_pagar") or 0) > 0:
+        return "ADVERTENCIA"
+    return "EXITO"
+
+
 async def _ejecutar_fuente(
     nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
     cedula_propietario: str | None = None,
+    nombres: str | None = None, apellidos: str | None = None,
 ) -> dict:
     """Ejecuta una fuente (caché → portal con reintento) y devuelve su sección
     lista para el doc del estudio. NUNCA lanza: una fuente caída queda
-    registrada como NO_DISPONIBLE/ERROR. `placa`/`cedula_propietario` solo los
-    usa la fuente runt (consulta de vehículo por placa + cédula del PROPIETARIO
-    ACTIVO, que puede ser distinta de la persona evaluada)."""
+    registrada como NO_DISPONIBLE/ERROR. `placa` la usan runt y simit;
+    `cedula_propietario` solo runt (consulta de vehículo por placa + cédula
+    del PROPIETARIO ACTIVO, que puede ser distinta de la persona evaluada).
+    simit consulta SOLO por placa: su caché va sin cédula (la identidad del
+    dato es la placa, no la persona evaluada). `nombres`/`apellidos` (SIN
+    tildes, mayúsculas) son la pista del consultante para el captcha de la
+    PGN que pregunta por el nombre de la persona consultada."""
     if nombre == "runt":
         # El RUNT valida la cédula contra el PROPIETARIO ACTIVO de la placa:
         # cuando el conductor evaluado no es el dueño, la consulta (y la caché,
@@ -253,8 +286,9 @@ async def _ejecutar_fuente(
     # 1) Caché global 24h por (tipo, cédula): los datos del tercero son
     #    idénticos para cualquier empresa; la atribución vive en el estudio.
     #    runt discrimina además por placa (una cédula puede tener varios
-    #    vehículos: sin placa en el filtro habría cross-contaminación).
-    cache = _buscar_cache(nombre, cedula, forzar, placa=placa)
+    #    vehículos: sin placa en el filtro habría cross-contaminación) y simit
+    #    va SIN cédula (solo placa: el estado de cuenta es del vehículo).
+    cache = _buscar_cache(nombre, None if nombre == "simit" else cedula, forzar, placa=placa)
     if cache:
         seccion.update({"estado": "EXITO", "origen": "cache", "intentos": 0, "cache_id": str(cache["_id"])})
         if nombre == "manifiestos_rndc":
@@ -282,6 +316,22 @@ async def _ejecutar_fuente(
                 "placa": cache.get("placa", ""),
             })
             seccion["estado"] = _estado_runt(seccion)
+        elif nombre == "simit":
+            # El saldo no "vence" con el reloj como un SOAT (cambia por pagos/
+            # nuevos comparendos): el estado se deriva de los datos cacheados
+            # con la misma función pura del post-portal.
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "total_comparendos": cache.get("total_comparendos"),
+                "total_multas": cache.get("total_multas"),
+                "total_acuerdos": cache.get("total_acuerdos"),
+                "total_deuda": cache.get("total_deuda"),
+                "total_a_pagar": cache.get("total_a_pagar"),
+                "comparendos": (cache.get("comparendos") or [])[:MAX_COMPARENDOS_DOC],
+                "placa": cache.get("placa", ""),
+            })
+            seccion["estado"] = _estado_simit(seccion)
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -313,10 +363,20 @@ async def _ejecutar_fuente(
             # runt consulta por placa + cédula del PROPIETARIO (sin placa no hay
             # consulta posible; el endpoint ya lo validó antes de llegar aquí).
             return await asyncio.to_thread(consultar_vehiculo_runt_sync, placa or "", cedula)
-    else:
+    elif nombre == "simit":
 
         async def invocar() -> dict:
-            return await asyncio.to_thread(consultar_antecedentes_sync, cedula)
+            # simit consulta SOLO por placa (portal público FCM, sin captcha).
+            return await asyncio.to_thread(consultar_comparendos_simit_sync, placa or "")
+    else:
+        # procuraduría (rama por defecto): los nombres/apellidos del
+        # consultante resuelven las preguntas del captcha sobre el NOMBRE
+        # ("¿cuál es el primer nombre de la persona que está consultando?").
+        async def invocar() -> dict:
+            return await asyncio.to_thread(
+                consultar_antecedentes_sync, cedula,
+                nombres=nombres, apellidos=apellidos,
+            )
 
     try:
         resultado, intentos, duraciones, error_exc = await _llamar_con_reintento(nombre, cedula, invocar)
@@ -489,6 +549,57 @@ async def _ejecutar_fuente(
         # El semáforo de SOAT decide el estado: vencido = ADVERTENCIA (decisión
         # de negocio 2026-08-30: el estudio no puede afirmar "todo en orden").
         seccion["estado"] = _estado_runt(seccion)
+    elif nombre == "simit":
+        # Estado de cuenta de comparendos por placa (portal público FCM, SIN
+        # captcha ni PDF consolidado: el informe lo genera Integra).
+        comparendos = (resultado.get("comparendos") or [])[:MAX_COMPARENDOS_DOC]
+        total_a_pagar = resultado.get("total_a_pagar")
+        mensaje = (resultado.get("mensaje") or "").strip()
+        # Anti-envenenamiento (segunda barrera; el bot ya lanza
+        # BotSimitSinResultado): sin totales, sin filas y sin mensaje de limpio
+        # NO es una consulta válida.
+        if total_a_pagar is None and not comparendos and not mensaje:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal SIMIT no entregó el estado de cuenta. Intente de nuevo.",
+                },
+            })
+            logger.warning("SIMIT sin resultado legible para placa %s (sin cachear)", placa)
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": None, "placa": resultado.get("placa") or placa or "",
+            "no_registra": resultado.get("no_registra"),
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "total_comparendos": resultado.get("total_comparendos"),
+            "total_multas": resultado.get("total_multas"),
+            "total_acuerdos": resultado.get("total_acuerdos"),
+            "total_deuda": resultado.get("total_deuda"),
+            "total_a_pagar": total_a_pagar,
+            "comparendos": comparendos,
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché simit %s no se pudo auditar: %s", placa, exc)
+        seccion.update({
+            "no_registra": doc_cache["no_registra"],
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "total_comparendos": doc_cache["total_comparendos"],
+            "total_multas": doc_cache["total_multas"],
+            "total_acuerdos": doc_cache["total_acuerdos"],
+            "total_deuda": doc_cache["total_deuda"],
+            "total_a_pagar": total_a_pagar,
+            "comparendos": comparendos,
+            "placa": doc_cache["placa"],
+        })
+        # Saldo exigible = ADVERTENCIA (decisión de negocio 2026-09-01).
+        seccion["estado"] = _estado_simit(seccion)
     else:
         pdf_bytes = resultado.get("pdf_bytes") or b""
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
@@ -562,6 +673,26 @@ def calcular_estado_global(fuentes: dict) -> str:
     return "ERROR"
 
 
+def mayoria_fuentes_fallidas(fuentes: dict) -> bool:
+    """Criterio del REEMBOLSO automático (decisión de negocio 2026-09-01):
+    se devuelve la consulta solo si MÁS del 51% de las fuentes CORRIDAS
+    fallaron (NO_DISPONIBLE/ERROR) — con la mitad o menos caídas, lo
+    entregado sigue siendo valioso y se cobra (que una plataforma esté
+    caída no invalida el resto del informe). Antes solo reembolsaba el
+    ERROR global (= 100% caídas); PARCIAL 2/3 caídas cobraba.
+
+    Sin NINGUNA fuente corrida (proceso falló antes/entre fuentes) → True:
+    no se entregó nada. DESHABILITADA y claves ausentes no cuentan (fueron
+    decisión del plan, no fallos). `fuentes.error_global` (str) se salta.
+    """
+    secciones = [f for f in fuentes.values() if isinstance(f, dict)]
+    corrieron = [f for f in secciones if f.get("estado") not in (None, "DESHABILITADA")]
+    if not corrieron:
+        return True
+    fallidas = [f for f in corrieron if f.get("estado") in {"NO_DISPONIBLE", "ERROR"}]
+    return len(fallidas) / len(corrieron) > 0.51
+
+
 # --- Estudio completo ------------------------------------------------------------
 
 async def ejecutar_estudio(
@@ -576,6 +707,8 @@ async def ejecutar_estudio(
     *,
     placa: str | None = None,
     cedula_propietario: str | None = None,
+    nombres: str | None = None,
+    apellidos: str | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
@@ -584,6 +717,7 @@ async def ejecutar_estudio(
     endpoint ya la calculó (config ∩ planes vigentes por fuente); si no llega,
     se usa config.fuentes_habilitadas como antes. `placa`/`cedula_propietario`
     solo los usa runt (vehículo del propietario, que puede ≠ persona evaluada).
+    `nombres`/`apellidos` (SIN tildes, mayúsculas) son pista del captcha PGN.
     """
     inicio = time.monotonic()
     habilitadas = list(fuentes) if fuentes is not None else list(
@@ -601,6 +735,7 @@ async def ejecutar_estudio(
                 _ejecutar_fuente(
                     nombre, cedula, actor, forzar,
                     placa=placa, cedula_propietario=cedula_propietario,
+                    nombres=nombres, apellidos=apellidos,
                 )
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
@@ -614,7 +749,7 @@ async def ejecutar_estudio(
     # procuraduría genera PDF; policía/runt mantienen el canal listo por si
     # el portal cambia.
     anexos: dict[str, dict] = {}
-    for nombre_fuente in ("procuraduria", "policia", "runt"):
+    for nombre_fuente in ("procuraduria", "policia", "runt", "simit"):
         bytes_anexo = (fuentes.get(nombre_fuente) or {}).pop("_pdf_bytes", None)
         if not bytes_anexo:
             continue
@@ -651,6 +786,7 @@ async def ejecutar_estudio(
                 "anexo_procuraduria": anexos.get("procuraduria"),
                 "anexo_policia": anexos.get("policia"),
                 "anexo_runt": anexos.get("runt"),
+                "anexo_simit": anexos.get("simit"),
                 "nombre_consultado": nombre_consultado,
             }
         },
@@ -690,14 +826,17 @@ def _limpiar_seccion(seccion: dict) -> dict:
 def crear_documento_estudio(
     consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict,
     *, placa: str | None = None, cedula_propietario: str | None = None,
+    nombres: str | None = None, apellidos: str | None = None,
 ) -> str:
     """Inserta el doc EN_PROGRESO y retorna el consulta_id. Se llama ANTES de
     ejecutar fuentes: la consulta queda trazada aunque todo falle después.
-    `placa`/`vehiculos` se persisten solo cuando la consulta incluye runt; el
+    `placa` se persiste cuando la consulta incluye runt o simit; `vehiculos`
+    SOLO cuando incluye runt (la tríada placa+cédula_propietario la valida el
+    RUNT — simit no conoce propietario y no debe fabricar la afiliación). El
     array `vehiculos` queda listo para soportar varios por estudio (hoy 1)."""
     ahora = _utcnow()
     retencion = int((empresa.get("config") or {}).get("retencion_dias") or RETENCION_DIAS)
-    ced_prop = cedula_propietario or cedula  # resuelta: dueño asumido = evaluado
+    ced_prop = cedula_propietario  # None = sin runt (solo simit): sin vehículo validado
     col_estudios.insert_one(
         {
             "consulta_id": consulta_id,
@@ -718,16 +857,23 @@ def crear_documento_estudio(
                 if actor.get("canal") == "api" else None
             ),
             "cedula": cedula,
+            # Nombres/apellidos que informó el CONSULTANTE (captcha PGN y
+            # pre-carga del nombre): SIN tildes y en mayúsculas — no es el
+            # nombre verificado (ese llega por la cascada PGN→Policía).
+            "nombres": nombres,
+            "apellidos": apellidos,
             "placa": placa,
             # Vehículos validados por runt: cada uno con SU propietario (puede
             # ser distinto de la persona evaluada). `placa` top-level queda
-            # como espejo de vehiculos[0] (compatibilidad con docs previos).
+            # como espejo de vehiculos[0] (compatibilidad con docs previos);
+            # con simit-only queda el espejo SIN vehiculos[] (sin runt no hay
+            # tríada validada).
             "vehiculos": (
                 [{
                     "placa": placa,
                     "cedula_propietario": ced_prop,
                     "propietario_es_evaluado": ced_prop == cedula,
-                }] if placa else []
+                }] if placa and ced_prop is not None else []
             ),
             "nombre_consultado": "",
             "estado": "EN_PROGRESO",
@@ -740,6 +886,7 @@ def crear_documento_estudio(
             "anexo_procuraduria": None,
             "anexo_policia": None,
             "anexo_runt": None,
+            "anexo_simit": None,
             "retencion_expira_en": ahora + timedelta(days=retencion),
             "auditoria": auditoria,
         }

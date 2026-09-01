@@ -57,8 +57,10 @@ EMPRESA_INICIAL = {
         # del titular (Decreto 019 de 2012) — se activa por empresa vía admin
         # con autorización documentada del titular (Ley 1581 de 2012).
         # "runt" SÍ va: portal público de consulta ciudadana por placa + cédula
-        # del propietario (sin restricción de terceros).
-        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt"],
+        # del propietario (sin restricción de terceros). "simit" SÍ va
+        # (2026-09-01): estado de cuenta público de la FCM por placa (sin
+        # captcha, sin restricción de terceros).
+        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit"],
     },
 }
 

@@ -868,6 +868,27 @@ class TestReservarConsumosMultiFuente(unittest.TestCase):
             self.assertEqual(e["cupo_disponible"], 49)
             self.assertEqual(e["cupo_consumido"], 1)
 
+    def test_plan_con_simit_consume_como_cualquier_fuente(self):
+        """simit (2026-09-01) es una fuente más del catálogo: un plan que la
+        incluye cobra por CONSULTA (lockstep) igual que runt — sin cambios de
+        cobro, la tupla FUENTES ampliada la valida y propaga sola."""
+        SIM = "simit"
+        plan_sim = plan_doc(precio=1500, nombre="COMPARENDOS", plan_id=ObjectId())
+        plan_sim["fuentes_incluidas"] = [SIM]
+        empresa, col_emp, col_pla, col_mov = self._montaje(
+            [entrada_plan(SIM, plan_sim, cupo_autorizado=6)],
+            planes=[plan_sim],
+        )
+        movs = cobro.reservar_consumos(
+            empresa, ACTOR, "ES-SIM1", [SIM],
+            col_mov=col_mov, col_emp=col_emp, col_pla=col_pla,
+        )
+        self.assertEqual(len(movs), 1)
+        self.assertEqual(movs[0]["monto_cop"], 1500)
+        self.assertEqual(movs[0]["fuentes"], [SIM])
+        self.assertEqual(movs[0]["fuentes_tocadas"], [SIM])
+        self.assertEqual(col_emp.documents[0]["planes"][0]["cupo_disponible"], 5)
+
     def test_consumo_marca_canal_portal_o_api(self):
         """Canal del consumo (2026-08-30): actor humano → "portal"; actor de API
         key (canal="api") → los CONSUMO quedan marcados para distinguir en

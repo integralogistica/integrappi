@@ -39,6 +39,7 @@ from Funciones.orquestador_estudios import (
     codigo_verificacion,
     enmascarar_cedula,
     ejecutar_estudio,
+    mayoria_fuentes_fallidas,
     nuevo_consulta_id,
 )
 from rutas.seguridad import _normalizar_cedula, _normalizar_placa
@@ -421,17 +422,39 @@ def consultar_cupo(
 
 # === 3. Crear estudio ==========================================================
 
+_TILDES_NOMBRE = str.maketrans("áéíóúüÁÉÍÓÚÜ", "aeiouuAEIOUU")
+
+
+def _normalizar_nombre(valor: str | None) -> str | None:
+    """Nombres/apellidos del consultante → MAYÚSCULAS SIN tildes, solo letras
+    y espacios (2026-09-01): así los espera el captcha de la PGN ("¿cuál es
+    el primer nombre…?"). La Ñ se conserva (es letra, no tilde). None/vacío
+    → None (sin pista)."""
+    texto = (valor or "").translate(_TILDES_NOMBRE).upper()
+    texto = "".join(c for c in texto if c.isalpha() or c == " ")
+    texto = " ".join(texto.split())
+    return texto or None
+
+
 class CrearEstudio(BaseModel):
     cedula: str
     forzar: bool = False
     empresa_id: str | None = None  # solo ADMIN_INTEGRA (attribución del estudio)
     fuentes: list[str] | None = None  # fuentes a consultar; None = todas las del plan
     plan_id: str | None = None  # plan con el que cobrar la consulta (elegido por el usuario)
-    placa: str | None = None  # solo la fuente runt: vehículo del propietario consultado
+    placa: str | None = None  # fuentes de vehículo (runt/simit)
     # cédula del PROPIETARIO del vehículo (solo runt): el RUNT valida contra
     # el propietario ACTIVO de la placa, que muchas veces NO es el conductor
     # evaluado. Vacía → se usa la cédula consultada (comportamiento previo).
     cedula_propietario: str | None = None
+    # Nombres y apellidos de la persona evaluada que informa el CONSULTANTE
+    # (2026-09-01): el portal los PIDE cuando el plan incluye procuraduria
+    # porque el captcha de la PGN pregunta por ellos ("¿cuál es el primer
+    # nombre de la persona que está consultando?"). Se normalizan SIN tildes
+    # y en mayúsculas. Opcionales para no romper integraciones API: sin ellos
+    # esas variantes del captcha caen a Gemini/reintento.
+    nombres: str | None = None
+    apellidos: str | None = None
 
 
 @router.post("", status_code=201)
@@ -535,25 +558,38 @@ async def crear_estudio(
         habilitadas = fuentes_del_plan
         plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
-    # La fuente runt consulta por placa + cédula del PROPIETARIO ACTIVO: la
-    # placa es OBLIGATORIA si runt va a correr (con `habilitadas` ya definitiva),
-    # y se ignora/limpia si no (no se persiste nada del vehículo en ese caso).
-    # La cédula del propietario puede ser DISTINTA de la del conductor evaluado
-    # (dueño ≠ conductor): sin `cedula_propietario` se asume que el evaluado es
-    # el propietario (comportamiento previo a 2026-08-30).
+    # Las fuentes de vehículo (runt, simit) consultan por PLACA: es OBLIGATORIA
+    # si alguna va a correr (con `habilitadas` ya definitiva), y se ignora/limpia
+    # si no (no se persiste nada del vehículo en ese caso).
+    # La cédula del propietario es SOLO de runt (valida contra el PROPIETARIO
+    # ACTIVO; puede ser DISTINTA de la del conductor evaluado: sin
+    # `cedula_propietario` se asume que el evaluado es el propietario —
+    # comportamiento previo a 2026-08-30). simit NO usa cédula: si solo corre
+    # simit, el campo se ignora.
     placa: str | None = None
     cedula_propietario: str | None = None
-    if "runt" in habilitadas:
+    if "runt" in habilitadas or "simit" in habilitadas:
         if not (datos.placa or "").strip():
+            fuentes_placa = " y ".join(
+                f for f in ("RUNT", "SIMIT") if f.lower() in habilitadas
+            )
             raise HTTPException(
                 status_code=422,
-                detail="La fuente RUNT requiere la placa del vehículo (campo placa)",
+                detail=f"La fuente {fuentes_placa} requiere la placa del vehículo (campo placa)",
             )
         placa = _normalizar_placa(datos.placa)
-        if (datos.cedula_propietario or "").strip():
-            cedula_propietario = _normalizar_cedula(datos.cedula_propietario)
-        else:
-            cedula_propietario = cedula
+        if "runt" in habilitadas:
+            if (datos.cedula_propietario or "").strip():
+                cedula_propietario = _normalizar_cedula(datos.cedula_propietario)
+            else:
+                cedula_propietario = cedula
+
+    # Nombres/apellidos del consultante (captcha de la PGN): SIN tildes, en
+    # mayúsculas, solo letras y espacios — es la forma en que el portal de la
+    # PGN espera la respuesta ("primer nombre de la persona que está
+    # consultando").
+    nombres = _normalizar_nombre(getattr(datos, "nombres", None))
+    apellidos = _normalizar_nombre(getattr(datos, "apellidos", None))
 
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
@@ -589,6 +625,8 @@ async def crear_estudio(
         auditoria=_auditoria_request(request),
         placa=placa,
         cedula_propietario=cedula_propietario,
+        nombres=nombres,
+        apellidos=apellidos,
     )
 
     try:
@@ -603,6 +641,8 @@ async def crear_estudio(
             fuentes=habilitadas,
             placa=placa,
             cedula_propietario=cedula_propietario,
+            nombres=nombres,
+            apellidos=apellidos,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -612,18 +652,20 @@ async def crear_estudio(
         )
         estudio = col_estudios.find_one({"consulta_id": consulta_id})
 
-    # Reembolso automático: el estudio no entregó NADA (todas las fuentes
-    # falladas) → se devuelven TODOS los consumos de la consulta (cupos y COP).
-    # PARCIAL/ADVERTENCIAS NO reembolsan (entregaron algo).
-    if consumos and (estudio.get("estado") == "ERROR"):
+    # Reembolso automático (regla 2026-09-01): se devuelve la consulta SOLO si
+    # MÁS del 51% de las fuentes corridas fallaron. Con la mitad o menos caídas
+    # lo entregado sigue siendo valioso y se cobra — que la Procuraduría (o
+    # cualquier portal) esté caída no invalida el resto del informe. Nada
+    # corrido (falla catastrófica del proceso) también reembolsa.
+    if consumos and mayoria_fuentes_fallidas(estudio.get("fuentes") or {}):
         try:
             cobro.reembolsar_consumos_consulta(
                 consulta_id, empresa, actor_doc,
-                motivo="Consulta terminó en ERROR (sin resultados)", automatico=True,
+                motivo="Más del 51% de las fuentes corridas fallaron (o no corrió ninguna)", automatico=True,
             )
             registrar_evento(
                 "reembolso", actor=actor, consulta_id=consulta_id,
-                detalle="automático por consulta en ERROR", request=request,
+                detalle="automático por mayoría de fuentes fallidas", request=request,
             )
         except Exception as exc:
             logger.error("Reembolso automático de %s falló: %s", consulta_id, exc)
@@ -939,6 +981,7 @@ def estadisticas_estudios(
                     {"$eq": ["$fuentes.procuraduria.origen", "cache"]},
                     {"$eq": ["$fuentes.policia.origen", "cache"]},
                     {"$eq": ["$fuentes.runt.origen", "cache"]},
+                    {"$eq": ["$fuentes.simit.origen", "cache"]},
                 ]},
                 1, 0,
             ]}},
@@ -1030,7 +1073,10 @@ CONFIG_DEFAULT_EMPRESA = {
     # runt SÍ va (2026-08-30): el portal público del RUNT es de consulta
     # ciudadana abierta por placa + cédula del propietario (sin restricción de
     # terceros); el gate real es el PLAN, no la config.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt"],
+    # simit SÍ va (2026-09-01): el estado de cuenta de la FCM es un portal
+    # público de consulta ciudadana (sin captcha, sin restricción de
+    # terceros); mismo gate: el PLAN.
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit"],
 }
 
 

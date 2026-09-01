@@ -63,24 +63,89 @@ def _resolver_captcha_texto(texto: str) -> Optional[str]:
     return str(a * b)
 
 
-def _resolver_captcha_gemini(pregunta: str) -> str:
+_TILDES = str.maketrans("áéíóúüÁÉÍÓÚÜ", "aeiouuAEIOUU")
+
+
+def _resolver_captcha_documento(
+    pregunta: str, cedula: str, nombres: str | None = None, apellidos: str | None = None,
+) -> Optional[str]:
+    """Preguntas cuya respuesta deriva de DATOS QUE EL CONSULTANTE CONOCE —
+    el portal las verifica contra el formulario:
+
+    - DEL DOCUMENTO (hallazgo 2026-09-01): "escriba los dos últimos dígitos
+      del documento a consultar" etc. → la cédula que el bot ya diligenció
+      (antes iba a parar a Gemini SIN la cédula → inventaba → fallo).
+    - DEL NOMBRE (estrategia 2026-09-01): "¿cuál es el primer nombre de la
+      persona que está consultando?" etc. → el portal cliente ahora PIDE
+      nombres y apellidos cuando el plan incluye procuraduria.
+
+    Determinista y gratuita: sin red. Solo patrones inequívocos (nunca
+    adivinar los que no entren aquí; p.ej. "segundo nombre" de quien solo
+    tiene uno → None → Gemini/reintento)."""
+    q = (pregunta or "").translate(_TILDES).lower()
+    doc = re.sub(r"\D", "", cedula or "")
+    if doc and any(k in q for k in ("documento", "cedula", "identificacion")):
+        if "dos ultimos digitos" in q or "ultimos dos digitos" in q:
+            return doc[-2:]
+        if "tres ultimos digitos" in q or "ultimos tres digitos" in q:
+            return doc[-3:]
+        if "primer digito" in q or "primer numero" in q:
+            return doc[0]
+        if "cuantos digitos" in q or "cuantos numeros" in q or "cuantas cifras" in q:
+            return str(len(doc))
+    # Preguntas de NOMBRE: respuesta = el token correspondiente de los
+    # nombres/apellidos que diligenció el consultante (SIN tildes, ya
+    # normalizados por el endpoint).
+    if "nombre" in q or "apellido" in q:
+        tokens_n = (nombres or "").split()
+        tokens_a = (apellidos or "").split()
+        if "primer nombre" in q and tokens_n:
+            return tokens_n[0]
+        if "segundo nombre" in q and len(tokens_n) > 1:
+            return tokens_n[1]
+        if "primer apellido" in q and tokens_a:
+            return tokens_a[0]
+        if "segundo apellido" in q and len(tokens_a) > 1:
+            return tokens_a[1]
+    return None
+
+
+def _resolver_captcha_gemini(
+    pregunta: str, cedula: str | None = None,
+    nombres: str | None = None, apellidos: str | None = None,
+) -> str:
     """Resuelve una pregunta de conocimiento general del captcha con Gemini.
 
     Igual que la lectura de documentos de En Ruta (vehiculos.py): temperature 0
     y respuesta de una sola palabra/cifra. Sin contexto de conversación.
+    `cedula`/`nombres`/`apellidos` (2026-09-01) le dan el CONTEXTO del
+    formulario para las variantes derivadas de él.
+    maxOutputTokens 8192: en Gemini 3.x el thinking CUENTA en el presupuesto
+    (con 512 devuelve vacío — bug ya visto en En Ruta).
     """
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise BotProcuraduriaError("Captcha de conocimiento general y no hay GEMINI_API_KEY configurada")
+    contexto = ""
+    if cedula or nombres or apellidos:
+        partes = []
+        if cedula:
+            partes.append(f"el número de documento consultado es {cedula}")
+        if nombres:
+            partes.append(f"los nombres de la persona consultada son {nombres}")
+        if apellidos:
+            partes.append(f"los apellidos son {apellidos}")
+        contexto = f"Contexto del formulario: {'; '.join(partes)}. Si la pregunta se responde con ese contexto, úsalo. "
     cuerpo = {
         "contents": [{"role": "user", "parts": [{
             "text": (
+                f"{contexto}"
                 f"Responde esta pregunta de un formulario público colombiano con UNA sola "
                 f"palabra o cifra, sin puntuación, sin explicación, en mayúsculas si es texto, "
                 f"sin artículos (el/la). Pregunta: {pregunta}"
             )
         }]}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 512},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 8192},
     }
     try:
         r = requests.post(
@@ -102,12 +167,21 @@ def _resolver_captcha_gemini(pregunta: str) -> str:
     return texto.split()[0].strip(".,;:")
 
 
-async def consultar_antecedentes(cedula: str, headed: bool = False) -> Dict[str, Any]:
+async def consultar_antecedentes(
+    cedula: str, headed: bool = False,
+    nombres: str | None = None, apellidos: str | None = None,
+) -> Dict[str, Any]:
     """Consulta el certificado ORDINARIO de antecedentes de una cédula.
 
     El ordinario contiene las sanciones/inhabilidades VIGENTES (el que se
     exige en contratación). Retorna: cedula, texto_resultado, no_registra
     (bool | None), pdf_bytes (| None si no vino PDF) y pdf_ruta.
+
+    `nombres`/`apellidos` (2026-09-01, SIN tildes y en mayúsculas — el
+    endpoint los normaliza): pista para las preguntas del captcha sobre el
+    nombre de la persona consultada ("¿cuál es el primer nombre…?"). El
+    portal cliente los pide cuando el plan incluye procuraduria; sin ellos
+    esas variantes caen a Gemini/reintento.
     """
     cedula_norm = re.sub(r"\D", "", cedula or "")
     if not 3 <= len(cedula_norm) <= 15:
@@ -142,13 +216,20 @@ async def consultar_antecedentes(cedula: str, headed: bool = False) -> Dict[str,
             await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
             await pagina.wait_for_timeout(2000)
 
-            # 1) Leer y resolver el captcha (span #lblPregunta). Dos vías:
-            # aritmética por regex (gratuita) o conocimiento general por Gemini.
+            # 1) Leer y resolver el captcha (span #lblPregunta). Tres vías:
+            # aritmética por regex (gratuita), derivada del DOCUMENTO o del
+            # NOMBRE (deterministas: la cédula ya diligenciada y los
+            # nombres/apellidos que informó el consultante) o conocimiento
+            # general por Gemini (con ese mismo contexto).
             texto_captcha = (await pagina.inner_text("#lblPregunta")).strip()
             respuesta = _resolver_captcha_texto(texto_captcha)
             if respuesta is None:
+                respuesta = _resolver_captcha_documento(texto_captcha, cedula_norm, nombres, apellidos)
+                if respuesta is not None:
+                    logger.info("[BOT PGN] Captcha de documento/nombre (determinista): %r -> %r", texto_captcha, respuesta)
+            if respuesta is None:
                 logger.info("[BOT PGN] Captcha de conocimiento: %r -> Gemini", texto_captcha)
-                respuesta = _resolver_captcha_gemini(texto_captcha)
+                respuesta = _resolver_captcha_gemini(texto_captcha, cedula_norm, nombres, apellidos)
                 logger.info("[BOT PGN] Respuesta Gemini: %r", respuesta)
 
             # 2) Llenar el formulario (CC = value 1 en el select del portal)
@@ -267,10 +348,12 @@ def _texto_pdf(pdf_bytes: bytes) -> str:
         return "\n".join((p.extract_text() or "") for p in pdf.pages)
 
 
-def consultar_antecedentes_sync(cedula: str) -> Dict[str, Any]:
+def consultar_antecedentes_sync(
+    cedula: str, nombres: str | None = None, apellidos: str | None = None,
+) -> Dict[str, Any]:
     """Versión síncrona para asyncio.to_thread, igual que bot_rndc2."""
     with _LOCK:
-        return asyncio.run(consultar_antecedentes(cedula))
+        return asyncio.run(consultar_antecedentes(cedula, nombres=nombres, apellidos=apellidos))
 
 
 if __name__ == "__main__":
@@ -278,7 +361,9 @@ if __name__ == "__main__":
     import sys
 
     cedula = sys.argv[1] if len(sys.argv) > 1 else "1033688842"
-    r = consultar_antecedentes_sync(cedula)
+    nombres = sys.argv[2] if len(sys.argv) > 2 else None
+    apellidos = sys.argv[3] if len(sys.argv) > 3 else None
+    r = consultar_antecedentes_sync(cedula, nombres=nombres, apellidos=apellidos)
     html = r.pop("html", "")
     r["pdf_bytes"] = f"<{len(r['pdf_bytes'])} bytes>" if r.get("pdf_bytes") else None
     try:

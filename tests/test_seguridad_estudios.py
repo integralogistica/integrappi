@@ -889,28 +889,29 @@ class TestFuenteRuntPropietario(unittest.TestCase):
         }])
 
     def test_documento_persiste_vehiculos_propietario_evaluado(self):
-        """Sin cedula_propietario (dueño asumido = evaluado) o con la misma
-        cédula, la relación queda True."""
+        """Con la misma cédula del evaluado (runt ya resuelto por el endpoint),
+        la relación queda True. cedula_propietario=None + placa = solo simit
+        (ese caso lo cubre TestFuenteSimitSoloPlaca)."""
         actor = actor_consultador()
-        for ced_prop in (None, "1033688842"):
-            insertados = {}
+        ced_prop = "1033688842"
+        insertados = {}
 
-            class ColFake:
-                def insert_one(self, doc):
-                    doc["_id"] = ObjectId()
-                    insertados.update(doc)
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
 
-            with patch.object(orch, "col_estudios", ColFake()):
-                orch.crear_documento_estudio(
-                    consulta_id="ES-PROP2", cedula="1033688842", actor=actor,
-                    empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
-                    placa="MVX48E", cedula_propietario=ced_prop,
-                )
-            self.assertEqual(insertados["vehiculos"], [{
-                "placa": "MVX48E",
-                "cedula_propietario": "1033688842",
-                "propietario_es_evaluado": True,
-            }])
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-PROP2", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+                placa="MVX48E", cedula_propietario=ced_prop,
+            )
+        self.assertEqual(insertados["vehiculos"], [{
+            "placa": "MVX48E",
+            "cedula_propietario": "1033688842",
+            "propietario_es_evaluado": True,
+        }])
 
     def test_documento_sin_runt_no_persiste_vehiculos(self):
         actor = actor_consultador()
@@ -966,6 +967,351 @@ class TestCacheRuntConPlaca(unittest.TestCase):
             rseg._normalizar_placa("123")
         with self.assertRaises(HTTPException):
             rseg._normalizar_placa("AAAAAA")
+
+
+class TestFuenteSimit(unittest.TestCase):
+    """Fuente "simit" (estado de cuenta de comparendos por PLACA, sin cédula):
+    caché con clave (tipo, placa, cedula=None), semáforo por saldo EXIGIBLE
+    (total_a_pagar > 0 = ADVERTENCIA) y anti-envenenamiento análogo."""
+
+    RESULTADO_LIMPIO = {
+        "placa": "MVX48E",
+        "no_registra": None,
+        "mensaje": "No tienes comparendos ni multas registradas en Simit",
+        "total_comparendos": 0, "total_multas": 0, "total_acuerdos": 0,
+        "total_deuda": 0.0, "total_a_pagar": 0.0,
+        "comparendos": [],
+        "pdf_bytes": None,
+    }
+
+    RESULTADO_DEUDA = {
+        "placa": "ZZZ999",
+        "no_registra": None,
+        "mensaje": "",
+        "total_comparendos": 88, "total_multas": 17, "total_acuerdos": 0,
+        "total_deuda": 40257438.0, "total_a_pagar": 0.0,
+        "comparendos": [{
+            "numero": "130289A", "tipo": "Comparendo", "fecha_imposicion": "2000-04-11",
+            "notificacion": "No aplica", "placa": "ZZZ999", "secretaria": "Villavicencio",
+            "infraccion": "No respetar las señales de tránsito", "estado": "Pendiente",
+            "estado_nota": "No tiene curso", "valor": 260130.0, "valor_a_pagar": 260130.0,
+        }],
+        "pdf_bytes": None,
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_exito_limpio_cachea_sin_cedula(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_comparendos_simit_sync", return_value=self.RESULTADO_LIMPIO):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="MVX48E")
+                    )
+        # La caché va SIN cédula: la identidad del dato es la placa.
+        buscar.assert_called_once_with("simit", None, False, placa="MVX48E")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["total_comparendos"], 0)
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "simit")
+        self.assertIsNone(doc_cache["cedula"])
+        self.assertEqual(doc_cache["placa"], "MVX48E")
+
+    def test_saldo_exigible_es_advertencia(self):
+        resultado = {**self.RESULTADO_DEUDA, "total_a_pagar": 260130.0}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_comparendos_simit_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="ZZZ999")
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        # Y contamina el estado global: con las demás EXITO → CON_ADVERTENCIAS.
+        fuentes = {
+            "manifiestos_rndc": {"estado": "DESHABILITADA"},
+            "procuraduria": {"estado": "EXITO"},
+            "policia": {"estado": "DESHABILITADA"},
+            "runt": {"estado": "DESHABILITADA"},
+            "simit": {"estado": "ADVERTENCIA"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA_CON_ADVERTENCIAS")
+
+    def test_deuda_historica_sin_saldo_es_exito(self):
+        # ZZZ999 real: 105 pendientes de 1999-2000 con $0 EXIGIBLE → EXITO
+        # (el detalle queda en la sección/PDF, pero no es deuda vigente).
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_comparendos_simit_sync", return_value=self.RESULTADO_DEUDA):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="ZZZ999")
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["total_comparendos"], 88)
+        self.assertEqual(len(seccion["comparendos"]), 1)
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "simit", "cedula": None, "placa": "MVX48E",
+            "no_registra": None,
+            "mensaje": "No tienes comparendos ni multas registradas en Simit",
+            "total_comparendos": 0, "total_multas": 0, "total_acuerdos": 0,
+            "total_deuda": 0.0, "total_a_pagar": 0.0, "comparendos": [],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache) as buscar:
+            with patch.object(orch, "consultar_comparendos_simit_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="MVX48E")
+                )
+        buscar.assert_called_once_with("simit", None, False, placa="MVX48E")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["placa"], "MVX48E")
+        bot.assert_not_called()
+
+    def test_resultado_vacio_es_no_disponible_sin_cachear(self):
+        resultado = {
+            "placa": "AAA123", "no_registra": None, "mensaje": "",
+            "total_comparendos": None, "total_multas": None, "total_acuerdos": None,
+            "total_deuda": None, "total_a_pagar": None, "comparendos": [],
+            "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_comparendos_simit_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="AAA123")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_simit import BotSimitSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_comparendos_simit_sync") as bot:
+                bot.side_effect = BotSimitSinResultado("sin datos")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("simit", "1033688842", actor_consultador(), False, placa="MVX48E")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
+class TestFuenteSimitSoloPlaca(unittest.TestCase):
+    """Estudio con SOLO simit: la placa se persiste (espejo) pero NO hay
+    vehiculos[] ni cedula_propietario (simit no valida propiedad)."""
+
+    def test_documento_solo_simit_sin_vehiculos(self):
+        actor = actor_consultador()
+        insertados = {}
+
+        class ColFake:
+            def insert_one(self, doc):
+                doc["_id"] = ObjectId()
+                insertados.update(doc)
+
+        with patch.object(orch, "col_estudios", ColFake()):
+            orch.crear_documento_estudio(
+                consulta_id="ES-SIMIT1", cedula="1033688842", actor=actor,
+                empresa={"nombre": "X", "config": {}}, forzar=False, auditoria={},
+                placa="MVX48E", cedula_propietario=None,
+            )
+        self.assertEqual(insertados["placa"], "MVX48E")
+        self.assertEqual(insertados["vehiculos"], [])
+
+
+class TestCacheSimitConPlaca(unittest.TestCase):
+    """La caché de simit es por (tipo, placa) SIN cédula: sin placa NUNCA hay
+    hit; con placa el filtro no depende de la cédula evaluada."""
+
+    def test_simit_sin_placa_nunca_hace_hit(self):
+        from rutas import seguridad as rseg
+
+        with patch.object(rseg, "col_consultas") as col:
+            col.find_one.return_value = {"_id": ObjectId(), "tipo": "simit"}
+            doc = rseg._buscar_cache("simit", None, False, placa=None)
+        self.assertIsNone(doc)
+        col.find_one.assert_not_called()
+
+    def test_simit_filtra_por_placa_con_cedula_none(self):
+        from rutas import seguridad as rseg
+
+        with patch.object(rseg, "col_consultas") as col:
+            col.find_one.return_value = None
+            # La cédula del evaluado NO participa: mismo filtro para cualquier evaluado.
+            rseg._buscar_cache("simit", "1033688842", False, placa="MVX48E")
+        filtro = col.find_one.call_args[0][0]
+        self.assertEqual(filtro["tipo"], "simit")
+        self.assertIsNone(filtro["cedula"])
+        self.assertEqual(filtro["placa"], "MVX48E")
+
+
+class TestCaptchaProcuraduriaDocumento(unittest.TestCase):
+    """2026-09-01: preguntas del captcha PGN derivadas DEL DOCUMENTO — el bot
+    ya conoce la cédula del formulario; resolverlas determinista (antes iban a
+    Gemini SIN la cédula y fallaban)."""
+
+    CEDULA = "1033688842"
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_dos_ultimos_digitos(self):
+        from Funciones.bot_procuraduria import _resolver_captcha_documento
+
+        self.assertEqual(
+            _resolver_captcha_documento("¿Escriba los dos últimos dígitos del documento a consultar?", self.CEDULA),
+            "42",
+        )
+        self.assertEqual(
+            _resolver_captcha_documento("Escriba los ultimos dos digitos del documento", self.CEDULA),
+            "42",
+        )
+
+    def test_variantes_del_documento(self):
+        from Funciones.bot_procuraduria import _resolver_captcha_documento
+
+        self.assertEqual(_resolver_captcha_documento("Escriba los tres últimos dígitos del documento", self.CEDULA), "842")
+        self.assertEqual(_resolver_captcha_documento("¿Cuál es el primer dígito del documento?", self.CEDULA), "1")
+        self.assertEqual(_resolver_captcha_documento("¿Cuántos dígitos tiene el documento?", self.CEDULA), "10")
+
+    def test_preguntas_ajenas_al_documento_no_se_adivinan(self):
+        from Funciones.bot_procuraduria import _resolver_captcha_documento
+
+        # Sin pista de nombre: cae a Gemini/reintento.
+        self.assertIsNone(
+            _resolver_captcha_documento("¿Cuál es el primer nombre de la persona que está consultando?", self.CEDULA)
+        )
+        self.assertIsNone(_resolver_captcha_documento("¿Cuánto es 7 + 5?", self.CEDULA))
+        self.assertIsNone(_resolver_captcha_documento("¿Capital de Francia?", self.CEDULA))
+        self.assertIsNone(_resolver_captcha_documento("", self.CEDULA))
+
+    def test_preguntas_de_nombre_con_pista_del_consultante(self):
+        """2026-09-01 (estrategia): el portal pide nombres/apellidos cuando el
+        plan incluye procuraduria — el captcha de nombre se responde con esa
+        pista (SIN tildes, mayúsculas, ya normalizada por el endpoint)."""
+        from Funciones.bot_procuraduria import _resolver_captcha_documento
+
+        NOMBRES = "JHOAM ORLANDO"
+        APELLIDOS = "AMAYA TOVAR"
+        self.assertEqual(
+            _resolver_captcha_documento(
+                "¿Cuál es el primer nombre de la persona que está consultando?",
+                self.CEDULA, NOMBRES, APELLIDOS,
+            ),
+            "JHOAM",
+        )
+        self.assertEqual(
+            _resolver_captcha_documento("Escriba el primer apellido de la persona consultada", self.CEDULA, NOMBRES, APELLIDOS),
+            "AMAYA",
+        )
+        self.assertEqual(
+            _resolver_captcha_documento("¿Segundo nombre?", self.CEDULA, NOMBRES, APELLIDOS),
+            "ORLANDO",
+        )
+        # Segundo apellido inexistente / sin pista: NO se adivina.
+        self.assertIsNone(_resolver_captcha_documento("¿Tercer nombre?", self.CEDULA, NOMBRES, APELLIDOS))
+        self.assertIsNone(
+            _resolver_captcha_documento("¿Cuál es el primer nombre de la persona que está consultando?", self.CEDULA)
+        )
+
+    def test_orquestador_pasa_nombres_al_bot_procuraduria(self):
+        """La pista viaja por toda la cadena hasta consultar_antecedentes_sync."""
+        resultado = {
+            "cedula": "1033688842", "no_registra": True,
+            "mensaje": "NO REGISTRA SANCIONES NI INHABILIDADES VIGENTES",
+            "texto_resultado": "ok", "pdf_bytes": b"%PDF-fake",
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_antecedentes_sync", return_value=resultado) as bot:
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    with patch.object(orch, "BACKOFF_MS", 0):
+                        self._correr(
+                            orch._ejecutar_fuente(
+                                "procuraduria", "1033688842", actor_consultador(), False,
+                                nombres="JHOAM ORLANDO", apellidos="AMAYA TOVAR",
+                            )
+                        )
+        bot.assert_called_once_with(
+            "1033688842", nombres="JHOAM ORLANDO", apellidos="AMAYA TOVAR",
+        )
+
+    def test_normalizar_nombre_sin_tildes(self):
+        self.assertEqual(se._normalizar_nombre("Jhoam Orlandó Ámaya"), "JHOAM ORLANDO AMAYA")
+        self.assertEqual(se._normalizar_nombre("josé muñoz"), "JOSE MUÑOZ")  # Ñ se conserva
+        self.assertIsNone(se._normalizar_nombre("   "))
+        self.assertIsNone(se._normalizar_nombre(None))
+        self.assertIsNone(se._normalizar_nombre("123"))
+
+
+class TestMayoriaFuentesFallidas(unittest.TestCase):
+    """Criterio del reembolso automático (decisión de negocio 2026-09-01): se
+    devuelve la consulta SOLO si >51% de las fuentes CORRIDAS fallaron — con
+    la mitad o menos caídas lo entregado es valioso y se cobra (antes solo
+    reembolsaba el ERROR global = 100% caídas)."""
+
+    def _f(self, estado):
+        return {"estado": estado, "origen": "portal", "intentos": 1, "error": None}
+
+    def test_mitad_fallida_no_reembolsa(self):
+        # El caso del usuario: plan proc+simit, la PGN caída — simit entregó.
+        fuentes = {"procuraduria": self._f("NO_DISPONIBLE"), "simit": self._f("EXITO")}
+        self.assertFalse(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_una_de_tres_no_reembolsa(self):
+        fuentes = {
+            "manifiestos_rndc": self._f("EXITO"),
+            "procuraduria": self._f("ERROR"),
+            "simit": self._f("EXITO"),
+        }
+        self.assertFalse(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_dos_de_tres_reembolsa(self):
+        # 66% caídas: ya no queda mayoritariamente nada valioso.
+        fuentes = {
+            "manifiestos_rndc": self._f("EXITO"),
+            "procuraduria": self._f("NO_DISPONIBLE"),
+            "simit": self._f("ERROR"),
+        }
+        self.assertTrue(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_todas_fallidas_reembolsa(self):
+        # 100% (el ERROR global de siempre).
+        fuentes = {"procuraduria": self._f("NO_DISPONIBLE"), "simit": self._f("ERROR")}
+        self.assertTrue(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_una_de_una_reembolsa(self):
+        self.assertTrue(orch.mayoria_fuentes_fallidas({"procuraduria": self._f("NO_DISPONIBLE")}))
+
+    def test_advertencia_cuenta_como_entregada(self):
+        fuentes = {"procuraduria": self._f("ADVERTENCIA"), "simit": self._f("ADVERTENCIA")}
+        self.assertFalse(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_deshabilitadas_y_ausentes_no_cuentan(self):
+        # El plan excluyó fuentes: no son fallos (ni salvación del conteo).
+        fuentes = {
+            "procuraduria": self._f("ERROR"),
+            "simit": self._f("ERROR"),
+            "runt": self._f("DESHABILITADA"),
+            "policia": self._f("DESHABILITADA"),
+        }
+        self.assertTrue(orch.mayoria_fuentes_fallidas(fuentes))
+
+    def test_nada_corrido_reembolsa(self):
+        # Falla catastrófica (fuentes.error_global str o dict vacío): no se
+        # entregó nada → reembolso (comportamiento previo del ERROR global).
+        self.assertTrue(orch.mayoria_fuentes_fallidas({}))
+        self.assertTrue(orch.mayoria_fuentes_fallidas({"error_global": "boom"}))
 
 
 

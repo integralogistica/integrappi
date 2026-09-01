@@ -113,20 +113,25 @@ def _enmascarar_cedula(cedula: str | None) -> str:
 def _vehiculo_del_estudio(estudio: dict) -> dict:
     """Vehículo validado por runt en este estudio (hoy 1; array en el doc).
 
-    Tolerante con docs previos a 2026-08-30 (sin `vehiculos`): se asume que la
-    consulta de runt se hizo con la cédula de la persona evaluada (que era el
-    comportamiento del sistema entonces).
+    Tolerante con docs previos a 2026-08-30 (sin `vehiculos`): si hay fuente
+    runt se asume que la consulta se hizo con la cédula de la persona evaluada
+    (que era el comportamiento del sistema entonces). Con estudios SOLO simit
+    (sin runt) no hay tríada validada: cédula del propietario None (simit
+    consulta por placa y no conoce propietario — no se fabrica la afiliación).
     """
     vehiculo = ((estudio.get("vehiculos") or [{}]) or [{}])[0] or {}
     ced_evaluada = estudio.get("cedula", "")
-    ced_prop = vehiculo.get("cedula_propietario") or ced_evaluada
+    # runt corrió de verdad (no DESHABILITADA por el plan): solo él valida la
+    # tríada. Docs viejos sin la clave runt no traen placa → da igual.
+    hay_runt = ((estudio.get("fuentes") or {}).get("runt") or {}).get("estado") not in (None, "DESHABILITADA")
+    ced_prop = vehiculo.get("cedula_propietario") or (ced_evaluada if hay_runt else None)
     es_evaluado = vehiculo.get("propietario_es_evaluado")
-    if es_evaluado is None:
+    if es_evaluado is None and ced_prop is not None:
         es_evaluado = ced_prop == ced_evaluada
     return {
         "placa": estudio.get("placa") or vehiculo.get("placa") or "",
         "cedula_propietario": ced_prop,
-        "propietario_es_evaluado": bool(es_evaluado),
+        "propietario_es_evaluado": bool(es_evaluado) if ced_prop is not None else None,
     }
 
 
@@ -244,6 +249,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     proc = fuentes.get("procuraduria") or {}
     pol = fuentes.get("policia") or {}
     runt = fuentes.get("runt") or {}
+    simit = fuentes.get("simit") or {}
+
+    def _corrio(fuente: dict) -> bool:
+        """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
+        plan elegido (no se consultó ni se cobró) y estado None = la clave no
+        existía cuando se creó el doc (fuente posterior): en ambos casos su
+        sección no se muestra — el informe presenta SOLO lo que el plan
+        consultó (2026-09-01)."""
+        estado = (fuente or {}).get("estado")
+        return estado is not None and estado != "DESHABILITADA"
     pdf_info = estudio.get("pdf") or {}
 
     consulta_id = estudio.get("consulta_id", "")
@@ -319,14 +334,20 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     ]
     vehiculo = _vehiculo_del_estudio(estudio)
     if vehiculo["placa"]:
-        datos_persona.insert(2, ["Placa consultada (RUNT)", vehiculo["placa"]])
+        # La placa la trae runt o simit: etiqueta según quién la validó (y
+        # CORRIÓ — una fuente DESHABILITADA no validó nada).
+        etiqueta_placa = "Placa consultada (RUNT)" if _corrio(runt) else "Placa consultada (SIMIT)"
+        datos_persona.insert(2, [etiqueta_placa, vehiculo["placa"]])
         # El propietario del vehículo puede ser OTRA persona: el informe debe
         # diferenciar quién se evalúa (conductor) de quién es dueño del carro.
-        datos_persona.insert(3, ["Propietario del vehículo", (
-            f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — es la persona evaluada"
-            if vehiculo["propietario_es_evaluado"] else
-            f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — DISTINTA de la persona evaluada"
-        )])
+        # Solo runt valida la propiedad — con solo simit no hay fila (el
+        # estado de cuenta de comparendos es de la PLACA).
+        if _corrio(runt) and vehiculo["cedula_propietario"] is not None:
+            datos_persona.insert(3, ["Propietario del vehículo", (
+                f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — es la persona evaluada"
+                if vehiculo["propietario_es_evaluado"] else
+                f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} — DISTINTA de la persona evaluada"
+            )])
     tabla_persona = Table(
         [[celda(k, negrita=True), celda(v)] for k, v in datos_persona],
         colWidths=[45 * mm, 115 * mm],
@@ -345,30 +366,41 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     cuento.append(Paragraph("Resumen por fuente", estilo_h2))
     filas_resumen = [["Fuente", "Estado", "Resultado"]]
-    etiqueta_rndc, _ = ESTADO_FUENTE_TEXTO.get(rndc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-    filas_resumen.append([
-        "Manifiestos RNDC (365 días)",
-        etiqueta_rndc,
-        f"{rndc.get('total', 0)} viajes registrados" if rndc.get("estado") == "EXITO" else _resumen_error(rndc),
-    ])
-    etiqueta_proc, _ = ESTADO_FUENTE_TEXTO.get(proc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-    filas_resumen.append([
-        "Procuraduría General de la Nación",
-        etiqueta_proc,
-        _texto_veredicto(proc),
-    ])
-    etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-    filas_resumen.append([
-        "Policía Nacional — Antecedentes Judiciales",
-        etiqueta_pol,
-        _texto_veredicto_policia(pol),
-    ])
-    etiqueta_runt, _ = ESTADO_FUENTE_TEXTO.get(runt.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-    filas_resumen.append([
-        f"RUNT — Vehículo {estudio.get('placa') or (runt.get('placa') or '')}".rstrip(),
-        etiqueta_runt,
-        _texto_veredicto_runt(runt),
-    ])
+    if _corrio(rndc):
+        etiqueta_rndc, _ = ESTADO_FUENTE_TEXTO.get(rndc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Manifiestos RNDC (365 días)",
+            etiqueta_rndc,
+            f"{rndc.get('total', 0)} viajes registrados" if rndc.get("estado") == "EXITO" else _resumen_error(rndc),
+        ])
+    if _corrio(proc):
+        etiqueta_proc, _ = ESTADO_FUENTE_TEXTO.get(proc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Procuraduría General de la Nación",
+            etiqueta_proc,
+            _texto_veredicto(proc),
+        ])
+    if _corrio(pol):
+        etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Policía Nacional — Antecedentes Judiciales",
+            etiqueta_pol,
+            _texto_veredicto_policia(pol),
+        ])
+    if _corrio(runt):
+        etiqueta_runt, _ = ESTADO_FUENTE_TEXTO.get(runt.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            f"RUNT — Vehículo {estudio.get('placa') or (runt.get('placa') or '')}".rstrip(),
+            etiqueta_runt,
+            _texto_veredicto_runt(runt),
+        ])
+    if _corrio(simit):
+        etiqueta_simit, _ = ESTADO_FUENTE_TEXTO.get(simit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            f"SIMIT — Comparendos placa {estudio.get('placa') or (simit.get('placa') or '')}".rstrip(),
+            etiqueta_simit,
+            _texto_veredicto_simit(simit),
+        ])
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -415,7 +447,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         logger.error("Bloque QR no se pudo construir: %s", exc)
 
     # ── 2. Detalle manifiestos RNDC ──────────────────────────────────────────
-    cuento.append(Paragraph("Manifiestos de carga — RNDC (Mintransporte)", estilo_h2))
+    if _corrio(rndc):
+        cuento.append(Paragraph("Manifiestos de carga — RNDC (Mintransporte)", estilo_h2))
     if rndc.get("estado") == "EXITO":
         cuento.append(Paragraph(
             f"Ventana consultada: {rndc.get('desde', '—')} a {rndc.get('hasta', '—')} · "
@@ -437,11 +470,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                     "el detalle completo queda en el registro del estudio.",
                     estilo_peq,
                 ))
-    else:
+    elif _corrio(rndc):
         cuento.append(_parrafo_estado_fuente(rndc, "RNDC"))
 
     # ── 3. Detalle Procuraduría ──────────────────────────────────────────────
-    cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
+    if _corrio(proc):
+        cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
     if proc.get("estado") in {"EXITO", "ADVERTENCIA"}:
         no_registra = proc.get("no_registra")
         if no_registra is True:
@@ -482,11 +516,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
         cuento.append(tabla_proc)
-    else:
+    elif _corrio(proc):
         cuento.append(_parrafo_estado_fuente(proc, "la Procuraduría"))
 
     # ── 4. Detalle Policía (antecedentes judiciales) ────────────────────────
-    cuento.append(Paragraph("Antecedentes judiciales — Policía Nacional", estilo_h2))
+    if _corrio(pol):
+        cuento.append(Paragraph("Antecedentes judiciales — Policía Nacional", estilo_h2))
     if pol.get("estado") in {"EXITO", "ADVERTENCIA"}:
         no_registra_pol = pol.get("no_registra")
         if no_registra_pol is True:
@@ -530,12 +565,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
         cuento.append(tabla_pol)
-    else:
+    elif _corrio(pol):
         cuento.append(_parrafo_estado_fuente(pol, "la Policía Nacional"))
 
     # ── 4b. Detalle RUNT (vehículo) ─────────────────────────────────────────
-    cuento.append(Paragraph("Vehículo — RUNT (Mintransporte)", estilo_h2))
-    if vehiculo["placa"] and not vehiculo["propietario_es_evaluado"]:
+    if _corrio(runt):
+        cuento.append(Paragraph("Vehículo — RUNT (Mintransporte)", estilo_h2))
+    # El badge exige propietario CONOCIDO (runt): con solo simit no hay tríada
+    # y propietario_es_evaluado es None (no "distinto").
+    if _corrio(runt) and vehiculo["placa"] and vehiculo["cedula_propietario"] is not None and not vehiculo["propietario_es_evaluado"]:
         # El dueño del vehículo NO es la persona evaluada: sin este aviso, el
         # lector atribuye al conductor un rechazo de propiedad del RUNT (o un
         # SOAT ajeno). La cédula del propietario va enmascarada.
@@ -650,8 +688,100 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ]))
             cuento.append(Paragraph("Historial de pólizas SOAT (más recientes)", ParagraphStyle("h_pol", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4)))
             cuento.append(tabla_polizas)
-    else:
+    elif _corrio(runt):
         cuento.append(_parrafo_estado_fuente(runt, "el RUNT"))
+
+    # ── 4c. Detalle SIMIT (comparendos de la placa) ─────────────────────────
+    if _corrio(simit):
+        cuento.append(Paragraph("Comparendos — SIMIT (Federación Colombiana de Municipios)", estilo_h2))
+    if simit.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        total_a_pagar = simit.get("total_a_pagar") or 0
+        total_deuda = simit.get("total_deuda") or 0
+        total_comps = simit.get("total_comparendos") or 0
+        if total_a_pagar > 0:
+            texto_simit, color_simit = (
+                f"COMPARENDOS PENDIENTES — SALDO EXIGIBLE {_cop_texto(total_a_pagar)}",
+                COLOR_ADVERTENCIA,
+            )
+        elif total_comps > 0:
+            # Deuda histórica sin saldo exigible (prescrita/condonada): el
+            # detalle va abajo pero NO es deuda vigente (ZZZ999: 105 de
+            # 1999-2000 con $0 a pagar).
+            texto_simit, color_simit = (
+                f"SIN SALDO EXIGIBLE — REGISTRA {int(total_comps)} ANTECEDENTES HISTÓRICOS ({_cop_texto(total_deuda)})",
+                COLOR_NEUTRO,
+            )
+        else:
+            texto_simit, color_simit = "SIN COMPARENDOS NI MULTAS REGISTRADAS", COLOR_EXITO
+        tabla_veredicto_simit = Table(
+            [[Paragraph(f"<b>{texto_simit}</b>", ParagraphStyle("veredicto_simit", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_simit.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_simit),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_simit)
+        cuento.append(Spacer(0, 2 * mm))
+        # Resumen del estado de cuenta + detalle de la primera página.
+        detalle_simit = [
+            ["Placa consultada", simit.get("placa") or vehiculo["placa"] or "—"],
+            ["Comparendos", int(simit.get("total_comparendos") or 0)],
+            ["Multas", int(simit.get("total_multas") or 0)],
+            ["Acuerdos de pago", int(simit.get("total_acuerdos") or 0)],
+            ["Deuda total reportada", _cop_texto(total_deuda) if total_deuda else "—"],
+            ["Saldo exigible", _cop_texto(total_a_pagar) if total_a_pagar else "$ 0"],
+            ["Origen de datos", _texto_origen(simit)],
+        ]
+        if (simit.get("mensaje") or "").strip():
+            detalle_simit.insert(6, ["Mensaje del portal", simit["mensaje"][:300]])
+        tabla_simit_resumen = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_simit],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_simit_resumen.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_simit_resumen)
+        comparendos = simit.get("comparendos") or []
+        if comparendos:
+            cuento.append(Spacer(0, 2 * mm))
+            estilo_celda_sim = ParagraphStyle("celda_sim", parent=estilo_celda, fontSize=7.5, leading=9.5)
+            estilo_cab_sim = ParagraphStyle("cab_sim", parent=estilo_celda_sim, fontName="Helvetica-Bold", textColor=colors.white)
+            filas_sim = [[
+                Paragraph("Número", estilo_cab_sim), Paragraph("Fecha", estilo_cab_sim),
+                Paragraph("Infracción", estilo_cab_sim), Paragraph("Secretaría", estilo_cab_sim),
+                Paragraph("Estado", estilo_cab_sim), Paragraph("Valor a pagar", estilo_cab_sim),
+            ]]
+            for c in comparendos[:10]:
+                filas_sim.append([
+                    Paragraph(escape(str(c.get("numero", "—"))), estilo_celda_sim),
+                    Paragraph(escape(str(c.get("fecha_imposicion") or "—")), estilo_celda_sim),
+                    Paragraph(escape(str(c.get("infraccion") or "—")), estilo_celda_sim),
+                    Paragraph(escape(str(c.get("secretaria") or "—")), estilo_celda_sim),
+                    Paragraph(escape(str(c.get("estado") or "—")), estilo_celda_sim),
+                    Paragraph(escape(_cop_texto(c.get("valor_a_pagar")) if c.get("valor_a_pagar") is not None else "—"), estilo_celda_sim),
+                ])
+            tabla_comps = Table(filas_sim, colWidths=[22 * mm, 20 * mm, 58 * mm, 26 * mm, 20 * mm, 14 * mm])
+            tabla_comps.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            total_reg = int(simit.get("total_comparendos") or 0) + int(simit.get("total_multas") or 0)
+            cuento.append(Paragraph(
+                f"Detalle de comparendos y multas ({min(10, len(comparendos))} de {total_reg or len(comparendos)} — primera página del portal)",
+                ParagraphStyle("h_sim", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4),
+            ))
+            cuento.append(tabla_comps)
+    elif _corrio(simit):
+        cuento.append(_parrafo_estado_fuente(simit, "el SIMIT"))
 
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -664,20 +794,25 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt))
-        )],
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit))
+            if _corrio(f)
+        ) or "—"],
         ["Informe PDF", (
             f"Versión {pdf_info.get('version', 1)} · SHA-256 {(pdf_info.get('sha256') or '—')[:32]}… · "
             f"Generado {_fecha_colombia(pdf_info.get('generado_en'))}"
         )],
     ]
-    if vehiculo["placa"]:
+    if vehiculo["placa"] and vehiculo["cedula_propietario"] is not None:
         filas_traza.append(["Vehículo / propietario", (
             f"Placa {vehiculo['placa']} · propietario cédula "
             f"{_enmascarar_cedula(vehiculo['cedula_propietario'])} "
             + ("(es la persona evaluada)" if vehiculo["propietario_es_evaluado"]
                else "(DISTINTA de la persona evaluada)")
         )])
+    elif vehiculo["placa"]:
+        # Solo simit: la placa se consultó por el estado de cuenta de
+        # comparendos, sin validación de propiedad.
+        filas_traza.append(["Vehículo", f"Placa {vehiculo['placa']} (consultada en SIMIT)"])
     tabla_traza = Table(
         [[celda(k, negrita=True), celda(v)] for k, v in filas_traza],
         colWidths=[40 * mm, 120 * mm],
@@ -692,20 +827,41 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     cuento.append(tabla_traza)
 
     # ── 6. Disposiciones legales ─────────────────────────────────────────────
+    # Un párrafo por fuente que CORRIÓ (el informe solo cubre lo que el plan
+    # consultó); el marco general de protección de datos va siempre.
     cuento.append(Paragraph("Disposiciones legales y alcance", estilo_h2))
-    cuento.append(Paragraph(
-        "<b>Antecedentes judiciales (Policía Nacional):</b> el portal de consulta en línea es un servicio de "
-        "autoconsulta dispuesto por el artículo 94 del Decreto 019 de 2012 para que el titular valide su "
-        "información judicial personal, y sus términos de uso prohíben el acceso por personas distintas del "
-        "titular. Este dato fue incorporado al estudio en el marco de un proceso de verificación con "
-        "autorización previa, expresa e inequívoca del titular de la información conforme a la Ley 1581 de "
-        "2012; la obligación de contar con dicha autorización es del solicitante del estudio. "
-        "<b>Vehículo (RUNT):</b> la información se obtuvo del Portal Público de Consulta Ciudadana del "
-        "Registro Único Nacional de Tránsito, servicio de consulta abierta por placa con verificación de la "
-        "cédula del propietario. Los datos corresponden a lo reportado por el Registro en la fecha de la "
-        "consulta; la vigencia del SOAT es informativa y no constituye certificación de aseguramiento. "
-        "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
-        "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas. "
+    bloques_legal = []
+    if _corrio(pol):
+        bloques_legal.append(
+            "<b>Antecedentes judiciales (Policía Nacional):</b> el portal de consulta en línea es un servicio de "
+            "autoconsulta dispuesto por el artículo 94 del Decreto 019 de 2012 para que el titular valide su "
+            "información judicial personal, y sus términos de uso prohíben el acceso por personas distintas del "
+            "titular. Este dato fue incorporado al estudio en el marco de un proceso de verificación con "
+            "autorización previa, expresa e inequívoca del titular de la información conforme a la Ley 1581 de "
+            "2012; la obligación de contar con dicha autorización es del solicitante del estudio."
+        )
+    if _corrio(runt):
+        bloques_legal.append(
+            "<b>Vehículo (RUNT):</b> la información se obtuvo del Portal Público de Consulta Ciudadana del "
+            "Registro Único Nacional de Tránsito, servicio de consulta abierta por placa con verificación de la "
+            "cédula del propietario. Los datos corresponden a lo reportado por el Registro en la fecha de la "
+            "consulta; la vigencia del SOAT es informativa y no constituye certificación de aseguramiento."
+        )
+    if _corrio(simit):
+        bloques_legal.append(
+            "<b>Comparendos (SIMIT):</b> la información se obtuvo del estado de cuenta público del Sistema "
+            "Integrado de Información sobre Comparendos administrado por la Federación Colombiana de "
+            "Municipios, consulta ciudadana abierta por placa. La consulta es sobre el VEHÍCULO y no constituye "
+            "antecedente personal ni atribuye responsabilidad por infracción a la persona evaluada; los datos "
+            "corresponden a lo reportado por los organismos de tránsito en la fecha de consulta y los saldos "
+            "son informativos."
+        )
+    if _corrio(proc):
+        bloques_legal.append(
+            "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
+            "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas."
+        )
+    bloques_legal.append(
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
         "se tratan con finalidad exclusiva de verificación en procesos de selección y vinculación de conductores/"
         "tenedores; el titular puede ejercer los derechos de acceso, corrección, actualización y supresión ante "
@@ -713,9 +869,9 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         "Este informe es confidencial: su circulación está restringida al proceso que lo motivó. La información "
         "corresponde a lo reportado por las fuentes oficiales consultadas en la fecha indicada; la ausencia de "
         "registros no constituye certificación de conducta. El usuario identificado en la trazabilidad es el "
-        "responsable del tratamiento de este documento.",
-        estilo_peq,
-    ))
+        "responsable del tratamiento de este documento."
+    )
+    cuento.append(Paragraph(" ".join(bloques_legal), estilo_peq))
 
     doc.build(cuento, canvasmaker=CanvasEstudio)
     buffer.seek(0)
@@ -821,6 +977,29 @@ def _texto_veredicto_runt(runt: dict) -> str:
         return f"SOAT vigente (vence {soat.get('fecha_fin_vigencia', '—')})"
     marca = (runt.get("datos_vehiculo") or {}).get("marca", "")
     return f"Vehículo identificado{f' ({marca})' if marca else ''} — sin póliza SOAT registrada"
+
+
+def _cop_texto(valor) -> str:
+    """40257438.0 → '$ 40.257.438' (formato COP del portal, puntos de miles)."""
+    try:
+        return "$ {:,.0f}".format(float(valor or 0)).replace(",", ".")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _texto_veredicto_simit(simit: dict) -> str:
+    """Veredicto de la fuente simit para la fila resumen. La consulta es sobre
+    la PLACA: nunca se presenta como antecedente personal de la persona
+    evaluada (mismo espíritu que propietario ≠ evaluado en runt)."""
+    if simit.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(simit)
+    total_a_pagar = simit.get("total_a_pagar") or 0
+    if total_a_pagar > 0:
+        total = int(simit.get("total_comparendos") or 0) + int(simit.get("total_multas") or 0)
+        return f"Saldo exigible {_cop_texto(total_a_pagar)} ({total} registros) — ver detalle"
+    if (simit.get("total_comparendos") or 0) > 0 or (simit.get("total_multas") or 0) > 0:
+        return "Sin saldo exigible — registra antecedentes históricos"
+    return "Sin comparendos ni multas registradas"
 
 
 def _resumen_error(fuente: dict) -> str:

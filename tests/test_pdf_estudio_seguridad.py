@@ -437,9 +437,13 @@ class TestSeccionRunt(unittest.TestCase):
         self.assertIn("noentregódatos", texto.replace("á", "a"))
 
     def test_resumen_con_cuatro_fuentes(self):
+        """2026-09-01: el resumen (y el informe) muestra SOLO las fuentes que
+        corrieron — Policía no está en este estudio (clave ausente) y ya NO
+        aparece como fila fantasma 'no consultada'."""
         texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
-        for frag in ("ManifiestosRNDC", "ProcuraduríaGeneraldelaNación", "PolicíaNacional", "RUNT—VehículoMVX48E"):
+        for frag in ("ManifiestosRNDC", "ProcuraduríaGeneraldelaNación", "RUNT—VehículoMVX48E"):
             self.assertIn(frag, texto)
+        self.assertNotIn("PolicíaNacional", texto)
 
     def test_disposicion_legal_runt(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
@@ -450,6 +454,143 @@ class TestSeccionRunt(unittest.TestCase):
 
         plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
         self.assertIn("noconstituyecertificaciondeaseguramiento", plano)
+
+
+def _fuente_simit(
+    estado="EXITO", total_comparendos=0, total_multas=0, total_acuerdos=0,
+    total_deuda=0.0, total_a_pagar=0.0, comparendos=None, mensaje="",
+):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": None,
+        "mensaje": mensaje,
+        "placa": "MVX48E",
+        "total_comparendos": total_comparendos,
+        "total_multas": total_multas,
+        "total_acuerdos": total_acuerdos,
+        "total_deuda": total_deuda,
+        "total_a_pagar": total_a_pagar,
+        "comparendos": comparendos if comparendos is not None else ([] if not total_comparendos else [{
+            "numero": "130289A", "tipo": "Comparendo", "fecha_imposicion": "2000-04-11",
+            "notificacion": "No aplica", "placa": "MVX48E", "secretaria": "Villavicencio",
+            "infraccion": "No respetar las señales de tránsito", "estado": "Pendiente",
+            "estado_nota": "No tiene curso", "valor": 260130.0, "valor_a_pagar": 260130.0,
+        }]),
+        "intentos": 1,
+        "duraciones_s": [9.8],
+        "error": None,
+    }
+
+
+class TestSeccionSimit(unittest.TestCase):
+    """Fuente "simit" en el PDF: fila de resumen con placa, banner semaforizado
+    por saldo EXIGIBLE (no por deuda histórica), tabla de comparendos y
+    disposición legal honesta (consulta sobre la PLACA, no antecedente
+    personal)."""
+
+    def _con_simit(self, **kw):
+        estudio = estudio_fixture()
+        estudio["placa"] = "MVX48E"
+        estudio["fuentes"]["simit"] = _fuente_simit(**kw)
+        return estudio
+
+    def test_limpio_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_simit(
+            mensaje="No tienes comparendos ni multas registradas en Simit",
+        )))
+        self.assertIn("Comparendos—SIMIT", texto)
+        self.assertIn("SINCOMPARENDOSNIMULTASREGISTRADAS", texto)
+
+    def test_saldo_exigible_banner_ambar(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_simit(
+            estado="ADVERTENCIA", total_comparendos=1,
+            total_deuda=260130.0, total_a_pagar=260130.0,
+        )))
+        self.assertIn("COMPARENDOSPENDIENTES", texto)
+        self.assertIn("SALDOEXIGIBLE", texto)
+        self.assertIn("$260.130", texto.replace(" ", ""))
+
+    def test_deuda_historica_sin_saldo_es_neutro(self):
+        # ZZZ999 real: 105 pendientes de 1999-2000, agregado "Total a pagar: $0"
+        # → neutro (NO verde, NO rojo): no es deuda vigente pero tampoco limpio.
+        texto = _texto_plano(generar_pdf_estudio(self._con_simit(
+            total_comparendos=88, total_multas=17, total_deuda=40257438.0, total_a_pagar=0.0,
+        )))
+        self.assertIn("SINSALDOEXIGIBLE", texto)
+        self.assertNotIn("SINCOMPARENDOSNIMULTASREGISTRADAS", texto)
+        self.assertNotIn("COMPARENDOSPENDIENTES", texto)
+
+    def test_tabla_de_comparendos(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_simit(
+            total_comparendos=88, total_multas=17, total_deuda=40257438.0, total_a_pagar=0.0,
+        )))
+        self.assertIn("130289A", texto)
+        self.assertIn("Villavicencio", texto)
+        self.assertIn("Pendiente", texto)
+        self.assertIn("Detalledecomparendosymultas", texto.replace(" ", ""))
+
+    def test_solo_simit_sin_filas_de_propietario(self):
+        """Estudio SIN runt (DESHABILITADA por el plan): la placa es de simit —
+        no hay fila de propietario (simit no valida propiedad) ni badge de
+        propietario distinto."""
+        estudio = self._con_simit()
+        estudio["fuentes"]["runt"] = {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None}
+        estudio["fuentes"]["policia"] = {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None}
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("Placaconsultada(SIMIT)", texto)
+        self.assertNotIn("Propietariodelvehículo", texto)
+        # Badge de propietario distinto: en mayúsculas (sección RUNT) — con
+        # solo simit no hay tríada y NO debe dispararse con None.
+        self.assertNotIn("ESDISTINTODELAPERSONAEVALUADA", texto)
+        self.assertIn("consultadaenSIMIT", texto)  # trazabilidad
+
+    def test_solo_las_fuentes_del_plan(self):
+        """2026-09-01: un plan que SOLO consulta algunas fuentes produce un
+        PDF con SOLO esas secciones — las DESHABILITADAS (fuera del plan, no
+        corridas ni cobradas) no aparecen ni en el resumen ni como sección
+        'no consultada'."""
+        estudio = estudio_fixture()
+        estudio["placa"] = "QVK013"
+        # Plan imaginario: solo procuraduria + simt (el caso reportado).
+        estudio["fuentes"]["manifiestos_rndc"] = {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None}
+        estudio["fuentes"]["policia"] = {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None}
+        estudio["fuentes"]["runt"] = {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None}
+        estudio["fuentes"]["simit"] = _fuente_simit(mensaje="No tienes comparendos ni multas registradas en Simit")
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        # Procuraduría (corrió, EXITO) y SIMIT sí.
+        self.assertIn("Antecedentesdisciplinarios", texto)
+        self.assertIn("Comparendos—SIMIT", texto)
+        # Las excluidas por el plan NO: ni sección ni fila de resumen.
+        self.assertNotIn("Manifiestosdecarga", texto)
+        self.assertNotIn("ManifiestosRNDC", texto)
+        self.assertNotIn("Antecedentesjudiciales", texto)
+        self.assertNotIn("PolicíaNacional", texto)
+        self.assertNotIn("Vehículo—RUNT", texto)
+        self.assertNotIn("RUNT—Vehículo", texto)
+        self.assertNotIn("Noconsultada", texto.replace(" ", ""))
+        # La placa es de SIMIT (runt no corrió).
+        self.assertIn("Placaconsultada(SIMIT)", texto)
+
+    def test_disposicion_legal_simit(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_simit()))
+        self.assertIn("FederaciónColombianadeMunicipios".replace(" ", ""), texto.replace(" ", ""))
+        # La consulta es sobre el VEHÍCULO: jamás antecedente personal.
+        import unicodedata
+
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("noconstituyeantecedentepersonal", plano)
+
+    def test_resumen_con_cinco_fuentes(self):
+        estudio = estudio_fixture()
+        estudio["placa"] = "MVX48E"
+        estudio["fuentes"]["runt"] = _fuente_runt()
+        estudio["fuentes"]["simit"] = _fuente_simit()
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        for frag in ("ManifiestosRNDC", "ProcuraduríaGeneraldelaNación", "RUNT—VehículoMVX48E", "SIMIT—ComparendosplacaMVX48E"):
+            self.assertIn(frag, texto)
+        # Policía no corrió en este estudio: sin fila fantasma.
+        self.assertNotIn("PolicíaNacional", texto)
 
 
 if __name__ == "__main__":

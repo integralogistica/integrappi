@@ -34,6 +34,7 @@ from Funciones.bot_policia import (
 from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
+from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/seguridad", tags=["Seguridad"])
@@ -50,6 +51,9 @@ col_consultas = db["consultas_seguridad"]
 col_usuarios = db["baseusuarios"]
 try:
     col_consultas.create_index([("tipo", 1), ("cedula", 1), ("consultado_en", -1)], name="idx_seg_tipo_cedula")
+    # runt/simit discriminan por placa (simit además SIN cédula: la identidad
+    # del dato es la placa).
+    col_consultas.create_index([("tipo", 1), ("placa", 1), ("consultado_en", -1)], name="idx_seg_tipo_placa")
     col_consultas.create_index([("consultado_en", -1)], name="idx_seg_fecha")
 except Exception as exc:
     logger.warning("No se pudo crear índices de consultas_seguridad: %s", exc)
@@ -100,7 +104,8 @@ def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = No
 
     runt discrimina además por PLACA (una cédula puede tener varios vehículos):
     sin placa no hay identidad de caché → nunca hit (evita cross-contaminación
-    entre placas de la misma cédula)."""
+    entre placas de la misma cédula). simit va SIN cédula (consulta solo por
+    placa: el estado de cuenta es del vehículo, no de la persona evaluada)."""
     if force:
         return None
     filtro = {"tipo": tipo, "cedula": cedula, "expira_en": {"$gt": _utcnow()}}
@@ -108,6 +113,10 @@ def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = No
         if not placa:
             return None
         filtro["placa"] = placa
+    if tipo == "simit":
+        if not placa:
+            return None
+        filtro = {"tipo": tipo, "cedula": None, "placa": placa, "expira_en": {"$gt": _utcnow()}}
     doc = col_consultas.find_one(filtro, sort=[("consultado_en", -1)])
     if (
         doc
@@ -412,10 +421,71 @@ async def consultar_runt(
     }
 
 
+@router.get("/simit")
+async def consultar_simit(
+    placa: str = Query(..., min_length=4, max_length=10, description="Placa del vehículo (AAA123 / AAA12A)"),
+    force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
+):
+    """Estado de cuenta de comparendos SIMIT de la placa (portal público FCM).
+
+    Canal: https://www.fcm.org.co/simit/#/estado-cuenta — portal público de
+    consulta ciudadana (un solo campo que acepta identificación O placa; aquí
+    se consulta SOLO por placa). Devuelve el resumen (comparendos, multas,
+    acuerdos de pago, deuda total), el total EXIGIBLE (`total_a_pagar`, base
+    del semáforo del estudio) y el detalle de la primera página. SIN captcha
+    (hallazgo de la sonda 2026-09-01) y sin PDF consolidado del portal.
+    Cacheo por placa SIN cédula (la identidad del dato es la placa).
+    """
+    _requiere_seguridad(actor)
+
+    placa_norm = _normalizar_placa(placa)
+    cache = _buscar_cache("simit", None, force, placa=placa_norm)
+    if cache:
+        return _envolver_cache(cache)
+
+    try:
+        resultado = await asyncio.to_thread(consultar_comparendos_simit_sync, placa_norm)
+    except BotSimitSinResultado as exc:
+        logger.error("Bot SIMIT sin resultado para placa %s: %s", placa_norm, exc)
+        raise HTTPException(status_code=502, detail=f"El portal SIMIT no entregó el estado de cuenta: {exc}") from exc
+    except BotSimitError as exc:
+        logger.error("Bot SIMIT falló para placa %s: %s", placa_norm, exc)
+        raise HTTPException(status_code=502, detail=f"No fue posible consultar el SIMIT: {exc}") from exc
+
+    ahora = _utcnow()
+    doc = {
+        "tipo": "simit",
+        "cedula": None,
+        "placa": placa_norm,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "total_comparendos": resultado.get("total_comparendos"),
+        "total_multas": resultado.get("total_multas"),
+        "total_acuerdos": resultado.get("total_acuerdos"),
+        "total_deuda": resultado.get("total_deuda"),
+        "total_a_pagar": resultado.get("total_a_pagar"),
+        "comparendos": (resultado.get("comparendos") or [])[:20],
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
+        "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE),
+        "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta simit %s no se pudo auditar: %s", placa_norm, exc)
+
+    doc.pop("_id", None)
+    return doc
+
+
 @router.get("/historico")
 async def listar_historico(
     cedula: str | None = Query(None, description="Filtrar por cédula consultada"),
-    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt)"),
+    tipo: str | None = Query(None, description="Filtrar por tipo (manifiestos_rndc, procuraduria, policia, runt, simit)"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     actor: dict = Depends(actor_actual),
