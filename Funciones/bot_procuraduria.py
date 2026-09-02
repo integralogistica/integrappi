@@ -2,7 +2,7 @@
 """
 Bot del certificado de antecedentes disciplinarios de la Procuraduría.
 
-https://apps.procuraduria.gov.co/webcert/inicio.aspx?tpo=2
+https://www.procuraduria.gov.co/Pages/consulta-de-antecedentes.aspx
 
 La Ley 1238 de 2008 dispone que entidades públicas O PRIVADAS consulten este
 certificado de aspirantes a cargos/contratos (diseñado para verificación de
@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 
 import requests
 from dotenv import load_dotenv
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 # Cargar .env del proyecto para GEMINI_API_KEY cuando se ejecute standalone.
@@ -31,12 +32,14 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 logger = logging.getLogger(__name__)
 
-PORTAL_URL = "https://apps.procuraduria.gov.co/webcert/inicio.aspx?tpo=2"
+PORTAL_URL = "https://www.procuraduria.gov.co/Pages/consulta-de-antecedentes.aspx"
+FORMULARIO_URL = "https://apps.procuraduria.gov.co/webcert/inicio.aspx"
+IFRAME_SELECTOR = 'iframe[src*="apps.procuraduria.gov.co/webcert/inicio.aspx"]'
 SALIDA = Path(__file__).resolve().parents[1] / "descargas_procuraduria"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 _LOCK = threading.Lock()
-_TIMEOUT_MS = 60000
+_TIMEOUT_MS = int(os.getenv("SEGURIDAD_PROCURADURIA_TIMEOUT_MS", "90000"))
 
 
 class BotProcuraduriaError(Exception):
@@ -213,7 +216,36 @@ async def consultar_antecedentes(
                 except Exception:
                     pass  # no hubo descarga: el resultado viene como página
 
-            await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
+            try:
+                # Entrar por la página oficial. El formulario se sirve dentro de
+                # un iframe de apps.procuraduria.gov.co; navegar directamente a
+                # ese host era justamente lo que producía los timeouts reportados.
+                await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
+                try:
+                    elemento_iframe = await pagina.wait_for_selector(
+                        IFRAME_SELECTOR, state="attached", timeout=20000,
+                    )
+                    vista = await elemento_iframe.content_frame()
+                    if vista is None:
+                        raise PlaywrightError("iframe sin contenido")
+                    await vista.wait_for_selector("#lblPregunta", timeout=20000)
+                except PlaywrightError:
+                    # El portal institucional a veces omite el iframe para
+                    # navegadores automatizados. Usar entonces su URL oficial
+                    # exacta, sin el antiguo parámetro tpo=2.
+                    await pagina.goto(
+                        FORMULARIO_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS,
+                    )
+                    vista = pagina
+                    await vista.wait_for_selector("#lblPregunta", timeout=_TIMEOUT_MS)
+            except PlaywrightError as exc:
+                # ERR_CONNECTION_TIMED_OUT/RESET y timeouts de navegación son
+                # indisponibilidad del portal, no un error funcional del bot.
+                # El orquestador reintenta y, si persiste, lo presenta como
+                # NO_DISPONIBLE sin envenenar la caché.
+                raise BotProcuraduriaSinResultado(
+                    f"No fue posible conectar con el portal de la Procuraduría: {exc}"
+                ) from exc
             await pagina.wait_for_timeout(2000)
 
             # 1) Leer y resolver el captcha (span #lblPregunta). Tres vías:
@@ -221,7 +253,7 @@ async def consultar_antecedentes(
             # NOMBRE (deterministas: la cédula ya diligenciada y los
             # nombres/apellidos que informó el consultante) o conocimiento
             # general por Gemini (con ese mismo contexto).
-            texto_captcha = (await pagina.inner_text("#lblPregunta")).strip()
+            texto_captcha = (await vista.inner_text("#lblPregunta")).strip()
             respuesta = _resolver_captcha_texto(texto_captcha)
             if respuesta is None:
                 respuesta = _resolver_captcha_documento(texto_captcha, cedula_norm, nombres, apellidos)
@@ -233,26 +265,26 @@ async def consultar_antecedentes(
                 logger.info("[BOT PGN] Respuesta Gemini: %r", respuesta)
 
             # 2) Llenar el formulario (CC = value 1 en el select del portal)
-            await pagina.select_option("#ddlTipoID", "1")
-            await pagina.fill("#txtNumID", cedula_norm)
-            await pagina.check("#rblTipoCert_0")  # ordinario
-            await pagina.fill("#txtRespuestaPregunta", respuesta)
+            await vista.select_option("#ddlTipoID", "1")
+            await vista.fill("#txtNumID", cedula_norm)
+            await vista.check("#rblTipoCert_0")  # ordinario
+            await vista.fill("#txtRespuestaPregunta", respuesta)
 
             # 3) Enviar (postback WebForms). Armar la trampa de descarga antes.
             tarea_descarga = asyncio.create_task(_esperar_descarga())
-            await pagina.click("#btnExportar")
+            await vista.click("#btnExportar")
 
             # Esperar: o la descarga del PDF o la página de resultados. El
             # postback a verpdf.aspx es LENTO e intermitente (2026-08-30:
             # visto tardar >45 s o no llegar): esperar el BOTÓN de descarga
             # de forma explícita, no un networkidle+3s que se rinde antes.
             try:
-                await pagina.wait_for_selector("#btnDescargar", timeout=45000, state="attached")
+                await vista.wait_for_selector("#btnDescargar", timeout=45000, state="attached")
             except Exception:
                 pass  # puede ser error de captcha o descarga directa: leer la página
             try:
                 # El botón ya cargó (o falló): networkidle corto, solo asentar
-                await pagina.wait_for_load_state("networkidle", timeout=20000)
+                await vista.wait_for_load_state("networkidle", timeout=20000)
             except Exception:
                 pass
             await pagina.wait_for_timeout(3000)
@@ -264,12 +296,12 @@ async def consultar_antecedentes(
                 except asyncio.TimeoutError:
                     pass
 
-            texto_resultado = " ".join((await pagina.inner_text("body")).split())
+            texto_resultado = " ".join((await vista.inner_text("body")).split())
 
             # 4b) La página de resultados entrega el PDF con el botón de imagen
             # #btnDescargar (postback WebForms), no con un link <a>.
             if not pdf_bytes and "descargue su certificado" in texto_resultado.lower():
-                boton_pdf = pagina.locator("#btnDescargar")
+                boton_pdf = vista.locator("#btnDescargar")
                 if await boton_pdf.count():
                     async with pagina.expect_download(timeout=_TIMEOUT_MS) as info_dl:
                         await boton_pdf.click()
@@ -332,7 +364,7 @@ async def consultar_antecedentes(
                 "texto_pdf": texto_pdf[:2500],
                 "pdf_bytes": pdf_bytes,
                 "pdf_ruta": pdf_ruta,
-                "html": await pagina.content(),
+                "html": await vista.content(),
             }
         finally:
             await navegador.close()

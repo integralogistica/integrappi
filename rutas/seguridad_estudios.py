@@ -573,7 +573,7 @@ async def crear_estudio(
 
     # OFAC empresarial usa NIT, nunca reutiliza la cédula. Las demás fuentes
     # continúan siendo consultas de la persona evaluada.
-    if any(f not in {"ofac_nit", "bdme_nit"} for f in habilitadas) and not cedula:
+    if any(f not in {"ofac_nit", "bdme_nit", "rama_judicial"} for f in habilitadas) and not cedula:
         raise HTTPException(status_code=422, detail="Las fuentes personales requieren el campo cedula")
     nit: str | None = None
     if "ofac_nit" in habilitadas or "bdme_nit" in habilitadas:
@@ -617,6 +617,11 @@ async def crear_estudio(
     # consultando").
     nombres = _normalizar_nombre(getattr(datos, "nombres", None))
     apellidos = _normalizar_nombre(getattr(datos, "apellidos", None))
+    if "rama_judicial" in habilitadas and (not nombres or not apellidos):
+        raise HTTPException(
+            status_code=422,
+            detail="La fuente Rama Judicial requiere nombres y apellidos completos",
+        )
 
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
@@ -843,6 +848,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "ofac_nit": "OFAC — Empresas por NIT",
         "bdme": "BDME — Persona por cédula",
         "bdme_nit": "BDME — Empresa por NIT",
+        "rama_judicial": "Rama Judicial — Procesos por nombre",
     }
     fuentes = []
     for clave, nombre in etiquetas.items():
@@ -1124,7 +1130,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"],
 }
 
 

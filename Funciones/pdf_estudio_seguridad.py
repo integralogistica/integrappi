@@ -272,6 +272,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     ofac_nit = fuentes.get("ofac_nit") or {}
     bdme = fuentes.get("bdme") or {}
     bdme_nit = fuentes.get("bdme_nit") or {}
+    rama_judicial = fuentes.get("rama_judicial") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -463,6 +464,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             else:
                 veredicto = _resumen_error(fuente_bdme)
             filas_resumen.append([etiqueta, estado_txt, veredicto])
+    if _corrio(rama_judicial):
+        estado_txt, _ = ESTADO_FUENTE_TEXTO.get(rama_judicial.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        total_rama = int(rama_judicial.get("total_procesos") or 0)
+        veredicto = (f"{total_rama} PROCESO(S) POR COINCIDENCIA DE NOMBRE — VALIDAR HOMONIMIA"
+                     if total_rama else "SIN PROCESOS PARA EL NOMBRE CONSULTADO")
+        if rama_judicial.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+            veredicto = _resumen_error(rama_judicial)
+        filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto])
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -1031,6 +1040,38 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(fuente_bdme, "el BDME"))
 
+    # ── Rama Judicial: persona natural, todos los procesos ────────────────
+    if _corrio(rama_judicial):
+        _antes_de_seccion(rama_judicial)
+        cuento.append(Paragraph("Rama Judicial — Consulta Nacional Unificada por nombre", estilo_h2))
+        if rama_judicial.get("estado") in {"EXITO", "ADVERTENCIA"}:
+            total_rama = int(rama_judicial.get("total_procesos") or 0)
+            cuento.append(Paragraph(
+                f"<b>{'REGISTRA ' + str(total_rama) + ' COINCIDENCIA(S)' if total_rama else 'SIN PROCESOS ENCONTRADOS'}</b>",
+                estilo_normal,
+            ))
+            cuento.append(Paragraph(
+                f"Nombre consultado: {escape(str(rama_judicial.get('nombre_completo') or '—'))} · "
+                "Tipo de persona: Natural · Alcance: todos los procesos (no solo actuaciones recientes).",
+                estilo_normal,
+            ))
+            for proceso in (rama_judicial.get("procesos") or [])[:20]:
+                numero = proceso.get("llaveProceso") or proceso.get("numeroProceso") or proceso.get("idProceso") or "—"
+                despacho = proceso.get("despacho") or proceso.get("nombreDespacho") or "—"
+                fecha = proceso.get("fechaProceso") or proceso.get("fechaUltimaActuacion") or "—"
+                cuento.append(Paragraph(
+                    f"<b>Proceso:</b> {escape(str(numero))} · "
+                    f"<b>Despacho:</b> {escape(str(despacho))} · <b>Fecha:</b> {escape(str(fecha))}",
+                    estilo_peq,
+                ))
+            if total_rama:
+                cuento.append(Paragraph(
+                    "La coincidencia se basa exclusivamente en el nombre informado y puede corresponder a homónimos. "
+                    "Debe verificarse la identidad y la calidad de la persona dentro de cada proceso.", estilo_peq,
+                ))
+        else:
+            cuento.append(_parrafo_estado_fuente(rama_judicial, "la Rama Judicial"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -1043,7 +1084,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (

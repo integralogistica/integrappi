@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -130,16 +131,38 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             await selects.nth(0).select_option(index=0 if tipo == "cedula" else 1)
             await campos.first.fill(documento)
             await campos.first.press("Tab")
+            # No basta esperar `options.length > 0`: la opción inicial ya
+            # existe mientras el RPC todavía está cargando los motivos. Se
+            # espera el TEXTO requerido y luego se usa el valor que el portal
+            # haya asignado (los códigos internos pueden cambiar).
             try:
+                motivo_busqueda = "autoconsulta" if tipo == "cedula" else "relacion contractual"
                 await page.wait_for_function(
-                    "() => document.querySelectorAll('#panelPrincipal select')[1]?.options.length > 0",
-                    timeout=15000,
+                    """motivo => {
+                        const norm = s => (s || '').normalize('NFD')
+                            .replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+                        const sels = [...document.querySelectorAll('#panelPrincipal select')]
+                            .filter(e => e.offsetParent !== null);
+                        return sels[1] && [...sels[1].options]
+                            .some(o => norm(o.textContent).includes(motivo));
+                    }""",
+                    motivo_busqueda,
+                    timeout=20000,
                 )
-            except Exception as exc:
-                raise BotBdmeSinResultado("BDME no cargó los motivos de consulta") from exc
-            valor_motivo = "1" if tipo == "cedula" else "2"
-            try:
-                await selects.nth(1).select_option(value=valor_motivo)
+                opciones = await selects.nth(1).locator("option").evaluate_all(
+                    "os => os.map(o => ({value: o.value, text: o.textContent || ''}))"
+                )
+                def normalizar(texto: str) -> str:
+                    return "".join(
+                        c for c in unicodedata.normalize("NFD", texto or "")
+                        if unicodedata.category(c) != "Mn"
+                    ).strip().casefold()
+                opcion = next(
+                    (o for o in opciones if motivo_busqueda in normalizar(o["text"])), None
+                )
+                if not opcion:
+                    raise ValueError("motivo ausente")
+                await selects.nth(1).select_option(value=opcion["value"])
             except Exception as exc:
                 raise BotBdmeSinResultado(f"No existe el motivo requerido: {motivo}")
             token = await asyncio.to_thread(_resolver_recaptcha)

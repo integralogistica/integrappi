@@ -64,6 +64,9 @@ from Funciones.bot_bdme import (
     BotBdmeAutenticacionError, BotBdmeCaptchaFallido,
     BotBdmeConfiguracionError, BotBdmeSinResultado, consultar_bdme_sync,
 )
+from Funciones.bot_rama_judicial import (
+    BotRamaJudicialError, BotRamaJudicialSinResultado, consultar_procesos_sync,
+)
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
 from rutas.seguridad import (
     DIAS_VENTANA,
@@ -84,9 +87,10 @@ RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
+MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -265,6 +269,10 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotBdmeCaptchaFallido):
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRamaJudicialSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRamaJudicialError):
+        return "ERROR", {"tipo": "rama_judicial", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
@@ -348,6 +356,10 @@ async def _ejecutar_fuente(
         cedula = cedula_propietario or cedula
     elif nombre in {"ofac_nit", "bdme_nit"}:
         cedula = nit or ""
+    elif nombre == "rama_judicial":
+        # La identidad de caché de esta fuente es el nombre completo, pues el
+        # portal no consulta por documento.
+        cedula = " ".join(f"{nombres or ''} {apellidos or ''}".split())
     seccion: dict[str, Any] = {
         "estado": "ERROR",
         "origen": None,
@@ -438,6 +450,16 @@ async def _ejecutar_fuente(
                 "filas": (cache.get("filas") or [])[:100],
             })
             seccion["estado"] = "ADVERTENCIA" if seccion["reportado"] else "EXITO"
+        elif nombre == "rama_judicial":
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "nombre_completo": cache.get("nombre_completo"),
+                "tipo_persona": "Natural", "todos_los_procesos": True,
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "total_procesos": int(cache.get("total_procesos") or 0),
+                "procesos": (cache.get("procesos") or [])[:MAX_PROCESOS_DOC],
+            })
+            seccion["estado"] = "ADVERTENCIA" if seccion["total_procesos"] else "EXITO"
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -494,6 +516,10 @@ async def _ejecutar_fuente(
             return await asyncio.to_thread(
                 consultar_bdme_sync, cedula, tipo="nit" if nombre == "bdme_nit" else "cedula"
             )
+    elif nombre == "rama_judicial":
+
+        async def invocar() -> dict:
+            return await asyncio.to_thread(consultar_procesos_sync, nombres or "", apellidos or "")
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
@@ -768,6 +794,28 @@ async def _ejecutar_fuente(
         })
         # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_sena(seccion)
+    elif nombre == "rama_judicial":
+        procesos = (resultado.get("procesos") or [])[:MAX_PROCESOS_DOC]
+        total = int(resultado.get("total_procesos") or len(procesos))
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "nombre_completo": resultado.get("nombre_completo"), "tipo_persona": "Natural",
+            "todos_los_procesos": True, "no_registra": total == 0,
+            "total_procesos": total, "procesos": procesos,
+            "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché Rama Judicial no se pudo auditar: %s", exc)
+        for campo in ("nombre_completo", "tipo_persona", "todos_los_procesos", "no_registra",
+                      "total_procesos", "procesos", "mensaje"):
+            seccion[campo] = doc_cache[campo]
+        seccion["estado"] = "ADVERTENCIA" if total else "EXITO"
     elif nombre in {"bdme", "bdme_nit"}:
         no_registra = resultado.get("no_registra")
         if no_registra is None:

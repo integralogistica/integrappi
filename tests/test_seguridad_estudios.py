@@ -296,6 +296,13 @@ class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
         self.assertEqual(estado, "NO_DISPONIBLE")
         self.assertEqual(error["tipo"], "portal_inconsistente")
 
+    def test_timeout_de_navegacion_es_no_disponible(self):
+        estado, error = orch._clasificar_error(
+            orch.BotProcuraduriaSinResultado("Page.goto: net::ERR_CONNECTION_TIMED_OUT")
+        )
+        self.assertEqual(estado, "NO_DISPONIBLE")
+        self.assertEqual(error["tipo"], "portal_inconsistente")
+
 
 class TestEstadoGlobal(unittest.TestCase):
     def f(self, a, b):
@@ -1126,7 +1133,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(
