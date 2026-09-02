@@ -129,13 +129,15 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             # reemplaza la lista por la única opción Autoconsulta (valor 1).
             # NIT usa Relación contractual (valor 2).
             indice_tipo = 0 if tipo == "cedula" else 1
-            if tipo == "cedula" and await selects.nth(0).locator("option").count() > 1:
-                # CC suele venir seleccionada por defecto. Cambiar primero a
-                # otra opción garantiza que GWT emita el evento que recarga
-                # los motivos cuando se vuelve a CC.
-                await selects.nth(0).select_option(index=1)
-                await page.wait_for_timeout(500)
-            await selects.nth(0).select_option(index=indice_tipo)
+            selector_tipo = selects.nth(0)
+            valor_actual = await selector_tipo.input_value()
+            valor_tipo = await selector_tipo.locator("option").nth(indice_tipo).get_attribute("value")
+            if valor_actual == valor_tipo:
+                # En CC el valor suele venir seleccionado, pero GWT necesita
+                # igualmente el evento change para preparar los motivos.
+                await selector_tipo.dispatch_event("change")
+            else:
+                await selector_tipo.select_option(index=indice_tipo)
             await campos.first.fill(documento)
             await campos.first.press("Tab")
             # No basta esperar `options.length > 0`: la opción inicial ya
@@ -144,34 +146,34 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             # haya asignado (los códigos internos pueden cambiar).
             try:
                 motivo_busqueda = "autoconsulta" if tipo == "cedula" else "relacioncontractual"
-                await page.wait_for_function(
-                    """motivo => {
-                        const norm = s => (s || '').normalize('NFD')
-                            .replace(/[\u0300-\u036f]/g, '').toLowerCase()
-                            .replace(/[^a-z0-9]/g, '');
-                        const sels = [...document.querySelectorAll('#panelPrincipal select')]
-                            .filter(e => e.offsetParent !== null);
-                        return sels[1] && [...sels[1].options]
-                            .some(o => norm(o.textContent).includes(motivo));
-                    }""",
-                    motivo_busqueda,
-                    timeout=_TIMEOUT_MS,
-                )
-                opciones = await selects.nth(1).locator("option").evaluate_all(
-                    "os => os.map(o => ({value: o.value, text: o.textContent || ''}))"
-                )
+
                 def normalizar(texto: str) -> str:
                     limpio = "".join(
                         c for c in unicodedata.normalize("NFD", texto or "")
                         if unicodedata.category(c) != "Mn"
                     ).casefold()
                     return re.sub(r"[^a-z0-9]", "", limpio)
-                opcion = next(
-                    (o for o in opciones if motivo_busqueda in normalizar(o["text"])), None
-                )
+
+                # El GWT de BDME carga este combo al primer clic/foco. Tal
+                # como ocurre manualmente, se abre, se espera y se vuelve a
+                # abrir hasta que llegue la opción por RPC.
+                selector_motivo = selects.nth(1)
+                opcion = None
+                limite = time.monotonic() + (_TIMEOUT_MS / 1000)
+                while time.monotonic() < limite:
+                    await selector_motivo.click(force=True)
+                    opciones = await selector_motivo.locator("option").evaluate_all(
+                        "os => os.map(o => ({value: o.value, text: o.textContent || ''}))"
+                    )
+                    opcion = next(
+                        (o for o in opciones if motivo_busqueda in normalizar(o["text"])), None
+                    )
+                    if opcion:
+                        break
+                    await page.wait_for_timeout(2000)
                 if not opcion:
                     raise ValueError("motivo ausente")
-                await selects.nth(1).select_option(value=opcion["value"])
+                await selector_motivo.select_option(value=opcion["value"])
             except Exception as exc:
                 raise BotBdmeSinResultado(
                     f"BDME no cargó el motivo requerido: {motivo}"
