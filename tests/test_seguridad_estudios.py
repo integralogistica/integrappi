@@ -256,9 +256,8 @@ class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
         col.insert_one.assert_not_called()  # nada de esto va a caché
 
-    def test_pdf_ilegible_sigue_advertencia_y_cachea(self):
-        """PDF presente pero veredicto ilegible: ADVERTENCIA legítima (hay
-        anexo que ver) y SÍ se cachea — ese caso funcionaba y no cambia."""
+    def test_respuesta_sin_veredicto_no_se_cachea_aunque_haya_pdf(self):
+        """Un archivo no sustituye el único dato requerido: el veredicto."""
         with patch.object(orch, "_buscar_cache", return_value=None):
             with patch.object(orch, "consultar_antecedentes_sync") as bot:
                 bot.return_value = {
@@ -270,9 +269,9 @@ class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
                     seccion = self._correr(
                         orch._ejecutar_fuente("procuraduria", "1033688842", actor_consultador(), False)
                     )
-        self.assertEqual(seccion["estado"], "ADVERTENCIA")
-        self.assertGreater(seccion["pdf_tamano"], 0)
-        col.insert_one.assert_called_once()
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertNotIn("pdf_tamano", seccion)
+        col.insert_one.assert_not_called()
 
     def test_cache_venenida_ignorada_al_leer(self):
         """Cachés ya escritas con el bug (no_registra None, sin PDF) se ignoran
@@ -458,15 +457,15 @@ class TestEjecutarFuente(unittest.TestCase):
         self.assertEqual(seccion["error"]["tipo"], "BotProcuraduriaError")
         self.assertEqual(seccion["intentos"], 2)
 
-    def test_procuraduria_sin_veredicto_es_advertencia(self):
+    def test_procuraduria_sin_veredicto_no_disponible(self):
         resultado = {"no_registra": None, "mensaje": "Certificado generado; ver PDF", "texto_pdf": "", "pdf_bytes": b"PDF"}
         with patch.object(orch, "_buscar_cache", return_value=None):
             with patch.object(orch, "consultar_antecedentes_sync", return_value=resultado):
                 with patch.object(orch, "col_consultas") as col:
                     col.insert_one.return_value = None
                     seccion = self._correr(orch._ejecutar_fuente("procuraduria", "1033688842", actor_consultador(), False))
-        self.assertEqual(seccion["estado"], "ADVERTENCIA")
-        self.assertEqual(seccion["_pdf_bytes"], b"PDF")
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertNotIn("_pdf_bytes", seccion)
 
     def test_viajes_invalidos_filtrados(self):
         resultado = {
@@ -1133,7 +1132,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(

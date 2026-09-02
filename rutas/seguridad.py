@@ -31,7 +31,12 @@ from Funciones.bot_policia import (
     BotPoliciaSinCaptchaKey,
     consultar_antecedentes_policia_sync,
 )
-from Funciones.bot_procuraduria import BotProcuraduriaError, consultar_antecedentes_sync
+from Funciones.bot_procuraduria import (
+    BotProcuraduriaError, BotProcuraduriaSinResultado, consultar_antecedentes_sync,
+)
+from Funciones.bot_contraloria import (
+    BotContraloriaError, BotContraloriaSinResultado, consultar_antecedentes_fiscales_sync,
+)
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
@@ -131,7 +136,6 @@ def _buscar_cache(tipo: str, cedula: str, force: bool, *, placa: str | None = No
         doc
         and tipo == "procuraduria"
         and doc.get("no_registra") is None
-        and not (doc.get("pdf_tamano") or 0)
     ):
         return None
     return doc
@@ -238,7 +242,7 @@ async def consultar_procuraduria(
 
     try:
         resultado = await asyncio.to_thread(consultar_antecedentes_sync, cedula_norm)
-    except BotProcuraduriaError as exc:
+    except (BotProcuraduriaError, BotProcuraduriaSinResultado) as exc:
         logger.error("Bot Procuraduría falló para cédula %s: %s", cedula_norm, exc)
         raise HTTPException(status_code=502, detail=f"No fue posible consultar la Procuraduría: {exc}") from exc
 
@@ -249,8 +253,6 @@ async def consultar_procuraduria(
         "no_registra": resultado.get("no_registra"),
         "mensaje": resultado.get("mensaje", ""),
         "nombre_certificado": _nombre_del_certificado(resultado.get("texto_pdf", "")),
-        "pdf_ruta": resultado.get("pdf_ruta"),
-        "pdf_tamano": len(resultado["pdf_bytes"]) if resultado.get("pdf_bytes") else 0,
         "usuario": actor["usuario"],
         "perfil": actor["perfil"],
         "empresa_id": actor.get("empresa_id"),
@@ -272,7 +274,62 @@ async def consultar_procuraduria(
         "no_registra": resultado.get("no_registra"),
         "mensaje": resultado.get("mensaje", ""),
         "nombre_certificado": doc["nombre_certificado"],
-        "pdf_ruta": resultado.get("pdf_ruta"),
+    }
+
+
+@router.get("/contraloria")
+async def consultar_contraloria(
+    cedula: str = Query(..., min_length=3, max_length=20, description="Cédula a consultar"),
+    force: bool = Query(False, description="Ignorar caché (vuelve a consultar el portal)"),
+    actor: dict = Depends(actor_actual),
+):
+    """Certificado de Antecedentes Fiscales — Persona Natural (CGR/SIBOR).
+
+    Consulta pública y gratuita por cédula (reCAPTCHA resuelto por servicio).
+    Retorna el veredicto (no_registra) y el código de verificación del
+    certificado oficial (procesado en memoria, no se persiste).
+    """
+    _requiere_seguridad(actor)
+
+    cedula_norm = _normalizar_cedula(cedula)
+    cache = _buscar_cache("contraloria", cedula_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+
+    try:
+        resultado = await asyncio.to_thread(consultar_antecedentes_fiscales_sync, cedula_norm)
+    except (BotContraloriaError, BotContraloriaSinResultado) as exc:
+        logger.error("Bot Contraloría falló para cédula %s: %s", cedula_norm, exc)
+        raise HTTPException(status_code=502, detail=f"No fue posible consultar la Contraloría: {exc}") from exc
+
+    ahora = _utcnow()
+    doc = {
+        "tipo": "contraloria",
+        "cedula": cedula_norm,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "codigo_verificacion": resultado.get("codigo_verificacion", ""),
+        "usuario": actor["usuario"],
+        "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"),
+        "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE),
+        "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta contraloría %s no se pudo auditar: %s", cedula_norm, exc)
+
+    doc.pop("_id", None)
+    return {
+        "tipo": "contraloria",
+        "cedula": cedula_norm,
+        "cache": False,
+        "consultado_en": ahora,
+        "no_registra": resultado.get("no_registra"),
+        "mensaje": resultado.get("mensaje", ""),
+        "codigo_verificacion": resultado.get("codigo_verificacion", ""),
     }
 
 

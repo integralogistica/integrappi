@@ -1,0 +1,528 @@
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head id="Head1" lang="es-co"><title>Expedición de antecedentes disciplinarios - Procuraduria General de la Nación</title><meta http-equiv="Content-Language" content="es"><link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css" integrity="sha384-9aIt2nRpC12Uk9gS9baDl411NQApFmC26EwAOH8WgZl5MYYxFfc+NcPb1dKGj7Sk" crossorigin="anonymous"><link href="Media/Style/Certificado.css" rel="stylesheet"><link href="Media/Style/PersonalizadoPGN.css" rel="stylesheet">
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js" integrity="sha384-DfXdz2htPH0lsSSs5nCTpuj/zy4C+OGpamoFVy38MVBnE+IbbVYUew+OrCXaRkfj" crossorigin="anonymous"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/js/bootstrap.min.js" integrity="sha384-OgVRvuATP1z7JjHLkuOU7Xw704+h835Lr+6QL9UvYjZE3Ipu6Tp75j7Bh/kR0JKI" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js" integrity="sha384-Q6E9RHvbIyZFJoft+2mJbHaEWldlvI9IOYy5n3zV9zzTtmI3UksdQRVvoxMfooAo" crossorigin="anonymous"></script>
+
+    <script type="text/javascript">
+        function Show(id) {
+            document.getElementById(id).style["display"] = '';
+            document.getElementById(id).style.display = '';
+        }
+
+        function Hide(id) {
+            document.getElementById(id).style["display"] = 'none';
+            document.getElementById(id).style.display = 'none';
+        }
+
+        function validarDatos(source, arguments) {
+            //debugger;
+            var TipoId = document.getElementById("ddlTipoID");
+            var valTipoId = TipoId[TipoId.selectedIndex].value;
+            var ddlCarg = document.getElementById("ddlCargo");
+
+            var bresultado = true;
+
+            if (valTipoId == '1' || valTipoId == '2') {
+                var NumId = document.getElementById("txtNumID").value;
+
+                if (NumId.length < 2) {
+                    bresultado = false;
+                    source.errormessage = 'El campo número de identificación debe ser mayor a 2 caracteres.';
+                }
+
+                if (NumId.length > 10) {
+                    bresultado = false;
+                    source.errormessage = 'El campo número de identificación debe ser menor a 10 caracteres.';
+                }
+
+                if (!NumId.match(/^\d+$/) || NumId == '') {
+                    if (isNaN(NumId)) {
+                        bresultado = false;
+                        source.errormessage = 'El campo número de identificación debe ser numérico.';
+                    }
+                    else {
+                        bresultado = true;
+                    }
+                }
+            }
+
+            if (ddlCarg != null && bresultado) {
+                if (valTipoId == '1' || valTipoId == '5') {
+                    bresultado = true;
+                }
+                else {
+                    bresultado = false;
+                    source.errormessage = 'No se pueden expedir certificados especiales para el tipo de identificación ' + TipoId[TipoId.selectedIndex].text;
+                }
+            }
+            arguments.IsValid = bresultado;
+            return;
+        }
+
+        function validarDatos() {
+            //debugger;
+            var TipoId = document.getElementById("ddlTipoID");
+            var valTipoId = TipoId[TipoId.selectedIndex].value;
+            var ddlCarg = document.getElementById("ddlCargo");
+            var NumId = document.getElementById("txtNumID").value;
+            var errormessage = "";
+
+            var bresultado = true;
+
+            if (valTipoId == '-1') {
+                bresultado = false;
+                errormessage = 'Seleccione un tipo de indentificacion.';
+            }
+
+            if (valTipoId == '1') { //Cedula
+
+                if (NumId.length < 2) {
+                    bresultado = false;
+                    errormessage = 'El campo número de la cédula de ciudadanía debe ser mayor a 2 caracteres.';
+                }
+
+                if (NumId.length > 10) {
+                    bresultado = false;
+                    errormessage = 'El campo número de la cédula de ciudadanía debe ser menor a 10 caracteres.';
+                }
+            }
+
+            if (valTipoId == '0') { //PEP
+                if (NumId.length != 15) {
+                    bresultado = false;
+                    errormessage = 'El campo número del PEP debe ser igual a 15 caracteres.';
+                }
+            }
+
+            if (valTipoId == '5') { //Cedula extranjeria
+
+                if (NumId.length < 4) {
+                    bresultado = false;
+                    errormessage = 'El campo número de la cédula de extranjeria debe ser mayor a 4 caracteres.';
+                }
+
+                if (NumId.length > 8) {
+                    bresultado = false;
+                    errormessage = 'El campo número de la cédula de extranjeria debe ser menor a 8 caracteres.';
+                }
+            }
+
+            if (valTipoId == '2') { //NIT
+
+                if (NumId.length < 4) {
+                    bresultado = false;
+                    errormessage = 'El campo número del NIT debe ser mayor a 4 caracteres.';
+                }
+
+                if (NumId.length > 12) {
+                    bresultado = false;
+                    errormessage = 'El campo número del NIT debe ser menor a 12 caracteres.';
+                }
+            }
+
+            if (valTipoId == '10') { //PPT
+
+                if (NumId.length < 6) {
+                    bresultado = false;
+                    errormessage = 'El campo número del PPT debe ser mayor a 6 caracteres.';
+                }
+
+                if (NumId.length > 8) {
+                    bresultado = false;
+                    errormessage = 'El campo número del PPT debe ser menor a 8 caracteres.';
+                }
+            }
+
+            if (!NumId.match(/^\d+$/) || NumId == '') {
+                if (isNaN(NumId)) {
+                    bresultado = false;
+                    errormessage = 'El campo número de identificación debe ser numérico.';
+                }
+                else {
+                    bresultado = true;
+                }
+            }
+
+            if (ddlCarg != null && bresultado) {
+                if (valTipoId == '1' || valTipoId == '5') {
+                    bresultado = true;
+                }
+                else {
+                    bresultado = false;
+                    errormessage = 'No se pueden expedir certificados especiales para el tipo de identificación ' + TipoId[TipoId.selectedIndex].text;
+                }
+            }
+
+            $("#ValidationSummary1").html(errormessage);
+            $("#ValidationSummary1").css("display", "block");
+
+            return bresultado;
+        }
+
+        //$(function () {
+        //    $("#dialog-confirm").dialog({
+        //        resizable: false,
+        //        height: "auto",
+        //        width: 400,
+        //        modal: true,
+        //        buttons: {
+        //            "ACEPTAR": function () {
+        //                self.location.href = "Encuesta.aspx";
+        //                $(this).dialog("close");
+        //            },
+        //            "Cancelar": function () {
+        //                $(this).dialog("close");
+        //            }
+        //        }
+        //    });
+        //});
+
+
+        function desactivarc() {
+
+            if (validarDatos()) {
+                $('#btnConsultar').hide();
+                return true;
+            }
+
+            return false;
+        }
+
+        function desacticare() {
+            if (validarDatos()) {
+                $('#btnExportar').hide();
+                return true;
+            }
+
+            return false;
+        }
+    </script>
+
+    <style>
+        .Vigencia {
+            font-size: 18px;
+            text-align: center;
+            font-weight: bold;
+            color: #000000;
+            margin-top: 10px;
+            margin-right: 0px;
+            margin-bottom: 10px;
+            margin-left: 0px;
+        }
+    </style>
+</head>
+<body lang="es-co" onsubmit="">
+    <form name="form1" method="post" action="./Certificado.aspx?t=dAylAkFT%2fgSkkvpDoI89aORiq2C8LI3z9uHAnBFaF08%2f32nPrGQhH4HhIkyJHgMD30HMssetl++ZaWYLWl9Ud3HRcFudCB1C+dmvnOTpzb9ipvVlkwZR+TABjraDbp0hlrwP2GCLMX8Rl+aw1u6GwgGEkvY16WZ4qm8sL17YyY5FLVGWSy+Eys6FEeWWKx6G+Rm%2fXaHa4L9eayTZkhzvIL4bJrDB501fmA%2fwv3NJ74I%3d&amp;tpo=1" onsubmit="javascript:return WebForm_OnSubmit();" id="form1">
+<div>
+
+
+
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var theForm = document.forms['form1'];
+if (!theForm) {
+    theForm = document.form1;
+}
+function __doPostBack(eventTarget, eventArgument) {
+    if (!theForm.onsubmit || (theForm.onsubmit() != false)) {
+        theForm.__EVENTTARGET.value = eventTarget;
+        theForm.__EVENTARGUMENT.value = eventArgument;
+        theForm.submit();
+    }
+}
+//]]>
+</script>
+
+
+<script src="/WEBCERT/WebResource.axd?d=8VxNYYVK_1-wbd2F7ez0VWMlEJXUAknbJrvpIB1t_GMFHwKXTsTQgeuUfewUevM9_aIY6JPLLjflo0lubvncdWxCzez4C4U4cyYyunfANg01&amp;t=639191793026372022" type="text/javascript"></script>
+
+
+<script src="/WEBCERT/ScriptResource.axd?d=G7E8-wEs24aw89YMjhXed0jMTkBpZiRMLGTIyX2dyFbgBW6hBxFZ2QPTyXS4bTHqi4qWBLBEy7pmIzEsmMayRXZQz03GkXkt6L4J3mUI6hjYCn8cMBTGu_aTX9AGwdkQzdGBS_tkvHmDnMTrYzTl1g4HiOlstYzA2tBYyPL_uDc1&amp;t=4623e90" type="text/javascript"></script>
+<script src="/WEBCERT/ScriptResource.axd?d=ik8q-GWrPNxjP5bK4-7BC5499OIHqt-YEZ38j3l3mddI2Vkr4RW8OVlY_7aTehNyO782oH8luBURCxyAMNWLNmzpRfVr96zkW0BNwkloywfZjrxOhFxRdUIhyWp6fmKChiN83R5aW-NG0UHaC5S3hhPUeP3Y_2jIOXR4a77Fx8M1&amp;t=fffffffff7f39b88" type="text/javascript"></script>
+<script src="/WEBCERT/ScriptResource.axd?d=QwoV1-5B5OTXA7XCxeSwsSHrvPr3_TYGT7_3QMQjgenw6VixlIkW8SDNMvUtuJBAH2eMkGbEvVsVjIzCQy3VrNs9swomiOr6fb1zNG6UxwS-m6bFHTx6HO28EvN_kVCR_1vla3icAjXeiEWwpD8WX_D8a8HexBDLR0kABGLexe4JHWFPSv0AyxF_g3nSVI8i0&amp;t=fffffffff7f39b88" type="text/javascript"></script>
+<script type="text/javascript">
+//<![CDATA[
+function WebForm_OnSubmit() {
+if (typeof(ValidatorOnSubmit) == "function" && ValidatorOnSubmit() == false) return false;
+return true;
+}
+//]]>
+</script>
+
+<div>
+
+	
+	
+</div>
+        <script type="text/javascript">
+//<![CDATA[
+Sys.WebForms.PageRequestManager._initialize('ctl05', 'form1', ['tUpdatePanel1',''], [], [], 360000, '');
+//]]>
+</script>
+
+        <div id="UpdatePanel1">
+                <div id="UpdateProgress" style="display:none;" role="status" aria-hidden="true">
+	
+                        <!-- LOADING SPINNER USER CONTROL -->
+                        <div style="position: fixed; text-align: center; height: 100%; width: 100%; top: 0; right: 0; left: 0; z-index: 9999999; background-color: #ffffff; opacity: 0.7;">
+                            <img style="position: relative; top: 25%;" src="Media/image/logo_espera.gif" alt="Loading">
+                            <br>
+                            <b style="position: relative; font-size: x-large; top: 25%;">Consultando por favor espere...</b>
+                        </div>
+                    
+</div>
+                <input name="foo" type="hidden" id="foo">
+                <div class="container-fluid">
+                    <div>
+                        <br>
+                        <h1 class="titulo1">
+                            <span id="lblTitulo">Consulta de antecedentes</span>
+                        </h1>
+                        <br>
+                        <p class="titulo2">
+                            Permite consultar los antecedentes disciplinarios, penales, contractuales, fiscales y de pérdida de investidura con solo digitar el número de identificación de la persona natural o jurídica.
+                        </p>
+                        <div class="row">
+                            <div class="col-2"></div>
+                            <div class="col-8">
+                                <div class="row">
+                                    <div class="col-md-3 col-12">
+                                        <label for="ddlTipoID">Tipo de Identificación:</label>
+                                    </div>
+                                    <div class="col-md-3 col-12">
+                                        <select name="ddlTipoID" id="ddlTipoID" class="form-control ComboBox">
+	<option value="-1">Seleccione...</option>
+	<option selected="selected" value="1">Cédula de ciudadanía</option>
+	<option value="0">PEP</option>
+	<option value="2">Nit</option>
+	<option value="5">Cédula extranjeria</option>
+	<option value="10">PPT</option>
+
+</select>
+                                        <span id="CompareValidator3" style="color:Red;visibility:hidden;">*</span>
+                                    </div>
+                                    <div class="col-md-3 col-12">
+                                        <label for="txtNumID">Número Identificación:</label>
+                                    </div>
+                                    <div class="col-md-3 col-12">
+                                        <input name="txtNumID" type="text" value="1033688842" maxlength="15" id="txtNumID" class="form-control TextBox">
+                                        <span id="RequiredFieldValidator2" style="color:Red;visibility:hidden;">*</span>
+                                        <span id="CustomValidator2" style="color:Red;visibility:hidden;">*</span>
+                                    </div>
+                                </div>
+                                
+                                <div class="row">
+                                    <div id="td112" class="col-md-9 col-12">
+                                        <label for="txtRespuestaPregunta">
+                                            <span id="lblPregunta">¿ Cuanto es 6 + 2 ?</span></label>
+                                        <input type="image" name="ImageButton1" id="ImageButton1" src="Media/Image/refresh.png" alt="Pregunta" style="width:24px;border-width:0px;padding-left: 10px;">
+                                    </div>
+                                    <div class="col-md-3 col-12">
+                                        <input name="txtRespuestaPregunta" type="text" value="MEDELLIN" id="txtRespuestaPregunta" class="form-control TextBox">
+                                        <input name="txtEmail" type="text" id="txtEmail" style="height:0px;width:0px;display: none;">
+                                        <span id="RequiredFieldValidator3" style="color:Red;visibility:hidden;">*</span>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div align="center" class="col-12 align-content-center">
+                                        <input type="submit" name="btnConsultar" value="Consultar" onclick="return desactivarc(); Catpcha();WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;btnConsultar&quot;, &quot;&quot;, true, &quot;1&quot;, &quot;&quot;, false, false))" id="btnConsultar" class="Botones">
+                                        
+                                        
+                                    </div>
+                                </div>
+                                <br>
+                                <div id="ValidationSummary1" style="color:Red;display:none;">
+
+</div>
+                                <br>
+                                <div id="ValidationSummary2" class="Vigencia" style="color:Black;display:none;">
+
+</div>
+                            </div>
+                            <div class="col-2"></div>
+                        </div>
+                    </div>
+                    <br>
+                    <div class="row">
+                        <div id="divSec" class="col-12">
+                            <!--?xml version="1.0" encoding="utf-16"?--><h2 class="titulo0">Datos del ciudadano</h2><div class="datosConsultado">
+        Señor(a)
+      <span>JHOAM</span><span>ORLANDO</span><span>AMAYA</span><span>TOVAR</span>  identificado(a) con
+      Cédula de ciudadanía  Número
+    1033688842.
+  <br><br></div><h2>El ciudadano no presenta antecedentes</h2>
+                        </div>
+                    </div>
+                    <br>
+                    <br>
+                    <div id="divSinIdent" style="display: none;" class="">
+                        <h1>¿Qué debo hacer cuándo el documento ingresado no aparezca registrado en el sistema de información SIRI? </h1>
+                        <p>
+                            Cuando se presente error o no exista la información del interesado en la base de datos de la Procuraduría , referida a: nombres, apellidos o razón social, deberá solicitar personalmente o por escrito a la División Centro de Atención al Público de la entidad para que se tramiten las correcciones de rigor; en la ciudad de Bogotá, D.C., y en nuestras sedes en las capitales de departamento en el nivel territorial, con copia simple del: Documento de identificación, o Certificado de existencia y representación legal, o Acto administrativo que autoriza su funcionamiento, observando los siguientes pasos:
+                        </p>
+                        <p>
+                            • En caso de correcciones de nombres o apellidos, el interesado deberá previamente solicitar a la Registraduría Nacional del Estado Civil, certificación donde aparezca su número de identificación, nombres y apellidos actualizados. 
+                        </p>
+                        <p>
+                            • En el evento que una persona solicite el certificado vía página Web y el sistema envíe el mensaje: EL NÚMERO DE IDENTIFICACIÓN INGRESADO NO SE ENCUENTRA REGISTRADO EN EL SISTEMA; debe tramitar ante la Procuraduría el registro de su cédula, cédula de extranjería o NIT de empresa en la base de datos de la entidad, debiendo presentar su documento original para la diligencia pertinente.  
+                        </p>
+                        <br>
+                        <br>
+                    </div>
+                    <div class="row">
+                        <div class="col-12 divNotaPGN">
+                            Señor(a) ciudadano(a): la expedición del certificado de antecedentes disciplinarios de la Procuraduría General de la Nación es gratuita en todo el país.
+                <br>
+                            <span id="lblFechaHora">Fecha de consulta: miércoles, septiembre 02, 2026 - Hora de consulta: 13:55:17</span>
+                        </div>
+                    </div>
+                    <br>
+                    <div class="row">
+                        <div class="col-12 divNotaPGN">
+                            <div id="divNombres" style="display: none;">
+                                <hr>
+                                <b>Nombres</b>, si los datos del nombre que aparecen en la consulta del certificado son inexactos, por favor de clic <a href="ActNombre.aspx">aqui</a> para realizar la actualización según los datos de la REGISTRADURÍA NACIONAL DEL ESTADO CIVIL, si luego de este paso los datos siguen erróneos por favor diríjase a la REGISTRADURÍA más cercana. Mayor información en http://www.registraduria.gov.co/
+                            </div>
+                            <hr>
+                            <p class="">
+                                <b>El certificado de antecedentes ordinario</b>, contiene las anotaciones de las sanciones o inhabilidades que se encuentren vigentes. (Inciso 3, artículo 238 de la ley 1952 de 2019, modificada por la Ley 2094 de 2021) 
+                            </p>
+                            <hr>
+                            <p class="">
+                                <b>El certificado de antecedente especial</b>, refleja todas las anotaciones que figuren en la base de datos, y se expide para acreditar requisitos de cuya elección, designación o nombramiento y posesión exige ausencia total o parcial de antecedentes. 
+                            </p>
+                            <hr>
+                            Para ver este documento necesita Acrobat Reader. Si no lo tiene, haga  <a href="http://www.adobe.com/es/products/acrobat/readstep2.html">clic aquí</a> para descargarlo gratis.  
+
+                        </div>
+                    </div>
+                    <br>
+                    <br>
+
+                    <div id="dialog-confirm" title="¡Satisfacción con el servicio!" style="display: none;">
+                        <p>Para la <strong>Procuraduría General de la Nación </strong>es importante conocer su opinión sobre el servicio prestado</p>
+                    </div>
+
+                </div>
+                <div class="divPiePGN">
+                    Copyright © 2013. Procuraduría General de la Nación / Todos los derechos reservados
+                                <br>
+                    Desarrollado por: <a href="http://www.cdi.com.co">CDI Software</a>  Colombia
+                                <br>
+                    <span id="Lblvr">V.1.0.1</span>
+
+                    <!-- No borrar  -->
+                    <div align="center" style="font-family: Arial; font-size: xx-small; font-weight: normal; color: #F8F8F8; vertical-align: bottom; text-align: right;">Por <a style="font-family: Arial; font-size: xx-small; font-weight: normal; color: #F8F8F8; vertical-align: bottom; text-align: right;" href="http://www.robertpineda.com">Robert Pineda</a>, para CDI Software. 2013</div>
+                    <!-- No borrar  -->
+                </div>
+
+            </div>
+    
+<script type="text/javascript">
+//<![CDATA[
+var Page_ValidationSummaries =  new Array(document.getElementById("ValidationSummary1"), document.getElementById("ValidationSummary2"));
+var Page_Validators =  new Array(document.getElementById("CompareValidator3"), document.getElementById("RequiredFieldValidator2"), document.getElementById("CustomValidator2"), document.getElementById("RequiredFieldValidator3"));
+//]]>
+</script>
+
+<script type="text/javascript">
+//<![CDATA[
+var CompareValidator3 = document.all ? document.all["CompareValidator3"] : document.getElementById("CompareValidator3");
+CompareValidator3.controltovalidate = "ddlTipoID";
+CompareValidator3.errormessage = "Seleccione un tipo de documento.";
+CompareValidator3.validationGroup = "1";
+CompareValidator3.evaluationfunction = "CompareValidatorEvaluateIsValid";
+CompareValidator3.valuetocompare = "-1";
+CompareValidator3.operator = "NotEqual";
+var RequiredFieldValidator2 = document.all ? document.all["RequiredFieldValidator2"] : document.getElementById("RequiredFieldValidator2");
+RequiredFieldValidator2.controltovalidate = "txtNumID";
+RequiredFieldValidator2.errormessage = "Escriba un número de identificación";
+RequiredFieldValidator2.validationGroup = "1";
+RequiredFieldValidator2.evaluationfunction = "RequiredFieldValidatorEvaluateIsValid";
+RequiredFieldValidator2.initialvalue = "";
+var CustomValidator2 = document.all ? document.all["CustomValidator2"] : document.getElementById("CustomValidator2");
+CustomValidator2.controltovalidate = "txtNumID";
+CustomValidator2.errormessage = "El campo número de identificación debe ser numérico.";
+CustomValidator2.validationGroup = "1";
+CustomValidator2.evaluationfunction = "CustomValidatorEvaluateIsValid";
+CustomValidator2.clientvalidationfunction = "validarDatos";
+var RequiredFieldValidator3 = document.all ? document.all["RequiredFieldValidator3"] : document.getElementById("RequiredFieldValidator3");
+RequiredFieldValidator3.controltovalidate = "txtRespuestaPregunta";
+RequiredFieldValidator3.errormessage = "Ingrese la respuesta a la pregunta de verificación";
+RequiredFieldValidator3.validationGroup = "1";
+RequiredFieldValidator3.evaluationfunction = "RequiredFieldValidatorEvaluateIsValid";
+RequiredFieldValidator3.initialvalue = "";
+var ValidationSummary1 = document.all ? document.all["ValidationSummary1"] : document.getElementById("ValidationSummary1");
+ValidationSummary1.displaymode = "List";
+ValidationSummary1.validationGroup = "1";
+var ValidationSummary2 = document.all ? document.all["ValidationSummary2"] : document.getElementById("ValidationSummary2");
+ValidationSummary2.displaymode = "List";
+ValidationSummary2.validationGroup = "2";
+//]]>
+</script>
+
+
+<script type="text/javascript">
+//<![CDATA[
+
+var Page_ValidationActive = false;
+if (typeof(ValidatorOnLoad) == "function") {
+    ValidatorOnLoad();
+}
+
+function ValidatorOnSubmit() {
+    if (Page_ValidationActive) {
+        return ValidatorCommonOnSubmit();
+    }
+    else {
+        return true;
+    }
+}
+        
+(function(id) {
+    var e = document.getElementById(id);
+    if (e) {
+        e.dispose = function() {
+            Array.remove(Page_ValidationSummaries, document.getElementById(id));
+        }
+        e = null;
+    }
+})('ValidationSummary1');
+
+(function(id) {
+    var e = document.getElementById(id);
+    if (e) {
+        e.dispose = function() {
+            Array.remove(Page_ValidationSummaries, document.getElementById(id));
+        }
+        e = null;
+    }
+})('ValidationSummary2');
+Sys.Application.add_init(function() {
+    $create(Sys.UI._UpdateProgress, {"associatedUpdatePanelId":"UpdatePanel1","displayAfter":500,"dynamicLayout":true}, null, null, $get("UpdateProgress"));
+});
+
+document.getElementById('CompareValidator3').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('CompareValidator3'));
+}
+
+document.getElementById('RequiredFieldValidator2').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('RequiredFieldValidator2'));
+}
+
+document.getElementById('CustomValidator2').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('CustomValidator2'));
+}
+
+document.getElementById('RequiredFieldValidator3').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('RequiredFieldValidator3'));
+}
+//]]>
+</script>
+<span style="display: none !important;"><input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value=""></span><span style="display: none !important;"><input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value=""></span><span style="display: none !important;"><input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="/wEPDwULLTE4NDk5MjMxMTYPFgQeCklkUHJlZ3VudGEFAjIwHgZUb2tlblAFGTAyMDkyMDI2NTU4NjcyMzEyMjAxNzEzMTcWAgIDD2QWAgIDD2QWAmYPZBYMAgUPDxYCHgRUZXh0BRhDb25zdWx0YSBkZSBhbnRlY2VkZW50ZXNkZAIRDxYCHgdWaXNpYmxlaBYEAgEPEGRkFgFmZAIFD2QWAgIBDxBkZBYAZAITDw8WAh8CBRTCvyBDdWFudG8gZXMgNiArIDIgP2RkAh8PDxYCHwNoZGQCKw8PFgIfAgVPRmVjaGEgZGUgY29uc3VsdGE6IG1pw6lyY29sZXMsIHNlcHRpZW1icmUgMDIsIDIwMjYgLSBIb3JhIGRlIGNvbnN1bHRhOiAxMzo1NToxN2RkAi8PDxYCHwIFB1YuMS4wLjFkZBgBBR5fX0NvbnRyb2xzUmVxdWlyZVBvc3RCYWNrS2V5X18WAQUMSW1hZ2VCdXR0b24xcI3Vq3pLyn66ItgQShqbV9KSJrQRVB3BtJ1Z+hzMLb8="></span><span style="display: none !important;"><input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="538A70A7"></span><span style="display: none !important;"><input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="/wEdAA1D9ObfjKmIjwLeXXA/ZOkMJNiQCaG9uOeO9FeyshHzF/jHxSHJFh7SaPJnCR17X+tIzJuBLp+gofrBkARS+g1hJFXulnbeSUKTTTvq6e213M3fuEc9GrdRZJskt9cqGCkk3IUiTjowiXR7olBG0CuqiT3JwJ+Yf3qyi1w8Ip+K0fZmkc4EpaLXj/p1P9qoMz3pkAKvHlFmeWUpJ6tT4i4qMaEkfSLg10dCaaAUV6iii0MHZh9ZuPBRie2vA/HfoRKECrD8jc5xpRI7GCI9w78rb/PHynf9YI1Y+nLkJcXFpUER5JZ2vjD7+EoYJxy+wDY="></span></form>
+
+
+</body></html>

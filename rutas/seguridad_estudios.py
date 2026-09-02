@@ -840,6 +840,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
     etiquetas = {
         "manifiestos_rndc": "RNDC — Historial de viajes",
         "procuraduria": "Procuraduría — Antecedentes disciplinarios",
+        "contraloria": "Contraloría — Antecedentes fiscales",
         "policia": "Policía — Antecedentes judiciales",
         "runt": "RUNT — Información del vehículo",
         "simit": "SIMIT — Estado de cuenta de la placa",
@@ -910,27 +911,6 @@ def descargar_pdf(
         "Content-Disposition": f"{'attachment' if descarga else 'inline'}; filename={nombre}"
     }
     return Response(content=contenido, media_type="application/pdf", headers=headers)
-
-
-@router.get("/{consulta_id}/procuraduria.pdf")
-def descargar_anexo_procuraduria(consulta_id: str, request: Request, actor: dict = Depends(actor_actual)):
-    """Certificado oficial de la Procuraduría (anexo original en GCS)."""
-    doc = _obtener_estudio(consulta_id, actor, request)
-    if not doc.get("anexo_procuraduria"):
-        raise HTTPException(status_code=404, detail="El estudio no tiene certificado de la Procuraduría")
-    from Funciones import storage_seguridad
-
-    registrar_evento("pdf_descargado", actor=actor, consulta_id=consulta_id, detalle="anexo procuraduría", request=request)
-    try:
-        contenido = storage_seguridad.descargar_blob(doc["anexo_procuraduria"]["gcs_ruta"])
-    except Exception as exc:
-        logger.error("Anexo %s no se pudo descargar de GCS: %s", consulta_id, exc)
-        raise HTTPException(status_code=502, detail="No fue posible recuperar el certificado del almacenamiento")
-    return Response(
-        content=contenido,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=certificado_procuraduria_{consulta_id}.pdf'},
-    )
 
 
 @router.get("/{consulta_id}/runt.pdf")
@@ -1130,7 +1110,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"],
 }
 
 

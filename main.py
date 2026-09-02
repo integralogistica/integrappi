@@ -128,6 +128,15 @@ async def lifespan(app: FastAPI):
     print("[LIFESPAN] Iniciando aplicación...")
     logger.info("[LIFESPAN] Iniciando aplicación...")
 
+    # Windows + uvicorn --reload: uvicorn pisa la política Proactor del import
+    # superior con WindowsSelectorEventLoopPolicy (la necesita para su watcher).
+    # El loop YA corrido no cambia, pero los asyncio.run de los HILOS de los bots
+    # (endpoints v1: /seguridad/procuraduria etc.) heredarían Selector →
+    # Playwright NotImplementedError. Re-forzar Proactor AQUÍ (esto corre tras
+    # el setup de uvicorn) hace que todo loop nuevo cree subprocesos bien.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     # Recupera cargas Excel SICE-TAC pendientes antes de atender solicitudes.
     await asyncio.to_thread(reanudar_jobs_excel)
 

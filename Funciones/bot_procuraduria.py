@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 PORTAL_URL = "https://www.procuraduria.gov.co/Pages/consulta-de-antecedentes.aspx"
 FORMULARIO_URL = "https://apps.procuraduria.gov.co/webcert/inicio.aspx"
 IFRAME_SELECTOR = 'iframe[src*="apps.procuraduria.gov.co/webcert/inicio.aspx"]'
-SALIDA = Path(__file__).resolve().parents[1] / "descargas_procuraduria"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 _LOCK = threading.Lock()
@@ -167,7 +166,9 @@ def _resolver_captcha_gemini(
     if not texto:
         raise BotProcuraduriaError("Gemini devolvió vacío para el captcha")
     # primera palabra, limpia
-    return texto.split()[0].strip(".,;:")
+    # El portal puede pedir explícitamente "sin tilde". Normalizar siempre es
+    # seguro para estas respuestas cortas y evita rechazos como BOGOTÁ/BOGOTA.
+    return texto.split()[0].strip(".,;:").translate(_TILDES)
 
 
 async def consultar_antecedentes(
@@ -178,7 +179,8 @@ async def consultar_antecedentes(
 
     El ordinario contiene las sanciones/inhabilidades VIGENTES (el que se
     exige en contratación). Retorna: cedula, texto_resultado, no_registra
-    (bool | None), pdf_bytes (| None si no vino PDF) y pdf_ruta.
+    (bool), mensaje y texto_resultado. El portal puede entregar internamente
+    un PDF, pero solo se usa en memoria para leer el veredicto y se descarta.
 
     `nombres`/`apellidos` (2026-09-01, SIN tildes y en mayúsculas — el
     endpoint los normaliza): pista para las preguntas del captcha sobre el
@@ -284,14 +286,18 @@ async def consultar_antecedentes(
                 )
             await boton_consulta.click()
 
-            # Esperar: o la descarga del PDF o la página de resultados. El
-            # postback a verpdf.aspx es LENTO e intermitente (2026-08-30:
-            # visto tardar >45 s o no llegar): esperar el BOTÓN de descarga
-            # de forma explícita, no un networkidle+3s que se rinde antes.
+            # Esperar la página de resultados. El postback es LENTO e
+            # intermitente (visto tardar >45 s, con spinner "Consultando por
+            # favor espere..."). Desde el rediseño del portal (2026-09-02) el
+            # veredicto llega INLINE en .datosConsultado y #btnDescargar ya no
+            # existe: esperar ambos marcadores (el que llegue primero) en vez
+            # de un networkidle+3s que se rinde antes de que termine el postback.
             try:
-                await vista.wait_for_selector("#btnDescargar", timeout=45000, state="attached")
+                await vista.wait_for_selector(
+                    ".datosConsultado, #btnDescargar", timeout=60000, state="attached",
+                )
             except Exception:
-                pass  # puede ser error de captcha o descarga directa: leer la página
+                pass  # puede ser error de captcha: leer la página igual
             try:
                 # El botón ya cargó (o falló): networkidle corto, solo asentar
                 await vista.wait_for_load_state("networkidle", timeout=20000)
@@ -319,14 +325,8 @@ async def consultar_antecedentes(
                     ruta_temp = await descarga.path()
                     pdf_bytes = ruta_temp.read_bytes()
 
-            # 4) Si vino PDF, guardarlo
-            pdf_ruta: Optional[str] = None
-            if pdf_bytes:
-                SALIDA.mkdir(exist_ok=True)
-                pdf_ruta = str(SALIDA / f"certificado_{cedula_norm}.pdf")
-                Path(pdf_ruta).write_bytes(pdf_bytes)
-
-            # 5) Veredicto del texto visible (o del propio PDF si no hay página)
+            # 4) Veredicto del texto visible (o del PDF en memoria si la PGN
+            # solo lo comunicó allí). El certificado no se guarda ni expone.
             no_registra = None
             mensaje = ""
             fuente_texto = texto_resultado
@@ -349,20 +349,29 @@ async def consultar_antecedentes(
                 if m2:
                     no_registra = False
                     mensaje = m2.group(0)[-160:].strip()
-                elif pdf_bytes:
-                    # PDF generado pero con veredicto ilegible: se entrega crudo
-                    # (el anexo queda en el estudio). Solo prometer "ver PDF"
-                    # cuando el PDF EXISTE (fix 2026-08-30: decirlo sin PDF
-                    # llevaba a un ADVERTENCIA que apuntaba a un anexo vacío).
-                    mensaje = "Certificado generado; ver PDF"
+                else:
+                    # Portal rediseñado (hallazgo 2026-09-02): el veredicto llega
+                    # INLINE en la misma página (sección "Datos del ciudadano"),
+                    # ya no hay #btnDescargar ni PDF que descargar. Chequear el
+                    # NO primero: "no presenta antecedentes" contiene "presenta
+                    # antecedentes" (mismo orden del fix de la fórmula oficial).
+                    m3 = re.search(r"((?:el\s+)?ciudadano\s+no\s+presenta\s+antecedentes)", fuente_texto, re.IGNORECASE)
+                    if m3:
+                        no_registra = True
+                        mensaje = "El ciudadano no presenta antecedentes"
+                    else:
+                        m4 = re.search(r"ciudadano\s+presenta\s+antecedentes[^.<]{0,200}", fuente_texto, re.IGNORECASE)
+                        if m4:
+                            no_registra = False
+                            mensaje = m4.group(0).strip()[:160]
+                        elif pdf_bytes:
+                            mensaje = "La Procuraduría respondió, pero no fue posible interpretar el veredicto"
 
-            # Sin veredicto Y sin PDF el portal no entregó nada usable (postback
-            # lento/caído o descarga que no llegó): LANZAR para que el orquestador
-            # REINTENTE y no quede nada en caché (fix 2026-08-30 — antes esto
-            # retornaba silenciosamente y era ADVERTENCIA cacheada 24 h).
-            if no_registra is None and not pdf_bytes:
+            # La consulta solo es útil si produjo un veredicto. Un archivo sin
+            # texto interpretable tampoco cuenta como éxito.
+            if no_registra is None:
                 raise BotProcuraduriaSinResultado(
-                    "El portal de la Procuraduría no entregó el certificado "
+                    "El portal de la Procuraduría no entregó un veredicto "
                     f"(postback sin respuesta). Texto visible: {texto_resultado[:120]!r}"
                 )
 
@@ -372,8 +381,6 @@ async def consultar_antecedentes(
                 "mensaje": mensaje,
                 "texto_resultado": texto_resultado[:1500],
                 "texto_pdf": texto_pdf[:2500],
-                "pdf_bytes": pdf_bytes,
-                "pdf_ruta": pdf_ruta,
                 "html": await vista.content(),
             }
         finally:
@@ -407,7 +414,6 @@ if __name__ == "__main__":
     apellidos = sys.argv[3] if len(sys.argv) > 3 else None
     r = consultar_antecedentes_sync(cedula, nombres=nombres, apellidos=apellidos)
     html = r.pop("html", "")
-    r["pdf_bytes"] = f"<{len(r['pdf_bytes'])} bytes>" if r.get("pdf_bytes") else None
     try:
         salida = Path(__file__).resolve().parents[1] / "descargas_procuraduria"
         salida.mkdir(exist_ok=True)

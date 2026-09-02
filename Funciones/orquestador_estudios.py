@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,12 @@ from Funciones.bot_procuraduria import (
     BotProcuraduriaError,
     BotProcuraduriaSinResultado,
     consultar_antecedentes, consultar_antecedentes_sync,
+)
+from Funciones.bot_contraloria import (
+    BotContraloriaCaptchaFallido,
+    BotContraloriaSinCaptchaKey,
+    BotContraloriaSinResultado,
+    consultar_antecedentes_fiscales, consultar_antecedentes_fiscales_sync,
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
@@ -89,7 +96,7 @@ MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -133,6 +140,7 @@ _SEMAFORO_NAVEGADORES = asyncio.Semaphore(
 _SYNC_ORIGINALES = {
     "consultar_historial_viajes_sync": consultar_historial_viajes_sync,
     "consultar_antecedentes_sync": consultar_antecedentes_sync,
+    "consultar_antecedentes_fiscales_sync": consultar_antecedentes_fiscales_sync,
     "consultar_antecedentes_policia_sync": consultar_antecedentes_policia_sync,
     "consultar_vehiculo_runt_sync": consultar_vehiculo_runt_sync,
     "consultar_comparendos_simit_sync": consultar_comparendos_simit_sync,
@@ -146,6 +154,20 @@ async def _invocar_playwright(async_fn, sync_nombre: str, *args, **kwargs):
     sync_actual = globals()[sync_nombre]
     if sync_actual is not _SYNC_ORIGINALES[sync_nombre]:
         return await asyncio.to_thread(sync_actual, *args, **kwargs)
+    if sys.platform == "win32":
+        # Windows: uvicorn con --reload pisa la política Proactor del main.py
+        # con WindowsSelectorEventLoopPolicy, y ese loop NO soporta subprocess
+        # → Playwright lanza NotImplementedError al arrancar Chromium (visto
+        # 2026-09-02 en dev local; en Render/Linux no aplica). Correr la
+        # corutina en un hilo con su PROPIO ProactorEventLoop, el mismo patrón
+        # de los bots standalone.
+        def _correr_en_hilo():
+            loop = asyncio.ProactorEventLoop()
+            try:
+                return loop.run_until_complete(async_fn(*args, **kwargs))
+            finally:
+                loop.close()
+        return await asyncio.to_thread(_correr_en_hilo)
     return await async_fn(*args, **kwargs)
 
 db = bd_cliente["integra"]
@@ -265,6 +287,14 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         # disparar reembolso en cascada por pura lentitud, y el reintento del
         # _llamar_con_reintento ya corrió (fix 2026-08-30).
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotContraloriaSinCaptchaKey):
+        # Falta de configuración (no del portal): NO_DISPONIBLE para que una
+        # causa pura de config no dispare la cadena de reembolso.
+        return "NO_DISPONIBLE", {"tipo": "configuracion_faltante", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotContraloriaSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotContraloriaCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotPoliciaSinCaptchaKey):
         # Falta de configuración (no del portal): NO_DISPONIBLE para que una
         # causa pura de config no dispare la cadena "todas fallidas → ERROR
@@ -485,12 +515,20 @@ async def _ejecutar_fuente(
                 "procesos": (cache.get("procesos") or [])[:MAX_PROCESOS_DOC],
             })
             seccion["estado"] = "ADVERTENCIA" if seccion["total_procesos"] else "EXITO"
+        elif nombre == "contraloria":
+            # Antecedentes fiscales (SIBOR): mismo shape que procuraduría
+            # (veredicto tri-estado) + el código de verificación del certificado.
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "codigo_verificacion": cache.get("codigo_verificacion", ""),
+            })
+            seccion["estado"] = "EXITO" if seccion["no_registra"] else "ADVERTENCIA"
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
                 "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
                 "nombre_certificado": cache.get("nombre_certificado", ""),
-                "pdf_tamano": cache.get("pdf_tamano", 0),
             })
             if nombre == "policia":
                 seccion["nombre_consultado"] = cache.get("nombre_consultado", "")
@@ -558,6 +596,15 @@ async def _ejecutar_fuente(
             async with _SEMAFORO_NAVEGADORES:
                 return await _invocar_playwright(
                     consultar_procesos, "consultar_procesos_sync", nombres or "", apellidos or ""
+                )
+    elif nombre == "contraloria":
+
+        async def invocar() -> dict:
+            # contraloria consulta por cédula (certificado SIBOR de persona
+            # natural; reCAPTCHA v2 resuelto por 2Captcha dentro del bot).
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_antecedentes_fiscales, "consultar_antecedentes_fiscales_sync", cedula
                 )
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
@@ -914,24 +961,59 @@ async def _ejecutar_fuente(
             seccion[campo] = doc_cache[campo]
         seccion["estado"] = _estado_ofac(seccion)
     else:
-        pdf_bytes = resultado.get("pdf_bytes") or b""
+        if nombre == "contraloria":
+            no_registra = resultado.get("no_registra")
+            # La CGR solo es concluyente cuando entrega un veredicto (NO SE
+            # ENCUENTRA REPORTADO / SE ENCUENTRA REPORTADO COMO RESPONSABLE
+            # FISCAL). Sin él no se cachea nada (anti-envenenamiento).
+            if no_registra is None:
+                seccion.update({
+                    "estado": "NO_DISPONIBLE",
+                    "error": {
+                        "tipo": "portal_inconsistente",
+                        "mensaje": "El portal de la Contraloría no entregó un veredicto. Intente de nuevo.",
+                    },
+                })
+                logger.warning(
+                    "Contraloría sin veredicto para %s (sin cachear): %s",
+                    enmascarar_cedula(cedula), (resultado.get("texto_pdf") or resultado.get("texto_resultado") or "")[:150] or "(sin texto)",
+                )
+                return seccion
+            doc_cache = {
+                "tipo": nombre, "cedula": cedula,
+                "no_registra": no_registra,
+                "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+                "codigo_verificacion": (resultado.get("codigo_verificacion") or "")[:40],
+                "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+                "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+                "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+            }
+            try:
+                col_consultas.insert_one(doc_cache)
+                seccion["cache_id"] = str(doc_cache["_id"])
+            except Exception as exc:
+                logger.error("Caché contraloría %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+            seccion.update({
+                "estado": "EXITO" if no_registra else "ADVERTENCIA",
+                "no_registra": no_registra,
+                "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+                "codigo_verificacion": (resultado.get("codigo_verificacion") or "")[:40],
+            })
+            return seccion
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
         no_registra = resultado.get("no_registra")
-        # Anti-envenenamiento (fix 2026-08-30, análogo RNDC/Policía/RUNT): sin
-        # veredicto Y sin PDF no hay consulta válida — el portal quedó en el
-        # formulario o falló la descarga. Antes esto era ADVERTENCIA con
-        # mensaje "ver PDF" (¡sin PDF!) y quedaba CACHÉ 24 h: la cédula salía
-        # "no concluyente" todo el día aunque el portal respondiera bien luego.
-        if no_registra is None and not pdf_bytes:
+        # La Procuraduría solo es concluyente cuando entrega un veredicto. El
+        # certificado puede procesarse dentro del bot, pero no se persiste.
+        if no_registra is None:
             seccion.update({
                 "estado": "NO_DISPONIBLE",
                 "error": {
                     "tipo": "portal_inconsistente",
-                    "mensaje": "El portal de la Procuraduría no entregó certificado ni veredicto. Intente de nuevo.",
+                    "mensaje": "El portal de la Procuraduría no entregó un veredicto. Intente de nuevo.",
                 },
             })
             logger.warning(
-                "Procuraduría sin veredicto ni PDF para %s (sin cachear): %s",
+                "Procuraduría sin veredicto para %s (sin cachear): %s",
                 enmascarar_cedula(cedula), (resultado.get("texto_resultado") or "")[:150] or "(sin texto)",
             )
             return seccion
@@ -940,8 +1022,6 @@ async def _ejecutar_fuente(
             "no_registra": no_registra,
             "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
             "nombre_certificado": nombre_cert,
-            "pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else None,
-            "pdf_tamano": len(pdf_bytes),
             "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
             "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
@@ -951,19 +1031,12 @@ async def _ejecutar_fuente(
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché procuraduría %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
-        # ADVERTENCIA: el portal respondió pero el veredicto no fue legible
-        # (no_registra None): el estudio no puede afirmar "limpio".
-        estado = "EXITO" if no_registra is not None else "ADVERTENCIA"
         seccion.update({
-            "estado": estado,
+            "estado": "EXITO" if no_registra else "ADVERTENCIA",
             "no_registra": no_registra,
             "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
             "nombre_certificado": nombre_cert,
-            "pdf_sha256": doc_cache["pdf_sha256"],
-            "pdf_tamano": len(pdf_bytes),
         })
-        # El certificado oficial se sube como anexo desde la ruta.
-        seccion["_pdf_bytes"] = pdf_bytes  # volátil: se sube a GCS y se descarta
 
     return seccion
 
@@ -1058,11 +1131,10 @@ async def ejecutar_estudio(
 
     fuentes = dict(zip(FUENTES, resultados))
 
-    # Anexos con certificado oficial (GCS privado) si llegaron. Hoy solo
-    # procuraduría genera PDF; policía/runt mantienen el canal listo por si
-    # el portal cambia.
+    # Anexos de otras fuentes, si algún portal llegara a entregarlos. La
+    # Procuraduría queda excluida: solo conservamos su veredicto.
     anexos: dict[str, dict] = {}
-    for nombre_fuente in ("procuraduria", "policia", "runt", "simit"):
+    for nombre_fuente in ("policia", "runt", "simit"):
         bytes_anexo = (fuentes.get(nombre_fuente) or {}).pop("_pdf_bytes", None)
         if not bytes_anexo:
             continue
@@ -1096,7 +1168,7 @@ async def ejecutar_estudio(
                 "finalizado_en": finalizado,
                 "duracion_s": duracion,
                 "fuentes": {k: _limpiar_seccion(v) for k, v in fuentes.items()},
-                "anexo_procuraduria": anexos.get("procuraduria"),
+                "anexo_procuraduria": None,
                 "anexo_policia": anexos.get("policia"),
                 "anexo_runt": anexos.get("runt"),
                 "anexo_simit": anexos.get("simit"),

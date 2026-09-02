@@ -268,6 +268,39 @@ class TestSeccionRamaJudicial(unittest.TestCase):
         self.assertIn("Demandado:JHOAMORLANDOAMAYATOVAR", texto)
 
 
+class TestSeccionContraloria(unittest.TestCase):
+    def test_veredicto_y_codigo_de_verificacion(self):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["contraloria"] = {
+            "estado": "EXITO",
+            "no_registra": True,
+            "mensaje": "No se encuentra reportado como responsable fiscal (SIBOR)",
+            "codigo_verificacion": "1033688842260902160211",
+            "intentos": 1,
+            "duraciones_s": [30.0],
+        }
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("Antecedentesfiscales", texto)
+        self.assertIn("NOSEENCUENTRAREPORTADOCOMORESPONSABLEFISCAL", texto)
+        self.assertIn("1033688842260902160211", texto)
+        # El párrafo legal solo cubre fuentes corridas.
+        self.assertIn("SIBOR", texto)
+
+    def test_reportado_es_advertencia(self):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["contraloria"] = {
+            "estado": "ADVERTENCIA",
+            "no_registra": False,
+            "mensaje": "SE ENCUENTRA REPORTADO COMO RESPONSABLE FISCAL",
+            "codigo_verificacion": "",
+            "intentos": 2,
+            "duraciones_s": [30.0, 30.0],
+        }
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("SEENCUENTRAREPORTADOCOMORESPONSABLEFISCAL", texto)
+        self.assertIn("Reportadocomoresponsablefiscal", texto)
+
+
 class TestTablaViajes(unittest.TestCase):
     """Regresión del bug 2026-08-29: la tabla de manifiestos usaba texto plano
     (reportlab no lo parte) y los nombres largos de transportadora INVADÍAN la

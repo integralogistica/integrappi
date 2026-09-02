@@ -266,6 +266,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     fuentes = estudio.get("fuentes") or {}
     rndc = fuentes.get("manifiestos_rndc") or {}
     proc = fuentes.get("procuraduria") or {}
+    cgr = fuentes.get("contraloria") or {}
     pol = fuentes.get("policia") or {}
     runt = fuentes.get("runt") or {}
     simit = fuentes.get("simit") or {}
@@ -423,6 +424,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             etiqueta_proc,
             _texto_veredicto(proc),
         ])
+    if _corrio(cgr):
+        etiqueta_cgr, _ = ESTADO_FUENTE_TEXTO.get(cgr.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Contraloría General de la República — Antecedentes Fiscales",
+            etiqueta_cgr,
+            _texto_veredicto_contraloria(cgr),
+        ])
     if _corrio(pol):
         etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
@@ -479,7 +487,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, proc, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial)
+        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial)
         if _corrio(fuente)
     ]
     tabla_resumen = Table(
@@ -582,9 +590,9 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         if no_registra is True:
             texto, color = "NO REGISTRA SANCIONES NI INHABILIDADES VIGENTES", COLOR_EXITO
         elif no_registra is False:
-            texto, color = "REGISTRA ANOTACIONES DISCIPLINARIAS — VER DETALLE", COLOR_FALLO
+            texto, color = "REGISTRA ANOTACIONES DISCIPLINARIAS", COLOR_FALLO
         else:
-            texto, color = "VEREDICTO NO CONCLUSIVO — VER CERTIFICADO ADJUNTO", COLOR_ADVERTENCIA
+            texto, color = "VEREDICTO NO CONCLUSIVO", COLOR_ADVERTENCIA
         tabla_veredicto = Table(
             [[Paragraph(f"<b>{texto}</b>", ParagraphStyle("veredicto", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
             colWidths=[160 * mm],
@@ -597,12 +605,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(tabla_veredicto)
         cuento.append(Spacer(0, 2 * mm))
         detalle_proc = [
-            ["Nombre según certificado", proc.get("nombre_certificado") or "No disponible"],
-            ["Mensaje del certificado", (proc.get("mensaje") or "—")[:300]],
-            ["Certificado oficial (anexo)", (
-                f"Adjunto a este estudio ({_nombre_anexo(estudio)}) · SHA-256: "
-                f"{proc.get('pdf_sha256') or '—'}"
-            )],
+            ["Nombre consultado", proc.get("nombre_certificado") or "No disponible"],
+            ["Resultado de la consulta", (proc.get("mensaje") or "—")[:300]],
             ["Origen de datos", _texto_origen(proc)],
         ]
         tabla_proc = Table(
@@ -619,6 +623,56 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(tabla_proc)
     elif _corrio(proc):
         cuento.append(_parrafo_estado_fuente(proc, "la Procuraduría"))
+
+    # ── 3b. Detalle Contraloría (antecedentes fiscales) ──────────────────────
+    if _corrio(cgr):
+        _antes_de_seccion(cgr)
+        cuento.append(Paragraph("Antecedentes fiscales — Contraloría General de la República", estilo_h2))
+    if cgr.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        no_registra_cgr = cgr.get("no_registra")
+        if no_registra_cgr is True:
+            texto_cgr, color_cgr = "NO SE ENCUENTRA REPORTADO COMO RESPONSABLE FISCAL (SIBOR)", COLOR_EXITO
+        elif no_registra_cgr is False:
+            texto_cgr, color_cgr = "SE ENCUENTRA REPORTADO COMO RESPONSABLE FISCAL — VER DETALLE", COLOR_FALLO
+        else:
+            texto_cgr, color_cgr = "VEREDICTO NO CONCLUSIVO — VER MENSAJE DEL PORTAL", COLOR_ADVERTENCIA
+        tabla_veredicto_cgr = Table(
+            [[Paragraph(f"<b>{texto_cgr}</b>", ParagraphStyle("veredicto_cgr", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_cgr.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_cgr),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_cgr)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_cgr = [
+            ["Resultado de la consulta", (cgr.get("mensaje") or "—")[:300]],
+            ["Código de verificación CGR", cgr.get("codigo_verificacion") or "No disponible"],
+            ["Origen de datos", _texto_origen(cgr)],
+        ]
+        tabla_cgr = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_cgr],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_cgr.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_cgr)
+        cuento.append(Spacer(0, 2 * mm))
+        cuento.append(Paragraph(
+            "El certificado oficial de la CGR se procesó en memoria para leer el veredicto; no se "
+            "adjunta ni se publica. El código de verificación permite constatar la autenticidad del "
+            "certificado directamente ante la Contraloría.",
+            estilo_peq,
+        ))
+    elif _corrio(cgr):
+        cuento.append(_parrafo_estado_fuente(cgr, "la Contraloría"))
 
     # ── 4. Detalle Policía (antecedentes judiciales) ────────────────────────
     if _corrio(pol):
@@ -1125,7 +1179,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1182,8 +1236,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         bloques_legal.append(
             "<b>Comparendos (SIMIT):</b> la información se obtuvo del estado de cuenta público del Sistema "
             "Integrado de Información sobre Comparendos administrado por la Federación Colombiana de "
-            "Municipios, consulta ciudadana abierta por placa. La consulta es sobre el VEHÍCULO y no constituye "
-            "antecedente personal ni atribuye responsabilidad por infracción a la persona evaluada; los datos "
+            "Municipios, consulta ciudadana abierta por placa. La consulta es sobre el VEHÍCULO y "
+            "no&nbsp;constituye&nbsp;antecedente&nbsp;personal ni atribuye responsabilidad por infracción a la persona evaluada; los datos "
             "corresponden a lo reportado por los organismos de tránsito en la fecha de consulta y los saldos "
             "son informativos."
         )
@@ -1191,6 +1245,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         bloques_legal.append(
             "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
             "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas."
+        )
+    if _corrio(cgr):
+        bloques_legal.append(
+            "<b>Antecedentes fiscales (Contraloría General de la República):</b> la información se obtuvo del "
+            "Certificado de Antecedentes Fiscales de persona natural que la CGR expide de forma pública y "
+            "gratuita contra el Sistema de Información del Boletín de Responsables Fiscales (SIBOR), exigible "
+            "en procesos de contratación (Decreto 2150 de 1995). El veredicto corresponde a lo certificado por "
+            "la CGR en la fecha de la consulta; la ausencia de reporte no constituye certificación de "
+            "responsabilidad fiscal futura."
         )
     if _corrio(sena):
         bloques_legal.append(
@@ -1284,12 +1347,20 @@ def _texto_veredicto(proc: dict) -> str:
     if no_registra is True:
         return "Sin sanciones ni inhabilidades vigentes"
     if no_registra is False:
-        return "Registra anotaciones — ver certificado"
-    # No concluyente: solo remitir al anexo si el certificado EXISTE (con
-    # veredicto ilegible hay PDF adjunto; sin PDF no hay nada que ver).
-    if (proc.get("pdf_tamano") or 0) > 0:
-        return "Veredicto no concluyente — ver certificado adjunto"
-    return "Veredicto no concluyente (certificado no entregado por el portal)"
+        return "Registra anotaciones disciplinarias"
+    return "Veredicto no concluyente"
+
+
+def _texto_veredicto_contraloria(cgr: dict) -> str:
+    """Veredicto de la fuente contraloria para la fila resumen (SIBOR)."""
+    if cgr.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(cgr)
+    no_registra = cgr.get("no_registra")
+    if no_registra is True:
+        return "No reportado como responsable fiscal"
+    if no_registra is False:
+        return "Reportado como responsable fiscal — ver detalle"
+    return "Veredicto no concluyente"
 
 
 def _texto_veredicto_policia(pol: dict) -> str:
@@ -1385,8 +1456,3 @@ def _parrafo_estado_fuente(fuente: dict, nombre: str) -> Paragraph:
         texto,
         ParagraphStyle("estado_fuente", fontName="Helvetica", fontSize=9, leading=13, textColor=color),
     )
-
-
-def _nombre_anexo(estudio: dict) -> str:
-    anexo = estudio.get("anexo_procuraduria") or {}
-    return (anexo.get("gcs_ruta") or "certificado oficial").split("/")[-1]

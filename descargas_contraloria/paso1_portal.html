@@ -1,0 +1,1890 @@
+<!DOCTYPE html><html class="ltr yui3-js-enabled" dir="ltr" lang="es-ES"><head> <!-- Google tag (gtag.js) --> <script type="text/javascript" async="" src="https://www.googletagmanager.com/gtag/js?id=G-4PJKYCDYFH&amp;cx=c&amp;_slc=1"></script><script type="text/javascript" async="" src="https://www.google-analytics.com/analytics.js"></script><script async="" src="//www.google-analytics.com/analytics.js"></script><script async="" src="https://www.googletagmanager.com/gtm.js?id=GTM-K9M8QM4"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-BFJR4G356B"></script> <script>
+		window.dataLayer = window.dataLayer || [];
+		function gtag(){dataLayer.push(arguments);}
+		gtag('js', new Date());
+
+		gtag('config', 'G-BFJR4G356B');
+	</script> <!-- Google Tag Manager --> <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+		new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+		j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+		'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+		})(window,document,'script','dataLayer','GTM-K9M8QM4');</script> <!-- End Google Tag Manager --> <script type="text/javascript">
+		!function(T,l,y){var S=T.location,k="script",D="instrumentationKey",C="ingestionendpoint",I="disableExceptionTracking",E="ai.device.",b="toLowerCase",w="crossOrigin",N="POST",e="appInsightsSDK",t=y.name||"appInsights";(y.name||T[e])&&(T[e]=t);var n=T[t]||function(d){var g=!1,f=!1,m={initialize:!0,queue:[],sv:"5",version:2,config:d};function v(e,t){var n={},a="Browser";return n[E+"id"]=a[b](),n[E+"type"]=a,n["ai.operation.name"]=S&&S.pathname||"_unknown_",n["ai.internal.sdkVersion"]="javascript:snippet_"+(m.sv||m.version),{time:function(){var e=new Date;function t(e){var t=""+e;return 1===t.length&&(t="0"+t),t}return e.getUTCFullYear()+"-"+t(1+e.getUTCMonth())+"-"+t(e.getUTCDate())+"T"+t(e.getUTCHours())+":"+t(e.getUTCMinutes())+":"+t(e.getUTCSeconds())+"."+((e.getUTCMilliseconds()/1e3).toFixed(3)+"").slice(2,5)+"Z"}(),iKey:e,name:"Microsoft.ApplicationInsights."+e.replace(/-/g,"")+"."+t,sampleRate:100,tags:n,data:{baseData:{ver:2}}}}var h=d.url||y.src;if(h){function a(e){var t,n,a,i,r,o,s,c,u,p,l;g=!0,m.queue=[],f||(f=!0,t=h,s=function(){var e={},t=d.connectionString;if(t)for(var n=t.split(";"),a=0;a<n.length;a++){var i=n[a].split("=");2===i.length&&(e[i[0][b]()]=i[1])}if(!e[C]){var r=e.endpointsuffix,o=r?e.location:null;e[C]="https://"+(o?o+".":"")+"dc."+(r||"services.visualstudio.com")}return e}(),c=s[D]||d[D]||"",u=s[C],p=u?u+"/v2/track":d.endpointUrl,(l=[]).push((n="SDK LOAD Failure: Failed to load Application Insights SDK script (See stack for details)",a=t,i=p,(o=(r=v(c,"Exception")).data).baseType="ExceptionData",o.baseData.exceptions=[{typeName:"SDKLoadFailed",message:n.replace(/\./g,"-"),hasFullStack:!1,stack:n+"\nSnippet failed to load ["+a+"] -- Telemetry is disabled\nHelp Link: https://go.microsoft.com/fwlink/?linkid=2128109\nHost: "+(S&&S.pathname||"_unknown_")+"\nEndpoint: "+i,parsedStack:[]}],r)),l.push(function(e,t,n,a){var i=v(c,"Message"),r=i.data;r.baseType="MessageData";var o=r.baseData;return o.message='AI (Internal): 99 message:"'+("SDK LOAD Failure: Failed to load Application Insights SDK script (See stack for details) ("+n+")").replace(/\"/g,"")+'"',o.properties={endpoint:a},i}(0,0,t,p)),function(e,t){if(JSON){var n=T.fetch;if(n&&!y.useXhr)n(t,{method:N,body:JSON.stringify(e),mode:"cors"});else if(XMLHttpRequest){var a=new XMLHttpRequest;a.open(N,t),a.setRequestHeader("Content-type","application/json"),a.send(JSON.stringify(e))}}}(l,p))}function i(e,t){f||setTimeout(function(){!t&&m.core||a()},500)}var e=function(){var n=l.createElement(k);n.src=h;var e=y[w];return!e&&""!==e||"undefined"==n[w]||(n[w]=e),n.onload=i,n.onerror=a,n.onreadystatechange=function(e,t){"loaded"!==n.readyState&&"complete"!==n.readyState||i(0,t)},n}();y.ld<0?l.getElementsByTagName("head")[0].appendChild(e):setTimeout(function(){l.getElementsByTagName(k)[0].parentNode.appendChild(e)},y.ld||0)}try{m.cookie=l.cookie}catch(p){}function t(e){for(;e.length;)!function(t){m[t]=function(){var e=arguments;g||m.queue.push(function(){m[t].apply(m,e)})}}(e.pop())}var n="track",r="TrackPage",o="TrackEvent";t([n+"Event",n+"PageView",n+"Exception",n+"Trace",n+"DependencyData",n+"Metric",n+"PageViewPerformance","start"+r,"stop"+r,"start"+o,"stop"+o,"addTelemetryInitializer","setAuthenticatedUserContext","clearAuthenticatedUserContext","flush"]),m.SeverityLevel={Verbose:0,Information:1,Warning:2,Error:3,Critical:4};var s=(d.extensionConfig||{}).ApplicationInsightsAnalytics||{};if(!0!==d[I]&&!0!==s[I]){var c="onerror";t(["_"+c]);var u=T[c];T[c]=function(e,t,n,a,i){var r=u&&u(e,t,n,a,i);return!0!==r&&m["_"+c]({message:e,url:t,lineNumber:n,columnNumber:a,error:i}),r},d.autoExceptionInstrumented=!0}return m}(y.cfg);function a(){y.onInit&&y.onInit(n)}(T[t]=n).queue&&0===n.queue.length?(n.queue.push(a),n.trackPageView({})):a()}(window,document,{
+		src: "https://js.monitor.azure.com/scripts/b/ai.2.min.js", // The SDK URL Source
+		crossOrigin: "anonymous",
+		cfg: { // Application Insights Configuration
+			instrumentationKey: "2128f833-0dcd-4d5b-8f7e-9c0c9cfd9530"
+		}});
+	</script> <!-- Dynatrace --> <script type="text/javascript" src="https://js-cdn.dynatrace.com/jstag/176fb25782e/bf06725rle/3828a7f12020bced_complete.js" crossorigin="anonymous"></script><script src="https://js.monitor.azure.com/scripts/b/ai.2.min.js" crossorigin="anonymous"></script> <!-- End Dynatrace --> <title>Persona Natural - Contraloria</title> <meta content="initial-scale=1.0, width=device-width" name="viewport"> <link rel="preconnect" href="https://fonts.googleapis.com"> <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin=""> <link href="https://fonts.googleapis.com/css2?family=Cabin+Sketch:wght@700&amp;display=swap" rel="stylesheet"> <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.css" integrity="sha512-5A8nwdMOWrSz20fDsjczgUidUBR8liPYU+WymTZP1lmY9G6Oc7HlZv156XqnsgNUzTyMefFTcsFH/tnJE/+xBg==" crossorigin="anonymous" referrerpolicy="no-referrer"> <meta content="text/html; charset=UTF-8" http-equiv="content-type"> <script type="importmap">{"imports":{"react-dom":"/o/frontend-js-react-web/__liferay__/exports/react-dom.js","@clayui/breadcrumb":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$breadcrumb.js","@clayui/form":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$form.js","@clayui/popover":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$popover.js","@clayui/charts":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$charts.js","@clayui/shared":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$shared.js","@clayui/localized-input":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$localized-input.js","@clayui/modal":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$modal.js","@clayui/empty-state":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$empty-state.js","react":"/o/frontend-js-react-web/__liferay__/exports/react.js","@clayui/color-picker":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$color-picker.js","@clayui/navigation-bar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$navigation-bar.js","@clayui/pagination":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$pagination.js","@clayui/icon":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$icon.js","@clayui/table":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$table.js","@clayui/autocomplete":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$autocomplete.js","@clayui/slider":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$slider.js","@clayui/management-toolbar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$management-toolbar.js","@clayui/multi-select":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$multi-select.js","@clayui/nav":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$nav.js","@clayui/time-picker":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$time-picker.js","@clayui/provider":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$provider.js","@clayui/upper-toolbar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$upper-toolbar.js","@clayui/loading-indicator":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$loading-indicator.js","@clayui/panel":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$panel.js","@clayui/drop-down":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$drop-down.js","@clayui/list":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$list.js","@clayui/date-picker":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$date-picker.js","@clayui/label":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$label.js","@clayui/data-provider":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$data-provider.js","@liferay/frontend-js-api/data-set":"/o/frontend-js-dependencies-web/__liferay__/exports/@liferay$js-api$data-set.js","@clayui/core":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$core.js","@liferay/language/":"/o/js/language/","@clayui/pagination-bar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$pagination-bar.js","@clayui/layout":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$layout.js","@clayui/multi-step-nav":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$multi-step-nav.js","@liferay/frontend-js-api":"/o/frontend-js-dependencies-web/__liferay__/exports/@liferay$js-api.js","@clayui/css":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$css.js","@clayui/toolbar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$toolbar.js","@clayui/alert":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$alert.js","@clayui/badge":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$badge.js","@clayui/link":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$link.js","@clayui/card":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$card.js","@clayui/progress-bar":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$progress-bar.js","@clayui/tooltip":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$tooltip.js","@clayui/button":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$button.js","@clayui/tabs":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$tabs.js","@clayui/sticker":"/o/frontend-taglib-clay/__liferay__/exports/@clayui$sticker.js"},"scopes":{}}</script><script data-senna-track="temporary">var Liferay = window.Liferay || {};Liferay.Icons = Liferay.Icons || {};Liferay.Icons.controlPanelSpritemap = 'https://www.contraloria.gov.co/o/admin-theme/images/clay/icons.svg'; Liferay.Icons.spritemap = 'https://www.contraloria.gov.co/o/portal-cgr-theme/images/clay/icons.svg';</script> <script data-senna-track="permanent" src="/combo?browserId=chrome&amp;minifierType=js&amp;languageId=es_ES&amp;t=1787891434275&amp;/o/frontend-js-jquery-web/jquery/jquery.min.js&amp;/o/frontend-js-jquery-web/jquery/init.js&amp;/o/frontend-js-jquery-web/jquery/ajax.js&amp;/o/frontend-js-jquery-web/jquery/bootstrap.bundle.min.js&amp;/o/frontend-js-jquery-web/jquery/collapsible_search.js&amp;/o/frontend-js-jquery-web/jquery/fm.js&amp;/o/frontend-js-jquery-web/jquery/form.js&amp;/o/frontend-js-jquery-web/jquery/popper.min.js&amp;/o/frontend-js-jquery-web/jquery/side_navigation.js" type="text/javascript"></script> <script data-senna-track="permanent" type="text/javascript">window.Liferay = window.Liferay || {}; window.Liferay.CSP = {nonce: ''};</script> <link data-senna-track="temporary" href="https://www.contraloria.gov.co/persona-natural" rel="canonical"> <link data-senna-track="temporary" href="https://www.contraloria.gov.co/persona-natural" hreflang="es-ES" rel="alternate"> <link data-senna-track="temporary" href="https://www.contraloria.gov.co/en/persona-natural" hreflang="en-US" rel="alternate"> <link data-senna-track="temporary" href="https://www.contraloria.gov.co/persona-natural" hreflang="x-default" rel="alternate"> <meta property="og:locale" content="es_ES"> <meta property="og:locale:alternate" content="es_ES"> <meta property="og:locale:alternate" content="en_US"> <meta property="og:site_name" content="Contraloria"> <meta property="og:title" content="Persona Natural - Contraloria"> <meta property="og:type" content="website"> <meta property="og:url" content="https://www.contraloria.gov.co/persona-natural"> <link href="/documents/20125/41149/favicon/da5c3e6f-c73c-3853-141a-74b5323572bc" rel="apple-touch-icon"> <link href="/documents/20125/41149/favicon/da5c3e6f-c73c-3853-141a-74b5323572bc" rel="icon"> <script charset="utf-8" id="yui_patched_v3_20_5_1_1788382534456_35" src="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/yui-throttle/yui-throttle-min.js&amp;/o/frontend-js-aui-web/aui/classnamemanager/classnamemanager-min.js&amp;/o/frontend-js-aui-web/aui/aui-classnamemanager/aui-classnamemanager-min.js&amp;/o/frontend-js-aui-web/aui/aui-debounce/aui-debounce-min.js&amp;/o/frontend-js-aui-web/aui/array-extras/array-extras-min.js&amp;/o/frontend-js-aui-web/aui/event-base/event-base-min.js&amp;/o/frontend-js-aui-web/aui/dom-core/dom-core-min.js&amp;/o/frontend-js-aui-web/aui/dom-base/dom-base-min.js&amp;/o/frontend-js-aui-web/aui/selector-native/selector-native-min.js&amp;/o/frontend-js-aui-web/aui/selector/selector-min.js&amp;/o/frontend-js-aui-web/aui/node-core/node-core-min.js&amp;/o/frontend-js-aui-web/aui/dom-style/dom-style-min.js&amp;/o/frontend-js-aui-web/aui/node-base/node-base-min.js&amp;/o/frontend-js-aui-web/aui/event-delegate/event-delegate-min.js&amp;/o/frontend-js-aui-web/aui/node-event-delegate/node-event-delegate-min.js" async=""></script><script charset="utf-8" id="yui_patched_v3_20_5_1_1788382534456_36" src="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/pluginhost-base/pluginhost-base-min.js&amp;/o/frontend-js-aui-web/aui/pluginhost-config/pluginhost-config-min.js&amp;/o/frontend-js-aui-web/aui/node-pluginhost/node-pluginhost-min.js&amp;/o/frontend-js-aui-web/aui/dom-screen/dom-screen-min.js&amp;/o/frontend-js-aui-web/aui/node-screen/node-screen-min.js&amp;/o/frontend-js-aui-web/aui/node-style/node-style-min.js&amp;/o/frontend-js-aui-web/aui/aui-node-base/aui-node-base-min.js&amp;/o/frontend-js-aui-web/aui/aui-timer/aui-timer-min.js&amp;/o/frontend-js-aui-web/aui/event-touch/event-touch-min.js&amp;/o/frontend-js-aui-web/aui/event-synthetic/event-synthetic-min.js&amp;/o/frontend-js-aui-web/aui/event-move/event-move-min.js" async=""></script><link rel="stylesheet" id="yui_patched_v3_20_5_1_1788382534456_68" href="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/widget-base/assets/skins/sam/widget-base.css"><script charset="utf-8" id="yui_patched_v3_20_5_1_1788382534456_69" src="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/base-core/base-core-min.js&amp;/o/frontend-js-aui-web/aui/base-observable/base-observable-min.js&amp;/o/frontend-js-aui-web/aui/base-base/base-base-min.js&amp;/o/frontend-js-aui-web/aui/base-pluginhost/base-pluginhost-min.js&amp;/o/frontend-js-aui-web/aui/event-focus/event-focus-min.js&amp;/o/frontend-js-aui-web/aui/widget-base/widget-base-min.js&amp;/o/frontend-js-aui-web/aui/aui-widget-cssclass/aui-widget-cssclass-min.js&amp;/o/frontend-js-aui-web/aui/aui-widget-toggle/aui-widget-toggle-min.js&amp;/o/frontend-js-aui-web/aui/base-build/base-build-min.js&amp;/o/frontend-js-aui-web/aui/aui-component/aui-component-min.js&amp;/o/frontend-js-aui-web/aui/cookie/cookie-min.js&amp;/o/frontend-js-aui-web/aui/plugin/plugin-min.js&amp;/o/frontend-js-aui-web/liferay/session.js" async=""></script><script charset="utf-8" id="yui_patched_v3_20_5_1_1788382534456_89" src="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/liferay/menu.js" async=""></script><script charset="utf-8" id="yui_patched_v3_20_5_1_1788382534456_90" src="/combo/?browserId=chrome&amp;minifierType=&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/array-invoke/array-invoke-min.js" async=""></script><link class="lfr-css-file" data-senna-track="temporary" href="https://www.contraloria.gov.co/o/portal-cgr-theme/css/clay.css?browserId=chrome&amp;themeId=portalcgrtheme_WAR_portalcgrtheme&amp;minifierType=css&amp;languageId=es_ES&amp;t=1787891454000" id="liferayAUICSS" rel="stylesheet" type="text/css"> <link href="/combo?browserId=chrome&amp;minifierType=css&amp;themeId=portalcgrtheme_WAR_portalcgrtheme&amp;languageId=es_ES&amp;com_liferay_portal_search_web_search_bar_portlet_SearchBarPortlet_INSTANCE_templateSearch:%2Fo%2Fportal-search-web%2Fcss%2Fmain.css&amp;com_liferay_product_navigation_product_menu_web_portlet_ProductMenuPortlet:%2Fo%2Fproduct-navigation-product-menu-web%2Fcss%2Fmain.css&amp;com_liferay_product_navigation_user_personal_bar_web_portlet_ProductNavigationUserPersonalBarPortlet:%2Fo%2Fproduct-navigation-user-personal-bar-web%2Fcss%2Fmain.css&amp;com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet:%2Fo%2Fsite-navigation-menu-web%2Fcss%2Fmain.css&amp;t=1787891454000" rel="stylesheet" type="text/css" data-senna-track="temporary" id="cede9d40"> <script type="text/javascript" data-senna-track="temporary">
+	// <![CDATA[
+		var Liferay = Liferay || {};
+
+		Liferay.Browser = {
+			acceptsGzip: function () {
+				return true;
+			},
+
+			
+
+			getMajorVersion: function () {
+				return 126.0;
+			},
+
+			getRevision: function () {
+				return '537.36';
+			},
+			getVersion: function () {
+				return '126.0';
+			},
+
+			
+
+			isAir: function () {
+				return false;
+			},
+			isChrome: function () {
+				return true;
+			},
+			isEdge: function () {
+				return false;
+			},
+			isFirefox: function () {
+				return false;
+			},
+			isGecko: function () {
+				return true;
+			},
+			isIe: function () {
+				return false;
+			},
+			isIphone: function () {
+				return false;
+			},
+			isLinux: function () {
+				return false;
+			},
+			isMac: function () {
+				return false;
+			},
+			isMobile: function () {
+				return false;
+			},
+			isMozilla: function () {
+				return false;
+			},
+			isOpera: function () {
+				return false;
+			},
+			isRtf: function () {
+				return true;
+			},
+			isSafari: function () {
+				return true;
+			},
+			isSun: function () {
+				return false;
+			},
+			isWebKit: function () {
+				return true;
+			},
+			isWindows: function () {
+				return true;
+			}
+		};
+
+		Liferay.Data = Liferay.Data || {};
+
+		Liferay.Data.ICONS_INLINE_SVG = true;
+
+		Liferay.Data.NAV_SELECTOR = '#navigation';
+
+		Liferay.Data.NAV_SELECTOR_MOBILE = '#navigationCollapse';
+
+		Liferay.Data.isCustomizationView = function () {
+			return false;
+		};
+
+		Liferay.Data.notices = [
+			
+		];
+
+		(function () {
+			var available = {};
+
+			var direction = {};
+
+			
+
+				available['es_ES'] = 'español\x20\x28España\x29';
+				direction['es_ES'] = 'ltr';
+
+			
+
+				available['ar_SA'] = 'árabe\x20\x28Arabia\x20Saudí\x29';
+				direction['ar_SA'] = 'rtl';
+
+			
+
+				available['ca_ES'] = 'catalán\x20\x28España\x29';
+				direction['ca_ES'] = 'ltr';
+
+			
+
+				available['zh_CN'] = 'chino\x20\x28China\x29';
+				direction['zh_CN'] = 'ltr';
+
+			
+
+				available['nl_NL'] = 'neerlandés\x20\x28Países\x20Bajos\x29';
+				direction['nl_NL'] = 'ltr';
+
+			
+
+				available['en_US'] = 'inglés\x20\x28Estados\x20Unidos\x29';
+				direction['en_US'] = 'ltr';
+
+			
+
+				available['fi_FI'] = 'finés\x20\x28Finlandia\x29';
+				direction['fi_FI'] = 'ltr';
+
+			
+
+				available['fr_FR'] = 'francés\x20\x28Francia\x29';
+				direction['fr_FR'] = 'ltr';
+
+			
+
+				available['de_DE'] = 'alemán\x20\x28Alemania\x29';
+				direction['de_DE'] = 'ltr';
+
+			
+
+				available['hu_HU'] = 'húngaro\x20\x28Hungría\x29';
+				direction['hu_HU'] = 'ltr';
+
+			
+
+				available['ja_JP'] = 'japonés\x20\x28Japón\x29';
+				direction['ja_JP'] = 'ltr';
+
+			
+
+				available['pt_BR'] = 'portugués\x20\x28Brasil\x29';
+				direction['pt_BR'] = 'ltr';
+
+			
+
+				available['sv_SE'] = 'sueco\x20\x28Suecia\x29';
+				direction['sv_SE'] = 'ltr';
+
+			
+
+			let _cache = {};
+
+			if (Liferay && Liferay.Language && Liferay.Language._cache) {
+				_cache = Liferay.Language._cache;
+			}
+
+			Liferay.Language = {
+				_cache,
+				available,
+				direction,
+				get: function(key) {
+					let value = Liferay.Language._cache[key];
+
+					if (value === undefined) {
+						value = key;
+					}
+
+					return value;
+				}
+			};
+		})();
+
+		var featureFlags = {"LPD-10964":false,"LPS-193884":false,"LPD-30371":false,"LPS-178642":false,"LPS-193005":false,"LPD-31789":false,"LPD-10562":false,"LPD-11212":false,"LPS-114786":false,"COMMERCE-8087":false,"LPD-13311":true,"LRAC-10757":false,"LPS-180090":false,"LPS-178052":false,"LPS-189856":false,"LPD-21414":false,"LPS-185892":false,"LPS-186620":false,"LPD-10727":false,"LPS-184404":false,"LPS-198183":false,"LPD-35678":false,"LPD-6378":false,"LPS-153714":false,"LPS-96845":false,"LPD-11848":false,"LPS-170670":false,"LPD-7822":false,"LPS-169981":false,"LPS-177027":false,"LPD-11003":false,"LPD-32247":false,"LPS-135430":false,"LPD-20556":false,"LPS-134060":false,"LPS-164563":false,"LPD-28830":false,"LPD-27222":false,"LPS-122920":false,"LPS-199086":false,"LPD-35128":false,"LPD-10588":false,"LPD-13778":true,"LPD-11313":false,"LPD-6368":false,"LPS-202104":false,"LPD-19955":false,"LPS-187142":false,"LPD-35443":false,"LPD-15596":false,"LPD-11232":false,"LPS-196935":true,"LPS-176691":false,"LPS-197909":false,"LPD-29516":false,"COMMERCE-8949":false,"LPD-11228":false,"LPS-153813":false,"LPD-17809":false,"COMMERCE-13024":false,"LPS-165482":false,"LPS-193551":false,"LPS-197477":false,"LPS-174816":false,"LPS-186360":false,"LPD-32867":false,"LPS-153332":false,"LPD-35013":true,"LPS-179669":false,"LPS-174417":false,"LPD-11147":false,"LPD-31212":false,"LPD-18221":false,"LPS-155284":false,"LRAC-15017":false,"LPD-19870":false,"LPS-200108":false,"LPD-20131":false,"LPS-159643":false,"LPS-129412":false,"LPD-21265":false,"LPS-169837":false,"LPD-20379":false};
+
+		Liferay.FeatureFlags = Object.keys(featureFlags).reduce(
+			(acc, key) => ({
+				...acc, [key]: featureFlags[key] === 'true' || featureFlags[key] === true
+			}), {}
+		);
+
+		Liferay.PortletKeys = {
+			DOCUMENT_LIBRARY: 'com_liferay_document_library_web_portlet_DLPortlet',
+			DYNAMIC_DATA_MAPPING: 'com_liferay_dynamic_data_mapping_web_portlet_DDMPortlet',
+			ITEM_SELECTOR: 'com_liferay_item_selector_web_portlet_ItemSelectorPortlet'
+		};
+
+		Liferay.PropsValues = {
+			JAVASCRIPT_SINGLE_PAGE_APPLICATION_TIMEOUT: 0,
+			UPLOAD_SERVLET_REQUEST_IMPL_MAX_SIZE: 314572800
+		};
+
+		Liferay.ThemeDisplay = {
+
+			
+
+			
+				getLayoutId: function () {
+					return '204';
+				},
+
+				
+
+				getLayoutRelativeControlPanelURL: function () {
+					return '/group/guest/~/control_panel/manage';
+				},
+
+				getLayoutRelativeURL: function () {
+					return '/persona-natural';
+				},
+				getLayoutURL: function () {
+					return 'https://www.contraloria.gov.co/persona-natural';
+				},
+				getParentLayoutId: function () {
+					return '202';
+				},
+				isControlPanel: function () {
+					return false;
+				},
+				isPrivateLayout: function () {
+					return 'false';
+				},
+				isVirtualLayout: function () {
+					return false;
+				},
+			
+
+			getBCP47LanguageId: function () {
+				return 'es-ES';
+			},
+			getCanonicalURL: function () {
+
+				
+
+				return 'https\x3a\x2f\x2fwww\x2econtraloria\x2egov\x2eco\x2fpersona-natural';
+			},
+			getCDNBaseURL: function () {
+				return 'https://www.contraloria.gov.co';
+			},
+			getCDNDynamicResourcesHost: function () {
+				return '';
+			},
+			getCDNHost: function () {
+				return '';
+			},
+			getCompanyGroupId: function () {
+				return '20127';
+			},
+			getCompanyId: function () {
+				return '20101';
+			},
+			getDefaultLanguageId: function () {
+				return 'es_ES';
+			},
+			getDoAsUserIdEncoded: function () {
+				return '';
+			},
+			getLanguageId: function () {
+				return 'es_ES';
+			},
+			getParentGroupId: function () {
+				return '20125';
+			},
+			getPathContext: function () {
+				return '';
+			},
+			getPathImage: function () {
+				return '/image';
+			},
+			getPathJavaScript: function () {
+				return '/o/frontend-js-web';
+			},
+			getPathMain: function () {
+				return '/c';
+			},
+			getPathThemeImages: function () {
+				return 'https://www.contraloria.gov.co/o/portal-cgr-theme/images';
+			},
+			getPathThemeRoot: function () {
+				return '/o/portal-cgr-theme';
+			},
+			getPlid: function () {
+				return '349';
+			},
+			getPortalURL: function () {
+				return 'https://www.contraloria.gov.co';
+			},
+			getRealUserId: function () {
+				return '20106';
+			},
+			getRemoteAddr: function () {
+				return '10.225.0.4';
+			},
+			getRemoteHost: function () {
+				return '10.225.0.4';
+			},
+			getScopeGroupId: function () {
+				return '20125';
+			},
+			getScopeGroupIdOrLiveGroupId: function () {
+				return '20125';
+			},
+			getSessionId: function () {
+				return '';
+			},
+			getSiteAdminURL: function () {
+				return 'https://www.contraloria.gov.co/group/guest/~/control_panel/manage?p_p_lifecycle=0&p_p_state=maximized&p_p_mode=view';
+			},
+			getSiteGroupId: function () {
+				return '20125';
+			},
+			getURLControlPanel: function () {
+				return '/group/control_panel?refererPlid=349';
+			},
+			getURLHome: function () {
+				return 'https\x3a\x2f\x2fwww\x2econtraloria\x2egov\x2eco\x2fweb\x2fguest';
+			},
+			getUserEmailAddress: function () {
+				return '';
+			},
+			getUserId: function () {
+				return '20106';
+			},
+			getUserName: function () {
+				return '';
+			},
+			isAddSessionIdToURL: function () {
+				return false;
+			},
+			isImpersonated: function () {
+				return false;
+			},
+			isSignedIn: function () {
+				return false;
+			},
+
+			isStagedPortlet: function () {
+				
+					
+						return false;
+					
+				
+			},
+
+			isStateExclusive: function () {
+				return false;
+			},
+			isStateMaximized: function () {
+				return false;
+			},
+			isStatePopUp: function () {
+				return false;
+			}
+		};
+
+		var themeDisplay = Liferay.ThemeDisplay;
+
+		Liferay.AUI = {
+
+			
+
+			getCombine: function () {
+				return true;
+			},
+			getComboPath: function () {
+				return '/combo/?browserId=chrome&minifierType=&languageId=es_ES&t=1733785153513&';
+			},
+			getDateFormat: function () {
+				return '%d/%m/%Y';
+			},
+			getEditorCKEditorPath: function () {
+				return '/o/frontend-editor-ckeditor-web';
+			},
+			getFilter: function () {
+				var filter = 'raw';
+
+				
+					
+						filter = 'min';
+					
+					
+
+				return filter;
+			},
+			getFilterConfig: function () {
+				var instance = this;
+
+				var filterConfig = null;
+
+				if (!instance.getCombine()) {
+					filterConfig = {
+						replaceStr: '.js' + instance.getStaticResourceURLParams(),
+						searchExp: '\\.js$'
+					};
+				}
+
+				return filterConfig;
+			},
+			getJavaScriptRootPath: function () {
+				return '/o/frontend-js-web';
+			},
+			getPortletRootPath: function () {
+				return '/html/portlet';
+			},
+			getStaticResourceURLParams: function () {
+				return '?browserId=chrome&minifierType=&languageId=es_ES&t=1733785153513';
+			}
+		};
+
+		Liferay.authToken = 'ZfBxpNum';
+
+		
+
+		Liferay.currentURL = '\x2fweb\x2fguest\x2fpersona-natural';
+		Liferay.currentURLEncoded = '\x252Fweb\x252Fguest\x252Fpersona-natural';
+	// ]]>
+</script> <script data-senna-track="temporary" type="text/javascript">window.__CONFIG__= {basePath: '',combine: true, defaultURLParams: null, explainResolutions: false, exposeGlobal: false, logLevel: 'warn', moduleType: 'module', namespace:'Liferay', nonce: '', reportMismatchedAnonymousModules: 'warn', resolvePath: '/o/js_resolve_modules', url: '/combo/?browserId=chrome&minifierType=js&languageId=es_ES&t=1733785153513&', waitTimeout: 60000};</script><script data-senna-track="permanent" src="/o/frontend-js-loader-modules-extender/loader.js?&amp;mac=9WaMmhziBCkScHZwrrVcOR7VZF4=&amp;browserId=chrome&amp;languageId=es_ES&amp;minifierType=js" type="text/javascript"></script><script data-senna-track="permanent" src="/combo?browserId=chrome&amp;minifierType=js&amp;languageId=es_ES&amp;t=1733785153513&amp;/o/frontend-js-aui-web/aui/aui/aui-min.js&amp;/o/frontend-js-aui-web/liferay/modules.js&amp;/o/frontend-js-aui-web/liferay/aui_sandbox.js&amp;/o/frontend-js-aui-web/aui/attribute-base/attribute-base-min.js&amp;/o/frontend-js-aui-web/aui/attribute-complex/attribute-complex-min.js&amp;/o/frontend-js-aui-web/aui/attribute-core/attribute-core-min.js&amp;/o/frontend-js-aui-web/aui/attribute-observable/attribute-observable-min.js&amp;/o/frontend-js-aui-web/aui/attribute-extras/attribute-extras-min.js&amp;/o/frontend-js-aui-web/aui/event-custom-base/event-custom-base-min.js&amp;/o/frontend-js-aui-web/aui/event-custom-complex/event-custom-complex-min.js&amp;/o/frontend-js-aui-web/aui/oop/oop-min.js&amp;/o/frontend-js-aui-web/aui/aui-base-lang/aui-base-lang-min.js&amp;/o/frontend-js-aui-web/liferay/dependency.js&amp;/o/frontend-js-aui-web/liferay/util.js&amp;/o/frontend-js-web/liferay/dom_task_runner.js&amp;/o/frontend-js-web/liferay/events.js&amp;/o/frontend-js-web/liferay/lazy_load.js&amp;/o/frontend-js-web/liferay/liferay.js&amp;/o/frontend-js-web/liferay/global.bundle.js&amp;/o/frontend-js-web/liferay/portlet.js&amp;/o/frontend-js-web/liferay/workflow.js&amp;/o/oauth2-provider-web/js/liferay.js" type="text/javascript"></script> <script data-senna-track="temporary" type="text/javascript">window.Liferay = Liferay || {}; window.Liferay.OAuth2 = {getAuthorizeURL: function() {return 'https://www.contraloria.gov.co/o/oauth2/authorize';}, getBuiltInRedirectURL: function() {return 'https://www.contraloria.gov.co/o/oauth2/redirect';}, getIntrospectURL: function() { return 'https://www.contraloria.gov.co/o/oauth2/introspect';}, getTokenURL: function() {return 'https://www.contraloria.gov.co/o/oauth2/token';}, getUserAgentApplication: function(externalReferenceCode) {return Liferay.OAuth2._userAgentApplications[externalReferenceCode];}, _userAgentApplications: {}}</script><script data-senna-track="temporary" type="text/javascript">try {var MODULE_MAIN='@liferay/frontend-js-react-web@5.0.50/index';var MODULE_PATH='/o/frontend-js-react-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			react: {
+
+				// eslint-disable-next-line
+				mainModule: MODULE_MAIN,
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='@liferay/frontend-js-state-web@1.0.28/index';var MODULE_PATH='/o/frontend-js-state-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			state: {
+
+				// eslint-disable-next-line
+				mainModule: MODULE_MAIN,
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='exportimport-web@5.0.96/index';var MODULE_PATH='/o/exportimport-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			exportimportweb: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-export-import-export-import': {
+						path: 'main.js',
+						requires: [
+							'aui-datatype',
+							'aui-dialog-iframe-deprecated',
+							'aui-modal',
+							'aui-parse-content',
+							'aui-toggler',
+							'liferay-portlet-base',
+							'liferay-util-window',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='@liferay/document-library-web@6.0.193/index';var MODULE_PATH='/o/document-library-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			dl: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'document-library-upload-component': {
+						path: 'DocumentLibraryUpload.js',
+						requires: [
+							'aui-component',
+							'aui-data-set-deprecated',
+							'aui-overlay-manager-deprecated',
+							'aui-overlay-mask-deprecated',
+							'aui-parse-content',
+							'aui-progressbar',
+							'aui-template-deprecated',
+							'liferay-search-container',
+							'querystring-parse-simple',
+							'uploader',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='staging-processes-web@5.0.63/index';var MODULE_PATH='/o/staging-processes-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			stagingprocessesweb: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-staging-processes-export-import': {
+						path: 'main.js',
+						requires: [
+							'aui-datatype',
+							'aui-dialog-iframe-deprecated',
+							'aui-modal',
+							'aui-parse-content',
+							'aui-toggler',
+							'liferay-portlet-base',
+							'liferay-util-window',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='contacts-web@5.0.63/index';var MODULE_PATH='/o/contacts-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			contactscenter: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-contacts-center': {
+						path: 'main.js',
+						requires: [
+							'aui-io-plugin-deprecated',
+							'aui-toolbar',
+							'autocomplete-base',
+							'datasource-io',
+							'json-parse',
+							'liferay-portlet-base',
+							'liferay-util-window',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='frontend-js-components-web@2.0.77/index';var MODULE_PATH='/o/frontend-js-components-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			components: {
+
+				// eslint-disable-next-line
+				mainModule: MODULE_MAIN,
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='portal-search-web@6.0.144/index';var MODULE_PATH='/o/portal-search-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			search: {
+				base: MODULE_PATH + '/js/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-search-custom-range-facet': {
+						path: 'custom_range_facet.js',
+						requires: ['aui-form-validator'],
+					},
+				},
+				root: MODULE_PATH + '/js/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='frontend-editor-alloyeditor-web@5.0.54/index';var MODULE_PATH='/o/frontend-editor-alloyeditor-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			alloyeditor: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-alloy-editor': {
+						path: 'alloyeditor.js',
+						requires: [
+							'aui-component',
+							'liferay-portlet-base',
+							'timers',
+						],
+					},
+					'liferay-alloy-editor-source': {
+						path: 'alloyeditor_source.js',
+						requires: [
+							'aui-debounce',
+							'liferay-fullscreen-source-editor',
+							'liferay-source-editor',
+							'plugin',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='dynamic-data-mapping-web@5.0.113/index';var MODULE_PATH='/o/dynamic-data-mapping-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	const LiferayAUI = Liferay.AUI;
+
+	AUI().applyConfig({
+		groups: {
+			ddm: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: LiferayAUI.getFilterConfig(),
+				modules: {
+					'liferay-ddm-form': {
+						path: 'ddm_form.js',
+						requires: [
+							'aui-base',
+							'aui-datatable',
+							'aui-datatype',
+							'aui-image-viewer',
+							'aui-parse-content',
+							'aui-set',
+							'aui-sortable-list',
+							'json',
+							'liferay-form',
+							'liferay-map-base',
+							'liferay-translation-manager',
+							'liferay-util-window',
+						],
+					},
+					'liferay-portlet-dynamic-data-mapping': {
+						condition: {
+							trigger: 'liferay-document-library',
+						},
+						path: 'main.js',
+						requires: [
+							'arraysort',
+							'aui-form-builder-deprecated',
+							'aui-form-validator',
+							'aui-map',
+							'aui-text-unicode',
+							'json',
+							'liferay-menu',
+							'liferay-translation-manager',
+							'liferay-util-window',
+							'text',
+						],
+					},
+					'liferay-portlet-dynamic-data-mapping-custom-fields': {
+						condition: {
+							trigger: 'liferay-document-library',
+						},
+						path: 'custom_fields.js',
+						requires: ['liferay-portlet-dynamic-data-mapping'],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}try {var MODULE_MAIN='calendar-web@5.0.102/index';var MODULE_PATH='/o/calendar-web';/**
+ * SPDX-FileCopyrightText: (c) 2000 Liferay, Inc. https://liferay.com
+ * SPDX-License-Identifier: LGPL-2.1-or-later OR LicenseRef-Liferay-DXP-EULA-2.0.0-2023-06
+ */
+
+(function () {
+	AUI().applyConfig({
+		groups: {
+			calendar: {
+				base: MODULE_PATH + '/js/legacy/',
+				combine: Liferay.AUI.getCombine(),
+				filter: Liferay.AUI.getFilterConfig(),
+				modules: {
+					'liferay-calendar-a11y': {
+						path: 'calendar_a11y.js',
+						requires: ['calendar'],
+					},
+					'liferay-calendar-container': {
+						path: 'calendar_container.js',
+						requires: [
+							'aui-alert',
+							'aui-base',
+							'aui-component',
+							'liferay-portlet-base',
+						],
+					},
+					'liferay-calendar-date-picker-sanitizer': {
+						path: 'date_picker_sanitizer.js',
+						requires: ['aui-base'],
+					},
+					'liferay-calendar-interval-selector': {
+						path: 'interval_selector.js',
+						requires: ['aui-base', 'liferay-portlet-base'],
+					},
+					'liferay-calendar-interval-selector-scheduler-event-link': {
+						path: 'interval_selector_scheduler_event_link.js',
+						requires: ['aui-base', 'liferay-portlet-base'],
+					},
+					'liferay-calendar-list': {
+						path: 'calendar_list.js',
+						requires: [
+							'aui-template-deprecated',
+							'liferay-scheduler',
+						],
+					},
+					'liferay-calendar-message-util': {
+						path: 'message_util.js',
+						requires: ['liferay-util-window'],
+					},
+					'liferay-calendar-recurrence-converter': {
+						path: 'recurrence_converter.js',
+						requires: [],
+					},
+					'liferay-calendar-recurrence-dialog': {
+						path: 'recurrence.js',
+						requires: [
+							'aui-base',
+							'liferay-calendar-recurrence-util',
+						],
+					},
+					'liferay-calendar-recurrence-util': {
+						path: 'recurrence_util.js',
+						requires: ['aui-base', 'liferay-util-window'],
+					},
+					'liferay-calendar-reminders': {
+						path: 'calendar_reminders.js',
+						requires: ['aui-base'],
+					},
+					'liferay-calendar-remote-services': {
+						path: 'remote_services.js',
+						requires: [
+							'aui-base',
+							'aui-component',
+							'liferay-calendar-util',
+							'liferay-portlet-base',
+						],
+					},
+					'liferay-calendar-session-listener': {
+						path: 'session_listener.js',
+						requires: ['aui-base', 'liferay-scheduler'],
+					},
+					'liferay-calendar-simple-color-picker': {
+						path: 'simple_color_picker.js',
+						requires: ['aui-base', 'aui-template-deprecated'],
+					},
+					'liferay-calendar-simple-menu': {
+						path: 'simple_menu.js',
+						requires: [
+							'aui-base',
+							'aui-template-deprecated',
+							'event-outside',
+							'event-touch',
+							'widget-modality',
+							'widget-position',
+							'widget-position-align',
+							'widget-position-constrain',
+							'widget-stack',
+							'widget-stdmod',
+						],
+					},
+					'liferay-calendar-util': {
+						path: 'calendar_util.js',
+						requires: [
+							'aui-datatype',
+							'aui-io',
+							'aui-scheduler',
+							'aui-toolbar',
+							'autocomplete',
+							'autocomplete-highlighters',
+						],
+					},
+					'liferay-scheduler': {
+						path: 'scheduler.js',
+						requires: [
+							'async-queue',
+							'aui-datatype',
+							'aui-scheduler',
+							'dd-plugin',
+							'liferay-calendar-a11y',
+							'liferay-calendar-message-util',
+							'liferay-calendar-recurrence-converter',
+							'liferay-calendar-recurrence-util',
+							'liferay-calendar-util',
+							'liferay-scheduler-event-recorder',
+							'liferay-scheduler-models',
+							'promise',
+							'resize-plugin',
+						],
+					},
+					'liferay-scheduler-event-recorder': {
+						path: 'scheduler_event_recorder.js',
+						requires: [
+							'dd-plugin',
+							'liferay-calendar-util',
+							'resize-plugin',
+						],
+					},
+					'liferay-scheduler-models': {
+						path: 'scheduler_models.js',
+						requires: [
+							'aui-datatype',
+							'dd-plugin',
+							'liferay-calendar-util',
+						],
+					},
+				},
+				root: MODULE_PATH + '/js/legacy/',
+			},
+		},
+	});
+})();
+} catch(error) {console.error(error);}</script> <script type="text/javascript" data-senna-track="temporary">
+	// <![CDATA[
+		
+			
+				
+		
+
+		
+	// ]]>
+</script> <script id="googleAnalyticsScript" type="text/javascript" data-senna-track="permanent">
+					(function(i, s, o, g, r, a, m) {
+						i['GoogleAnalyticsObject'] = r;
+
+						i[r] = i[r] || function () {
+							var arrayValue = i[r].q || [];
+
+							i[r].q = arrayValue;
+
+							(i[r].q).push(arguments);
+						};
+
+						i[r].l = 1 * new Date();
+
+						a = s.createElement(o);
+						m = s.getElementsByTagName(o)[0];
+						a.async = 1;
+						a.src = g;
+						m.parentNode.insertBefore(a, m);
+					})(window, document, 'script', '//www.google-analytics.com/analytics.js', 'ga');
+
+					
+
+					
+						
+							ga('create', 'GTM-K9M8QM4', 'auto');
+						
+					
+
+					
+
+					
+
+					ga('send', 'pageview');
+
+					
+						Liferay.on(
+							'endNavigate',
+							function(event) {
+								ga('set', 'page', Liferay.ThemeDisplay.getLayoutRelativeURL());
+								ga('send', 'pageview');
+							}
+						);
+					
+				</script> <link class="lfr-css-file" data-senna-track="temporary" href="https://www.contraloria.gov.co/o/portal-cgr-theme/css/main.css?browserId=chrome&amp;themeId=portalcgrtheme_WAR_portalcgrtheme&amp;minifierType=css&amp;languageId=es_ES&amp;t=1787891454000" id="liferayThemeCSS" rel="stylesheet" type="text/css"> <style data-senna-track="senna" type="text/css"> body { overflow-x: hidden; } .lateral-menu { margin-top: -4rem; } .aspect-ratio-bg-cover { background-size: contain !important; } @media (max-width: 1024px) and (orientation: portrait) { .lateral-menu { margin-top: 0rem; } } footer#footer h2, footer#footer h2 p { font-size: 12pt !important; } /* 1) Ocultar checkbox de selección en filas que son carpetas */ dd[data-folder="true"] .custom-checkbox { display: none !important; } /* 2) Ocultar la opción "Descargar" (ZIP de carpeta completa) en el menú de acciones */ a.dropdown-item[href*="download_folder"] { display: none !important; } /* 3) Ocultar el checkbox "Seleccionar todos" del toolbar superior del widget */ [class*="portlet-boundary_com_liferay_document_library_web_portlet_DLPortlet"] .management-bar .custom-checkbox { display: none !important; } </style> <style data-senna-track="senna" type="text/css"> </style> <style data-senna-track="temporary" type="text/css">
+	:root {
+		--container-max-sm: 540px;
+		--h4-font-size: 1rem;
+		--font-weight-bold: 700;
+		--rounded-pill: 50rem;
+		--display4-weight: 300;
+		--danger: #da1414;
+		--display2-size: 5.5rem;
+		--body-bg: #fff;
+		--display2-weight: 300;
+		--display1-weight: 300;
+		--display3-weight: 300;
+		--box-shadow-sm: 0 .125rem .25rem rgba(0, 0, 0, .075);
+		--font-weight-lighter: lighter;
+		--h3-font-size: 1.1875rem;
+		--btn-outline-primary-hover-border-color: #0b5fff;
+		--transition-collapse: height .35s ease;
+		--blockquote-small-color: #6b6c7e;
+		--gray-200: #f1f2f5;
+		--btn-secondary-hover-background-color: #f7f8f9;
+		--gray-600: #6b6c7e;
+		--secondary: #0F2A44;
+		--btn-outline-primary-color: #0b5fff;
+		--btn-link-hover-color: #004ad7;
+		--hr-border-color: rgba(0, 0, 0, .1);
+		--hr-border-margin-y: 1rem;
+		--light: #f1f2f5;
+		--btn-outline-primary-hover-color: #0b5fff;
+		--btn-secondary-background-color: #fff;
+		--btn-outline-secondary-hover-border-color: transparent;
+		--display3-size: 4.5rem;
+		--primary: #d13204;
+		--container-max-md: 720px;
+		--border-radius-sm: 0.1875rem;
+		--display-line-height: 1.2;
+		--h6-font-size: 0.8125rem;
+		--h2-font-size: 1.375rem;
+		--aspect-ratio-4-to-3: 75%;
+		--spacer-10: 10rem;
+		--font-family-cabin-sketch-script: Cabin Sketch;
+		--font-weight-semi-bold: 600;
+		--font-weight-normal: 400;
+		--dark: #272833;
+		--blockquote-small-font-size: 80%;
+		--h5-font-size: 0.875rem;
+		--blockquote-font-size: 1.25rem;
+		--brand-color-3: #2e5aac;
+		--brand-color-2: #6b6c7e;
+		--brand-color-1: #0b5fff;
+		--transition-fade: opacity .15s linear;
+		--display4-size: 3.5rem;
+		--border-radius-lg: 0.375rem;
+		--btn-primary-hover-color: #fff;
+		--display1-size: 6rem;
+		--brand-color-4: #30313f;
+		--black: #000;
+		--lighter: #f7f8f9;
+		--gray-300: #e7e7ed;
+		--gray-700: #495057;
+		--btn-secondary-border-color: #cdced9;
+		--btn-outline-secondary-hover-color: #272833;
+		--body-color: #1c1c24;
+		--btn-outline-secondary-hover-background-color: rgba(39, 40, 51, 0.03);
+		--btn-primary-color: #fff;
+		--btn-secondary-color: #6b6c7e;
+		--btn-secondary-hover-border-color: #cdced9;
+		--box-shadow-lg: 0 1rem 3rem rgba(0, 0, 0, .175);
+		--container-max-lg: 960px;
+		--btn-outline-primary-border-color: #0b5fff;
+		--aspect-ratio: 100%;
+		--gray-dark: #393a4a;
+		--aspect-ratio-16-to-9: 56.25%;
+		--box-shadow: 0 .5rem 1rem rgba(0, 0, 0, .15);
+		--white: #fff;
+		--warning: #FFC700;
+		--info: #2e5aac;
+		--hr-border-width: 1px;
+		--btn-link-color: #0b5fff;
+		--gray-400: #cdced9;
+		--gray-800: #393a4a;
+		--btn-outline-primary-hover-background-color: #f0f5ff;
+		--btn-primary-hover-background-color: #0053f0;
+		--btn-primary-background-color: #0b5fff;
+		--success: #287d3c;
+		--font-size-sm: 0.875rem;
+		--btn-primary-border-color: #0b5fff;
+		--font-family-base: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen-Sans, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
+		--spacer-0: 0;
+		--font-family-monospace: SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+		--lead-font-size: 1.25rem;
+		--border-radius: 0.25rem;
+		--spacer-9: 9rem;
+		--font-weight-light: 300;
+		--btn-secondary-hover-color: #272833;
+		--spacer-2: 0.5rem;
+		--spacer-1: 0.25rem;
+		--spacer-4: 1.5rem;
+		--spacer-3: 1rem;
+		--spacer-6: 4.5rem;
+		--spacer-5: 3rem;
+		--spacer-8: 7.5rem;
+		--border-radius-circle: 50%;
+		--spacer-7: 6rem;
+		--font-size-lg: 1.125rem;
+		--aspect-ratio-8-to-3: 37.5%;
+		--font-family-sans-serif: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen-Sans, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
+		--gray-100: #f7f8f9;
+		--font-weight-bolder: 900;
+		--container-max-xl: 1248px;
+		--btn-outline-secondary-color: #6b6c7e;
+		--gray-500: #a7a9bc;
+		--h1-font-size: 1.625rem;
+		--gray-900: #272833;
+		--text-muted: #a7a9bc;
+		--btn-primary-hover-border-color: transparent;
+		--btn-outline-secondary-border-color: #cdced9;
+		--lead-font-weight: 300;
+		--font-size-base: 0.875rem;
+	}
+</style> <link data-senna-track="permanent" href="/o/frontend-js-aui-web/alloy_ui.css?&amp;mac=favIEq7hPo8AEd6k+N5OVADEEls=&amp;browserId=chrome&amp;languageId=es_ES&amp;minifierType=css&amp;themeId=portalcgrtheme_WAR_portalcgrtheme" rel="stylesheet"> <script type="module">
+import {init} from '/o/frontend-js-spa-web/__liferay__/index.js';
+{
+init({"navigationExceptionSelectors":":not([target=\"_blank\"]):not([data-senna-off]):not([data-resource-href]):not([data-cke-saved-href]):not([data-cke-saved-href])","cacheExpirationTime":-1,"clearScreensCache":true,"portletsBlacklist":["com_liferay_login_web_portlet_CreateAccountPortlet","com_liferay_site_navigation_directory_web_portlet_SitesDirectoryPortlet","com_liferay_nested_portlets_web_portlet_NestedPortletsPortlet","com_liferay_questions_web_internal_portlet_QuestionsPortlet","com_liferay_account_admin_web_internal_portlet_AccountUsersRegistrationPortlet","com_liferay_login_web_portlet_ForgotPasswordPortlet","com_liferay_portal_language_override_web_internal_portlet_PLOPortlet","com_liferay_login_web_portlet_LoginPortlet","jorgediazest_indexchecker_portlet_IndexCheckerPortlet","com_liferay_login_web_portlet_FastLoginPortlet"],"excludedTargetPortlets":["com_liferay_users_admin_web_portlet_UsersAdminPortlet","com_liferay_server_admin_web_portlet_ServerAdminPortlet"],"validStatusCodes":[221,490,494,499,491,492,493,495,220],"debugEnabled":false,"loginRedirect":"","excludedPaths":["/c/document_library","/documents","/image"],"preloadCSS":false,"userNotification":{"message":"Parece que esto está tardando más de lo esperado.","title":"Vaya","timeout":30000},"requestTimeout":0});
+}
+
+</script><link data-senna-track="temporary" href="/o/layout-common-styles/main.css?plid=349&amp;segmentsExperienceId=9721736&amp;t=1779823301092" rel="stylesheet" type="text/css"> <script type="text/javascript">
+Liferay.on(
+	'ddmFieldBlur', function(event) {
+		if (window.Analytics) {
+			Analytics.send(
+				'fieldBlurred',
+				'Form',
+				{
+					fieldName: event.fieldName,
+					focusDuration: event.focusDuration,
+					formId: event.formId,
+					formPageTitle: event.formPageTitle,
+					page: event.page,
+					title: event.title
+				}
+			);
+		}
+	}
+);
+
+Liferay.on(
+	'ddmFieldFocus', function(event) {
+		if (window.Analytics) {
+			Analytics.send(
+				'fieldFocused',
+				'Form',
+				{
+					fieldName: event.fieldName,
+					formId: event.formId,
+					formPageTitle: event.formPageTitle,
+					page: event.page,
+					title:event.title
+				}
+			);
+		}
+	}
+);
+
+Liferay.on(
+	'ddmFormPageShow', function(event) {
+		if (window.Analytics) {
+			Analytics.send(
+				'pageViewed',
+				'Form',
+				{
+					formId: event.formId,
+					formPageTitle: event.formPageTitle,
+					page: event.page,
+					title: event.title
+				}
+			);
+		}
+	}
+);
+
+Liferay.on(
+	'ddmFormSubmit', function(event) {
+		if (window.Analytics) {
+			Analytics.send(
+				'formSubmitted',
+				'Form',
+				{
+					formId: event.formId,
+					title: event.title
+				}
+			);
+		}
+	}
+);
+
+Liferay.on(
+	'ddmFormView', function(event) {
+		if (window.Analytics) {
+			Analytics.send(
+				'formViewed',
+				'Form',
+				{
+					formId: event.formId,
+					title: event.title
+				}
+			);
+		}
+	}
+);
+
+</script><script>
+
+</script> <script type="text/javascript" data-senna-track="temporary">
+	if (window.Analytics) {
+		window._com_liferay_document_library_analytics_isViewFileEntry = false;
+	}
+</script> <link type="text/css" rel="stylesheet" charset="UTF-8" href="https://www.gstatic.com/_/translate_http/_/ss/k=translate_http.tr.zZZZhVqDDCw.L.W.O/am=BECAAQ/d=0/rs=AN8SPfreld5KM52lJgLi44qeAC03eRorPQ/m=el_main_css"><script type="text/javascript" charset="UTF-8" src="https://translate.googleapis.com/_/translate_http/_/js/k=translate_http.tr.es_419.1kcchQXIqlk.O/am=BECAAQ/d=1/ed=1/rs=AN8SPfp4gKOZ6jL8LMoEjUJx5zGynkiJ5g/m=el_main"></script><link rel="stylesheet" type="text/css" href="/o/frontend-js-web/liferay/modal/Modal.css" nonce=""><link rel="stylesheet" type="text/css" href="/o/frontend-js-web/css/notification.css" nonce=""><style type="text/css">
+@keyframes shift-rightwards {
+	0% {
+		transform: translateX(-100%);
+	}
+	40% {
+		transform: translateX(0%);
+	}
+	60% {
+		transform: translateX(0%);
+	}
+	100% {
+		transform: translateX(100%);
+	}
+}
+
+.lfr-spa-loading-bar {
+	background: var(--primary);
+	display: none;
+	height: 2px;
+	left: 0;
+	position: fixed;
+	right: 0;
+	top: 0;
+	transform: translateX(100%);
+	z-index: 2000;
+}
+
+.lfr-spa-loading .lfr-spa-loading-bar {
+	animation: shift-rightwards 1s ease-in-out infinite;
+	animation-delay: 0.4s;
+	display: block;
+}</style></head> <body class="chrome controls-visible yui3-skin-sam guest-site signed-out public-page site" id="senna_surface1"><div id="senna_surface1-default" class="flipped" style="display: block;"> <!-- Google Tag Manager (noscript) --> <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-K9M8QM4" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript> <!-- End Google Tag Manager (noscript) --> <nav aria-label="Enlaces rápidos" class="bg-dark cadmin quick-access-nav text-center text-white" id="aiso_quickAccessNav"> <ul class="list-unstyled mb-0"> <li> <a class="d-block p-2 sr-only sr-only-focusable text-reset" href="#main-content"> Saltar al contenido principal </a> </li> <li> <button class="d-block p-2 sr-only sr-only-focusable text-reset btn btn-link btn-unstyled text-nowrap" id="aiso_fjzs" onclick="Liferay.fire('openAccessibilityMenu');"> Abrir menú de accesibilidad </button> </li> </ul> </nav> <div class="accessibility-menu" style="display: none;"> <div class="portlet-boundary portlet-boundary_com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet_ portlet-static portlet-static-end portlet-borderless accessibility-menu " id="p_p_id_com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet_"> <span id="p_com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet"></span> <section class="portlet" id="portlet_com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet"> <div class="portlet-content"> <div class=" portlet-content-container"> <div class="portlet-body lfr-tooltip-scope"></div> </div> </div> </section> </div> </div> <div class="d-flex flex-column min-vh-100"> <div class="d-flex flex-column flex-fill" id="wrapper"> <header id="banner" role="banner"> <div class="navbar-mintic"> <div class="container-xl logo_menu_superior"> <div class="header-govco d-flex justify-content-between"> <a href="https://www.gov.co/" target="blank" title="Ir al portal GOV.CO"> <img src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/govco.png" alt="Imagen logo GovCo" class="img-fluid"> <span class="sr-only">Logo Gobierno de Colombia</span> </a> <div> <span class="go-to-gov">ir a <a title="Clic para abrir https://www.gov.co/ En una nueva pestaña" tabindex="1" href="https://www.gov.co/" target="_blank"> GOV.CO </a></span> <a tabindex="1" class="pre-header__lang" href="/en/persona-natural" title="Clic to see the website in English"><span class="sr-only">English</span><span aria-hidden="true" class="acronym">En</span></a> </div> </div><!--end-box--> </div> </div> <nav class="sort-pages modify-pages navbar navbar-expand-lg sticky-top navbar-light portal-menu" id="navigation" role="navigation"> <a class="logo custom-logo navbar-brand mr-xl-4 ml-xl-1" href="/" title="Ir a Contraloria"> <img src="/image/layout_set_logo?img_id=6251347&amp;t=1788239125187" alt="Logo Contraloria" width="100%" height="100%"> </a> <button class="navbar-toggler" type="button" data-toggle="liferay-collapse" data-target="#cgr-menu-principal" aria-controls="cgr-menu-principal" aria-expanded="false" aria-label="Toggle navigation"> <span class="navbar-toggler-icon"></span> </button> <div class="collapse navbar-collapse font-weight-bold mr-5" id="cgr-menu-principal"> <div class="mr-auto"> <div class="portlet-boundary portlet-boundary_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_ portlet-static portlet-static-end portlet-barebone portlet-navigation " id="p_p_id_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_"> <span id="p_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet"></span> <section class="portlet" id="portlet_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet"> <div class="portlet-content"> <div class=" portlet-content-container"> <div class="portlet-body"> <ul class="navbar-nav mr-auto" aria-label="Páginas del sitio web" role="menu"> <li class="nav-item dropdown position-static" id="layout_397714" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_397714" aria-haspopup="true" href="https://www.contraloria.gov.co" role="menuitem" data-original-title="" title=""> CONTRALORÍA <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_397805"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_397805" href="https://www.contraloria.gov.co/web/guest/la-entidad" role="menuitem"> ENTIDAD </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_397806"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397806" href="https://www.contraloria.gov.co/web/guest/organigrama-y-dependencias" role="menuitem"> Organigrama y dependencias <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397812"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397812" href="https://www.contraloria.gov.co/web/guest/simbolos-institucionales" role="menuitem"> Símbolos institucionales <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397813"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397813" href="https://www.contraloria.gov.co/contraloria/la-entidad/historiaycontralores" role="menuitem"> Historia y Contralores <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397808"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397808" href="https://www.contraloria.gov.co/web/guest/mision-y-vision" role="menuitem"> Misión y Visión <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401254"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401254" href="https://www.contraloria.gov.co/contraloria/contralor-general" role="menuitem"> CONTRALOR GENERAL </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_5897856"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_5897856" href="https://www.contraloria.gov.co/contraloria/contralor-general" role="menuitem"> Jorge Enrique Laverde Vargas <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_397814"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_397814" href="https://www.contraloria.gov.co/contraloria/talento-humano" role="menuitem"> TALENTO HUMANO </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_397815"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397815" href="https://www.contraloria.gov.co/contraloria/talento-humano/perfiles-directivos" role="menuitem"> Perfiles Directivos <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397863"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397863" href="https://www.contraloria.gov.co/web/guest/resoluciones-de-nombramiento" role="menuitem"> Resoluciones de Nombramiento <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397917"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397917" href="https://www.contraloria.gov.co/web/guest/concurso-de-meritos" role="menuitem"> Concurso de Méritos <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397918"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397918" href="https://www.contraloria.gov.co/contraloria/talento-humano/evaluacion-del-desempeno" role="menuitem"> Evaluación del Desempeño <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397919"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397919" href="https://www.contraloria.gov.co/web/guest/directorio-completo-de-funcionarios-y-contratistas" role="menuitem"> Directorio Completo de Funcionarios y contratistas <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_397921"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_397921" href="https://www.contraloria.gov.co/web/guest/comunicados" role="menuitem"> Comunicados <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_398032"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_398032" href="https://www.contraloria.gov.co/contraloria/planeacion-gestion-y-control" role="menuitem"> PLANEACIÓN, GESTIÓN Y CONTROL </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_398034"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398034" href="https://www.contraloria.gov.co/contraloria/planeacion-gestion-y-control/gestion-estrategica" role="menuitem"> Gestión Estratégica <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_398157"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398157" href="https://www.contraloria.gov.co/contraloria/planeacion-gestion-y-control/gestion-presupuestal" role="menuitem"> Gestión Presupuestal <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_398162"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398162" href="https://www.contraloria.gov.co/contraloria/planeacion-gestion-y-control/gestion-documental" role="menuitem"> Gestión Documental <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_398163"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398163" href="https://www.contraloria.gov.co/contraloria/planeacion-gestion-y-control/contratacion" role="menuitem"> Contratación <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_398164"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398164" href="https://www.contraloria.gov.co/web/guest/control-interno" role="menuitem"> Control Interno <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_398165"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_398165" href="https://www.contraloria.gov.co/web/guest/quien-nos-vigila" role="menuitem"> Quién Nos Vigila <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401239"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401239" href="https://www.contraloria.gov.co/web/guest/sala-de-prensa" role="menuitem"> SALA DE PRENSA </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401240"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401240" href="https://www.contraloria.gov.co/web/guest/boletines-de-prensa" role="menuitem"> Boletines de Prensa <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401242"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401242" href="https://www.contraloria.gov.co/web/guest/evento" role="menuitem"> Eventos <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401243"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401243" href="https://www.youtube.com/@ContraloriaColombia" target="_blank" role="menuitem"> Multimedia <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> </div> </div> </li> <li class="nav-item dropdown position-static" id="layout_401256" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_401256" aria-haspopup="true" href="https://www.contraloria.gov.co/web/guest/control-fiscal" role="menuitem" data-original-title="" title=""> CONTROL FISCAL <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_401257"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401257" href="https://www.contraloria.gov.co/web/finanzas-publicas" role="menuitem"> CONTROL FISCAL MACRO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401258"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401258" href="https://www.contraloria.gov.co/web/guest/control-fiscal-micro-proceso-auditor" role="menuitem"> CONTROL FISCAL MICRO PROCESO AUDITOR </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401259"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401259" href="https://www.contraloria.gov.co/es/web/guest/control-fiscal/control-fiscal-micro-proceso-auditor/gestion-sujetos-de-control" role="menuitem"> Gestión Sujetos de Control <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401260"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401260" href="https://www.contraloria.gov.co/web/guest/guia-de-auditoria" role="menuitem"> Guía de Auditoría <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401261"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401261" href="https://www.contraloria.gov.co/web/guest/responsabilidad-fiscal" role="menuitem"> RESPONSABILIDAD FISCAL </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401262"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401262" href="https://www.contraloria.gov.co/web/guest/certificado-de-antecedentes-fiscales" role="menuitem"> Certificado de Antecedentes Fiscales <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401270"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401270" href="https://www.contraloria.gov.co/control-fiscal/responsabilidad-fiscal/cobro-coactivo" role="menuitem"> Cobro Coactivo <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_5245355"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_5245355" href="https://www.contraloria.gov.co/es/web/guest/relatoria-decisiones-destacadas" target="_blank" role="menuitem"> Relatoría - Decisiones Destacadas <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401273"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401273" href="https://www.contraloria.gov.co/web/guest/apoyo-al-congreso" role="menuitem"> APOYO AL CONGRESO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401277"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401277" href="https://www.contraloria.gov.co/web/participacion-ciudadana" role="menuitem"> PARTICIPACIÓN CIUDADANA </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401364"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401364" href="https://www.contraloria.gov.co/web/red-apoyo-veedurias-ciudadanas/home" role="menuitem"> RED INSTITUCIONAL DE APOYO A VEEDURÍAS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_4640972"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_4640972" href="https://www.contraloria.gov.co/control-fiscal/asuntos-internacionales?p_l_back_url=%2Fen%2Fgroup%2Fguest%2F%7E%2Fcontrol_panel%2Fmanage%3Fp_p_id%3Dcom_liferay_layout_admin_web_portlet_GroupPagesPortlet%26p_p_lifecycle%3D0%26p_p_state%3Dmaximized%26p_p_mode%3Dview%26_com_liferay_layout_admin_web_portlet_GroupPagesPortlet_tabs1%3Dpages%26_com_liferay_layout_admin_web_portlet_GroupPagesPortlet_privateLayout%3Dfalse%26_com_liferay_layout_admin_web_portlet_GroupPagesPortlet_displayStyle%3Dmiller-columns%26_com_liferay_layout_admin_web_portlet_GroupPagesPortlet_selPlid%3D315%26p_r_p_layoutSetBranchId%3D0%26p_p_auth%3DM7fUbjI9" role="menuitem"> ASUNTOS INTERNACIONALES </a> </div> <hr class="border-danger border-top-2"> </div> </div> </div> </li> <li class="nav-item dropdown position-static" id="layout_401371" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_401371" aria-haspopup="true" href="https://www.contraloria.gov.co/web/guest/resultados-e-informes" role="menuitem" data-original-title="" title=""> RESULTADOS E INFORMES <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_401372"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401372" href="https://www.contraloria.gov.co/web/guest/informes" role="menuitem"> INFORMES </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401373"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401373" href="https://www.contraloria.gov.co/web/guest/informes-constitucionales" role="menuitem"> Informes Constitucionales <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401374"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401374" href="https://www.contraloria.gov.co/web/guest/analisis-sectoriales-y-politicas-publicas" role="menuitem"> Análisis Sectoriales y Políticas Públicas <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401375"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401375" href="https://www.contraloria.gov.co/web/guest/informes-posconflicto" role="menuitem"> Informes Postconflicto <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401378"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401378" href="https://www.contraloria.gov.co/web/guest/proceso-auditor" role="menuitem"> PROCESO AUDITOR </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401381"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401381" href="https://www.contraloria.gov.co/web/guest/auditor-auditorias-liberadas" role="menuitem"> Auditorías Liberadas <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401383"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401383" href="https://www.contraloria.gov.co/web/guest/actuaciones-especiales" role="menuitem"> Actuaciones Especiales <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401384"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401384" href="https://www.contraloria.gov.co/web/guest/resultados-unidad-de-apoyo-al-congreso" role="menuitem"> RESULTADOS UNIDAD DE APOYO AL CONGRESO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401386"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401386" href="https://www.contraloria.gov.co/web/guest/publicaciones" role="menuitem"> PUBLICACIONES </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401387"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401387" href="https://www.contraloria.gov.co/web/guest/rendicion-de-cuentas" role="menuitem"> RENDICIÓN DE CUENTAS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401402"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401402" href="https://www.contraloria.gov.co/resultados/notificaciones-y-citaciones" role="menuitem"> NOTIFICACIONES Y CITACIONES </a> </div> <hr class="border-danger border-top-2"> <div class="d-flex flex-column pt-2 mb-1"> <ul class="p-0"> <li class="nav-item" id="layout_401405"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401405" href="https://www.contraloria.gov.co/web/guest/notificaciones-procesos-de-contratacion" role="menuitem"> Notificaciones Proceso de Contratación <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401406"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401406" href="https://www.contraloria.gov.co/web/guest/notificaciones-procesos-de-responsabilidad-fiscal" role="menuitem"> Notificaciones Procesos de Responsabilidad Fiscal <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401407"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401407" href="https://www.contraloria.gov.co/web/guest/notificaciones-por-estado" role="menuitem"> Notificaciones por Estado <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401411"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401411" href="https://www.contraloria.gov.co/resultados/notificaciones-y-citaciones/notificaciones-procesos-administrativos-sancionatorios" role="menuitem"> Notificaciones Procesos Administrativos Sancionatorios <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401413"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401413" href="https://www.contraloria.gov.co/resultados/notificaciones-y-citaciones/notificaciones-jurisdiccion-coactiva" role="menuitem"> Notificaciones Jurisdicción Coactiva <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> <li class="nav-item" id="layout_401414"> <a class="text-light fs-11 text-decoration-none pt-2 mb-3 text-wrap" aria-labelledby="layout_401414" href="https://www.contraloria.gov.co/resultados/notificaciones-y-citaciones/notificaciones-anonimos-o-sin-direccion" role="menuitem"> Notificaciones Anónimas o Sin Dirección <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#angle-right-small"></use> </svg> </a> </li> </ul> </div> </div> </div> </div> </li> <li class="nav-item dropdown position-static" id="layout_401418" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_401418" aria-haspopup="true" href="https://www.contraloria.gov.co/web/guest/atencion-al-ciudadano" role="menuitem" data-original-title="" title=""> ATENCIÓN AL CIUDADANO <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_6049373"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_6049373" href="https://www.contraloria.gov.co/es/atencion-al-ciudadano" role="menuitem"> Atención y servicios a la ciudadanía </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_4226152"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_4226152" href="https://www.contraloria.gov.co/atencion-al-ciudadano/consulte-su-radicado" target="_blank" role="menuitem"> CONSULTE SU RADICADO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401419"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401419" href="https://www.contraloria.gov.co/atencion-al-ciudadano/instrumentos-gestion-informacion/datos-abiertos" role="menuitem"> DATOS ABIERTOS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401421"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401421" href="https://www.contraloria.gov.co/web/guest/carta-de-trato-digno-al-ciudadano" role="menuitem"> CARTA DE TRATO DIGNO AL CIUDADANO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401455"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401455" href="https://www.contraloria.gov.co/web/guest/atencion-al-ciudadano-glosario" role="menuitem"> GLOSARIO </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401424"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401424" href="https://www.contraloria.gov.co/web/guest/preguntas-frecuentes" role="menuitem"> PREGUNTAS FRECUENTES </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401452"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401452" href="https://www.contraloria.gov.co/web/guest/denuncias-y-otras-solicitudes-pqrd" role="menuitem"> DENUNCIAS Y OTRAS SOLICITUDES PQRD </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401420"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401420" href="https://www.contraloria.gov.co/web/guest/directorio-de-dependencias" role="menuitem"> DIRECTORIO DE DEPENDENCIAS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_12254564"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_12254564" href="https://www.contraloria.gov.co/documents/d/guest/canales_de_atencion_vr-2026" target="_blank" role="menuitem"> CANALES DE ATENCIÓN </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401423"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401423" href="https://www.contraloria.gov.co/web/guest/contactos" role="menuitem"> CONTÁCTENOS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_6115619"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_6115619" href="https://www.contraloria.gov.co/atencion-al-ciudadano/contactenos/pida-una-cita" role="menuitem"> PIDA UNA CITA </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401422"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401422" href="https://www.contraloria.gov.co/web/guest/portafolio-de-tramites-y-servicios" role="menuitem"> PORTAFOLIO DE TRÁMITES Y SERVICIOS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401425"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401425" href="https://www.contraloria.gov.co/web/guest/protocolos" role="menuitem"> PROTOCOLOS </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_401451"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_401451" href="https://www.contraloria.gov.co/web/guest/encuesta" role="menuitem"> ENCUESTA DE SATISFACCIÓN </a> </div> <hr class="border-danger border-top-2"> </div> </div> </div> </li> <li class="nav-item dropdown position-static" id="layout_3617011" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_3617011" aria-haspopup="true" href="https://www.contraloria.gov.co/en/web/rendicion-de-cuentas/transparencia-y-acceso-a-la-informacion-p%C3%BAblica" role="menuitem" data-original-title="" title=""> TRANSPARENCIA <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_3596517"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3596517" href="https://www.contraloria.gov.co/web/rendicion-de-cuentas/transparencia-y-acceso-a-la-informacion-p%C3%Bablica" role="menuitem"> Transparencia y Acceso a la Información Pública </a> </div> <hr class="border-danger border-top-2"> </div> </div> </div> </li> <li class="nav-item dropdown position-static" id="layout_3617012" role="presentation"> <a class="nav-link dropdown-toggle text-uppercase fs-12 text-decoration-none text-dark" data-toggle="liferay-dropdown" aria-labelledby="layout_3617012" aria-haspopup="true" href="https://www.contraloria.gov.co/participa" role="menuitem" data-original-title="" title=""> PARTICIPA <span class="sr-only"> (current) </span> <svg class="lexicon-icon"> <use xlink:href="https://www.contraloria.gov.co/o/portal-cgr-theme/images/lexicon/icons.svg#caret-bottom"></use> </svg> <div class="border-danger line invisible"></div> </a> <div class="dropdown-menu mega-menu pl-7 pr-7 w-100 float-left position-absolute p-0 m-0 bg-secondary"> <div class="row pt-2 px-5 helvetica"> <div class="col-lg-2 pt-3 mb-4" id="layout_6116014"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_6116014" href="https://www.contraloria.gov.co/es/participa" role="menuitem"> INTRODUCCIÓN A PARTICIPA </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3528672"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3528672" href="https://www.contraloria.gov.co/participa/generalidades" role="menuitem"> Generalidades (mecanismos, espacios e instancias) </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589633"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589633" href="https://www.contraloria.gov.co/participa/participacion-para-el-diagnostico-de-necesidades-e-identificacion-de-problemas" role="menuitem"> Participación para el diagnóstico de necesidades e identificación de problemas </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589634"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589634" href="https://www.contraloria.gov.co/participa/planeacion-planes-politicas-y-proyectos-y-presupuesto-participativo" role="menuitem"> Planeación (planes políticas y proyectos) y presupuesto participativo </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589635"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589635" href="https://www.contraloria.gov.co/participa/consulta-ciudadana" role="menuitem"> Consulta ciudadana </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589637"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589637" href="https://www.contraloria.gov.co/participa/colaboracion-e-innovacion-abierta" role="menuitem"> Colaboración e innovación abierta </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589638"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589638" href="https://www.contraloria.gov.co/web/rendicion-de-cuentas/home" role="menuitem"> Rendición de cuentas </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589639"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589639" href="https://www.contraloria.gov.co/participa/control-social" role="menuitem"> Control social </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_3589642"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_3589642" href="https://www.contraloria.gov.co/web/participacion-ciudadana/" role="menuitem"> Control fiscal participativo </a> </div> <hr class="border-danger border-top-2"> </div> <div class="col-lg-2 pt-3 mb-4" id="layout_6044858"> <div class="nivel-2 d-flex align-items-sm-start align-items-lg-end"> <a class="text-light fs-11 text-uppercase font-weight-bold align-self-stretch align-text-bottom text-decoration-none" aria-labelledby="layout_6044858" href="https://www.contraloria.gov.co/es/participa/normas_participa" role="menuitem"> Normas Participa </a> </div> <hr class="border-danger border-top-2"> </div> </div> </div> </li> </ul> <script>
+if ($(window).width() > 767) {
+    document.querySelectorAll('#cgr-menu-principal .portlet-body .position-static a.nav-link').forEach( x => {
+    const title = x.textContent.replace('(current)','').trim().toLowerCase();
+    let urlImage = "";
+
+    switch(title) {
+        case "contraloría":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/CONTRALORIA.gif/8d5af575-9ce0-86b6-59ac-8d7577f41c22?t=1726016023362";
+        break;
+        case "control fiscal":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/CONTROL_FISCAL.gif/92003457-7430-9803-5bd3-391ed413fa2f?t=1692891874788";
+        break;
+        case "resultados e informes":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/RESULTADOR_E_INFORMES.gif/2226eae7-4569-f798-fffa-35dd7507440b?t=1692891876764";
+        break;
+        case "atención al ciudadano":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/ATENCION_AL_CIUDADANO.gif/d456eda8-5d9e-2d15-f82d-601122fc07e2?t=1692891872628";
+        break;
+        case "transparencia":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/TRANSPARENCIA.gif/c9463289-56ca-27d4-844b-28eeb21ae0fd?t=1692891937021";
+        break;
+        case "participa":
+            urlImage = "https://www.contraloria.gov.co/documents/20125/5060015/PARTICIPA.gif/e8d96bb6-5faa-33fc-316a-7638a1129911?t=1692891875877";
+        break;
+    }
+
+    $(x).popover({ trigger: 'hover', html:true, content: '<img src="'+ urlImage +'" longdesc="'+ urlImage +'" alt="Lenguaje de señas:'+ title +'" />', placement:"bottom" })
+    });
+}
+
+</script> </div> </div> </div> </section> </div> </div> <div class="form-inline my-lg-0 otherOptionMenu"> <div id="float-tab"> <div class="selector" onclick="openTab()"> <div class="d-flex align-items-center justify-content-center h-100"> <i class="fa fa-universal-access fa-2x" aria-hidden="true"></i> </div> </div> <div class="tabtitle"> <h4>Accesibilidad</h4> </div> <div class="tabcontent"> <ul class="list-group list-group-flush"> <li class="list-group-item list-group-item-action"> <h5 class="mb-1">Fuente</h5> <ul> <li><a href="javascript:void(0)" onclick="onClickZoomIn()"><i class="fa fa-plus-square" aria-hidden="true"></i>&nbsp;Aumentar</a></li> <li><a href="javascript:void(0)" onclick="onClickZoomOut()"><i class="fa fa-minus-square" aria-hidden="true"></i>&nbsp;Disminuir</a></li> </ul> </li> <li class="list-group-item list-group-item-action"> <h5 class="mb-1">Contraste</h5> <ul> <li><a href="javascript:void(0)" onclick="ContrastBlack()"><i class="fa fa-adjust" aria-hidden="true"></i>&nbsp;Oscuro</a></li> <li><a href="javascript:void(0)" onclick="ContrastWhite()"><i class="fa fa-adjust fa-flip-horizontal" aria-hidden="true"></i>&nbsp;Claro</a></li> </ul> </li> <li class="list-group-item list-group-item-action"> <div class="d-flex w-100 justify-content-between"> <h5 class="mb-1">Idioma</h5> <div class="idiomaPanel alignC"> <span class="lblIdioma">Idioma</span> <div id="google_translate_element"></div> </div> </div> </li> </ul> </div> </div> <div class="search d-lg-none d-xl-flex"> <div class="autofit-col autofit-col-expand"> <div class="searchPanel d-lg-none d-xl-flex"> <div class="justify-content-md-end navbar-form" role="search"> </div> </div> <div class="searchaPanel-lg d-none d-lg-flex d-xl-none"> <div class="input-group-inset-item input-group-inset-item-after"> <button class="btn btn-monospaced btn-unstyled" type="submit" aria-label="Submit" onclick="window.location.href = '/search'"> <span class="inline-item"> <svg class="lexicon-icon lexicon-icon-search" role="presentation" viewBox="0 0 512 512"> <use xlink:href="https://www.contraloria.gov.co/o/cgr-theme/images/clay/icons.svg#search"></use> </svg> </span> </button> </div> </div> </div> </div> <img class="mx-3 border-left pl-4 escudo" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/Escudo_de_Colombia.jpg" alt="escudo_de_colombia"> </div> <div class="form-inline my-lg-0 otherOptionMenuMobile"> <ul class="navbar-nav mr-auto" aria-label="Site Pages" role="menu"> <li class="nav-item dropdown position-static" role="presentation"> <div class="search"> <div class="autofit-col autofit-col-expand"> <div class="searchPanel"></div> </div> </div> </li> <li class="nav-item dropdown position-static" role="presentation"> <div class="col-md-12 idiomaPanel alignC"> <span class="lblIdioma">Idioma</span> <div id="google_translate_elementMB"></div> </div> </li> <li class="nav-item dropdown position-static" role="presentation"> <div class="sign"></div> </li> </ul> </div> </div> </nav> <div class="justify-content-md-end navbar-form accesibilidadPanel accesibilidadPanelHide"> <div class="col-md-2 borderR alignC"> <span class="lbls">Fuente</span> <img src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/Iconos/zoomOut.svg" alt="zoomOut" onclick="onClickZoomOut()" class="clickable"> <img src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/Iconos/zoomIn.svg" alt="zoomIn" onclick="onClickZoomIn()" class="clickable"> </div> <div class="col-md-2 borderR alignC"> <span class="lbls">Contraste</span> <img src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/Iconos/ContrastBlack.svg" alt="ContrastBlack" onclick="ContrastBlack()" class="clickable"> <img src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/Iconos/ContrastWhite.svg" alt="ContrastWhite" onclick="ContrastWhite()" class="clickable"> </div> <div class="col-md-8 idiomaPanel alignC"> <span class="lblIdioma">Idioma</span> <div id="google_translate_element"></div> </div> </div> <script type="text/javascript">
+
+    var select = document.getElementById("float-tab");
+    function openTab()
+    {
+        new google.translate.TranslateElement({
+            pageLanguage:"es",
+            includedLanguages:"en,es,pt",
+            autoDisplay:false,
+            multilanguagePage:true
+        }, "google_translate_element");
+        document.querySelector(".goog-te-gadget").childNodes[1] && document.querySelector(".goog-te-gadget").childNodes[1].remove();
+
+        if(select.classList.contains('active'))
+        {
+            select.className = select.className.replace( /(?:^|\s)active(?!\S)/g , '' );       
+        }
+        else
+        {
+            select.className = "active";       
+        }
+    }
+
+    function onClickAccesibily(){
+        var panel = document.querySelector(".accesibilidadPanel");
+        if(panel.classList.contains("accesibilidadPanelShow")) {
+            panel.classList.remove("accesibilidadPanelShow");
+            panel.classList.add("accesibilidadPanelHide");
+        } else {
+            panel.classList.remove("accesibilidadPanelHide");
+            panel.classList.add("accesibilidadPanelShow");
+        }
+        new google.translate.TranslateElement({
+            pageLanguage:"es",
+            includedLanguages:"en,es,pt",
+            autoDisplay:false,
+            multilanguagePage:true
+        }, "google_translate_element");
+        document.querySelector(".goog-te-gadget").childNodes[1] && document.querySelector(".goog-te-gadget").childNodes[1].remove();
+    }
+    function onClickZoomIn(){
+        var zoomIn = 0.25,
+            base = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-base').replace("rem","").trim()) + zoomIn;
+        if(base < 1.5){
+            document.documentElement.style.setProperty("--font-size-base", base.toString() + "rem");
+            var lg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-lg').replace("px","").trim()) + zoomIn;
+            document.documentElement.style.setProperty("--font-size-lg", lg.toString() + "px");
+            var sm = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-sm').replace("px","").trim()) + zoomIn;
+            document.documentElement.style.setProperty("--font-size-sm", sm.toString() + "px");
+            for (var i = 1; i <= 6; i++) {
+                var h = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--h' + i.toString() + '-font-size').replace("rem","").trim()) + zoomIn;
+                document.documentElement.style.setProperty("--h" + i.toString() + "-font-size", h.toString() + "rem");
+            }
+            for (var i = 8; i <= 15; i++) {
+                var fs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--fs-' + i.toString()).replace("rem","").trim()) + zoomIn;
+                document.documentElement.style.setProperty("--fs-" + i.toString(), fs.toString() + "rem");
+            }
+        }
+    }
+    function onClickZoomOut(){
+        var zoomOut = 0.25,
+            base = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-base').replace("rem","").trim()) - zoomOut;
+        if(base > 0.5){
+            document.documentElement.style.setProperty("--font-size-base", base.toString() + "rem");
+            var lg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-lg').replace("px","").trim()) - zoomOut;
+            if(lg > 0){
+                document.documentElement.style.setProperty("--font-size-lg", lg.toString() + "px");
+            }
+            var sm = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-sm').replace("px","").trim()) - zoomOut;
+            if(sm > 0){
+                document.documentElement.style.setProperty("--font-size-sm", sm.toString() + "px");
+            }
+            for (var i = 1; i <= 6; i++){
+                var h = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--h' + i.toString() + '-font-size').replace("rem","").trim()) - zoomOut;
+                if(h > 0){
+                    document.documentElement.style.setProperty("--h" + i.toString() + "-font-size", h.toString() + "rem");
+                }
+            }
+            for (var i = 8; i <= 15; i++) {
+                var fs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--fs-' + i.toString()).replace("rem","").trim()) - zoomOut;
+                if(fs > 0){
+                    document.documentElement.style.setProperty("--fs-" + i.toString(), fs.toString() + "rem");
+                }
+            }
+        }
+    }
+    function setImagesByAlt(alt,src) {      
+        document.querySelectorAll("img[alt='" + alt + "']")[0].src = src;
+    }
+    var dark = getComputedStyle(document.documentElement).getPropertyValue('--dark'),
+        iconLogo =  document.querySelectorAll("img[alt='Logo Contraloria']")[0].src,
+        iconWhite = "https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/Logotipo_ContraloriaCFP_white.svg"    
+    
+    function ContrastBlack(){       
+        setImagesByAlt("Logo Contraloria", iconWhite);
+        document.documentElement.style.setProperty("--body-bg", getComputedStyle(document.documentElement).getPropertyValue('--secondary'));
+        document.documentElement.style.setProperty("--body-color", getComputedStyle(document.documentElement).getPropertyValue('--white'));
+        document.documentElement.style.setProperty("--accesibility-white-color", dark);
+        document.documentElement.style.setProperty("--dark", getComputedStyle(document.documentElement).getPropertyValue('--white'));
+        document.querySelector(".site").classList.add("contrastCustom");
+    }
+    function ContrastWhite(){
+        setImagesByAlt("Logo Contraloria", iconLogo);
+        document.documentElement.style.setProperty("--dark", dark);
+        document.documentElement.style.setProperty("--body-bg", getComputedStyle(document.documentElement).getPropertyValue('--white'));
+        document.documentElement.style.setProperty("--body-color", getComputedStyle(document.documentElement).getPropertyValue('--dark'));
+        document.documentElement.style.setProperty("--accesibility-white-color", getComputedStyle(document.documentElement).getPropertyValue('--white'));
+        document.querySelector(".site").classList.remove("contrastCustom");
+    }
+
+    
+    
+</script> <script type="text/javascript" src="//translate.google.com/translate_a/element.js"></script> </header> <section class=" flex-fill" id="content"> <h2 class="sr-only" role="heading" aria-level="1">Persona Natural</h2> <div class="layout-content portlet-layout" id="main-content" role="main"> <div class="lfr-layout-structure-item-04ab413d-56e7-5cba-2671-742b387e806c lfr-layout-structure-item-row " style=""><div class="container-fluid p-0"><div class="row align-items-lg-start align-items-sm-start align-items-start align-items-md-start flex-lg-row flex-sm-row flex-row flex-md-row"><div class="col col-lg-12 col-sm-12 col-12 col-md-12"><div class="lfr-layout-structure-item-slider--copy- lfr-layout-structure-item-d88b4289-4758-e5a1-572b-2400810e39f7 " style=""><div id="fragment-0cb39e6d-18dd-550c-393d-58b07253f5ef"> <div class="container-fluid banner"> <div id="myCarousel" class="carousel slide" data-ride="carousel"> <!-- Indicators --> <div class="carousel-inner"> <div class="carousel-item active" data-interval="5000"> <div class="row"> <div class="col-12 col-xl-4 col-text"> <div> <div class="subtitle">control fiscal</div> <div class="title">Consulta Certificado Antecedentes Fiscales Persona Natural</div> <div class="description"></div> <div class="content"></div> </div> </div> <div class="col-12 col-xl-8 col-image"> <picture data-fileentryid="11598690"><source media="(max-width:300px)" srcset="/o/adaptive-media/image/11598690/Thumbnail-300x300/B_CF_Responsabilidad+fiscal.png?t=1779741061809"><source media="(max-width:1000px) and (min-width:300px)" srcset="/o/adaptive-media/image/11598690/Preview-1000x0/B_CF_Responsabilidad+fiscal.png?t=1779741061809"><img alt="" class="w-100" data-lfr-editable-id="03-image" data-lfr-editable-type="image" data-lfr-priority="9" src="/documents/20125/11597960/B_CF_Responsabilidad+fiscal.png/65f2a723-332b-0e9c-09be-5c6d30fb91cf?version=1.0&amp;t=1779741061809" data-fileentryid="11598690"></picture> </div> </div> </div> </div> </div> </div></div><style>.layout { padding-left: 40px; padding-right: 40px; } /* Banner */ .carousel-inner, .carousel, .carousel-item, .banner .row { height: 100%; min-height: 400px; width: 100%; background-position: center center; background-size: cover; } .banner { padding: 0; display: inline; } .banner .row { margin: 0px; } .banner .col-image, .banner .coi-text { padding: 0%; } .banner .col-text { padding: 137px 42px 0px 37px; } .banner .col-text .title { font-size: var(--h1-font-size); text-align: left; /*text-transform: capitalize;*/ font-weight: bold; } .banner .col-text .subtitle { font-size: var(--h5-font-size); text-align: left; text-transform: uppercase; } .banner .col-text .description { font-size: var(--h5-font-size); text-align: left; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; } .banner .col-text .btn-seeMore { text-transform: uppercase; border-radius: 0px; width: 10rem; border: none; } .banner .col-text a:hover { text-decoration: inherit; } @media (max-width: 576px) and (orientation: portrait) { .banner .col-text { padding: 30px 50px 40px 36px; } .banner .image { width: 100%; height: 368px; object-fit: cover; } }</style><script type="module">const configuration = {"imageSize":"w-0","alternativeText":""}; const fragmentElement = document.querySelector('#fragment-0cb39e6d-18dd-550c-393d-58b07253f5ef'); const fragmentEntryLinkNamespace = 'zhsx'; const fragmentNamespace = 'zhsx'; const layoutMode = 'view';const editMode = document.body.classList.contains('has-edit-mode-menu');
+if(!editMode) {
+
+	let textFields = document.querySelectorAll('.title, .subtitle, .description, .content');
+	textFields.forEach( (field, index) => {
+		if(field.innerText.toLowerCase().includes("this is an example")) {
+			field.innerText = "";
+		}
+	});
+	
+	let image = fragmentElement.querySelector("img");
+	if(image.src == "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAA7KqwyAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAkSURBVHgB7cxBEQAACAIwtH8Pzw52kxD8OBZgNXsPQUOUwCIgAz0DHTyygaAAAAAASUVORK5CYII="){
+		let colImage = fragmentElement.querySelector(".col-image");
+		let colText = fragmentElement.querySelector(".col-text");
+		
+		colImage.remove();
+		colText.classList.remove("col-xl-4");
+	}
+	
+	if(!configuration.showButton) {
+		if(fragmentElement.querySelector(".btn-seeMore")) {
+			fragmentElement.querySelector(".btn-seeMore").remove();
+		}
+	}
+};</script></div></div></div></div></div><div class="lfr-layout-structure-item-6fdba236-b254-dbd6-4e30-b5dda9588f12 lfr-layout-structure-item-row " style=""><div class="container-fluid p-0"><div class="row align-items-lg-start align-items-sm-start align-items-start align-items-md-start flex-lg-row flex-sm-column-reverse flex-column-reverse flex-md-column-reverse"><div class="col col-lg-4 col-sm-12 col-12 col-md-12"><div class="lfr-layout-structure-item-aef78bf1-062d-c339-2a66-25d83a0a0ea6 lfr-layout-structure-item-container " style=""><div class="lfr-layout-structure-item-com-liferay-asset-publisher-web-portlet-assetpublisherportlet lfr-layout-structure-item-4d249caa-339d-d75c-456f-5486b2929e49 " style=""><div id="fragment-8a97bc06-dcd0-41e2-ad96-f12629b1e4e6"><link href="/combo?browserId=chrome&amp;minifierType=css&amp;themeId=portalcgrtheme_WAR_portalcgrtheme&amp;languageId=es_ES&amp;com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj:%2Fo%2Fasset-publisher-web%2Fcss%2Fmain.css&amp;t=1787891454000" rel="stylesheet" type="text/css"> <div class="portlet-boundary portlet-boundary_com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_ portlet-static portlet-static-end portlet-borderless portlet-asset-publisher " id="p_p_id_com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj_"> <span id="p_com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj"></span> <section class="portlet" id="portlet_com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj"> <div class="portlet-content"> <div class=" portlet-content-container"> <div class="portlet-body"> <style> .lateral-menu .container-menu { border: 1px solid #E2E9EC; padding: 20px 20px 20px 0px; background-color: #FFFFFF; } .lateral-menu ul > li { color:#0F2A44; font-size: 15px; font-weight: bold; padding: 10px; border-bottom: 1.5px solid #EDF0FC ; list-style-type: none; } .lateral-menu li a { color: inherit; } .lateral-menu li a:hover { text-decoration: inherit; } .lateral-menu .item:hover { background-color: #FFFFFF; color: #D4354D; } .lateral-menu .item.active { background-color: #FFFFFF; color: #D4354D; } .lateral-menu ul> li:hover { border-radius: 25px; } .lateral-menu ul> li .arrow-img { width: 13px; height: 11px; } @media (max-width: 576px) and (orientation: portrait) { .lateral-menu .container-menu { border: 1px solid #E2E9EC; padding: 20px 20px 20px 0px; background-color: #FFFFFF; } } </style> <div class="lateral-menu"> <div class="container container-menu"> <ul> <li class="item"> <a href="https://www.contraloria.gov.co/web/guest/control-fiscal/responsabilidad-fiscal/certificado-de-antecedentes-fiscales" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Certificado de Antecedentes Fiscales </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item active"> <a href="/web/guest/persona-natural" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Persona Natural </div> <div class="col-2 col-md-1"> <i class="icon-arrow-left"></i> </div> </div> </a> </li> <li class="item"> <a href="/web/guest/persona-juridica" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Persona Jurídica </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item"> <a href="/certificado-de-antecedentes-de-responsabilidad-fiscal-con-destino-a-embajadas-y-consulados" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Certificado de Antecedentes de Responsabilidad Fiscal con destino a Embajadas y Consulados </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item"> <a href="/web/guest/consulta-codigo-de-verificacion-y-validez-certificado" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Consulta Código de Verificación y Validez Certificado </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item"> <a href="/web/guest/boletin-pdf" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Boletín PDF </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item"> <a href="/web/guest/formularios-inclusion-exclusion-boletin" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Formularios - Inclusión / Exclusión Boletín </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> <li class="item"> <a href="/web/guest/califique-nuestro-servicio" target="_self"> <div class="row"> <div class="col-10 col-md-11"> Califique Nuestro Servicio </div> <div class="col-2 col-md-1"> <span class="icon-arrow-right"></span> </div> </div> </a> </li> </ul> </div> </div> </div> </div> </div> </section> </div> </div></div></div></div><div class="col col-lg-8 col-sm-12 col-12 col-md-12"><div class="lfr-layout-structure-item-2b519d7b-98a7-f3e3-ae5e-b866b27e9569 lfr-layout-structure-item-container " style=""><div class="lfr-layout-structure-item-basic-component-spacer lfr-layout-structure-item-e11c10bd-b071-e952-32c8-d33acb1f2e90 " style=""><div id="fragment-f48d5614-2b0e-a751-4de7-8c70e6525259"> <div class="py-3"></div></div></div><div class="lfr-layout-structure-item-com-liferay-site-navigation-breadcrumb-web-portlet-sitenavigationbreadcrumbportlet lfr-layout-structure-item-e27d72e0-3756-c666-cef0-8ae8270b97af " style=""><div id="fragment-eb97b92b-82b4-5c95-7694-c20a58ea6bb9"> <div class="portlet-boundary portlet-boundary_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_ portlet-static portlet-static-end portlet-borderless portlet-breadcrumb " id="p_p_id_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt_"> <span id="p_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt"></span> <section class="portlet" id="portlet_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt"> <div class="portlet-content"> <div class=" portlet-content-container"> <div class="portlet-body"> <nav aria-label="Ruta de navegación" id="_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt_breadcrumbs-defaultScreen"> <ol class="breadcrumb"> <li class="breadcrumb-item"> <a class="breadcrumb-link" href="https://www.contraloria.gov.co/control-fiscal"> <span class="breadcrumb-text-truncate">CONTROL FISCAL</span> </a> </li> <li class="breadcrumb-item"> <a class="breadcrumb-link" href="https://www.contraloria.gov.co/control-fiscal/responsabilidad-fiscal"> <span class="breadcrumb-text-truncate">RESPONSABILIDAD FISCAL</span> </a> </li> <li class="breadcrumb-item"> <a class="breadcrumb-link" href="https://www.contraloria.gov.co/control-fiscal/responsabilidad-fiscal/certificado-de-antecedentes-fiscales"> <span class="breadcrumb-text-truncate">Certificado de Antecedentes Fiscales</span> </a> </li> <li class="breadcrumb-item"> <span class="active breadcrumb-text-truncate">Persona Natural</span> </li> </ol> </nav> </div> </div> </div> </section> </div> </div></div><div class="lfr-layout-structure-item-bf3b897e-ecea-2b04-cf17-d621d6fe4cf1 lfr-layout-structure-item-container " style=""><div class="lfr-layout-structure-item-basic-component-image lfr-layout-structure-item-3ce17331-58f6-14da-c4ba-28fefbdb0174 " style=""><div id="fragment-9039a2e5-d4d5-e56b-cbd7-2893c80fb744"> <div class="component-image overflow-hidden"> <img alt="" class="w-100" data-lfr-editable-id="image-square" data-lfr-editable-type="image" src="/documents/20125/404544/Banner+CAF+Gratuito_2.png/ba1b569e-79fc-7be7-3157-25ecb5c73770?version=1.0&amp;t=1778271041541" data-fileentryid="11479143"> </div></div></div></div><div class="lfr-layout-structure-item-basic-component-heading lfr-layout-structure-item-f431324b-0e0d-dd99-3aa9-78fa4958bf35 " style=""><div id="fragment-f0b0fa44-87cc-75e5-8326-2952ea4edf49"> <h1 class="component-heading mb-0 text-break" data-lfr-editable-id="element-text" data-lfr-editable-type="text">Consulta Certificado Antecedentes Fiscales Persona Natural.</h1></div><style>.fragment-heading-text-colored a { color: inherit; }</style></div><div class="lfr-layout-structure-item-basic-component-spacer lfr-layout-structure-item-6522f4f1-0381-82b2-3e82-77273a946bb3 " style=""><div id="fragment-6afe3a28-4d81-c35f-9d52-fe7b1e7d86b4"> <div class="py-3"></div></div></div></div><div class="lfr-layout-structure-item-7ce9c5bd-8525-9fcb-6d4c-3b2134e72eed lfr-layout-structure-item-container " style=""><div class="lfr-layout-structure-item-basic-component-html lfr-layout-structure-item-c47dd8a3-70b7-18f9-8e34-20465c602d9a " style=""><div id="fragment-3a734919-a8bf-3b21-3793-064f2fdb7d8d"> <div class="component-html" data-lfr-editable-id="element-html" data-lfr-editable-type="html"> <iframe class="ml-2" frameborder="0" height="570px" width="100%" scrolling="no" src="https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx" style="margin: 0 auto;" title="Certificado Personas naturales"></iframe></div></div><style>.component-html img { max-width: 100%; }</style></div></div></div></div></div></div><div class="lfr-layout-structure-item-basic-component-spacer lfr-layout-structure-item-db33e66b-231b-f1fc-26d7-bb6ff538a0aa " style=""><div id="fragment-cd7c252e-954d-5ad7-ea8a-348ee50928be"> <div class="py-3"></div></div></div> </div> <form action="#" aria-hidden="true" class="hide" id="hrefFm" method="post" name="hrefFm"><span></span><button hidden="" type="submit">Oculto</button></form> </section> <div class="scrollToTopBtn">︿</div> <div class="scrollToTopBtn d-block d-sm-none" style=" opacity: 1; transform: translateY(0); bottom: 105px; align-content: flex-end; "> <a href="tel:199"> <span class="glyphicon glyphicon-earphone"></span> </a> </div> <div id="aliados" class="container-fluid text-center pb-5"> <a href="http://www.procuraduria.gov.co/" target="_blank" title="Procuraduria"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/procuraduria_logo.png" alt="Procuraduría" longdesc="/documents/20125/4030216/procuraduria_logo.png/4410228f-9a2a-9258-310c-6d2bc8e34dbc?t=1670871180488"> </a> <a href="http://www.fiscalia.gov.co/" target="_blank" title="Fiscalía"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/fiscalia_logo.png" alt="Fiscalía" longdesc="/documents/20125/4030216/fiscalia_logo.png/b3807951-4622-781b-4100-0ccc2021a3fe?t=1670871175283"> </a> <a href="http://www.auditoria.gov.co" target="_blank" title="Auditoria"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/AGR-LogoVertical15-grises-02.png" alt="AGR" longdesc="/documents/20125/4030216/AGR-LogoVertical15-grises-02.png/991fb52a-4ba2-28b5-91cc-380045649706?t=1670871169757"> </a> <a href="http://defensoria.gov.co/" target="_blank" title="Defensoria"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/defensoria_logo.png" alt="Defensoría" longdesc="/documents/20125/4030216/defensoria_logo.png/1add3019-14ef-45e2-5df2-d97130d45452?t=1670871173053"> </a> <a href="http://www.contaduria.gov.co" target="_blank" title="Contaduria"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/contaduria_logo.png" alt="Contaduría" longdesc="/documents/20125/4030216/contaduria_logo.png/522765f4-8c8a-d7e9-9227-27379ffd1933?t=1670871172081"> </a> <a href="http://www.colombiacompra.gov.co" target="_blank" title="Colombia Compra"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/colombia_compra_logo.png" alt="Colombia-compra" longdesc="/documents/20125/4030216/colombia_compra_logo.png/f72ea488-5820-57d4-bf74-9dbe0f838655?t=1670871171012"> </a> <a href="http://vive.gobiernoenlinea.gov.co/" target="_blank" title="Gobierno en Linea"> <img class="mx-5" src="https://www.contraloria.gov.co/o/portal-cgr-theme/images/portal/gobierno_en_linea_logo.png" alt="Gobierno-en-linea" longdesc="/documents/20125/4030216/gobierno_en_linea_logo.png/7746af0a-8352-74f4-927e-c3e296e52668?t=1670871176266"> </a> </div> <footer id="footer" class="bg-secondary theme-footer" role="contentinfo"> <h1 class="hide-accessible">Footer</h1> <div class="portlet-boundary portlet-boundary_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_ portlet-static portlet-static-end portlet-borderless portlet-navigation " id="p_p_id_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu_"> <span id="p_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu"></span> <section class="portlet" id="portlet_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu"> <div class="portlet-content"> <div class=" portlet-content-container"> <div class="portlet-body"> <div class="container-fluid"> <div class="row pt-5 px-5 mb-5"> <div class="col-md-3"> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">Contraloría General de la República</h2> <hr class="border-pink my-4"> <p class="fs-12 text-light">Lunes a viernes: 8:00 a.m. - 5:00 p.m.</p> <p class="fs-12 text-light">Dirección: Carrera 69 No 44-35, Bogotá, Colombia</p> <p class="fs-12 text-light"><a href="/web/guest/directorio-de-dependencias">Localización Física de las sedes nacionales</a></p> <p class="fs-12 text-light">Código postal: 111071</p> <p class="fs-12 text-light">PBX: (+57) 601 518 7000 / FAX: (+57) 601518 7001 </p> <p class="fs-12 text-light">Correo: <a href="mailto:cgr@contraloria.gov.co">cgr@contraloria.gov.co</a></p> </div> <div class="col-md-3"> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">Centro de Servicio al Ciudadano</h2> <hr class="border-pink my-4"> <p class="fs-12 text-light">Lunes a viernes: 8:00 a.m. - 5:00 p.m.</p> <p class="fs-12 text-light">Dirección: Carrera 69 No 44-35, Bogotá, Colombia</p> <p class="fs-12 text-light"><a href="/documents/20125/3526037/Canales+de+Atención.pdf/1dd538f2-a031-9396-56a4-62d581d770e5?t=1662651850032" target="_blank">Canales físicos y electrónicos de atención</a></p> <p class="fs-12 text-light">Código postal: 111071</p> <p class="fs-12 text-light">PBX: (+57) 601 518 7000 / FAX: (+57) 601518 7001 </p> <p class="fs-12 text-light">Correo: <a href="mailto:cgr@contraloria.gov.co">cgr@contraloria.gov.co</a></p> </div> <div class="col-md-3"> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">Recibo de Correspondencia</h2> <hr class="border-pink my-4"> <p class="fs-12 text-light">Lunes a viernes: 8:00 a.m. - 5:00 p.m.</p> <p class="fs-12 text-light">Carrera 69 No 44 - Piso 1 Costado Norte - Bogotá, Colombia</p> <p class="fs-12 text-light">Y en el buzón: <a href="mailto:cgr@contraloria.gov.co">cgr@contraloria.gov.co</a></p> <br> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">Notiﬁcaciones Judiciales</h2> <p class="fs-12 text-light"><a href="mailto:notificacionesjudiciales@contraloria.gov.co">notificacionesjudiciales@contraloria.gov.co</a></p> <br> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">Talento Humano</h2> <p class="fs-12 text-light"><a href="https://concursocgr2024-2026.com.co/#/convocatorias/avisos-informativos">Concurso de Méritos</a></p> </div> <div class="col-md-2 offset-md-1"> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap">LINEAS GRATUITAS DE SERVICIOS AL CIUDADANO Y DENUNCIAS</h2> <hr class="border-pink my-4"> <p class="fs-12 text-light">199</p> <p class="fs-12 text-light">01 8000 910060</p> <br> <br> <h2 class="text-uppercase text-light font-weight-bold fs-13 text-wrap text-break">Encuéntranos en nuestras redes sociales</h2> <div class="d-inline-block"> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://www.facebook.com/contraloriacolombia/"> <img src="/documents/20125/4046158/facebook.svg/b68f974c-dbe9-c7fb-08fe-1e90e73f26e6?t=1671207879992" alt="facebook" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/20125/4046158/facebook.svg/b68f974c-dbe9-c7fb-08fe-1e90e73f26e6?t=1671207879992"> </a> </div> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://www.instagram.com/cgr_colombia/"> <img src="/documents/20125/4046158/instagram.svg/380e9616-ba83-174c-4c91-cf841f4c3985?t=1671207880406" alt="instagram" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/20125/4046158/instagram.svg/380e9616-ba83-174c-4c91-cf841f4c3985?t=1671207880406"> </a> </div> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://www.linkedin.com/company/contralor-a-general-de-la-rep-blica-de-colombia/"> <img src="/documents/20125/4046158/linkedin.svg/e102b5cf-feaf-17ac-c63f-e2e1b99c0175?t=1671207880793" alt="linkedin" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/20125/4046158/linkedin.svg/e102b5cf-feaf-17ac-c63f-e2e1b99c0175?t=1671207880793"> </a> </div> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://twitter.com/CGR_Colombia"> <img src="/documents/d/guest/x-icon" alt="x" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/d/guest/x-icon"> </a> </div> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://www.youtube.com/user/ContraloriaColombia"> <img src="/documents/20125/4046158/youtube.svg/6026bcbe-06fd-0466-da9e-371394066700?t=1671207881624" alt="youtube" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/20125/4046158/youtube.svg/6026bcbe-06fd-0466-da9e-371394066700?t=1671207881624"> </a> </div> <div class="rounded-circle bg-light text-center align-middle d-inline-block mr-2" style="height: 32px; width: 32px;"> <a class="d-inline-block text-center mt-1" style="height: 19px; width: 19px;" href="https://www.tiktok.com/@cgr_colombia"> <img src="/documents/d/guest/tiktok-icon" alt="x" width="auto" height="auto" longdesc="https://www.contraloria.gov.co/documents/d/guest/tiktok-icon"> </a> </div> </div> </div> <div class="row px-5"> <div class="col-md-12 col-sm-12"> <hr class="border-white my-4"> </div> </div> <div class="row px-5 mb-2"> <div class="col-md-3 col-sm-12 logo-footer"> <img src="/documents/20125/4046158/Logotipo_ContraloriaCFP_white.png/7cb63ecc-0ac7-3d26-5609-06c76c3fa928?t=1726015893436" width="152" height="40" alt="Logotipo_ContraloriaCFP_white" longdesc="/documents/20125/4046158/Logotipo_ContraloriaCFP_white.png/7cb63ecc-0ac7-3d26-5609-06c76c3fa928?t=1726015893436"> </div> <div class="col-md-9 col-sm-12"> <p class="text-segoe text-light fs-14 text-right"> Copyright © <span id="year">2026</span> Contraloría General de la República | <a href="/web/guest/mapa-de-sitio">Mapa del sitio</a> | <a href="https://www.contraloria.gov.co/web/guest/politicas-de-seguridad-y-condiciones-de-uso"> Políticas de Seguridad,&nbsp;Derechos de autor, Términos y Condiciones de Uso</a> </p> </div> <div class="row px-5"></div> </div> </div> <style> footer#footer h2, footer#footer p { font-size: 12pt !important; } </style> <script>
+    document.getElementById("year").textContent = new Date().getFullYear();
+</script> </div> </div> </div> </div></section> </div> </footer> </div> </div> <script type="text/javascript">
+
+	
+		
+
+			
+
+			
+		
+	
+
+
+</script><script>
+
+</script> <script type="text/javascript">
+
+	
+		Liferay.Portlet.register('com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt_',
+			portletId: 'com_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_site_navigation_breadcrumb_web_portlet_SiteNavigationBreadcrumbPortlet_INSTANCE_hfxt\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+(function() {var $ = AUI.$;var _ = AUI._;
+	var onDestroyPortlet = function () {
+		Liferay.detach('messagePosted', onMessagePosted);
+		Liferay.detach('destroyPortlet', onDestroyPortlet);
+	};
+
+	Liferay.on('destroyPortlet', onDestroyPortlet);
+
+	var onMessagePosted = function (event) {
+		if (window.Analytics) {
+			const eventProperties = {
+				className: event.className,
+				classPK: event.classPK,
+				commentId: event.commentId,
+				text: event.text,
+			};
+
+			const blogNode = document.querySelector(
+				'[data-analytics-asset-id="' + event.classPK + '"]'
+			);
+
+			const dmNode = document.querySelector(
+				'[data-analytics-file-entry-id="' + event.classPK + '"]'
+			);
+
+			if (blogNode) {
+				eventProperties.title = blogNode.dataset.analyticsAssetTitle;
+			}
+			else if (dmNode) {
+				eventProperties.title = dmNode.dataset.analyticsFileEntryTitle;
+			}
+
+			Analytics.send('posted', 'Comment', eventProperties);
+		}
+	};
+
+	Liferay.on('messagePosted', onMessagePosted);
+})();
+(function() {var $ = AUI.$;var _ = AUI._;
+	var onVote = function (event) {
+		if (window.Analytics) {
+			let title = event.contentTitle;
+
+			if (!title) {
+				const dmNode = document.querySelector(
+					'[data-analytics-file-entry-id="' + event.classPK + '"]'
+				);
+
+				if (dmNode) {
+					title = dmNode.dataset.analyticsFileEntryTitle;
+				}
+			}
+
+			Analytics.send('VOTE', 'Ratings', {
+				className: event.className,
+				classPK: event.classPK,
+				ratingType: event.ratingType,
+				score: event.score,
+				title,
+			});
+		}
+	};
+
+	var onDestroyPortlet = function () {
+		Liferay.detach('ratings:vote', onVote);
+		Liferay.detach('destroyPortlet', onDestroyPortlet);
+	};
+
+	Liferay.on('ratings:vote', onVote);
+	Liferay.on('destroyPortlet', onDestroyPortlet);
+})();
+
+	function getValueByAttribute(node, attr) {
+		return (
+			node.dataset[attr] ||
+			(node.parentElement && node.parentElement.dataset[attr])
+		);
+	}
+
+	function sendDocumentDownloadedAnalyticsEvent(anchor) {
+		var fileEntryId = getValueByAttribute(
+			anchor,
+			'analyticsFileEntryId'
+		);
+		var title = getValueByAttribute(
+			anchor,
+			'analyticsFileEntryTitle'
+		);
+		var version = getValueByAttribute(
+			anchor,
+			'analyticsFileEntryVersion'
+		);
+
+		if (fileEntryId) {
+			Analytics.send('documentDownloaded', 'Document', {
+				groupId: themeDisplay.getScopeGroupId(),
+				fileEntryId,
+				preview:
+					!!window._com_liferay_document_library_analytics_isViewFileEntry,
+				title,
+				version,
+			});
+		}
+	}
+
+	function handleDownloadClick(event) {
+		if (window.Analytics) {
+			if (event.target.nodeName.toLowerCase() === 'a') {
+				sendDocumentDownloadedAnalyticsEvent(
+					event.target
+				);
+			}
+			else if (
+				event.target.parentNode &&
+				event.target.parentNode.nodeName.toLowerCase() === 'a'
+			) {
+				sendDocumentDownloadedAnalyticsEvent(
+					event.target.parentNode
+				);
+			}
+			else {
+				var target = event.target;
+				var matchTextContent =
+					target.textContent &&
+					target.textContent.toLowerCase() ===
+						'descargar';
+				var matchTitle =
+					target.title && target.title.toLowerCase() === 'download';
+				var matchAction = target.action === 'download';
+				var matchLexiconIcon = !!target.querySelector(
+					'.lexicon-icon-download'
+				);
+				var matchLexiconClassName = target.classList.contains(
+					'lexicon-icon-download'
+				);
+				var matchParentTitle =
+					target.parentNode &&
+					target.parentNode.title &&
+					target.parentNode.title.toLowerCase() === 'download';
+				var matchParentLexiconClassName =
+					target.parentNode &&
+					target.parentNode.classList.contains('lexicon-icon-download');
+
+				if (
+					matchTextContent ||
+					matchTitle ||
+					matchParentTitle ||
+					matchAction ||
+					matchLexiconIcon ||
+					matchLexiconClassName ||
+					matchParentLexiconClassName
+				) {
+					var selectedFiles = document.querySelectorAll(
+						'.form .custom-control-input:checked'
+					);
+
+					selectedFiles.forEach(({value}) => {
+						var selectedFile = document.querySelector(
+							'[data-analytics-file-entry-id="' + value + '"]'
+						);
+
+						sendDocumentDownloadedAnalyticsEvent(
+							selectedFile
+						);
+					});
+				}
+			}
+		}
+	}
+
+	Liferay.once('destroyPortlet', () => {
+		document.body.removeEventListener(
+			'click',
+			handleDownloadClick
+		);
+	});
+
+	Liferay.once('portletReady', () => {
+		document.body.addEventListener(
+			'click',
+			handleDownloadClick
+		);
+	});
+
+(function() {var $ = AUI.$;var _ = AUI._;
+	var onShare = function (data) {
+		if (window.Analytics) {
+			Analytics.send('shared', 'SocialBookmarks', {
+				className: data.className,
+				classPK: data.classPK,
+				type: data.type,
+				url: data.url,
+			});
+		}
+	};
+
+	var onDestroyPortlet = function () {
+		Liferay.detach('socialBookmarks:share', onShare);
+		Liferay.detach('destroyPortlet', onDestroyPortlet);
+	};
+
+	Liferay.on('socialBookmarks:share', onShare);
+	Liferay.on('destroyPortlet', onDestroyPortlet);
+})();
+(function() {var $ = AUI.$;var _ = AUI._;
+	function showDialog(uri, title) {
+		Liferay.Util.openModal({
+			id: 'sharingDialog',
+			iframeBodyCssClass: 'sharing-dialog',
+			height: '475px',
+			size: 'md',
+			title: title,
+			url: uri,
+		});
+	}
+
+	var Sharing = {
+		copyLink: function (link) {
+			navigator.clipboard.writeText(link);
+
+			Liferay.Util.openToast({
+				message:
+					'Enlace copiado al Portapapeles.',
+			});
+		},
+
+		manageCollaborators: function (classNameId, classPK) {
+			var manageCollaboratorsParameters = {
+				classNameId: classNameId,
+				classPK: classPK,
+			};
+
+			var manageCollaboratorsURL = Liferay.Util.PortletURL.createPortletURL(
+				'https://www.contraloria.gov.co/group/guest/~/control_panel/manage?p_p_id=com_liferay_sharing_web_portlet_ManageCollaboratorsPortlet&p_p_lifecycle=0&p_p_state=pop_up&p_p_auth=L825wlRh',
+				manageCollaboratorsParameters
+			);
+
+			showDialog(
+				manageCollaboratorsURL.toString(),
+				'Administrar colaboradores'
+			);
+		},
+
+		share: function (classNameId, classPK, title) {
+			var sharingParameters = {
+				classNameId: classNameId,
+				classPK: classPK,
+			};
+
+			var sharingURL = Liferay.Util.PortletURL.createPortletURL(
+				'https://www.contraloria.gov.co/group/guest/~/control_panel/manage?p_p_id=com_liferay_sharing_web_portlet_SharingPortlet&p_p_lifecycle=0&p_p_state=pop_up&p_p_auth=iceAYDFG',
+				sharingParameters
+			);
+
+			showDialog(sharingURL.toString(), title);
+		},
+	};
+
+	Liferay.Sharing = Sharing;
+})();
+
+	if (window.svg4everybody && Liferay.Data.ICONS_INLINE_SVG) {
+		svg4everybody(
+			{
+				polyfill: true,
+				validate: function (src, svg, use) {
+					return !src || !src.startsWith('#');
+				}
+			}
+		);
+	}
+
+(function() {var $ = AUI.$;var _ = AUI._;
+	Liferay.Util.delegate(
+		document,
+		'focusin',
+		'.portlet',
+		function(event) {
+			event.delegateTarget.closest('.portlet').classList.add('open');
+		}
+	);
+
+	Liferay.Util.delegate(
+		document,
+		'focusout',
+		'.portlet',
+		function(event) {
+			event.delegateTarget.closest('.portlet').classList.remove('open');
+		}
+	);
+})();
+
+	// <![CDATA[
+
+		
+
+		Liferay.currentURL = '\x2fweb\x2fguest\x2fpersona-natural';
+		Liferay.currentURLEncoded = '\x252Fweb\x252Fguest\x252Fpersona-natural';
+
+	// ]]>
+
+
+		// <![CDATA[
+			
+				
+
+				
+
+				
+			
+		// ]]>
+	
+(function() {var $ = AUI.$;var _ = AUI._;
+		import(Liferay.ThemeDisplay.getPathContext() + '/o/frontend-js-web/__liferay__/index.js').then(
+			({openToast}) => {
+				AUI().use(
+					'liferay-session',
+					function () {
+						Liferay.Session = new Liferay.SessionBase(
+							{
+								autoExtend: true,
+								redirectOnExpire: true,
+								redirectUrl: 'https\x3a\x2f\x2fwww\x2econtraloria\x2egov\x2eco\x2fweb\x2fguest',
+								sessionLength: 900,
+								sessionTimeoutOffset: 70,
+								warningLength: 300
+							}
+						);
+
+						
+					}
+				);
+			}
+		)
+	})();
+
+	
+		Liferay.Portlet.register('com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu_',
+			portletId: 'com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_INSTANCE_footer_navigation_menu\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+
+	
+		Liferay.Portlet.register('com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet_',
+			portletId: 'com_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_accessibility_menu_web_portlet_AccessibilityMenuPortlet\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+(function() {var $ = AUI.$;var _ = AUI._;
+	var assetEntryId =
+		'';
+
+	if (assetEntryId) {
+		window.location.hash = assetEntryId;
+	}
+})();
+
+	
+		Liferay.Portlet.register('com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj_',
+			portletId: 'com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_tmtj\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+
+	
+		Liferay.Portlet.register('com_liferay_portal_search_web_search_bar_portlet_SearchBarPortlet_INSTANCE_templateSearch');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_portal_search_web_search_bar_portlet_SearchBarPortlet_INSTANCE_templateSearch_',
+			portletId: 'com_liferay_portal_search_web_search_bar_portlet_SearchBarPortlet_INSTANCE_templateSearch',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_portal_search_web_search_bar_portlet_SearchBarPortlet_INSTANCE_templateSearch\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+
+	
+		Liferay.Portlet.register('com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet');
+	
+
+	Liferay.Portlet.onLoad(
+		{
+			canEditTitle: false,
+			columnPos: 0,
+			isStatic: 'end',
+			namespacedId: 'p_p_id_com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet_',
+			portletId: 'com_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet',
+			refreshURL: '\x2fc\x2fportal\x2frender_portlet\x3fp_l_id\x3d349\x26p_p_id\x3dcom_liferay_site_navigation_menu_web_portlet_SiteNavigationMenuPortlet\x26p_p_lifecycle\x3d0\x26p_t_lifecycle\x3d0\x26p_p_state\x3dnormal\x26p_p_mode\x3dview\x26p_p_col_id\x3dnull\x26p_p_col_pos\x3dnull\x26p_p_col_count\x3dnull\x26p_p_static\x3d1\x26p_p_isolated\x3d1\x26currentURL\x3d\x252Fweb\x252Fguest\x252Fpersona-natural',
+			refreshURLData: {}
+		}
+	);
+
+
+</script><script type="module">
+import {InfoItemActionHandler as ComponentModule} from '/o/layout-taglib/__liferay__/index.js';
+AUI().use(
+  'liferay-menu',
+function(A) {
+{
+Liferay.component('infoItemActionComponent', new ComponentModule({"executeInfoItemActionURL":"https:\/\/www.contraloria.gov.co\/c\/portal\/execute_info_item_action?p_l_mode=view&plid=349","namespace":"","spritemap":"https:\/\/www.contraloria.gov.co\/o\/portal-cgr-theme\/images\/clay\/icons.svg"}), { destroyOnNavigate: true, portletId: ''});
+}
+(function() {
+var $ = AUI.$;var _ = AUI._;
+	new Liferay.Menu();
+
+	var liferayNotices = Liferay.Data.notices;
+
+	for (var i = 0; i < liferayNotices.length; i++) {
+		Liferay.Util.openToast(liferayNotices[i]);
+	}
+
+})();
+});
+
+</script> <script src="https://www.contraloria.gov.co/o/portal-cgr-theme/cgr/js/main.js?browserId=chrome&amp;minifierType=js&amp;languageId=es_ES&amp;t=1787891454000" type="text/javascript"></script> <script type="module">
+import {main} from '/o/frontend-js-tabs-support-web/__liferay__/index.js';
+{
+main();
+}
+
+</script><script type="module">
+import {main} from '/o/frontend-js-collapse-support-web/__liferay__/index.js';
+{
+main();
+}
+
+</script><script type="module">
+import {main} from '/o/frontend-js-tooltip-support-web/__liferay__/index.js';
+{
+main();
+}
+
+</script><script type="module">
+import {main} from '/o/frontend-js-alert-support-web/__liferay__/index.js';
+{
+main();
+}
+
+</script><script type="module">
+import {main} from '/o/frontend-js-dropdown-support-web/__liferay__/index.js';
+{
+main();
+}
+
+</script><script type="module">
+import {runThirdPartyCookiesInterval} from '/o/cookies-banner-web/__liferay__/index.js';
+{
+runThirdPartyCookiesInterval();
+}
+
+</script><script type="text/javascript">
+Liferay.CustomDialogs = {enabled: false};
+
+</script><script>
+
+</script>  <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js" integrity="sha384-Q6E9RHvbIyZFJoft+2mJbHaEWldlvI9IOYy5n3zV9zzTtmI3UksdQRVvoxMfooAo" crossorigin="anonymous"></script> <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.4.1/dist/js/bootstrap.min.js" integrity="sha384-wfSDF2E50Y2D1uUdj0O3uMBJnjuUD4Ih7YwaYd1iqfktj0Uod8GCExl3Og8ifwB6" crossorigin="anonymous"></script>  </div><div class="lfr-spa-loading-bar"></div><div id="tooltipContainer" class="lfr-tooltip-scope"></div><div id="yui3-css-stamp" class=""></div></body></html>
