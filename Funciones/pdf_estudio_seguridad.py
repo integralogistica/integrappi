@@ -65,6 +65,7 @@ COLOR_FALLO = colors.HexColor("#C0392B")
 COLOR_NEUTRO = colors.HexColor("#57606A")
 COLOR_PRIMARIO = colors.HexColor("#0F2A43")
 COLOR_FONDO_TABLA = colors.HexColor("#F0F3F7")
+COLOR_FONDO_FALLO = colors.HexColor("#FADADD")  # rosado suave, solo celda Estado
 
 ESTADO_GLOBAL_TEXTO = {
     "COMPLETADA": ("ESTUDIO COMPLETADO", COLOR_EXITO),
@@ -348,19 +349,22 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     cuento.append(Paragraph("Informe consolidado de consultas en fuentes públicas — Integra Logística", estilo_sub))
     cuento.append(Spacer(0, 6 * mm))
 
-    etiqueta_estado, color_estado = ESTADO_GLOBAL_TEXTO.get(estado_global, (estado_global, COLOR_NEUTRO))
-    badge = Table(
-        [[Paragraph(f"<b>{etiqueta_estado}</b>", ParagraphStyle("badge", fontName="Helvetica", fontSize=11, textColor=colors.white, alignment=1))]],
-        colWidths=[90 * mm],
-    )
-    badge.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), color_estado),
-        ("BOX", (0, 0), (-1, -1), 0.5, color_estado),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    cuento.append(badge)
-    cuento.append(Spacer(0, 4 * mm))
+    # En un estudio PARCIAL el resumen por fuente ya identifica con precisión
+    # cuál portal no respondió. Evitar una alerta roja general al inicio.
+    if estado_global != "PARCIAL":
+        etiqueta_estado, color_estado = ESTADO_GLOBAL_TEXTO.get(estado_global, (estado_global, COLOR_NEUTRO))
+        badge = Table(
+            [[Paragraph(f"<b>{etiqueta_estado}</b>", ParagraphStyle("badge", fontName="Helvetica", fontSize=11, textColor=colors.white, alignment=1))]],
+            colWidths=[90 * mm],
+        )
+        badge.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_estado),
+            ("BOX", (0, 0), (-1, -1), 0.5, color_estado),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        cuento.append(badge)
+        cuento.append(Spacer(0, 4 * mm))
 
     datos_persona = [
         ["Cédula consultada" if estudio.get("cedula") else "NIT consultado", estudio.get("cedula") or estudio.get("nit", "")],
@@ -472,6 +476,11 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         if rama_judicial.get("estado") not in {"EXITO", "ADVERTENCIA"}:
             veredicto = _resumen_error(rama_judicial)
         filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto])
+    estados_resumen = [
+        (fuente or {}).get("estado")
+        for fuente in (rndc, proc, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial)
+        if _corrio(fuente)
+    ]
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -481,7 +490,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ],
         colWidths=[62 * mm, 38 * mm, 60 * mm],
     )
-    tabla_resumen.setStyle(TableStyle([
+    estilos_tabla_resumen = [
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
@@ -491,7 +500,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
+    ]
+    # Para fallos, sombrear SOLO el recuadro Estado (columna 1), no toda la
+    # fila ni el resultado descriptivo.
+    estilos_tabla_resumen.extend(
+        ("BACKGROUND", (1, fila), (1, fila), COLOR_FONDO_FALLO)
+        for fila, estado in enumerate(estados_resumen, start=1)
+        if estado in {"NO_DISPONIBLE", "ERROR"}
+    )
+    tabla_resumen.setStyle(TableStyle(estilos_tabla_resumen))
     cuento.append(tabla_resumen)
     cuento.append(Spacer(0, 4 * mm))
 

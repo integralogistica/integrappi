@@ -232,6 +232,7 @@ class TestGenerarPDF(unittest.TestCase):
         }
         texto = _texto_plano(generar_pdf_estudio(estudio))
         self.assertIn("NODISPONIBLE", texto)
+        self.assertNotIn("PARCIALFUENTESNODISPONIBLES", texto)
         self.assertNotIn("NOREGISTRASANCIONES", texto)
 
     def test_reproducibilidad(self):
