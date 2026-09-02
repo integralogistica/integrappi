@@ -39,7 +39,9 @@ async def consultar_procesos(nombres: str, apellidos: str, headed: bool = False)
     nombre_completo = f"{nombres} {apellidos}"
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            channel="chrome", headless=not headed,
+            # Chrome del sistema en Windows; Chromium incluido por la imagen
+            # oficial de Playwright en Render/Linux.
+            channel="chrome" if os.name == "nt" else None, headless=not headed,
             args=["--disable-blink-features=AutomationControlled"],
         )
         try:

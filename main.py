@@ -217,4 +217,8 @@ if __name__ == "__main__":
     import uvicorn
     # Render inyecta PORT; localmente se mantiene 8000 por defecto
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Playwright se ejecuta en varios hilos, cada uno con su propio event loop.
+    # uvloop no admite que esos loops creen subprocesos Chromium al mismo
+    # tiempo ("Racing with another loop to spawn a process"). El loop asyncio
+    # estándar de Python usa ThreadedChildWatcher y sí soporta este patrón.
+    uvicorn.run(app, host="0.0.0.0", port=port, loop="asyncio")

@@ -94,7 +94,9 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
         raise BotBdmeConfiguracionError("Faltan BDME_USUARIO o BDME_CLAVE")
     motivo = "Autoconsulta" if tipo == "cedula" else "Relación contractual"
     async with async_playwright() as p:
-        browser = await p.chromium.launch(channel="chrome", headless=not headed,
+        # Windows local usa Chrome instalado; la imagen oficial de Playwright
+        # en Render/Linux trae Chromium, pero no /opt/google/chrome/chrome.
+        browser = await p.chromium.launch(channel="chrome" if os.name == "nt" else None, headless=not headed,
                                           args=["--disable-blink-features=AutomationControlled"])
         try:
             page = await browser.new_page(locale="es-CO", user_agent=(
