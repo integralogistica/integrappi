@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -63,7 +63,7 @@ SALIDA = Path(__file__).resolve().parents[1] / "descargas_runt"
 # Bloqueo para serializar consultas al portal (una a la vez, como los demás bots).
 _LOCK = threading.Lock()
 
-_TIMEOUT_MS = 45000              # Playwright: goto/clicks/esperas puntuales
+_TIMEOUT_MS = int(os.getenv("SEGURIDAD_RUNT_TIMEOUT_MS", "45000"))
 _RENDER_MS = 4000                # render inicial del SPA Angular
 _PASO_RESULTADO_MS = 30000       # espera de la página de resultado tras Consultar
 _CAPTCHA_BASE = os.getenv("SEGURIDAD_RUNT_CAPTCHA_URL", "https://2captcha.com").rstrip("/")
@@ -332,13 +332,37 @@ async def consultar_vehiculo_runt(placa: str, cedula: str, headed: bool = False)
             )
             pagina = await contexto.new_page()
 
-            # 1) SPA Angular hash-routing: domcontentloaded + espera de render.
-            await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
-            await pagina.wait_for_selector("input[formcontrolname=placa]", timeout=_TIMEOUT_MS)
+            # 1) SPA Angular hash-routing: en Render la primera carga puede
+            # entregar el shell antes de descargar los chunks de Angular. Una
+            # recarga limpia suele completar el formulario; se hace AQUÍ,
+            # antes de pedir/pagar captcha.
+            selector_placa = "input[formcontrolname=placa]"
+            ultimo_error = None
+            for intento_carga in range(2):
+                try:
+                    await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
+                    await pagina.wait_for_selector(
+                        selector_placa, state="visible", timeout=_TIMEOUT_MS,
+                    )
+                    ultimo_error = None
+                    break
+                except PlaywrightTimeoutError as exc:
+                    ultimo_error = exc
+                    logger.warning(
+                        "[BOT RUNT] formulario no cargó (%s/2), url=%s; recargando",
+                        intento_carga + 1, pagina.url,
+                    )
+                    if intento_carga == 0:
+                        await pagina.goto("about:blank", wait_until="domcontentloaded")
+                        await pagina.wait_for_timeout(1500)
+            if ultimo_error is not None:
+                raise BotRuntSinResultado(
+                    "El portal RUNT no cargó el formulario de consulta después de dos intentos"
+                ) from ultimo_error
             await pagina.wait_for_timeout(_RENDER_MS)
 
             # 2) Formulario. Procedencia default NACIONAL (CC): no se toca.
-            await pagina.fill("input[formcontrolname=placa]", placa_norm)
+            await pagina.fill(selector_placa, placa_norm)
             await pagina.fill("input[formcontrolname=documento]", cedula_norm)
             await pagina.wait_for_timeout(500)
 
