@@ -243,6 +243,31 @@ class TestGenerarPDF(unittest.TestCase):
         self.assertEqual(primero, segundo)
 
 
+class TestSeccionRamaJudicial(unittest.TestCase):
+    def test_imprime_demandante_y_demandado(self):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["rama_judicial"] = {
+            "estado": "ADVERTENCIA",
+            "nombre_completo": "JHOAM ORLANDO AMAYA TOVAR",
+            "total_procesos": 1,
+            "procesos": [{
+                "llaveProceso": "11001418903620220056800",
+                "despacho": "JUZGADO 036 DE PEQUEÑAS CAUSAS",
+                "fechaProceso": "2022-05-05T00:00:00",
+                "sujetosProcesales": (
+                    "Demandante: SYSTEMGROUP S.A.S. | "
+                    "Demandado: JHOAM ORLANDO AMAYA TOVAR"
+                ),
+            }],
+            "intentos": 1,
+            "duraciones_s": [5.0],
+        }
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertIn("Sujetosprocesales", texto)
+        self.assertIn("Demandante:SYSTEMGROUPS.A.S.", texto)
+        self.assertIn("Demandado:JHOAMORLANDOAMAYATOVAR", texto)
+
+
 class TestTablaViajes(unittest.TestCase):
     """Regresión del bug 2026-08-29: la tabla de manifiestos usaba texto plano
     (reportlab no lo parte) y los nombres largos de transportadora INVADÍAN la

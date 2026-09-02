@@ -66,6 +66,7 @@ COLOR_NEUTRO = colors.HexColor("#57606A")
 COLOR_PRIMARIO = colors.HexColor("#0F2A43")
 COLOR_FONDO_TABLA = colors.HexColor("#F0F3F7")
 COLOR_FONDO_FALLO = colors.HexColor("#FADADD")  # rosado suave, solo celda Estado
+COLOR_FONDO_ADVERTENCIA = colors.HexColor("#F4B183")  # naranja, solo celda Estado
 
 ESTADO_GLOBAL_TEXTO = {
     "COMPLETADA": ("ESTUDIO COMPLETADO", COLOR_EXITO),
@@ -507,6 +508,11 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ("BACKGROUND", (1, fila), (1, fila), COLOR_FONDO_FALLO)
         for fila, estado in enumerate(estados_resumen, start=1)
         if estado in {"NO_DISPONIBLE", "ERROR"}
+    )
+    estilos_tabla_resumen.extend(
+        ("BACKGROUND", (1, fila), (1, fila), COLOR_FONDO_ADVERTENCIA)
+        for fila, estado in enumerate(estados_resumen, start=1)
+        if estado == "ADVERTENCIA"
     )
     tabla_resumen.setStyle(TableStyle(estilos_tabla_resumen))
     cuento.append(tabla_resumen)
@@ -1081,6 +1087,24 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                     f"<b>Despacho:</b> {escape(str(despacho))} · <b>Fecha:</b> {escape(str(fecha))}",
                     estilo_peq,
                 ))
+                sujetos = str(proceso.get("sujetosProcesales") or "").strip()
+                if sujetos:
+                    partes_sujetos = []
+                    for parte in sujetos.split("|"):
+                        parte = parte.strip()
+                        if not parte:
+                            continue
+                        if ":" in parte:
+                            calidad, persona = parte.split(":", 1)
+                            partes_sujetos.append(
+                                f"<b>{escape(calidad.strip())}:</b> {escape(persona.strip())}"
+                            )
+                        else:
+                            partes_sujetos.append(escape(parte))
+                    cuento.append(Paragraph(
+                        "<b>Sujetos procesales</b><br/>" + "<br/>".join(partes_sujetos),
+                        estilo_peq,
+                    ))
             if total_rama:
                 cuento.append(Paragraph(
                     "La coincidencia se basa exclusivamente en el nombre informado y puede corresponder a homónimos. "
