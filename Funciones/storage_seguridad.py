@@ -23,7 +23,10 @@ os.environ.setdefault(
 
 logger = logging.getLogger(__name__)
 
-BUCKET_SEGURIDAD = os.getenv("SEGURIDAD_ESTUDIOS_BUCKET", "integrapp")
+# Los estudios contienen datos personales y NUNCA deben caer por omisión en
+# el bucket general. Render y .env lo definen explícitamente, pero el fallback
+# también debe ser el bucket privado.
+BUCKET_SEGURIDAD = os.getenv("SEGURIDAD_ESTUDIOS_BUCKET", "integrapp-privado")
 CARPETA_SEGURIDAD = os.getenv("SEGURIDAD_ESTUDIOS_CARPETA", "SeguridadEstudios")
 
 _client = None
@@ -54,6 +57,10 @@ def ruta_blob_cuenta(empresa_id: str, periodo: str) -> str:
 
 def subir_pdf(contenido: bytes, ruta: str, cedula: str, content_type: str = "application/pdf") -> dict:
     """Sube (o pisa) un PDF privado. Retorna {gcs_ruta, sha256, tamano}."""
+    logger.info(
+        "[STORAGE SEGURIDAD] subiendo %s bytes a gs://%s/%s",
+        len(contenido), BUCKET_SEGURIDAD, ruta,
+    )
     blob = _obtener_cliente().bucket(BUCKET_SEGURIDAD).blob(ruta)
     blob.upload_from_file(
         io.BytesIO(contenido),
@@ -62,6 +69,7 @@ def subir_pdf(contenido: bytes, ruta: str, cedula: str, content_type: str = "app
     # La cédula no va en la ruta; queda como metadato del blob.
     blob.metadata = {"cedula": cedula, "modulo": "estudios_seguridad"}
     blob.patch()
+    logger.info("[STORAGE SEGURIDAD] carga confirmada en gs://%s/%s", BUCKET_SEGURIDAD, ruta)
     return {
         "gcs_ruta": ruta,
         "sha256": hashlib.sha256(contenido).hexdigest(),

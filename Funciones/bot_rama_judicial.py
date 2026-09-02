@@ -57,11 +57,19 @@ async def consultar_procesos(nombres: str, apellidos: str, headed: bool = False)
             # Todos los procesos (no solo actuaciones recientes), persona Natural.
             await page.locator("#input-67").check(force=True)
             await page.locator("#input-72").click()
-            opciones = page.locator("[role=option]:visible,.v-list-item:visible")
-            natural = opciones.filter(has_text=re.compile(r"^Natural$", re.I))
-            if not await natural.count():
-                raise BotRamaJudicialSinResultado("No apareció el tipo de persona Natural")
-            await natural.first.click()
+            # Vuetify monta las opciones de forma asíncrona. En Render el
+            # `count()` inmediato podía ejecutarse antes de que aparecieran
+            # Natural/Jurídica, aunque el selector estuviera correcto.
+            natural = page.locator(
+                "[role=option]:visible, .v-list-item:visible"
+            ).filter(has_text=re.compile(r"^\s*Natural\s*$", re.I)).first
+            try:
+                await natural.wait_for(state="visible", timeout=15000)
+                await natural.click()
+            except Exception as exc:
+                raise BotRamaJudicialSinResultado(
+                    "El selector de tipo de persona no terminó de cargar la opción Natural"
+                ) from exc
             await page.locator("#input-78").fill(nombre_completo)
             try:
                 async with page.expect_response(
