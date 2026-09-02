@@ -529,9 +529,8 @@ async def _ejecutar_fuente(
                 "no_registra": cache.get("no_registra"),
                 "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
                 "nombre_certificado": cache.get("nombre_certificado", ""),
+                "nombre_consultado": cache.get("nombre_consultado", ""),
             })
-            if nombre == "policia":
-                seccion["nombre_consultado"] = cache.get("nombre_consultado", "")
         return seccion
 
     # 2) Consulta real al portal.
@@ -1001,6 +1000,9 @@ async def _ejecutar_fuente(
             })
             return seccion
         nombre_cert = _nombre_del_certificado(resultado.get("texto_pdf", "") or "")
+        # Portal rediseñado (2026-09-02): sin PDF, el nombre llega de la
+        # sección "Datos del ciudadano" de la página (como policía).
+        nombre_consultado = (resultado.get("nombre_consultado") or "").strip()
         no_registra = resultado.get("no_registra")
         # La Procuraduría solo es concluyente cuando entrega un veredicto. El
         # certificado puede procesarse dentro del bot, pero no se persiste.
@@ -1022,6 +1024,7 @@ async def _ejecutar_fuente(
             "no_registra": no_registra,
             "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
             "nombre_certificado": nombre_cert,
+            "nombre_consultado": nombre_consultado,
             "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
             "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
@@ -1036,6 +1039,7 @@ async def _ejecutar_fuente(
             "no_registra": no_registra,
             "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
             "nombre_certificado": nombre_cert,
+            "nombre_consultado": nombre_consultado,
         })
 
     return seccion

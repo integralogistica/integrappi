@@ -605,7 +605,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(tabla_veredicto)
         cuento.append(Spacer(0, 2 * mm))
         detalle_proc = [
-            ["Nombre consultado", proc.get("nombre_certificado") or "No disponible"],
+            ["Nombre consultado", proc.get("nombre_certificado") or proc.get("nombre_consultado") or "No disponible"],
             ["Resultado de la consulta", (proc.get("mensaje") or "—")[:300]],
             ["Origen de datos", _texto_origen(proc)],
         ]

@@ -33,6 +33,10 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 logger = logging.getLogger(__name__)
 
 PORTAL_URL = "https://www.procuraduria.gov.co/Pages/consulta-de-antecedentes.aspx"
+# ?nocache=1 (hallazgo del usuario 2026-09-02): evita que el CDN/portal sirva
+# una versión cacheada del iframe del formulario (a veces venía sin estado de
+# sesión y el postback no respondía).
+PORTAL_URL_CONSULTA = PORTAL_URL + "?nocache=1"
 FORMULARIO_URL = "https://apps.procuraduria.gov.co/webcert/inicio.aspx"
 IFRAME_SELECTOR = 'iframe[src*="apps.procuraduria.gov.co/webcert/inicio.aspx"]'
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
@@ -97,15 +101,24 @@ def _resolver_captcha_documento(
             return str(len(doc))
     # Preguntas de NOMBRE: respuesta = el token correspondiente de los
     # nombres/apellidos que diligenció el consultante (SIN tildes, ya
-    # normalizados por el endpoint).
+    # normalizados por el endpoint). Variante vista 2026-09-02: "las dos
+    # primeras letras del primer nombre".
     if "nombre" in q or "apellido" in q:
         tokens_n = (nombres or "").split()
         tokens_a = (apellidos or "").split()
         if "primer nombre" in q and tokens_n:
+            if "dos primeras letras" in q:
+                return tokens_n[0][:2]
+            if "tres primeras letras" in q:
+                return tokens_n[0][:3]
             return tokens_n[0]
         if "segundo nombre" in q and len(tokens_n) > 1:
             return tokens_n[1]
         if "primer apellido" in q and tokens_a:
+            if "dos primeras letras" in q:
+                return tokens_a[0][:2]
+            if "tres primeras letras" in q:
+                return tokens_a[0][:3]
             return tokens_a[0]
         if "segundo apellido" in q and len(tokens_a) > 1:
             return tokens_a[1]
@@ -222,7 +235,8 @@ async def consultar_antecedentes(
                 # Entrar por la página oficial. El formulario se sirve dentro de
                 # un iframe de apps.procuraduria.gov.co; navegar directamente a
                 # ese host era justamente lo que producía los timeouts reportados.
-                await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
+                # ?nocache=1 (2026-09-02): evita la copia cacheada del portal.
+                await pagina.goto(PORTAL_URL_CONSULTA, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
                 try:
                     elemento_iframe = await pagina.wait_for_selector(
                         IFRAME_SELECTOR, state="attached", timeout=20000,
@@ -314,6 +328,18 @@ async def consultar_antecedentes(
 
             texto_resultado = " ".join((await vista.inner_text("body")).split())
 
+            # Nombre del consultado desde la sección "Datos del ciudadano"
+            # (portal rediseñado 2026-09-02): el texto plano CONCATENA los
+            # <span> del nombre ("JHOAMORLANDOAMAYATOVAR"), así que se leen los
+            # spans del DOM y se unen con espacio. Análogo a nombre_consultado
+            # del bot de Policía.
+            nombre_consultado = ""
+            try:
+                spans = await vista.locator(".datosConsultado span").all_inner_texts()
+                nombre_consultado = " ".join(" ".join(s.split()) for s in spans if s.strip())
+            except Exception:
+                pass
+
             # 4b) La página de resultados entrega el PDF con el botón de imagen
             # #btnDescargar (postback WebForms), no con un link <a>.
             if not pdf_bytes and "descargue su certificado" in texto_resultado.lower():
@@ -379,6 +405,7 @@ async def consultar_antecedentes(
                 "cedula": cedula_norm,
                 "no_registra": no_registra,
                 "mensaje": mensaje,
+                "nombre_consultado": nombre_consultado,
                 "texto_resultado": texto_resultado[:1500],
                 "texto_pdf": texto_pdf[:2500],
                 "html": await vista.content(),
