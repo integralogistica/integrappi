@@ -128,7 +128,14 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             # cédula igual al usuario autenticado, después del blur del número
             # reemplaza la lista por la única opción Autoconsulta (valor 1).
             # NIT usa Relación contractual (valor 2).
-            await selects.nth(0).select_option(index=0 if tipo == "cedula" else 1)
+            indice_tipo = 0 if tipo == "cedula" else 1
+            if tipo == "cedula" and await selects.nth(0).locator("option").count() > 1:
+                # CC suele venir seleccionada por defecto. Cambiar primero a
+                # otra opción garantiza que GWT emita el evento que recarga
+                # los motivos cuando se vuelve a CC.
+                await selects.nth(0).select_option(index=1)
+                await page.wait_for_timeout(500)
+            await selects.nth(0).select_option(index=indice_tipo)
             await campos.first.fill(documento)
             await campos.first.press("Tab")
             # No basta esperar `options.length > 0`: la opción inicial ya
@@ -136,27 +143,29 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             # espera el TEXTO requerido y luego se usa el valor que el portal
             # haya asignado (los códigos internos pueden cambiar).
             try:
-                motivo_busqueda = "autoconsulta" if tipo == "cedula" else "relacion contractual"
+                motivo_busqueda = "autoconsulta" if tipo == "cedula" else "relacioncontractual"
                 await page.wait_for_function(
                     """motivo => {
                         const norm = s => (s || '').normalize('NFD')
-                            .replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+                            .replace(/[\u0300-\u036f]/g, '').toLowerCase()
+                            .replace(/[^a-z0-9]/g, '');
                         const sels = [...document.querySelectorAll('#panelPrincipal select')]
                             .filter(e => e.offsetParent !== null);
                         return sels[1] && [...sels[1].options]
                             .some(o => norm(o.textContent).includes(motivo));
                     }""",
                     motivo_busqueda,
-                    timeout=20000,
+                    timeout=_TIMEOUT_MS,
                 )
                 opciones = await selects.nth(1).locator("option").evaluate_all(
                     "os => os.map(o => ({value: o.value, text: o.textContent || ''}))"
                 )
                 def normalizar(texto: str) -> str:
-                    return "".join(
+                    limpio = "".join(
                         c for c in unicodedata.normalize("NFD", texto or "")
                         if unicodedata.category(c) != "Mn"
-                    ).strip().casefold()
+                    ).casefold()
+                    return re.sub(r"[^a-z0-9]", "", limpio)
                 opcion = next(
                     (o for o in opciones if motivo_busqueda in normalizar(o["text"])), None
                 )
@@ -164,7 +173,9 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
                     raise ValueError("motivo ausente")
                 await selects.nth(1).select_option(value=opcion["value"])
             except Exception as exc:
-                raise BotBdmeSinResultado(f"No existe el motivo requerido: {motivo}")
+                raise BotBdmeSinResultado(
+                    f"BDME no cargó el motivo requerido: {motivo}"
+                ) from exc
             token = await asyncio.to_thread(_resolver_recaptcha)
             await page.evaluate("""t=>{const e=document.getElementById('g-recaptcha-response');
                 if(!e)throw Error('captcha ausente');e.value=t;e.innerHTML=t}""", token)

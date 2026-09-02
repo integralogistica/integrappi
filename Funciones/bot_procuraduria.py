@@ -267,12 +267,22 @@ async def consultar_antecedentes(
             # 2) Llenar el formulario (CC = value 1 en el select del portal)
             await vista.select_option("#ddlTipoID", "1")
             await vista.fill("#txtNumID", cedula_norm)
-            await vista.check("#rblTipoCert_0")  # ordinario
+            # La versión antigua (tpo=2) pedía escoger certificado
+            # ordinario; la consulta oficial actual (tpo=1) ya no muestra ese
+            # radio y genera directamente el certificado correspondiente.
+            radio_ordinario = vista.locator("#rblTipoCert_0")
+            if await radio_ordinario.count() and await radio_ordinario.is_visible():
+                await radio_ordinario.check()
             await vista.fill("#txtRespuestaPregunta", respuesta)
 
             # 3) Enviar (postback WebForms). Armar la trampa de descarga antes.
             tarea_descarga = asyncio.create_task(_esperar_descarga())
-            await vista.click("#btnExportar")
+            boton_consulta = vista.locator("#btnConsultar, #btnExportar").first
+            if not await boton_consulta.count():
+                raise BotProcuraduriaSinResultado(
+                    "El portal no mostró el botón para generar el certificado"
+                )
+            await boton_consulta.click()
 
             # Esperar: o la descarga del PDF o la página de resultados. El
             # postback a verpdf.aspx es LENTO e intermitente (2026-08-30:
