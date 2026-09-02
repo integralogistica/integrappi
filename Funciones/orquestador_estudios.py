@@ -1,9 +1,8 @@
 """Orquestador de Estudios de Seguridad: cédula → fuentes → PDF → GCS → Mongo.
 
-Ejecuta las dos fuentes (RNDC manifiestos y Procuraduría) EN PARALELO —
-`asyncio.gather` sobre `asyncio.to_thread` es seguro porque cada bot tiene su
-propio `threading.Lock` de módulo (serializa consultas dentro de cada portal,
-pero los portales entre sí van en paralelo).
+Ejecuta las fuentes en paralelo dentro del MISMO event loop del servidor.
+Playwright no debe arrancarse mediante varios `asyncio.run()` en hilos: bajo
+uvloop/Linux eso causa "Racing with another loop to spawn a process".
 
 Reglas del módulo:
   - El doc del estudio se crea ANTES de consultar (estado EN_PROGRESO): aunque
@@ -35,37 +34,37 @@ from Funciones.bot_policia import (
     BotPoliciaCaptchaFallido,
     BotPoliciaSinCaptchaKey,
     BotPoliciaSinResultado,
-    consultar_antecedentes_policia_sync,
+    consultar_antecedentes_policia, consultar_antecedentes_policia_sync,
 )
 from Funciones.bot_procuraduria import (
     BotProcuraduriaError,
     BotProcuraduriaSinResultado,
-    consultar_antecedentes_sync,
+    consultar_antecedentes, consultar_antecedentes_sync,
 )
-from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
+from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
     BotRuntSinCaptchaKey,
     BotRuntSinResultado,
-    consultar_vehiculo_runt_sync,
+    consultar_vehiculo_runt, consultar_vehiculo_runt_sync,
 )
 from Funciones.bot_sena import (
     BotSenaCaptchaFallido,
     BotSenaSinCaptchaKey,
     BotSenaSinResultado,
-    consultar_sena_sync,
+    consultar_sena, consultar_sena_sync,
 )
 from Funciones.bot_simit import (
     BotSimitSinResultado,
-    consultar_comparendos_simit_sync,
+    consultar_comparendos_simit, consultar_comparendos_simit_sync,
 )
 from Funciones.bot_bdme import (
     BotBdmeAutenticacionError, BotBdmeCaptchaFallido,
-    BotBdmeConfiguracionError, BotBdmeSinResultado, consultar_bdme_sync,
+    BotBdmeConfiguracionError, BotBdmeSinResultado, consultar_bdme, consultar_bdme_sync,
 )
 from Funciones.bot_rama_judicial import (
-    BotRamaJudicialError, BotRamaJudicialSinResultado, consultar_procesos_sync,
+    BotRamaJudicialError, BotRamaJudicialSinResultado, consultar_procesos, consultar_procesos_sync,
 )
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
 from rutas.seguridad import (
@@ -122,6 +121,32 @@ def fuentes_habilitadas_efectivas(empresa: dict | None) -> list[str]:
 
 # Evita apilar Chromium concurrentes en una instancia pequeña de Render.
 _SEMAFORO_ESTUDIOS = asyncio.Semaphore(2)
+# Render Starter no soporta de forma estable una decena de Chromium a la vez.
+# Tres mantienen paralelismo sin disparar el consumo de memoria.
+_SEMAFORO_NAVEGADORES = asyncio.Semaphore(
+    max(1, int(os.getenv("SEGURIDAD_NAVEGADORES_CONCURRENTES", "3")))
+)
+
+# Compatibilidad exclusiva con pruebas existentes que parchean los wrappers
+# sync. En producción las referencias permanecen intactas y SIEMPRE se llama
+# la coroutine Playwright directamente en el loop del servidor.
+_SYNC_ORIGINALES = {
+    "consultar_historial_viajes_sync": consultar_historial_viajes_sync,
+    "consultar_antecedentes_sync": consultar_antecedentes_sync,
+    "consultar_antecedentes_policia_sync": consultar_antecedentes_policia_sync,
+    "consultar_vehiculo_runt_sync": consultar_vehiculo_runt_sync,
+    "consultar_comparendos_simit_sync": consultar_comparendos_simit_sync,
+    "consultar_sena_sync": consultar_sena_sync,
+    "consultar_bdme_sync": consultar_bdme_sync,
+    "consultar_procesos_sync": consultar_procesos_sync,
+}
+
+
+async def _invocar_playwright(async_fn, sync_nombre: str, *args, **kwargs):
+    sync_actual = globals()[sync_nombre]
+    if sync_actual is not _SYNC_ORIGINALES[sync_nombre]:
+        return await asyncio.to_thread(sync_actual, *args, **kwargs)
+    return await async_fn(*args, **kwargs)
 
 db = bd_cliente["integra"]
 col_estudios = db["estudios_seguridad"]
@@ -477,31 +502,41 @@ async def _ejecutar_fuente(
         fecha_inicio, fecha_fin = _ventana_rndc()
 
         async def invocar() -> dict:
-            return await asyncio.to_thread(
-                consultar_historial_viajes_sync,
-                cedula=cedula, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
-            )
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(consultar_historial_viajes, "consultar_historial_viajes_sync",
+                    cedula=cedula, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
+                )
     elif nombre == "policia":
 
         async def invocar() -> dict:
-            return await asyncio.to_thread(consultar_antecedentes_policia_sync, cedula)
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_antecedentes_policia, "consultar_antecedentes_policia_sync", cedula
+                )
     elif nombre == "runt":
 
         async def invocar() -> dict:
             # runt consulta por placa + cédula del PROPIETARIO (sin placa no hay
             # consulta posible; el endpoint ya lo validó antes de llegar aquí).
-            return await asyncio.to_thread(consultar_vehiculo_runt_sync, placa or "", cedula)
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_vehiculo_runt, "consultar_vehiculo_runt_sync", placa or "", cedula
+                )
     elif nombre == "simit":
 
         async def invocar() -> dict:
             # simit consulta SOLO por placa (portal público FCM, sin captcha).
-            return await asyncio.to_thread(consultar_comparendos_simit_sync, placa or "")
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_comparendos_simit, "consultar_comparendos_simit_sync", placa or ""
+                )
     elif nombre == "sena":
 
         async def invocar() -> dict:
             # sena consulta por cédula (portal público del SENA, captcha de
             # imagen propio resuelto por 2Captcha dentro del bot).
-            return await asyncio.to_thread(consultar_sena_sync, cedula)
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(consultar_sena, "consultar_sena_sync", cedula)
     elif nombre == "ofac":
 
         async def invocar() -> dict:
@@ -513,22 +548,26 @@ async def _ejecutar_fuente(
     elif nombre in {"bdme", "bdme_nit"}:
 
         async def invocar() -> dict:
-            return await asyncio.to_thread(
-                consultar_bdme_sync, cedula, tipo="nit" if nombre == "bdme_nit" else "cedula"
-            )
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(consultar_bdme, "consultar_bdme_sync",
+                    cedula, tipo="nit" if nombre == "bdme_nit" else "cedula"
+                )
     elif nombre == "rama_judicial":
 
         async def invocar() -> dict:
-            return await asyncio.to_thread(consultar_procesos_sync, nombres or "", apellidos or "")
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_procesos, "consultar_procesos_sync", nombres or "", apellidos or ""
+                )
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
         # ("¿cuál es el primer nombre de la persona que está consultando?").
         async def invocar() -> dict:
-            return await asyncio.to_thread(
-                consultar_antecedentes_sync, cedula,
-                nombres=nombres, apellidos=apellidos,
-            )
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(consultar_antecedentes, "consultar_antecedentes_sync",
+                    cedula, nombres=nombres, apellidos=apellidos,
+                )
 
     try:
         resultado, intentos, duraciones, error_exc = await _llamar_con_reintento(nombre, cedula, invocar)
