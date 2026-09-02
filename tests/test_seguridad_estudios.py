@@ -1126,7 +1126,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(
@@ -1438,6 +1438,10 @@ class TestCaptchaProcuraduriaDocumento(unittest.TestCase):
         self.assertIsNone(se._normalizar_nombre("   "))
         self.assertIsNone(se._normalizar_nombre(None))
         self.assertIsNone(se._normalizar_nombre("123"))
+
+    def test_normalizar_nit_sin_dv(self):
+        self.assertEqual(se._normalizar_nit_sin_dv("900.123.456-7"), "900123456")
+        self.assertEqual(se._normalizar_nit_sin_dv("900123456"), "900123456")
 
 
 class TestMayoriaFuentesFallidas(unittest.TestCase):

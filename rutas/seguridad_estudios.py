@@ -437,6 +437,13 @@ def _normalizar_nombre(valor: str | None) -> str | None:
     return texto or None
 
 
+def _normalizar_nit_sin_dv(valor: str | None) -> str:
+    """NIT base: elimina el DV si viene separado por guion."""
+    crudo = (valor or "").strip()
+    crudo = re.sub(r"-\s*\d\s*$", "", crudo)
+    return re.sub(r"\D", "", crudo)
+
+
 class CrearEstudio(BaseModel):
     cedula: str | None = None
     nit: str | None = None  # fuente empresarial ofac_nit; separado de la cédula
@@ -566,15 +573,15 @@ async def crear_estudio(
 
     # OFAC empresarial usa NIT, nunca reutiliza la cédula. Las demás fuentes
     # continúan siendo consultas de la persona evaluada.
-    if any(f != "ofac_nit" for f in habilitadas) and not cedula:
+    if any(f not in {"ofac_nit", "bdme_nit"} for f in habilitadas) and not cedula:
         raise HTTPException(status_code=422, detail="Las fuentes personales requieren el campo cedula")
     nit: str | None = None
-    if "ofac_nit" in habilitadas:
-        nit = re.sub(r"\D", "", getattr(datos, "nit", None) or "")
+    if "ofac_nit" in habilitadas or "bdme_nit" in habilitadas:
+        nit = _normalizar_nit_sin_dv(getattr(datos, "nit", None))
         if len(nit) < 6 or len(nit) > 15:
             raise HTTPException(
                 status_code=422,
-                detail="La fuente OFAC NIT requiere el NIT con dígito de verificación (campo nit)",
+                detail="Las fuentes empresariales requieren el NIT sin dígito de verificación (campo nit)",
             )
 
     # Las fuentes de vehículo (runt, simit) consultan por PLACA: es OBLIGATORIA
@@ -834,6 +841,8 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "sena": "SENA — Certificados de formación",
         "ofac": "OFAC — Personas por cédula",
         "ofac_nit": "OFAC — Empresas por NIT",
+        "bdme": "BDME — Persona por cédula",
+        "bdme_nit": "BDME — Empresa por NIT",
     }
     fuentes = []
     for clave, nombre in etiquetas.items():
@@ -1115,7 +1124,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit"],
 }
 
 

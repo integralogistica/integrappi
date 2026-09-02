@@ -60,6 +60,10 @@ from Funciones.bot_simit import (
     BotSimitSinResultado,
     consultar_comparendos_simit_sync,
 )
+from Funciones.bot_bdme import (
+    BotBdmeAutenticacionError, BotBdmeCaptchaFallido,
+    BotBdmeConfiguracionError, BotBdmeSinResultado, consultar_bdme_sync,
+)
 from rutas.baseusuarios import BASEUSUARIOS_JWT_SECRET
 from rutas.seguridad import (
     DIAS_VENTANA,
@@ -82,7 +86,7 @@ MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit")
+FUENTES = ("manifiestos_rndc", "procuraduria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -255,6 +259,12 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotSimitSinResultado):
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, (BotBdmeConfiguracionError, BotBdmeAutenticacionError)):
+        return "NO_DISPONIBLE", {"tipo": "configuracion_bdme", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotBdmeSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotBdmeCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     tipo = type(exc).__name__
     mensaje = str(exc)[:MAX_MENSAJE]
     return "ERROR", {"tipo": tipo, "mensaje": mensaje}
@@ -336,7 +346,7 @@ async def _ejecutar_fuente(
         # y el bot) van con la cédula del propietario. Sin `cedula_propietario`
         # se asume que el evaluado es el propietario (comportamiento previo).
         cedula = cedula_propietario or cedula
-    elif nombre == "ofac_nit":
+    elif nombre in {"ofac_nit", "bdme_nit"}:
         cedula = nit or ""
     seccion: dict[str, Any] = {
         "estado": "ERROR",
@@ -420,6 +430,14 @@ async def _ejecutar_fuente(
                 "metodo": cache.get("metodo"),
             })
             seccion["estado"] = _estado_ofac(seccion)
+        elif nombre in {"bdme", "bdme_nit"}:
+            seccion.update({
+                "no_registra": cache.get("no_registra"), "reportado": bool(cache.get("reportado")),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE], "motivo": cache.get("motivo"),
+                "total_registros": int(cache.get("total_registros") or 0),
+                "filas": (cache.get("filas") or [])[:100],
+            })
+            seccion["estado"] = "ADVERTENCIA" if seccion["reportado"] else "EXITO"
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -470,6 +488,12 @@ async def _ejecutar_fuente(
 
         async def invocar() -> dict:
             return await asyncio.to_thread(consultar_ofac_nit_sync, cedula)
+    elif nombre in {"bdme", "bdme_nit"}:
+
+        async def invocar() -> dict:
+            return await asyncio.to_thread(
+                consultar_bdme_sync, cedula, tipo="nit" if nombre == "bdme_nit" else "cedula"
+            )
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
         # consultante resuelven las preguntas del captcha sobre el NOMBRE
@@ -744,6 +768,30 @@ async def _ejecutar_fuente(
         })
         # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_sena(seccion)
+    elif nombre in {"bdme", "bdme_nit"}:
+        no_registra = resultado.get("no_registra")
+        if no_registra is None:
+            seccion.update({"estado": "NO_DISPONIBLE", "error": {
+                "tipo": "portal_inconsistente", "mensaje": "BDME no entregó un veredicto concluyente."
+            }})
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula, "no_registra": bool(no_registra),
+            "reportado": not bool(no_registra), "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+            "motivo": resultado.get("motivo"), "total_registros": int(resultado.get("total_registros") or 0),
+            "filas": (resultado.get("filas") or [])[:100], "usuario": actor["usuario"],
+            "perfil": actor.get("perfil", ""), "empresa_id": actor.get("empresa_id"),
+            "usuario_id": actor.get("usuario_id"), "consultado_en": ahora,
+            "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché BDME %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        for campo in ("no_registra", "reportado", "mensaje", "motivo", "total_registros", "filas"):
+            seccion[campo] = doc_cache[campo]
+        seccion["estado"] = "ADVERTENCIA" if doc_cache["reportado"] else "EXITO"
     elif nombre in {"ofac", "ofac_nit"}:
         coincidencias = (resultado.get("coincidencias") or [])[:10]
         aplica = bool(resultado.get("aplica"))

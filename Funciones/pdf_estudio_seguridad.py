@@ -270,6 +270,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     sena = fuentes.get("sena") or {}
     ofac = fuentes.get("ofac") or {}
     ofac_nit = fuentes.get("ofac_nit") or {}
+    bdme = fuentes.get("bdme") or {}
+    bdme_nit = fuentes.get("bdme_nit") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -453,6 +455,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     if _corrio(ofac_nit):
         etiqueta_ofac_nit, _ = ESTADO_FUENTE_TEXTO.get(ofac_nit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append(["OFAC — Empresas por NIT", etiqueta_ofac_nit, _texto_veredicto_ofac(ofac_nit)])
+    for fuente_bdme, etiqueta in ((bdme, "BDME — Persona por cédula"), (bdme_nit, "BDME — Empresa por NIT")):
+        if _corrio(fuente_bdme):
+            estado_txt, _ = ESTADO_FUENTE_TEXTO.get(fuente_bdme.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+            if fuente_bdme.get("estado") in {"EXITO", "ADVERTENCIA"}:
+                veredicto = "REPORTADO EN EL BDME" if fuente_bdme.get("reportado") else "NO REPORTADO EN EL BDME"
+            else:
+                veredicto = _resumen_error(fuente_bdme)
+            filas_resumen.append([etiqueta, estado_txt, veredicto])
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
@@ -999,6 +1009,28 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(ofac_nit, "OFAC por NIT"))
 
+    # ── BDME personal y empresarial ────────────────────────────────────────
+    for fuente_bdme, titulo_bdme in (
+        (bdme, "BDME — Consulta personal por cédula"),
+        (bdme_nit, "BDME — Consulta empresarial por NIT"),
+    ):
+        if not _corrio(fuente_bdme):
+            continue
+        _antes_de_seccion(fuente_bdme)
+        cuento.append(Paragraph(titulo_bdme, estilo_h2))
+        if fuente_bdme.get("estado") in {"EXITO", "ADVERTENCIA"}:
+            veredicto = "REPORTADO EN EL BDME" if fuente_bdme.get("reportado") else "NO REPORTADO EN EL BDME"
+            cuento.append(Paragraph(f"<b>{veredicto}</b>", estilo_normal))
+            cuento.append(Paragraph(
+                f"Motivo: {escape(str(fuente_bdme.get('motivo') or '—'))} · "
+                f"Registros: {int(fuente_bdme.get('total_registros') or 0)} · "
+                f"Origen: {_texto_origen(fuente_bdme)}", estilo_normal,
+            ))
+            if fuente_bdme.get("mensaje"):
+                cuento.append(Paragraph(escape(str(fuente_bdme["mensaje"])[:300]), estilo_peq))
+        else:
+            cuento.append(_parrafo_estado_fuente(fuente_bdme, "el BDME"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -1011,7 +1043,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
