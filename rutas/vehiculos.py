@@ -956,6 +956,22 @@ async def crear_vehiculo(id_usuario: str = Form(...), placa: str = Form(...)):
     placa_limpia = placa.strip().upper()
     if coleccion_vehiculos.find_one({"placa": placa_limpia}):
         raise HTTPException(status_code=400, detail="La placa ya está registrada.")
+
+    # Regla de negocio: el CONDUCTOR solo puede registrar UN vehículo propio
+    # (varias placas es privilegio del TENEDOR, que además invita conductores).
+    # No cuentan los vehículos donde llega como conductor invitado (idConductor).
+    try:
+        usuario = coleccion_conductores_cuenta.find_one({"_id": ObjectId(id_usuario)})
+    except Exception:
+        usuario = None
+    perfil_usuario = (usuario or {}).get("perfil", "CONDUCTOR")
+    if (perfil_usuario or "CONDUCTOR").strip().upper() != "TENEDOR":
+        propios = coleccion_vehiculos.count_documents({"idUsuario": id_usuario})
+        if propios >= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Como conductor solo puedes registrar un vehículo. Para registrar varias placas, tu cuenta debe ser de tenedor (dueño de flota).",
+            )
     
     nuevo_vehiculo = {
         "idUsuario": id_usuario,
