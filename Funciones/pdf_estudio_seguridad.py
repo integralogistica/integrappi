@@ -276,6 +276,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     bdme = fuentes.get("bdme") or {}
     bdme_nit = fuentes.get("bdme_nit") or {}
     rama_judicial = fuentes.get("rama_judicial") or {}
+    rues = fuentes.get("rues") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -485,9 +486,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         if rama_judicial.get("estado") not in {"EXITO", "ADVERTENCIA"}:
             veredicto = _resumen_error(rama_judicial)
         filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto])
+    if _corrio(rues):
+        etiqueta_rues, _ = ESTADO_FUENTE_TEXTO.get(rues.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            f"RUES — Registro Mercantil NIT {estudio.get('nit') or (rues.get('nit') or '')}".rstrip(),
+            etiqueta_rues,
+            _texto_veredicto_rues(rues),
+        ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial)
+        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial, rues)
         if _corrio(fuente)
     ]
     tabla_resumen = Table(
@@ -1167,6 +1175,88 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(rama_judicial, "la Rama Judicial"))
 
+    # ── 4g. RUES — Registro Mercantil por NIT ───────────────────────────────
+    if _corrio(rues):
+        _antes_de_seccion(rues)
+        cuento.append(Paragraph("RUES — Registro Mercantil (Confecámaras)", estilo_h2))
+        if rues.get("estado") in {"EXITO", "ADVERTENCIA"}:
+            no_registra_rues = bool(rues.get("no_registra"))
+            estado_mat = (rues.get("estado_matricula") or "").strip().upper()
+            if no_registra_rues:
+                texto_rues = "NIT SIN REGISTRO EN EL REGISTRO MERCANTIL"
+                color_rues = COLOR_NEUTRO
+            elif estado_mat == "ACTIVA":
+                renovacion = rues.get("fecha_renovacion")
+                texto_rues = (
+                    f"MATRÍCULA ACTIVA — RENOVADA HASTA {renovacion}"
+                    if renovacion else "MATRÍCULA ACTIVA"
+                )
+                color_rues = COLOR_EXITO
+            else:
+                texto_rues = f"MATRÍCULA {estado_mat or 'SIN ESTADO'} — LA EMPRESA NO ESTÁ ACTIVA EN REGISTRO MERCANTIL"
+                color_rues = COLOR_ADVERTENCIA
+            tabla_rues_banner = Table([[Paragraph(f"<b>{texto_rues}</b>", ParagraphStyle(
+                "veredicto_rues", fontName="Helvetica", fontSize=10.5,
+                textColor=colors.white, alignment=1,
+            ))]], colWidths=[160 * mm])
+            tabla_rues_banner.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), color_rues),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            cuento.append(tabla_rues_banner)
+            if not no_registra_rues:
+                ciiu = rues.get("ciiu") or {}
+                actividades = " · ".join(
+                    f"{escape(str((a.get('codigo') or '').strip()))} {escape(str((a.get('descripcion') or '').strip()))}"
+                    for a in (ciiu.get("principal"), ciiu.get("secundaria"), ciiu.get("terciaria"))
+                    if (a or {}).get("codigo") or (a or {}).get("descripcion")
+                ) or "—"
+                filas_rues = [
+                    ["Razón social", rues.get("razon_social") or "—"],
+                    ["NIT", rues.get("nit_con_dv") or (rues.get("nit") or estudio.get("nit") or "—")],
+                    ["Estado de la matrícula", estado_mat or "—"],
+                    ["Cámara de Comercio", f"{rues.get('camara') or '—'} · matrícula {rues.get('matricula') or '—'}"],
+                    ["Fecha de matrícula", rues.get("fecha_matricula") or "—"],
+                    ["Última renovación", (
+                        f"{rues.get('fecha_renovacion') or '—'} · último año renovado {rues.get('ultimo_ano_renovado') or '—'}"
+                    )],
+                    ["Fecha de cancelación", rues.get("fecha_cancelacion") or "—"],
+                    ["Tipo de sociedad", (
+                        f"{rues.get('tipo_sociedad') or '—'} · {rues.get('organizacion_juridica') or '—'}"
+                    )],
+                    ["Categoría", rues.get("categoria_matricula") or "—"],
+                    ["Actividad económica (CIIU)", actividades],
+                    ["Ubicación", f"{rues.get('municipio') or '—'} · {rues.get('departamento') or '—'}"],
+                ]
+                tabla_rues = Table(
+                    [[celda(k, True), celda(v)] for k, v in filas_rues],
+                    colWidths=[45 * mm, 115 * mm],
+                )
+                tabla_rues.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]))
+                cuento.append(tabla_rues)
+                for representante in (rues.get("representantes") or [])[:5]:
+                    cuento.append(Paragraph(
+                        "<b>Representante legal:</b> "
+                        f"{escape(str(representante.get('nombre') or '—'))} · "
+                        f"cédula {escape(str(representante.get('documento') or '—'))}",
+                        estilo_peq,
+                    ))
+            if rues.get("mensaje"):
+                cuento.append(Paragraph(escape(str(rues["mensaje"])[:300]), estilo_peq))
+            cuento.append(Paragraph(
+                "Información pública informativa reportada por la cámara de comercio correspondiente en la fecha "
+                "de consulta; NO constituye el Certificado de Existencia y Representación Legal ni el certificado "
+                "de matrícula (los expide la cámara de comercio ante solicitud).",
+                estilo_peq,
+            ))
+        else:
+            cuento.append(_parrafo_estado_fuente(rues, "el RUES"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -1179,7 +1269,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1269,6 +1359,15 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Departamento del Tesoro de los Estados Unidos. El resultado compara de manera exacta el número "
             "de identificación; una coincidencia requiere validación humana y análisis de identidad, programa "
             "y alcance, y no constituye por sí sola una decisión automática de rechazo."
+        )
+    if _corrio(rues):
+        bloques_legal.append(
+            "<b>Registro Mercantil (RUES):</b> la información se obtuvo del portal público de consulta "
+            "ciudadana del Registro Único Empresarial y Social (Confecámaras), servicio de consulta abierta "
+            "por NIT. Los datos —incluido el estado de la matrícula y la representación legal— corresponden "
+            "a lo reportado por la cámara de comercio correspondiente en la fecha de consulta y son de "
+            "carácter informativo; NO constituyen el Certificado de Existencia y Representación Legal ni "
+            "certificación mercantil expedida por la cámara."
         )
     bloques_legal.append(
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
@@ -1437,6 +1536,20 @@ def _texto_veredicto_sena(sena: dict) -> str:
     if total > 0:
         return f"{total} certificado(s) de formación — ver detalle"
     return "Sin certificados de formación registrados"
+
+
+def _texto_veredicto_rues(rues: dict) -> str:
+    """Veredicto de la fuente rues para la fila resumen. El tri-estado es
+    sobre el NIT consultado (registro mercantil), jamás un "limpio" de la
+    empresa evaluada."""
+    if rues.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(rues)
+    if rues.get("no_registra"):
+        return "NIT sin registro en Registro Mercantil"
+    estado_mat = (rues.get("estado_matricula") or "").strip().upper()
+    if estado_mat == "ACTIVA":
+        return "Matrícula mercantil ACTIVA"
+    return f"Matrícula {estado_mat or 'sin estado'} — empresa no activa"
 
 
 def _resumen_error(fuente: dict) -> str:

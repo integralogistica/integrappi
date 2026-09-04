@@ -50,6 +50,7 @@ from Funciones.bot_contraloria import (
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
+from Funciones.bot_rues import BotRuesError, BotRuesSinResultado, consultar_rues_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
     BotRuntSinCaptchaKey,
@@ -96,7 +97,7 @@ MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial", "rues")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -278,6 +279,12 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
     """(estado de la fuente, error {tipo, mensaje}) — NO_DISPONIBLE vs ERROR."""
     if isinstance(exc, BotOfacError):
         return "NO_DISPONIBLE", {"tipo": "ofac_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRuesSinResultado):
+        # El API respondió sin un resultado determinante (anti-envenenamiento).
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotRuesError):
+        # API caído / passphrase rotada / NIT fuera del formato del buscador.
+        return "NO_DISPONIBLE", {"tipo": "rues_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, asyncio.TimeoutError):
         return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
     if isinstance(exc, BotRNDC2Incompleto):
@@ -388,6 +395,21 @@ def _estado_ofac(seccion: dict) -> str:
     return "ADVERTENCIA" if seccion.get("aplica") else "EXITO"
 
 
+def _estado_rues(seccion: dict) -> str:
+    """Estado de la fuente rues a partir de su sección (decisión de negocio
+    2026-09-03, análoga a SOAT vencido / saldo SIMIT).
+
+    - Matrícula distinta de ACTIVA (CANCELADA / INACTIVA / cancelada por Ley
+      1429 / pérdida de calidad de comerciante...) → ADVERTENCIA: la empresa
+      existe pero NO está activa en el registro mercantil.
+    - Matrícula ACTIVA o NIT sin registro (no_registra determinante sobre el
+      NIT, jamás un "limpio" de la empresa) → EXITO.
+    """
+    if seccion.get("no_registra"):
+        return "EXITO"
+    return "EXITO" if (seccion.get("estado_matricula") or "").upper() == "ACTIVA" else "ADVERTENCIA"
+
+
 async def _ejecutar_fuente(
     nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
     cedula_propietario: str | None = None,
@@ -409,7 +431,7 @@ async def _ejecutar_fuente(
         # y el bot) van con la cédula del propietario. Sin `cedula_propietario`
         # se asume que el evaluado es el propietario (comportamiento previo).
         cedula = cedula_propietario or cedula
-    elif nombre in {"ofac_nit", "bdme_nit"}:
+    elif nombre in {"ofac_nit", "bdme_nit", "rues"}:
         cedula = nit or ""
     elif nombre == "rama_judicial":
         # La identidad de caché de esta fuente es el nombre completo, pues el
@@ -497,6 +519,32 @@ async def _ejecutar_fuente(
                 "metodo": cache.get("metodo"),
             })
             seccion["estado"] = _estado_ofac(seccion)
+        elif nombre == "rues":
+            # Registro Mercantil por NIT: el semáforo se deriva del estado de
+            # la matrícula cacheado con la misma función pura del post-portal.
+            seccion.update({
+                "nit": cache.get("nit", ""),
+                "nit_con_dv": cache.get("nit_con_dv", ""),
+                "razon_social": (cache.get("razon_social") or "")[:150],
+                "estado_matricula": cache.get("estado_matricula"),
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "camara": cache.get("camara", ""),
+                "matricula": cache.get("matricula", ""),
+                "fecha_matricula": cache.get("fecha_matricula"),
+                "fecha_renovacion": cache.get("fecha_renovacion"),
+                "ultimo_ano_renovado": cache.get("ultimo_ano_renovado"),
+                "fecha_cancelacion": cache.get("fecha_cancelacion"),
+                "tipo_sociedad": (cache.get("tipo_sociedad") or "")[:120],
+                "organizacion_juridica": (cache.get("organizacion_juridica") or "")[:120],
+                "categoria_matricula": (cache.get("categoria_matricula") or "")[:120],
+                "ciiu": cache.get("ciiu") or {},
+                "municipio": (cache.get("municipio") or "")[:60],
+                "departamento": (cache.get("departamento") or "")[:60],
+                "representantes": (cache.get("representantes") or [])[:5],
+                "fecha_actualizacion": cache.get("fecha_actualizacion"),
+            })
+            seccion["estado"] = _estado_rues(seccion)
         elif nombre in {"bdme", "bdme_nit"}:
             seccion.update({
                 "no_registra": cache.get("no_registra"), "reportado": bool(cache.get("reportado")),
@@ -582,6 +630,12 @@ async def _ejecutar_fuente(
 
         async def invocar() -> dict:
             return await asyncio.to_thread(consultar_ofac_nit_sync, cedula)
+    elif nombre == "rues":
+
+        async def invocar() -> dict:
+            # rues consulta el API directo de la SPA (requests puro, sin
+            # navegador ni captcha: ~1-2 s, costo $0).
+            return await asyncio.to_thread(consultar_rues_sync, cedula)
     elif nombre in {"bdme", "bdme_nit"}:
 
         async def invocar() -> dict:
@@ -959,6 +1013,66 @@ async def _ejecutar_fuente(
         ):
             seccion[campo] = doc_cache[campo]
         seccion["estado"] = _estado_ofac(seccion)
+    elif nombre == "rues":
+        # Registro Mercantil del RUES por NIT (API público de la SPA, sin
+        # captcha ni PDF: el informe lo genera Integra).
+        estado_matricula = (resultado.get("estado") or "").strip().upper() or None
+        no_registra = resultado.get("no_registra")
+        # Anti-envenenamiento (segunda barrera; el bot ya lanza
+        # BotRuesSinResultado): sin estado de matrícula Y sin no_registra
+        # determinante NO es una consulta válida.
+        if not estado_matricula and no_registra is not True:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El RUES no entregó el estado de la matrícula. Intente de nuevo.",
+                },
+            })
+            logger.warning("RUES sin resultado legible para NIT %s (sin cachear)", enmascarar_cedula(cedula))
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula, "nit": resultado.get("nit") or cedula,
+            "nit_con_dv": (resultado.get("nit_con_dv") or "")[:20],
+            "razon_social": (resultado.get("razon_social") or "")[:150],
+            "estado_matricula": estado_matricula,
+            "no_registra": bool(no_registra),
+            "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+            "camara": (resultado.get("camara") or "")[:80],
+            "codigo_camara": (resultado.get("codigo_camara") or "")[:5],
+            "matricula": (resultado.get("matricula") or "")[:15],
+            "fecha_matricula": resultado.get("fecha_matricula"),
+            "fecha_renovacion": resultado.get("fecha_renovacion"),
+            "ultimo_ano_renovado": resultado.get("ultimo_ano_renovado"),
+            "fecha_cancelacion": resultado.get("fecha_cancelacion"),
+            "tipo_sociedad": (resultado.get("tipo_sociedad") or "")[:120],
+            "organizacion_juridica": (resultado.get("organizacion_juridica") or "")[:120],
+            "categoria_matricula": (resultado.get("categoria_matricula") or "")[:120],
+            "ciiu": resultado.get("ciiu") or {},
+            "municipio": (resultado.get("municipio") or "")[:60],
+            "departamento": (resultado.get("departamento") or "")[:60],
+            "representantes": (resultado.get("representantes") or [])[:5],
+            "fecha_actualizacion": resultado.get("fecha_actualizacion"),
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché rues %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        for campo in (
+            "nit", "nit_con_dv", "razon_social", "estado_matricula", "no_registra",
+            "mensaje", "camara", "codigo_camara", "matricula", "fecha_matricula",
+            "fecha_renovacion", "ultimo_ano_renovado", "fecha_cancelacion",
+            "tipo_sociedad", "organizacion_juridica", "categoria_matricula",
+            "ciiu", "municipio", "departamento", "representantes", "fecha_actualizacion",
+        ):
+            seccion[campo] = doc_cache[campo]
+        # Matrícula distinta de ACTIVA = ADVERTENCIA (decisión de negocio
+        # 2026-09-03, análoga a SOAT vencido / saldo SIMIT exigible).
+        seccion["estado"] = _estado_rues(seccion)
     else:
         if nombre == "contraloria":
             no_registra = resultado.get("no_registra")

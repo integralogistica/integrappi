@@ -1112,6 +1112,135 @@ class TestFuenteSimit(unittest.TestCase):
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
 
 
+class TestFuenteRues(unittest.TestCase):
+    """Fuente "rues" (Registro Mercantil de Confecámaras por NIT sin DV):
+    caché con clave (tipo, NIT) — viaja en el campo cédula como ofac_nit —,
+    semáforo por estado de matrícula (distinto de ACTIVA → ADVERTENCIA,
+    decisión de negocio 2026-09-03 análoga a SOAT vencido / saldo SIMIT) y
+    anti-envenenamiento análogo. NIT sin registro = determinante (no_registra),
+    jamás un "limpio" de la empresa."""
+
+    RESULTADO_ACTIVA = {
+        "nit": "901923029", "nit_con_dv": "901923029-2",
+        "razon_social": "GLAMPEROS S.A.S.", "estado": "ACTIVA", "no_registra": False,
+        "mensaje": "Matrícula ACTIVA — GLAMPEROS S.A.S. (cámara ABURRA SUR).",
+        "camara": "ABURRA SUR", "codigo_camara": "55", "matricula": "281773",
+        "fecha_matricula": "2025-03-03", "fecha_renovacion": "2026-03-09",
+        "ultimo_ano_renovado": "2026", "fecha_cancelacion": None,
+        "tipo_sociedad": "SOCIEDAD COMERCIAL",
+        "organizacion_juridica": "SOCIEDADES POR ACCIONES SIMPLIFICADAS SAS",
+        "categoria_matricula": "SOCIEDAD – PERSONA JURIDICA PRINCIPAL – ESAL",
+        "ciiu": {"principal": {"codigo": "6312", "descripcion": "Portales web"}},
+        "municipio": "ITAGUI", "departamento": "ANTIOQUIA",
+        "representantes": [{"documento": "1010213062", "nombre": "ZARATE PEÑA EDWIN MISAEL"}],
+        "fecha_actualizacion": "2026-03-09",
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_exito_activa_cachea_por_nit(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_rues_sync", return_value=self.RESULTADO_ACTIVA):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="901923029")
+                    )
+        # La identidad de la caché es el NIT (viaja en el campo cédula, como ofac_nit).
+        buscar.assert_called_once_with("rues", "901923029", False, placa=None)
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["estado_matricula"], "ACTIVA")
+        self.assertEqual(seccion["razon_social"], "GLAMPEROS S.A.S.")
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "rues")
+        self.assertEqual(doc_cache["cedula"], "901923029")
+        self.assertEqual(doc_cache["nit"], "901923029")
+        self.assertEqual(doc_cache["representantes"][0]["documento"], "1010213062")
+
+    def test_matricula_distinta_de_activa_es_advertencia(self):
+        # Caso real visto en la sonda: cancelada por Ley 1429 de 2010.
+        resultado = {**self.RESULTADO_ACTIVA, "estado": "MATRICULACANCELADALEY1429"}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_rues_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="901923029")
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        # Y contamina el estado global: con las demás EXITO → CON_ADVERTENCIAS.
+        fuentes = {
+            "manifiestos_rndc": {"estado": "DESHABILITADA"},
+            "procuraduria": {"estado": "EXITO"},
+            "rues": {"estado": "ADVERTENCIA"},
+        }
+        self.assertEqual(orch.calcular_estado_global(fuentes), "COMPLETADA_CON_ADVERTENCIAS")
+
+    def test_nit_sin_registro_es_exito_determinante(self):
+        resultado = {"nit": "999999997", "no_registra": True, "estado": None,
+                     "mensaje": "NIT sin registro en el Registro Mercantil del RUES."}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_rues_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="999999997")
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertTrue(seccion["no_registra"])
+        col.insert_one.assert_called_once()
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "rues", "cedula": "901923029", "nit": "901923029",
+            "nit_con_dv": "901923029-2", "razon_social": "GLAMPEROS S.A.S.",
+            "estado_matricula": "ACTIVA", "no_registra": False,
+            "mensaje": "Matrícula ACTIVA", "camara": "ABURRA SUR", "matricula": "281773",
+            "representantes": [], "ciiu": {},
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache) as buscar:
+            with patch.object(orch, "consultar_rues_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="901923029")
+                )
+        buscar.assert_called_once_with("rues", "901923029", False, placa=None)
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["razon_social"], "GLAMPEROS S.A.S.")
+        bot.assert_not_called()
+
+    def test_resultado_indeterminado_es_no_disponible_sin_cachear(self):
+        # Sin estado de matrícula y sin no_registra determinante: el API no
+        # entregó un resultado usable (anti-envenenamiento, doble barrera).
+        resultado = {"nit": "901923029", "no_registra": None, "estado": None, "mensaje": ""}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_rues_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="901923029")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_rues import BotRuesSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_rues_sync") as bot:
+                bot.side_effect = BotRuesSinResultado("sin datos")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("rues", "", actor_consultador(), False, nit="901923029")
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
 class TestFuentesHabilitadasEfectivas(unittest.TestCase):
     """2026-09-01 (pedido del usuario): EL PLAN ES EL GATE — editar
     `fuentes_incluidas` de un plan (o agregar una fuente al catálogo) queda
@@ -1132,7 +1261,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial", "rues"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(

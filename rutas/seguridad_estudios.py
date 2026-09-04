@@ -571,12 +571,12 @@ async def crear_estudio(
         habilitadas = fuentes_del_plan
         plan_preferido = {"plan_id": ObjectId(plan_pedido), "fuente": fuentes_del_plan[0]}
 
-    # OFAC empresarial usa NIT, nunca reutiliza la cédula. Las demás fuentes
-    # continúan siendo consultas de la persona evaluada.
-    if any(f not in {"ofac_nit", "bdme_nit", "rama_judicial"} for f in habilitadas) and not cedula:
+    # Las fuentes empresariales (OFAC/BDME/RUES) usan NIT, nunca reutilizan la
+    # cédula. Las demás fuentes continúan siendo consultas de la persona evaluada.
+    if any(f not in {"ofac_nit", "bdme_nit", "rama_judicial", "rues"} for f in habilitadas) and not cedula:
         raise HTTPException(status_code=422, detail="Las fuentes personales requieren el campo cedula")
     nit: str | None = None
-    if "ofac_nit" in habilitadas or "bdme_nit" in habilitadas:
+    if any(f in {"ofac_nit", "bdme_nit", "rues"} for f in habilitadas):
         nit = _normalizar_nit_sin_dv(getattr(datos, "nit", None))
         if len(nit) < 6 or len(nit) > 15:
             raise HTTPException(
@@ -850,6 +850,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "bdme": "BDME — Persona por cédula",
         "bdme_nit": "BDME — Empresa por NIT",
         "rama_judicial": "Rama Judicial — Procesos por nombre",
+        "rues": "RUES — Registro Mercantil por NIT",
     }
     fuentes = []
     for clave, nombre in etiquetas.items():

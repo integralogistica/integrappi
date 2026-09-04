@@ -874,5 +874,87 @@ class TestSeccionOfac(unittest.TestCase):
         self.assertIn("EMPRESADEPRUEBA", texto)
 
 
+def _fuente_rues(
+    estado="EXITO", estado_matricula="ACTIVA", no_registra=False,
+    razon_social="GLAMPEROS S.A.S.", representantes=None,
+    fecha_renovacion="2026-03-09", ultimo_ano_renovado="2026",
+):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "nit": "901923029",
+        "nit_con_dv": "901923029-2",
+        "razon_social": razon_social,
+        "estado_matricula": estado_matricula,
+        "no_registra": no_registra,
+        "mensaje": f"Matrícula {estado_matricula}" if estado_matricula else "NIT sin registro",
+        "camara": "ABURRA SUR",
+        "codigo_camara": "55",
+        "matricula": "281773",
+        "fecha_matricula": "2025-03-03",
+        "fecha_renovacion": fecha_renovacion,
+        "ultimo_ano_renovado": ultimo_ano_renovado,
+        "fecha_cancelacion": None,
+        "tipo_sociedad": "SOCIEDAD COMERCIAL",
+        "organizacion_juridica": "SOCIEDADES POR ACCIONES SIMPLIFICADAS SAS",
+        "categoria_matricula": "SOCIEDAD — PERSONA JURIDICA PRINCIPAL — ESAL",
+        "ciiu": {"principal": {"codigo": "6312", "descripcion": "Portales web"}},
+        "municipio": "ITAGUI",
+        "departamento": "ANTIOQUIA",
+        "representantes": representantes if representantes is not None else [
+            {"documento": "1010213062", "nombre": "ZARATE PEÑA EDWIN MISAEL"},
+        ],
+        "fecha_actualizacion": "2026-03-09",
+        "intentos": 1,
+        "duraciones_s": [0.1],
+        "error": None,
+    }
+
+
+class TestSeccionRues(unittest.TestCase):
+    def _con_rues(self, **kwargs):
+        estudio = estudio_fixture()
+        estudio["nit"] = "901923029"
+        estudio["fuentes"]["rues"] = _fuente_rues(**kwargs)
+        return estudio
+
+    def test_matricula_activa_banner_verde_y_datos(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_rues())).replace(" ", "")
+        self.assertIn("RUES—RegistroMercantil(Confecámaras)", texto)
+        self.assertIn("MATRÍCULAACTIVA", texto)
+        self.assertIn("RENOVADAHASTA2026-03-09", texto)
+        self.assertIn("GLAMPEROSS.A.S.", texto)
+        self.assertIn("901923029-2", texto)
+        self.assertIn("ABURRASUR", texto)
+        self.assertIn("Portalesweb", texto)
+        self.assertIn("Representantelegal", texto)
+        self.assertIn("ZARATEPEÑAEDWINMISAEL", texto)
+        self.assertIn("MatrículamercantilACTIVA", texto)  # fila resumen
+        self.assertIn("NOconstituyeelCertificadodeExistencia", texto)  # legal honesto
+
+    def test_matricula_distinta_de_activa_es_advertencia(self):
+        # Caso real de la sonda: cancelada por Ley 1429 de 2010.
+        estudio = self._con_rues(
+            estado="ADVERTENCIA", estado_matricula="MATRICULACANCELADALEY1429",
+            fecha_renovacion=None, ultimo_ano_renovado=None,
+        )
+        texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        self.assertIn("LAEMPRESANOESTÁACTIVAENREGISTROMERCANTIL", texto)
+        self.assertIn("MatrículaMATRICULACANCELADALEY1429", texto)  # fila resumen
+
+    def test_nit_sin_registro_neutro(self):
+        estudio = self._con_rues(estado_matricula=None, no_registra=True, razon_social="")
+        estudio["fuentes"]["rues"]["mensaje"] = "NIT sin registro en el Registro Mercantil del RUES."
+        texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        self.assertIn("NITSINREGISTROENELREGISTROMERCANTIL", texto)
+
+    def test_fuente_fallida_muestra_estado_no_disponible(self):
+        estudio = self._con_rues(estado="NO_DISPONIBLE", estado_matricula=None, razon_social="")
+        estudio["fuentes"]["rues"]["error"] = {"tipo": "rues_no_disponible", "mensaje": "El API no respondió"}
+        texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        self.assertIn("RUES—RegistroMercantil(Confecámaras)", texto)
+        self.assertIn("NODISPONIBLE", texto)
+
+
 if __name__ == "__main__":
     unittest.main()

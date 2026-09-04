@@ -42,6 +42,7 @@ from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
 from Funciones.bot_sena import BotSenaError, BotSenaSinCaptchaKey, consultar_sena_sync
 from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
+from Funciones.bot_rues import BotRuesError, BotRuesSinResultado, consultar_rues_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/seguridad", tags=["Seguridad"])
@@ -669,6 +670,57 @@ async def consultar_ofac_nit(
         col_consultas.insert_one(doc)
     except Exception as exc:
         logger.error("Consulta OFAC NIT %s no se pudo auditar: %s", nit_norm, exc)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/rues")
+async def consultar_rues(
+    nit: str = Query(..., min_length=6, max_length=25, description="NIT de la empresa SIN dígito de verificación"),
+    force: bool = Query(False, description="Ignorar caché de consulta"),
+    actor: dict = Depends(actor_actual),
+):
+    """Estado de la matrícula mercantil del RUES (Confecámaras) por NIT.
+
+    API público del portal de consulta ciudadana (sin captcha, costo $0):
+    razón social, estado (ACTIVA/CANCELADA/...), cámara, matrícula,
+    renovaciones, tipo societario, CIIU y representante legal. La información
+    es la reportada por las cámaras de comercio con fines informativos: NO
+    constituye el Certificado de Existencia y Representación Legal (ese se
+    expide en la cámara correspondiente).
+    """
+    _requiere_seguridad(actor)
+    nit_norm = re.sub(r"\D", "", nit)
+    if len(nit_norm) < 6 or len(nit_norm) > 10:
+        raise HTTPException(status_code=422, detail="NIT inválido (6 a 10 dígitos, sin dígito de verificación)")
+    cache = _buscar_cache("rues", nit_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+    try:
+        resultado = await asyncio.to_thread(consultar_rues_sync, nit_norm)
+    except BotRuesSinResultado as exc:
+        raise HTTPException(status_code=502, detail=f"El RUES no entregó un resultado legible: {exc}") from exc
+    except BotRuesError as exc:
+        raise HTTPException(status_code=503, detail=f"No fue posible consultar el RUES: {exc}") from exc
+    ahora = _utcnow()
+    doc = {
+        "tipo": "rues", "cedula": nit_norm, "nit": nit_norm,
+        "estado_matricula": (resultado.get("estado") or "").strip().upper() or None,
+        **{k: resultado.get(k) for k in (
+            "nit_con_dv", "razon_social", "no_registra", "mensaje", "camara",
+            "codigo_camara", "matricula", "fecha_matricula", "fecha_renovacion",
+            "ultimo_ano_renovado", "fecha_cancelacion", "tipo_sociedad",
+            "organizacion_juridica", "categoria_matricula", "ciiu", "municipio",
+            "departamento", "representantes", "fecha_actualizacion",
+        )},
+        "usuario": actor["usuario"], "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"), "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE), "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta RUES %s no se pudo auditar: %s", nit_norm, exc)
     doc.pop("_id", None)
     return doc
 
