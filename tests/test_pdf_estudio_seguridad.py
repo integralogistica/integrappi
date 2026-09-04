@@ -776,9 +776,11 @@ class TestSeccionSena(unittest.TestCase):
         self.assertIn("PRODUCCIÓN", texto)
         self.assertIn("ALIMENTOS", texto)
         self.assertIn("TECNÓLOGOEN", texto.replace(" ", ""))
-        # Las fechas caben enteras en su columna (23 mm): sin wrap del guion.
-        self.assertIn("2013-02-09", texto)
-        self.assertIn("2023-11-30", texto)
+        # Las fechas van unificadas a dd/mm/aaaa (2026-09-04) y caben enteras
+        # en su columna (23 mm): sin wrap de la barra.
+        self.assertIn("09/02/2013", texto)
+        self.assertIn("30/11/2023", texto)
+        self.assertNotIn("2013-02-09", texto)
 
     def test_sin_certificados_banner_verde(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_sena(
@@ -922,7 +924,7 @@ class TestSeccionRues(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(self._con_rues())).replace(" ", "")
         self.assertIn("RUES—RegistroMercantil(Confecámaras)", texto)
         self.assertIn("MATRÍCULAACTIVA", texto)
-        self.assertIn("RENOVADAHASTA2026-03-09", texto)
+        self.assertIn("RENOVADAHASTA09/03/2026", texto)
         self.assertIn("GLAMPEROSS.A.S.", texto)
         self.assertIn("901923029-2", texto)
         self.assertIn("ABURRASUR", texto)
@@ -954,6 +956,65 @@ class TestSeccionRues(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
         self.assertIn("RUES—RegistroMercantil(Confecámaras)", texto)
         self.assertIn("NODISPONIBLE", texto)
+
+
+class TestFechaLegible(unittest.TestCase):
+    """2026-09-04: TODAS las fechas del informe van en dd/mm/aaaa vengan como
+    vengan de la fuente (cada portal tiene su formato)."""
+
+    def test_iso_de_runt_simit_sena_rues(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("2026-10-22"), "22/10/2026")
+        self.assertEqual(_fecha_legible("2000-04-11"), "11/04/2000")
+
+    def test_iso_con_hora_de_rama_judicial(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("2022-05-05T00:00:00"), "05/05/2022")
+
+    def test_slash_del_rndc(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("2026/08/28 15:15:21"), "28/08/2026 15:15:21")
+        self.assertEqual(_fecha_legible("2026/08/21"), "21/08/2026")
+
+    def test_us_de_ofac(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("08/28/2026"), "28/08/2026")
+
+    def test_ya_legible_pasa_intacto(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("21/10/2026"), "21/10/2026")
+
+    def test_texto_libre_y_vacios(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        # Lo que no es fecha NO se toca (celdas de datos de portales).
+        self.assertEqual(_fecha_legible("VIGENTE"), "VIGENTE")
+        self.assertEqual(_fecha_legible(None), "—")
+        self.assertEqual(_fecha_legible(""), "—")
+
+    def test_fecha_imposible_no_se_reescribe(self):
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+        self.assertEqual(_fecha_legible("2026-13-45"), "2026-13-45")
+
+    def test_en_pdf_completo_no_queda_fecha_iso(self):
+        """El informe fixture trae fechas ISO en runt/simit/sena/rues: ninguna
+        debe sobrevivir sin convertir en el PDF final."""
+        from Funciones.pdf_estudio_seguridad import _fecha_legible
+
+        estudio = estudio_fixture()
+        estudio["placa"] = "MVX48E"
+        estudio["nit"] = "901923029"
+        estudio["fuentes"]["runt"] = _fuente_runt()
+        estudio["fuentes"]["simit"] = _fuente_simit(total_comparendos=1)
+        estudio["fuentes"]["sena"] = _fuente_sena()
+        estudio["fuentes"]["rues"] = _fuente_rues()
+        texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        for fecha_iso in (
+            "2025-10-23", "2099-10-22",  # SOAT runt
+            "2000-04-11",               # simit
+            "2013-02-09",               # sena
+            "2025-03-03", "2026-03-09",  # rues
+        ):
+            self.assertNotIn(fecha_iso, texto, f"{fecha_iso} debió ir como {_fecha_legible(fecha_iso)}")
 
 
 if __name__ == "__main__":

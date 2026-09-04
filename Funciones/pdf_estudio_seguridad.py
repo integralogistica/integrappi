@@ -120,6 +120,54 @@ def _fecha_colombia(dt: datetime | None, con_hora: bool = True) -> str:
     return local.strftime("%d/%m/%Y %H:%M:%S hora Colombia" if con_hora else "%d/%m/%Y")
 
 
+# Formatos de fecha que traen las fuentes (cada portal tiene el suyo):
+#   ISO 'aaaa-mm-dd' (runt/simit/sena/rues/rama judicial), 'aaaa/mm/dd' (ventana
+#   y tabla del RNDC), US 'mm/dd/aaaa' (Publish_Date del XML de OFAC),
+#   'dd/mm/aaaa' (algunos portales), ISO con hora 'aaaa-mm-ddThh:mm:ss' y el
+#   'aaaa/mm/dd hh:mm:ss' de la tabla de manifiestos. El informe unifica TODO a
+#   dd/mm/aaaa (pedido 2026-09-04); lo que no parsea como fecha pasa intacto.
+_RE_FECHA_ISO = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
+_RE_FECHA_US = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})")
+
+
+def _fecha_legible(valor, defecto: str = "—") -> str:
+    """Cualquier fecha de fuente → 'dd/mm/aaaa'.
+
+    Ambigüedad dd/mm vs mm/dd: los portales colombianos (runt/rues/simit/sena)
+    entregan ISO yyyy-mm-dd, así que el slash se asume US mm/dd SOLO si el día
+    y el mes no caben como dd/mm (OFAC es el único emisor mm/dd/aaaa). Si el
+    texto no es una fecha conocida se devuelve tal cual (o el defecto si es
+    vacío): el helper pinta celdas de datos de portales, no debe tragarse
+    texto libre.
+    """
+    texto = str(valor or "").strip()
+    if not texto:
+        return defecto
+    m = _RE_FECHA_ISO.match(texto)
+    if m:
+        anio, mes, dia = m.group(1), int(m.group(2)), int(m.group(3))
+    else:
+        m = _RE_FECHA_US.match(texto)
+        if not m:
+            return texto
+        primero, segundo, anio = int(m.group(1)), int(m.group(2)), m.group(3)
+        if primero > 12:  # 28/08/2026 no puede ser mm/dd → es dd/mm
+            dia, mes = primero, segundo
+        else:
+            mes, dia = primero, segundo
+    try:
+        datetime(int(anio), mes, dia)  # valida rango real (13/13 falla)
+    except ValueError:
+        return texto
+    # La hora (si viene) viaja con la fecha: 'Fecha Hora Radicación' del RNDC
+    # trae 'aaaa/mm/dd hh:mm:ss'. El sufijo ISO 'Thh:mm:ss' (rama judicial) no
+    # es legible y se descarta.
+    resto = texto[m.end():].strip()
+    if resto.startswith("T"):
+        resto = ""
+    return f"{dia:02d}/{mes:02d}/{anio}{' ' + resto if resto else ''}"
+
+
 def _enmascarar_cedula(cedula: str | None) -> str:
     """Cédula VISIBLE completa (decisión de negocio 2026-08-30: el cliente
     necesita verla para cruzar con sus registros; antes iba enmascarada).
@@ -293,7 +341,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     creado = estudio.get("creado_en")
 
     buffer = io.BytesIO()
-    fecha_wm = creado.replace(tzinfo=timezone.utc).astimezone(_TZ_BOGOTA).strftime("%Y-%m-%d %H:%M") if creado else ""
+    fecha_wm = creado.replace(tzinfo=timezone.utc).astimezone(_TZ_BOGOTA).strftime("%d/%m/%Y %H:%M") if creado else ""
     CanvasEstudio._consulta_id_pdf = consulta_id
     CanvasEstudio._wm_l1 = f"{estudio.get('empresa_nombre', '')} | {estudio.get('usuario', '')} | {fecha_wm}"
     CanvasEstudio._wm_l2 = f"{consulta_id} | Generado por Integra Logística"
@@ -567,7 +615,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(Paragraph("Manifiestos de carga — RNDC (Mintransporte)", estilo_h2))
     if rndc.get("estado") == "EXITO":
         cuento.append(Paragraph(
-            f"Ventana consultada: {rndc.get('desde', '—')} a {rndc.get('hasta', '—')} · "
+            f"Ventana consultada: {_fecha_legible(rndc.get('desde'))} a {_fecha_legible(rndc.get('hasta'))} · "
             f"Últimos <b>{rndc.get('total', 0)}</b> viajes:  · Origen de datos: {_texto_origen(rndc)}",
             estilo_normal,
         ))
@@ -777,7 +825,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         elif soat.get("vigente") is False:
             texto_runt, color_runt = "SOAT VENCIDO — VEHÍCULO SIN SEGURO VIGENTE", COLOR_FALLO
         elif soat and soat.get("vigente") is True:
-            texto_runt, color_runt = f"SOAT VIGENTE — VENCE {soat.get('fecha_fin_vigencia', '—')}", COLOR_EXITO
+            texto_runt, color_runt = f"SOAT VIGENTE — VENCE {_fecha_legible(soat.get('fecha_fin_vigencia'))}", COLOR_EXITO
         else:
             texto_runt, color_runt = "VEHÍCULO SIN PÓLIZA SOAT REGISTRADA — VERIFICAR", COLOR_ADVERTENCIA
         tabla_veredicto_runt = Table(
@@ -806,12 +854,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         for clave, etiqueta in etiquetas_runt.items():
             valor = (runt.get("datos_vehiculo") or {}).get(clave)
             if valor:
-                detalle_runt.append([etiqueta, valor])
+                detalle_runt.append([etiqueta, _fecha_legible(valor) if "fecha" in clave else valor])
         if soat:
             detalle_runt.append(["SOAT — póliza", soat.get("numero", "—")])
             detalle_runt.append(["SOAT — aseguradora", soat.get("aseguradora", "—")])
             detalle_runt.append(["SOAT — vigencia", (
-                f"{soat.get('fecha_inicio_vigencia', '—')} a {soat.get('fecha_fin_vigencia', '—')} "
+                f"{_fecha_legible(soat.get('fecha_inicio_vigencia'))} a {_fecha_legible(soat.get('fecha_fin_vigencia'))} "
                 f"({soat.get('estado_portal', '—')})"
             )])
         if (runt.get("mensaje") or "").strip():
@@ -849,7 +897,9 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             for p in polizas[:5]:
                 filas_pol.append([
                     Paragraph(escape(str(p.get("numero", "—"))), estilo_celda_pol),
-                    Paragraph(escape(f"{p.get('fecha_inicio_vigencia', '—')} → {p.get('fecha_fin_vigencia', '—')}"), estilo_celda_pol),
+                    Paragraph(escape(
+                        f"{_fecha_legible(p.get('fecha_inicio_vigencia'))} → {_fecha_legible(p.get('fecha_fin_vigencia'))}"
+                    ), estilo_celda_pol),
                     Paragraph(escape(str(p.get("aseguradora", "—"))), estilo_celda_pol),
                     Paragraph(escape(str(p.get("estado", "—"))), estilo_celda_pol),
                 ])
@@ -936,7 +986,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             for c in comparendos[:10]:
                 filas_sim.append([
                     Paragraph(escape(str(c.get("numero", "—"))), estilo_celda_sim),
-                    Paragraph(escape(str(c.get("fecha_imposicion") or "—")), estilo_celda_sim),
+                    Paragraph(escape(_fecha_legible(c.get("fecha_imposicion"))), estilo_celda_sim),
                     Paragraph(escape(str(c.get("infraccion") or "—")), estilo_celda_sim),
                     Paragraph(escape(str(c.get("secretaria") or "—")), estilo_celda_sim),
                     Paragraph(escape(str(c.get("estado") or "—")), estilo_celda_sim),
@@ -1012,8 +1062,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                     Paragraph(escape(str(c.get("programa") or "—")), estilo_celda_sena),
                     Paragraph(escape(str(c.get("titulo") or "—")), estilo_celda_sena),
                     Paragraph(escape(str(c.get("tipo") or "—")), estilo_celda_sena),
-                    Paragraph(escape(str(c.get("fecha_certificacion") or "—")), estilo_celda_sena),
-                    Paragraph(escape(str(c.get("fecha_firma") or "—")), estilo_celda_sena),
+                    Paragraph(escape(_fecha_legible(c.get("fecha_certificacion"))), estilo_celda_sena),
+                    Paragraph(escape(_fecha_legible(c.get("fecha_firma"))), estilo_celda_sena),
                 ])
             tabla_certs = Table(filas_sena, colWidths=[56 * mm, 28 * mm, 30 * mm, 23 * mm, 23 * mm])
             tabla_certs.setStyle(TableStyle([
@@ -1053,7 +1103,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(tabla_ofac_banner)
         filas_ofac = [
             ["Método", "Coincidencia exacta del número de identificación (sin búsqueda difusa por nombre)"],
-            ["Publicación OFAC", ofac.get("fecha_publicacion") or "—"],
+            ["Publicación OFAC", _fecha_legible(ofac.get("fecha_publicacion"))],
             ["Registros de la lista", str(ofac.get("total_registros_lista") or "—")],
             ["Coincidencias", str(ofac.get("total_coincidencias") or 0)],
             ["SHA-256 del dataset", ofac.get("sha256_dataset") or "—"],
@@ -1091,7 +1141,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             cuento.append(Paragraph(f"<b>{veredicto_nit}</b>", estilo_normal))
             cuento.append(Paragraph(
                 f"NIT consultado: {escape(str(estudio.get('nit') or '—'))} · "
-                f"Publicación OFAC: {escape(str(ofac_nit.get('fecha_publicacion') or '—'))} · "
+                f"Publicación OFAC: {escape(_fecha_legible(ofac_nit.get('fecha_publicacion')))} · "
                 f"Coincidencias: {int(ofac_nit.get('total_coincidencias') or 0)}", estilo_normal,
             ))
             for coincidencia in (ofac_nit.get("coincidencias") or [])[:10]:
@@ -1143,10 +1193,10 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             for proceso in (rama_judicial.get("procesos") or [])[:20]:
                 numero = proceso.get("llaveProceso") or proceso.get("numeroProceso") or proceso.get("idProceso") or "—"
                 despacho = proceso.get("despacho") or proceso.get("nombreDespacho") or "—"
-                fecha = proceso.get("fechaProceso") or proceso.get("fechaUltimaActuacion") or "—"
+                fecha = _fecha_legible(proceso.get("fechaProceso") or proceso.get("fechaUltimaActuacion"))
                 cuento.append(Paragraph(
                     f"<b>Proceso:</b> {escape(str(numero))} · "
-                    f"<b>Despacho:</b> {escape(str(despacho))} · <b>Fecha:</b> {escape(str(fecha))}",
+                    f"<b>Despacho:</b> {escape(str(despacho))} · <b>Fecha:</b> {escape(fecha)}",
                     estilo_peq,
                 ))
                 sujetos = str(proceso.get("sujetosProcesales") or "").strip()
@@ -1188,7 +1238,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             elif estado_mat == "ACTIVA":
                 renovacion = rues.get("fecha_renovacion")
                 texto_rues = (
-                    f"MATRÍCULA ACTIVA — RENOVADA HASTA {renovacion}"
+                    f"MATRÍCULA ACTIVA — RENOVADA HASTA {_fecha_legible(renovacion)}"
                     if renovacion else "MATRÍCULA ACTIVA"
                 )
                 color_rues = COLOR_EXITO
@@ -1217,11 +1267,11 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                     ["NIT", rues.get("nit_con_dv") or (rues.get("nit") or estudio.get("nit") or "—")],
                     ["Estado de la matrícula", estado_mat or "—"],
                     ["Cámara de Comercio", f"{rues.get('camara') or '—'} · matrícula {rues.get('matricula') or '—'}"],
-                    ["Fecha de matrícula", rues.get("fecha_matricula") or "—"],
+                    ["Fecha de matrícula", _fecha_legible(rues.get("fecha_matricula"))],
                     ["Última renovación", (
-                        f"{rues.get('fecha_renovacion') or '—'} · último año renovado {rues.get('ultimo_ano_renovado') or '—'}"
+                        f"{_fecha_legible(rues.get('fecha_renovacion'))} · último año renovado {rues.get('ultimo_ano_renovado') or '—'}"
                     )],
-                    ["Fecha de cancelación", rues.get("fecha_cancelacion") or "—"],
+                    ["Fecha de cancelación", _fecha_legible(rues.get("fecha_cancelacion"))],
                     ["Tipo de sociedad", (
                         f"{rues.get('tipo_sociedad') or '—'} · {rues.get('organizacion_juridica') or '—'}"
                     )],
@@ -1417,7 +1467,13 @@ def _tabla_viajes(viajes: list[dict], columnas_portal: list[str]) -> Table:
 
     filas = [[celda(c, estilo_cabecera) for c in columnas]]
     for v in viajes[:MAX_VIAJES_PDF]:
-        filas.append([celda(v.get(c, "")) for c in columnas])
+        filas.append([
+            # La columna de fecha del portal trae 'aaaa/mm/dd hh:mm:ss': al
+            # mostrarla se unifica la parte de la fecha a dd/mm/aaaa (la hora
+            # del radicado viaja con ella, tal cual la reporta el portal).
+            celda(_fecha_legible(v.get(c, "")) if "fecha" in c.lower() else v.get(c, ""))
+            for c in columnas
+        ])
 
     tabla = Table(filas, colWidths=anchos, repeatRows=1)
     tabla.setStyle(TableStyle([
@@ -1490,7 +1546,7 @@ def _texto_veredicto_runt(runt: dict) -> str:
     if soat.get("vigente") is False:
         return "SOAT vencido — ver detalle"
     if soat and soat.get("vigente") is True:
-        return f"SOAT vigente (vence {soat.get('fecha_fin_vigencia', '—')})"
+        return f"SOAT vigente (vence {_fecha_legible(soat.get('fecha_fin_vigencia'))})"
     marca = (runt.get("datos_vehiculo") or {}).get("marca", "")
     return f"Vehículo identificado{f' ({marca})' if marca else ''} — sin póliza SOAT registrada"
 

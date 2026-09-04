@@ -90,6 +90,19 @@ logger = logging.getLogger(__name__)
 INTENTOS_FUENTE = int(os.getenv("SEGURIDAD_INTENTOS_FUENTE", "2"))        # totales (1 original + 1 reintento)
 BACKOFF_MS = int(os.getenv("SEGURIDAD_BACKOFF_MS", "3000"))
 TIMEOUT_FUENTE_S = float(os.getenv("SEGURIDAD_TIMEOUT_FUENTE_S", "150"))
+# Presupuesto POR FUENTE (sobrescribe el global): la PGN rediseñada tiene un
+# postback INLINE visto tardar >45 s + captcha de conocimiento (Gemini) y es
+# la fuente más lenta del módulo — 150 s la cortaba a mitad de postback en
+# horas pico (pedido del usuario 2026-09-04: 300 s para que el reintento
+# completo —2 intentos— quepa holgado).
+TIMEOUTS_FUENTE_S: dict[str, float] = {
+    "procuraduria": float(os.getenv("SEGURIDAD_PROCURADURIA_TIMEOUT_S", "300")),
+}
+
+
+def _timeout_fuente(nombre: str) -> float:
+    """Presupuesto de pared de la fuente (override por fuente o el global)."""
+    return TIMEOUTS_FUENTE_S.get(nombre, TIMEOUT_FUENTE_S)
 RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
@@ -225,10 +238,13 @@ async def _llamar_con_reintento(
     Un resultado RNDC 'vacío sin confirmación del portal' (respuesta Ajax
     incompleta) también consume intento y se reintenta (fix 2026-08-29): no es
     una excepción, pero tampoco es un resultado válido.
+
+    El presupuesto de pared es POR FUENTE (`_timeout_fuente`): procuraduría
+    tiene el suyo propio (300 s) porque su postback es el más lento del módulo.
     """
     intentos = 0
     duraciones: list[float] = []
-    presupuesto = time.monotonic() + TIMEOUT_FUENTE_S
+    presupuesto = time.monotonic() + _timeout_fuente(nombre)
     ultima: Exception | None = None
     while intentos < INTENTOS_FUENTE:
         intentos += 1
@@ -275,7 +291,7 @@ def _resultado_vacio_sin_confirmar(nombre: str, resultado: dict | None) -> bool:
     return "consulta realizada" not in (resultado.get("mensaje_portal") or "").lower()
 
 
-def _clasificar_error(exc: Exception) -> tuple[str, dict]:
+def _clasificar_error(exc: Exception, nombre: str = "") -> tuple[str, dict]:
     """(estado de la fuente, error {tipo, mensaje}) — NO_DISPONIBLE vs ERROR."""
     if isinstance(exc, BotOfacError):
         return "NO_DISPONIBLE", {"tipo": "ofac_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
@@ -286,7 +302,9 @@ def _clasificar_error(exc: Exception) -> tuple[str, dict]:
         # API caído / passphrase rotada / NIT fuera del formato del buscador.
         return "NO_DISPONIBLE", {"tipo": "rues_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, asyncio.TimeoutError):
-        return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {TIMEOUT_FUENTE_S:.0f} s"}
+        # El timeout del wait_for es el presupuesto POR FUENTE (300 s para
+        # procuraduría, el global para las demás).
+        return "NO_DISPONIBLE", {"tipo": "TimeoutError", "mensaje": f"La fuente no respondió en {_timeout_fuente(nombre):.0f} s"}
     if isinstance(exc, BotRNDC2Incompleto):
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotProcuraduriaSinResultado):
@@ -672,14 +690,14 @@ async def _ejecutar_fuente(
     try:
         resultado, intentos, duraciones, error_exc = await _llamar_con_reintento(nombre, cedula, invocar)
     except Exception as exc:  # red de Mongo, etc.: igual queda auditada la fuente como ERROR
-        estado, error = _clasificar_error(exc)
+        estado, error = _clasificar_error(exc, nombre)
         seccion.update({"estado": estado, "intentos": 0, "duraciones_s": [], "error": error})
         logger.error("Fuente %s falló para cédula %s: %s", nombre, enmascarar_cedula(cedula), exc)
         return seccion
     seccion["intentos"] = intentos
     seccion["duraciones_s"] = duraciones
     if error_exc is not None:
-        estado, error = _clasificar_error(error_exc)
+        estado, error = _clasificar_error(error_exc, nombre)
         seccion.update({"estado": estado, "error": error})
         logger.error(
             "Fuente %s falló para cédula %s tras %s intentos: %s",

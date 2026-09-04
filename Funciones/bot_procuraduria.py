@@ -306,9 +306,14 @@ async def consultar_antecedentes(
             # veredicto llega INLINE en .datosConsultado y #btnDescargar ya no
             # existe: esperar ambos marcadores (el que llegue primero) en vez
             # de un networkidle+3s que se rinde antes de que termine el postback.
+            # 180 s (2026-09-04): el orquestador le da a procuraduría 300 s de
+            # presupuesto — antes se rendía a los 60 s y leía la página antes
+            # de que terminara el postback (SinResultado prematuro), gastando
+            # el intento sin aprovechar el presupuesto. Navegación + captcha +
+            # 180 s de postback siguen cabiendo en los 300 s.
             try:
                 await vista.wait_for_selector(
-                    ".datosConsultado, #btnDescargar", timeout=60000, state="attached",
+                    ".datosConsultado, #btnDescargar", timeout=180000, state="attached",
                 )
             except Exception:
                 pass  # puede ser error de captcha: leer la página igual
