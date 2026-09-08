@@ -134,6 +134,8 @@ async def checkin(
         raise HTTPException(status_code=400, detail=f"Departamentos no válidos: {', '.join(invalidos)}")
 
     # 4. Upsert de hoy (un check-in por placa+fecha). Expira solo por fecha (lazy).
+    #    `enturnado_en` es la hora del PRIMER ofrecimiento del día (no cambia en
+    #    re-guardados): con ella la bolsa muestra la hora y el orden de llegada.
     hoy = _fecha_hoy_str()
     ahora = _ahora_bogota()
     coleccion_disponibilidades.update_one(
@@ -146,7 +148,7 @@ async def checkin(
                 "estado": "activa",
                 "actualizado_en": ahora
             },
-            "$setOnInsert": {"creado_en": ahora}
+            "$setOnInsert": {"creado_en": ahora, "enturnado_en": ahora}
         },
         upsert=True
     )
@@ -178,7 +180,10 @@ def mia(id_usuario: str):
     # invitado (idConductor).
     aprobados = list(coleccion_vehiculos.find(
         {"$or": [{"idUsuario": id_usuario}, {"idConductor": id_usuario}], "estadoIntegra": "aprobado"},
-        {"_id": 0, "placa": 1, "vehMarca": 1, "tipo_veh_sicetac": 1}
+        {
+            "_id": 0, "placa": 1, "vehMarca": 1, "vehLinea": 1,
+            "vehClase": 1, "vehTipoCarroceria": 1, "tipo_veh_sicetac": 1
+        }
     ))
 
     # Se incluyen las ASIGNADAS (tomadas por la operación): siguen siendo
@@ -207,6 +212,7 @@ def bolsa(
     """
     Flota disponible HOY. Cada ítem = un check-in activo + datos del vehículo y conductor.
     Filtros opcionales: origen (bodega), destino (departamento), tipo_veh_sicetac.
+    Orden: hora de enturnado (los que se ofrecieron primero, primero).
     """
     hoy = _fecha_hoy_str()
 
@@ -218,7 +224,7 @@ def bolsa(
     tipo_buscar = tipo_veh_sicetac.strip().upper() if tipo_veh_sicetac else None
 
     resultado = []
-    for c in coleccion_disponibilidades.find(query, {"_id": 0}):
+    for c in coleccion_disponibilidades.find(query, {"_id": 0}).sort("enturnado_en", 1):
         destinos_c = [d.upper() for d in c.get("departamentos_destino", [])]
         if destino_buscar and destino_buscar not in destinos_c:
             continue
@@ -233,12 +239,16 @@ def bolsa(
             continue
 
         actualizado = c.get("actualizado_en")
+        # Hora de enturnado: la del primer ofrecimiento del día; a falta de esa
+        # (check-ins viejos), se usa el creado/actualizado como aproximación.
+        enturnado = c.get("enturnado_en") or c.get("creado_en") or actualizado
         resultado.append({
             "placa": c.get("placa"),
             "origen": c.get("origen"),
             "departamentos_destino": c.get("departamentos_destino", []),
             "estado": c.get("estado"),
             "actualizado_en": actualizado.isoformat() if isinstance(actualizado, datetime) else actualizado,
+            "enturnado_en": enturnado.isoformat() if isinstance(enturnado, datetime) else enturnado,
             "conductor": {
                 "nombre": veh.get("condNombres") or veh.get("condNombre"),
                 "celular": veh.get("condCelular"),
@@ -248,10 +258,17 @@ def bolsa(
             "vehiculo": {
                 "linea": veh.get("vehLinea"),
                 "tipo_veh_sicetac": tipo_veh or None,
-                "toneladas": veh.get("vehCapacidadToneladas") or veh.get("toneladas") or veh.get("vehTonelaje")
+                "toneladas": veh.get("vehCapacidadToneladas") or veh.get("toneladas") or veh.get("vehTonelaje"),
+                # Identificación del carro para quien no conoce la línea: marca,
+                # clase (TRACTOCAMIÓN, CAMIÓN...) y carrocería (FURGÓN...).
+                "marca": veh.get("vehMarca"),
+                "clase": veh.get("vehClase"),
+                "carroceria": veh.get("vehTipoCarroceria")
             }
         })
 
+    # Orden de llegada a igual hora de enturnado (un solo vehículo no define
+    # el orden; el sort de Mongo + posición de cursor desempata).
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "message": "OK",
         "fecha": hoy,
@@ -403,4 +420,136 @@ def asignadas(solo_abiertas: bool = False, limit: int = 100):
         "message": "OK",
         "total": len(lista),
         "asignaciones": lista
+    })
+
+
+# ==========================================
+# DESCARTE (la operación llamó al carro y no lo va a usar)
+# ==========================================
+
+@ruta_disponibilidad.put("/descartar")
+async def descartar(
+    placa: str = Form(...),
+    descartado_por: str = Form(...),
+    motivo: Optional[str] = Form(None)
+):
+    """
+    La operación DESCARTA un vehículo de la bolsa (lo llamó y no lo va a usar):
+
+    - Su check-in pasa de `activa` a `descartada` (desaparece de la bolsa, pero
+      NO queda registrado como «en uso»: es distinto de asignar).
+    - Queda el registro en `asignaciones_flota` con estado `descartada`, para
+      que se pueda ver quién lo descartó y por qué, y RESTAURARLO si hace falta.
+    - Restaurarlo lo devuelve a la bolsa conservando su hora de enturnado.
+    """
+    placa_limpia = placa.strip().upper()
+    hoy = _fecha_hoy_str()
+    ahora = _ahora_bogota()
+
+    # No descartar un carro que ya está asignado o descartado hoy.
+    existente = coleccion_asignaciones.find_one(
+        {"placa": placa_limpia, "fecha": hoy, "estado": {"$in": ["asignada", "descartada"]}}
+    )
+    if existente:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Este vehículo ya está {'asignado' if existente.get('estado') == 'asignada' else 'descartado'} hoy."
+        )
+
+    disp = coleccion_disponibilidades.find_one_and_update(
+        {"placa": placa_limpia, "fecha": hoy, "estado": "activa"},
+        {"$set": {"estado": "descartada", "actualizado_en": ahora}}
+    )
+    if not disp:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay disponibilidad activa hoy para esta placa."
+        )
+
+    doc = {
+        "placa": placa_limpia,
+        "fecha": hoy,
+        "origen": disp.get("origen"),
+        "departamentos_destino": disp.get("departamentos_destino", []),
+        "idUsuario": disp.get("idUsuario"),
+        "descartado_por": str(descartado_por).strip(),
+        "motivo_descarte": (motivo or "").strip() or None,
+        "descartado_en": ahora,
+        "enturnado_en": disp.get("enturnado_en") or disp.get("creado_en"),
+        "estado": "descartada"
+    }
+    insertado = coleccion_asignaciones.insert_one(doc)
+    doc["_id"] = str(insertado.inserted_id)
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Vehículo descartado",
+        "descarte": _serializar(doc)
+    })
+
+
+@ruta_disponibilidad.put("/restaurar")
+async def restaurar(placa: str = Form(...), restaurado_por: str = Form(None)):
+    """
+    Revoca el descarte MÁS RECIENTE de una placa (p. ej. lo llamaron de nuevo):
+
+    - El registro pasa a `restaurada`.
+    - Si el descarte era de HOY, el check-in vuelve a `activa` y reaparece en
+      la bolsa CONSERVANDO su hora de enturnado original.
+    """
+    placa_limpia = placa.strip().upper()
+    ahora = _ahora_bogota()
+    hoy = _fecha_hoy_str()
+
+    descarte = coleccion_asignaciones.find_one_and_update(
+        {"placa": placa_limpia, "estado": "descartada"},
+        {"$set": {
+            "estado": "restaurada",
+            "restaurado_en": ahora,
+            "restaurado_por": (restaurado_por or "").strip() or None
+        }},
+        sort=[("descartado_en", -1)]
+    )
+    if not descarte:
+        raise HTTPException(
+            status_code=404,
+            detail="Esta placa no tiene un descarte pendiente."
+        )
+
+    reactivada = False
+    if descarte.get("fecha") == hoy:
+        reactivar = {"estado": "activa", "actualizado_en": ahora}
+        # Conservar la hora de enturnado original (si viene en el registro).
+        if descarte.get("enturnado_en"):
+            reactivar["enturnado_en"] = descarte["enturnado_en"]
+        res = coleccion_disponibilidades.update_one(
+            {"placa": placa_limpia, "fecha": hoy, "estado": "descartada"},
+            {"$set": reactivar}
+        )
+        reactivada = res.matched_count > 0
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Descarte revertido",
+        "placa": placa_limpia,
+        "reactivada": reactivada,
+        "descarte": _serializar(descarte)
+    })
+
+
+@ruta_disponibilidad.get("/descartes")
+def descartes(solo_hoy: bool = False, limit: int = 100):
+    """
+    Descartes de flota (vehículos que la operación llamó y no usó), el más
+    reciente primero. `solo_hoy=true` → solo los del día actual.
+    Los que siguen `descartada` se pueden restaurar desde /FlotaUsada.
+    """
+    query = {"estado": "descartada"}
+    if solo_hoy:
+        query["fecha"] = _fecha_hoy_str()
+    cursor = coleccion_asignaciones.find(query).sort("descartado_en", -1).limit(max(1, min(limit, 500)))
+    lista = [_serializar(d) for d in cursor]
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "OK",
+        "total": len(lista),
+        "descartes": lista
     })

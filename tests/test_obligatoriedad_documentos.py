@@ -82,7 +82,13 @@ TODOS_DOCS = {
 
 
 def vehiculo_completo(**extra):
-    doc = {"placa": "TEST01", "estadoIntegra": "registro_incompleto", **TODOS_DOCS}
+    doc = {
+        "placa": "TEST01", "estadoIntegra": "registro_incompleto",
+        # Capacidad de carga (kg): obligatoria y en rango 300–50.000 para
+        # pasar a completado_revision (2026-09-07).
+        "vehCapacidadCarga": "8000",
+        **TODOS_DOCS,
+    }
     doc.update(extra)
     return doc
 
@@ -325,6 +331,35 @@ class ActualizarEstadoValidacionTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 200)
         mock_notif.assert_called_once()
+
+    def test_completado_revision_sin_capacidad_bloquea(self):
+        """vehCapacidadCarga es obligatoria (300–50.000 kg): vacía, fuera de
+        rango o ilegible → 400 sin cambiar el estado."""
+        for capacidad in [None, "", "0", "299", "50001", "abc"]:
+            fake = FakeColeccionVehiculos([vehiculo_completo(vehCapacidadCarga=capacidad)])
+            with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                 patch.object(vehiculos, "enviar_notificacion_seguridad") as mock_notif:
+                resp = self.client.put(
+                    "/vehiculos/actualizar-estado",
+                    data={"placa": "TEST01", "nuevo_estado": "completado_revision", "usuario_id": "u1"},
+                )
+            self.assertEqual(resp.status_code, 400, f"capacidad={capacidad!r} no debió pasar")
+            self.assertIn("Capacidad de Carga", resp.json()["detail"])
+            self.assertEqual(fake.documents[0]["estadoIntegra"], "registro_incompleto")
+            mock_notif.assert_not_called()
+
+    def test_completado_revision_capacidad_en_rango_pasa(self):
+        """Los límites exactos del rango (300 y 50.000) sí pasan."""
+        for capacidad in ["300", "50000", "3500"]:
+            fake = FakeColeccionVehiculos([vehiculo_completo(vehCapacidadCarga=capacidad)])
+            with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                 patch.object(vehiculos, "enviar_notificacion_seguridad") as mock_notif:
+                resp = self.client.put(
+                    "/vehiculos/actualizar-estado",
+                    data={"placa": "TEST01", "nuevo_estado": "completado_revision", "usuario_id": "u1"},
+                )
+            self.assertEqual(resp.status_code, 200, f"capacidad={capacidad!r} debió pasar")
+            mock_notif.assert_called_once()
 
 
 class DocumentoValidoTests(unittest.TestCase):

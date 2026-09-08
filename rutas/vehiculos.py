@@ -367,6 +367,7 @@ ESQUEMAS_EXTRACCION = {
             "modelo": "Año del modelo (4 dígitos)",
             "color": "Color del vehículo",
             "clase_vehiculo": "Clase de vehículo (ej: Motocicleta, Automóvil, Camión, Bus)",
+            "capacidad_carga": "Capacidad de carga en kg del campo 'Capacidad Kg' o 'Capacidad Carga', SOLO dígitos",
             "cilindraje": "Cilindraje en c.c., SOLO dígitos",
             "servicio": "Servicio (ej: Particular, Público, Comercial)",
             "combustible": "Combustible (ej: Gasolina, Diesel, GNV, Híbrido, Eléctrico)",
@@ -1085,6 +1086,18 @@ async def actualizar_estado(
             raise HTTPException(
                 status_code=400,
                 detail=f"Faltan documentos obligatorios: {nombres}.",
+            )
+        # Capacidad de carga (kg): obligatoria y dentro del rango operativo
+        # (300–50.000). Si la IA leyó 0/ilegible, el conductor la digita a mano.
+        capacidad = str(vehiculo.get("vehCapacidadCarga") or "").strip()
+        try:
+            capacidad_num = int(float(capacidad)) if capacidad else 0
+        except ValueError:
+            capacidad_num = 0
+        if not capacidad or capacidad_num < 300 or capacidad_num > 50000:
+            raise HTTPException(
+                status_code=400,
+                detail="La Capacidad de Carga (kg) es obligatoria y debe estar entre 300 y 50.000 kg. Diligénciala en Datos del Vehículo.",
             )
 
     # Inactivar un aprobado exige SIEMPRE un motivo (quedar en la base sin
