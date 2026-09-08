@@ -18,6 +18,7 @@ lo resuelve contra `baseusuarios` para autorizar con el perfil real.
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -45,10 +46,12 @@ LIMITE_COORDINADOR = 500000  # Coordinador aprueba hasta este valor inclusive
 LIMITE_VALOR_SOLICITUD = 5_000_000  # Valor total máximo permitido por solicitud
 
 # ── Adjuntos (soportes) en Google Cloud Storage ───────────────────────────────
-# Mismo patrón que rutas/vehiculos.py: bucket compartido, carpeta propia del
-# módulo; en Mongo solo se guarda la URL pública de cada archivo.
-BUCKET_OC = "integrapp"
+# Mismo patrón que rutas/vehiculos.py: bucket PRIVADO compartido, carpeta propia
+# del módulo. En Mongo solo se guarda la RUTA del blob (OtrosCostos/...); los
+# endpoints de lectura la convierten en URL firmada v4 temporal — nunca pública.
+BUCKET_OC = os.getenv("OTROS_COSTOS_BUCKET", "integrapp-privado")
 CARPETA_OC = "OtrosCostos"
+OC_URL_FIRMADA_MIN = int(os.getenv("OTROS_COSTOS_URL_FIRMADA_MIN", "60"))
 MAX_ADJUNTOS_OC = 10                      # tope TOTAL por solicitud (existentes + nuevos)
 MAX_TAMANO_ADJUNTO_OC = 10 * 1024 * 1024  # 10 MB por archivo
 TIPOS_ADJUNTO_OC = {"image/jpeg", "image/jpg", "image/png", "application/pdf"}
@@ -707,7 +710,17 @@ def _enmascarar(valor: str) -> str:
 def _serializar(doc: Optional[dict], perfil: str, usuario: Optional[str] = None) -> Optional[dict]:
     if doc is None:
         return None
-    return _aplicar_visibilidad(_jsonable(doc), perfil, usuario)
+    doc = _aplicar_visibilidad(_jsonable(doc), perfil, usuario)
+    # Los adjuntos viven en el bucket PRIVADO: Mongo guarda la ruta plana y aquí
+    # se entrega como URL firmada temporal (el front consume `url` sin cambios).
+    adjuntos = doc.get("adjuntos")
+    if isinstance(adjuntos, list):
+        doc["adjuntos"] = [
+            {**a, "url": _url_firmada_adjunto(a.get("url", ""))}
+            for a in adjuntos
+            if isinstance(a, dict)
+        ]
+    return doc
 
 
 # ── Adjuntos: validación, optimización y subida a GCS ─────────────────────────
@@ -773,10 +786,24 @@ def _optimizar_imagen_oc(archivo: UploadFile) -> BytesIO:
         raise HTTPException(status_code=422, detail=f"No se pudo procesar la imagen '{archivo.filename}': {str(e)}")
 
 
+def _obtener_cliente_storage():
+    """Cliente GCS perezoso y compartido (uno por request es caro; patrón de
+    rutas/vehiculos.py)."""
+    global _cliente_storage
+    if _cliente_storage is None:
+        _cliente_storage = storage.Client()
+    return _cliente_storage
+
+
+_cliente_storage = None
+_RE_URL_PUBLICA_GCS = re.compile(r"^https://storage\.googleapis\.com/[^/]+/")
+
+
 def _subir_adjunto_gcs(archivo: UploadFile, nombre_blob: str) -> str:
-    """Sube un adjunto al bucket: imágenes optimizadas como WEBP, PDF tal cual."""
-    cliente = storage.Client()
-    bucket = cliente.bucket(BUCKET_OC)
+    """Sube un adjunto al bucket privado: imágenes optimizadas como WEBP, PDF tal
+    cual. Devuelve la RUTA del blob (OtrosCostos/...); la URL firmada se genera
+    únicamente al servir el documento."""
+    bucket = _obtener_cliente_storage().bucket(BUCKET_OC)
     ruta = f"{CARPETA_OC}/{nombre_blob}"
     blob = bucket.blob(ruta)
     if (archivo.content_type or "").startswith("image/"):
@@ -784,7 +811,7 @@ def _subir_adjunto_gcs(archivo: UploadFile, nombre_blob: str) -> str:
     else:
         archivo.file.seek(0)
         blob.upload_from_file(archivo.file, content_type=archivo.content_type)
-    return f"https://storage.googleapis.com/{BUCKET_OC}/{ruta}"
+    return ruta
 
 
 def _nombre_adjunto_bucket(consecutivo: str, nombre_original: str, es_imagen: bool) -> str:
@@ -797,15 +824,32 @@ def _nombre_adjunto_bucket(consecutivo: str, nombre_original: str, es_imagen: bo
     return f"{consecutivo}/{fecha}/{uuid4().hex[:8]}_{base}"
 
 
-def _eliminar_blob_oc(url: str) -> None:
-    """Best-effort: borra un blob del bucket a partir de su URL pública."""
+def _url_firmada_adjunto(ruta: str) -> str:
+    """URL firmada v4 temporal (OC_URL_FIRMADA_MIN) para que el navegador abra
+    el adjunto del bucket privado sin exponerlo permanentemente. Defensiva: si
+    el signing falla, devuelve la ruta plana — jamás tumba el endpoint."""
     try:
-        cliente = storage.Client()
-        bucket = cliente.bucket(BUCKET_OC)
-        prefijo = f"https://storage.googleapis.com/{BUCKET_OC}/"
-        bucket.blob(url.split(prefijo)[-1]).delete()
+        blob = _obtener_cliente_storage().bucket(BUCKET_OC).blob(
+            _RE_URL_PUBLICA_GCS.sub("", str(ruta or ""))
+        )
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=OC_URL_FIRMADA_MIN),
+            method="GET",
+        )
     except Exception as e:
-        logger.warning("No se pudo eliminar el adjunto %s: %s", url, e)
+        logger.warning("No se pudo firmar el adjunto %s: %s", ruta, e)
+        return ruta
+
+
+def _eliminar_blob_oc(ruta: str) -> None:
+    """Best-effort: borra un blob del bucket a partir de su ruta (tolera URLs
+    públicas históricas recortando el prefijo del bucket)."""
+    try:
+        bucket = _obtener_cliente_storage().bucket(BUCKET_OC)
+        bucket.blob(_RE_URL_PUBLICA_GCS.sub("", str(ruta or ""))).delete()
+    except Exception as e:
+        logger.warning("No se pudo eliminar el adjunto %s: %s", ruta, e)
 
 
 def _subir_adjuntos(archivos: List[UploadFile], consecutivo: str, info: dict) -> List[dict]:
