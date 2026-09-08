@@ -612,6 +612,7 @@ class ActualizarPlanillaPedidosRequest(BaseModel):
     aprobado_por: Optional[str] = None
     fecha_aprobacion: Optional[str] = None
     municipio_destino: Optional[str] = None  # Municipio principal elegido manualmente
+    departamento_destino: Optional[str] = None  # Departamento del municipio principal (derivado de divipolas)
     ahorro: Optional[float] = None  # Ahorro operativo generado (máx. $5.000.000)
     observacion: Optional[str] = None  # Observación textual que explica el ahorro
     observacion_causal: Optional[str] = None  # Texto libre que explica/amplía la causal elegida (máx. 1000 chars)
@@ -2208,6 +2209,28 @@ async def listar_rutas():
         raise HTTPException(status_code=500, detail=f"Error al listar rutas: {str(e)}")
 
 
+@router.get("/departamento-por-municipio")
+async def departamento_por_municipio(municipio: str):
+    """
+    Devuelve el departamento de una población según la colección `divipolas`
+    (la misma fuente que enriquece Ruta/Departamento al consultar planillas).
+    La búsqueda normaliza como el mapper: mayúsculas, sin tildes y sin espacios
+    laterales. 200 siempre; `encontrado=False` cuando la población no está en
+    divipolas (el frontend entonces conserva el departamento actual).
+    """
+    try:
+        from Funciones.siscore_excel_mapper import construir_lookup_divipolas, normalizar_texto
+        lookup = construir_lookup_divipolas(coleccion_divipolas)
+        div = lookup.get(normalizar_texto(municipio)) or {}
+        departamento = (div.get("departamento") or "").strip()
+        if departamento:
+            return {"encontrado": True, "departamento": departamento}
+        return {"encontrado": False, "departamento": None}
+    except Exception as e:
+        logger.error(f"Error al consultar departamento por municipio: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al consultar departamento: {str(e)}")
+
+
 @router.post("/consultar-tarifa")
 async def consultar_tarifa(request: ConsultarTarifaRequest):
 
@@ -3268,6 +3291,17 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
                     "valor_nuevo": request.municipio_destino
                 })
 
+        # Ídem departamento_destino: viaja junto al municipio principal (derivado de divipolas
+        # en el frontend). También es un cambio de etiqueta, sin efecto en cálculos.
+        if request.departamento_destino is not None:
+            campos_actualizar["departamento_destino"] = request.departamento_destino
+            if request.departamento_destino != doc_actual.get("departamento_destino"):
+                campos_modificados.append({
+                    "campo": "departamento_destino",
+                    "valor_anterior": doc_actual.get("departamento_destino"),
+                    "valor_nuevo": request.departamento_destino
+                })
+
         # Si se envía estado, actualizarlo
         if request.estado is not None:
             campos_actualizar["estado"] = request.estado
@@ -3847,6 +3881,7 @@ def _escribir_fila_planilla(
         "JUAN MINA": "JUAN MINA BARRANQUILLA ATLANTICO",
         "CALI": "YUMBO",
         "YUMBO": "YUMBO",
+        "BUCARAMANGA": "FLORIDA BLANCA",
     }
     origen = _origen_map.get(str(regional_doc).upper().strip(), regional_doc)
 
