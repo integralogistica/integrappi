@@ -3973,8 +3973,9 @@ def _escribir_fila_planilla(
     ubicacion_cargue = _cargue[0]
     direccion_cargue = _cargue[1]
 
-    # SEGURO: solo FRESENIUS KABI lleva 6000; el resto de clientes va en 0.
-    seguro = 6000 if _es_cliente_kabi(cliente_origen) else 0
+    # SEGURO: siempre 0 en el Excel (desde 2026-09-09). El seguro de FRESENIUS KABI
+    # se registra por fuera (Vulcano/TMS); antes salía 6000 fijo para KABI.
+    seguro = 0
 
     datos = [
         consecutivo,                                      # Consecutivo
