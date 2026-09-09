@@ -3881,7 +3881,6 @@ def _escribir_fila_planilla(
         "JUAN MINA": "JUAN MINA BARRANQUILLA ATLANTICO",
         "CALI": "YUMBO",
         "YUMBO": "YUMBO",
-        "BUCARAMANGA": "FLORIDA BLANCA",
     }
     origen = _origen_map.get(str(regional_doc).upper().strip(), regional_doc)
 
