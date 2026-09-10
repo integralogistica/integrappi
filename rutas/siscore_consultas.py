@@ -777,6 +777,10 @@ async def importar_vulcano(archivo: UploadFile = File(...), usuario: Optional[st
         # Mapear columnas alternativas
         if "NO._PEDIDO" in df.columns and "PEDIDO" not in df.columns:
             df.rename(columns={"NO._PEDIDO": "PEDIDO"}, inplace=True)
+        if "NUMERO_PEDIDO" in df.columns and "PEDIDO" not in df.columns:
+            df.rename(columns={"NUMERO_PEDIDO": "PEDIDO"}, inplace=True)
+        if "CONSECUTIVO_INTEGRAPP" in df.columns and "CONSECUTIVO" not in df.columns:
+            df.rename(columns={"CONSECUTIVO_INTEGRAPP": "CONSECUTIVO"}, inplace=True)
 
         # Validar columnas requeridas
         columnas_requeridas = {"CONSECUTIVO", "PEDIDO"}
@@ -784,7 +788,7 @@ async def importar_vulcano(archivo: UploadFile = File(...), usuario: Optional[st
             faltantes = columnas_requeridas - set(df.columns)
             raise HTTPException(
                 status_code=400,
-                detail=f"El archivo debe tener las columnas: CONSECUTIVO, PEDIDO (o No. Pedido). Faltan: {', '.join(sorted(faltantes))}"
+                detail=f"El archivo debe tener las columnas: CONSECUTIVO (o consecutivo_integrapp) y PEDIDO (o No. Pedido / numero_pedido). Faltan: {', '.join(sorted(faltantes))}"
             )
 
         # Limpiar datos
@@ -3840,7 +3844,8 @@ DESTINOS_RENOMBRAR_EXCEL = {
     "DOSQUEBRADAS RISARALDA": "DOS QUEBRADAS",
     "VISTAHERMOSA": "VISTA HERMOSA",
     "GUAMAL": "GUAMAL MAGDALENA",
-    "PUERTO LIBERTADOR": "PTO. LIBERTADOR"
+    "PUERTO LIBERTADOR": "PTO. LIBERTADOR",
+    "BARRANQUILLA ATL": "BARRANQUILLA"
 }
 
 # Versión del mapa con claves normalizadas a ASCII para el lookup.
