@@ -215,13 +215,13 @@ REGIONALES_PAREADAS = {"CELTA", "FUNZA"}
 def regionales_visibles_para(user: dict):
     """
     Devuelve:
-      - None  -> sin restricción (ADMIN/COORDINADOR/CONTROL/ANALISTA)
+      - None  -> sin restricción (ADMIN/COORDINADOR/CONTROL/ANALISTA/VISUALIZADOR)
       - [..]  -> lista de regionales visibles (DESPACHADOR/OPERADOR: CELTA+FUNZA si aplica; de lo contrario, su propia regional)
     """
     perfil = (user.get("perfil") or "").upper()
     reg    = (user.get("regional") or "").upper()
 
-    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "VISUALIZADOR"}:
         return None  # sin restricción por regional, se respeta lo que manden por filtros
 
     if perfil in {"DESPACHADOR", "OPERADOR"}:
@@ -1746,8 +1746,8 @@ async def exportar_completados(
         }
     }
 
-    # Si es ADMIN/COORDINADOR/CONTROL/Analista y envió regionales, úsalas; de lo contrario, su regional por cookie
-    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+    # Si es ADMIN/COORDINADOR/CONTROL/Analista/Visualizador y envió regionales, úsalas; de lo contrario, su regional por cookie
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "VISUALIZADOR"}:
         if regionales:
             filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
     else:
@@ -1859,6 +1859,11 @@ async def asignar_causal_completado(payload: AsignarCausalCompletadoPayload):
     if not causal:
         raise HTTPException(400, "La causal es obligatoria")
 
+    # VISUALIZADOR es un perfil de solo lectura: no puede asignar causales
+    user = coleccion_usuarios.find_one({"usuario": usuario})
+    if user and (user.get("perfil") or "").upper() == "VISUALIZADOR":
+        raise HTTPException(403, "El perfil VISUALIZADOR es de solo lectura")
+
     ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     res = coleccion_pedidos_completados.update_many(
         {"consecutivo_vehiculo": cv},
@@ -1961,7 +1966,7 @@ async def listar_vehiculos_completados(
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}
 
     # 4) Filtrar por regional según perfil/visibilidad
-    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA"}:
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "VISUALIZADOR"}:
         # Perfiles amplios: si envían 'regionales' en filtros, se respetan
         if filtros.regionales:
             filtro["regional"] = {"$in": [r.upper().strip() for r in filtros.regionales]}

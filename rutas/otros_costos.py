@@ -199,7 +199,7 @@ REGIONAL_A_BODEGA = {
 }
 BODEGA_A_REGIONAL = {b: r for r, b in REGIONAL_A_BODEGA.items()}
 # Perfiles que ven TODAS las regionales (y a los que se les ofrece el dropdown).
-PERFILES_GLOBALES_OC = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL"}
+PERFILES_GLOBALES_OC = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL", "VISUALIZADOR"}
 
 
 def _normalizar_regional(valor: str) -> Optional[dict]:

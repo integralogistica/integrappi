@@ -957,6 +957,12 @@ async def retroceder_a_solicitud(request: RetrocederASolicitudRequest):
         if not planilla:
             raise HTTPException(status_code=400, detail="planilla es obligatoria")
 
+        # VISUALIZADOR es un perfil de solo lectura: no puede retroceder planillas
+        if request.usuario:
+            usuario_doc = coleccion_baseusuarios.find_one({"usuario": request.usuario.upper().strip()})
+            if usuario_doc and (usuario_doc.get("perfil") or "").upper() == "VISUALIZADOR":
+                raise HTTPException(status_code=403, detail="El perfil VISUALIZADOR es de solo lectura")
+
         logger.info(
             f"=== RETROCEDER A SOLICITUD === planilla={planilla}, "
             f"usuario={request.usuario}, motivo={request.motivo}"
@@ -1073,6 +1079,12 @@ async def anular_planilla(request: AnularPlanillaRequest):
             raise HTTPException(status_code=400, detail="planilla es obligatoria")
         if not causal:
             raise HTTPException(status_code=400, detail="causal es obligatorio")
+
+        # VISUALIZADOR es un perfil de solo lectura: no puede anular planillas
+        if request.usuario:
+            usuario_doc = coleccion_baseusuarios.find_one({"usuario": request.usuario.upper().strip()})
+            if usuario_doc and (usuario_doc.get("perfil") or "").upper() == "VISUALIZADOR":
+                raise HTTPException(status_code=403, detail="El perfil VISUALIZADOR es de solo lectura")
 
         logger.info(
             f"=== ANULAR PLANILLA === planilla={planilla}, "
@@ -4496,7 +4508,7 @@ async def obtener_historico(
         }
 
         # Filtrar por regional para operativos
-        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL', 'VISUALIZADOR']
         if perfil and perfil not in perfiles_globales and centro_distribucion:
             _aplicar_filtro_regional_operativo(filtro, centro_distribucion)
 
@@ -4625,7 +4637,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         }
 
         # Filtrar por regional para operativos
-        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL']
+        perfiles_globales = ['ADMIN', 'ANALISTA', 'COORDINADOR', 'CONTROL', 'VISUALIZADOR']
         if request.perfil and request.perfil not in perfiles_globales and request.centro_distribucion:
             _aplicar_filtro_regional_operativo(filtro, request.centro_distribucion)
 
