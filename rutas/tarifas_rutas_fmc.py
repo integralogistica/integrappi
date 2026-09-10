@@ -295,6 +295,75 @@ async def cargar_tarifas_masivo(archivo: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
 
 # ------------------------------
+# ✅ Descargar todas las tarifas en Excel
+# ------------------------------
+@ruta_tarifas_rutas_fmc.get("/descargar-excel")
+async def descargar_tarifas_excel():
+    from fastapi.responses import Response
+    from datetime import datetime
+    import io
+
+    docs = coleccion_tarifas.find().sort([("centro_costo", 1), ("ruta", 1)])
+
+    columnas = {
+        "CENTRO_COSTO": [],
+        "RUTA": [],
+        "CARRY": [],
+        "NHR": [],
+        "TURBO": [],
+        "NIES": [],
+        "SENCILLO": [],
+        "PATINETA": [],
+        "TRACTOMULA": [],
+        "REQUIERE_DESCARGUE": [],
+        "PROMESA_ENTREGA_DIAS": []
+    }
+
+    total = 0
+    for t in docs:
+        m = modelo_tarifa(t)
+        columnas["CENTRO_COSTO"].append(m["centro_costo"])
+        columnas["RUTA"].append(m["ruta"])
+        columnas["CARRY"].append(m["carry"])
+        columnas["NHR"].append(m["nhr"])
+        columnas["TURBO"].append(m["turbo"])
+        columnas["NIES"].append(m["nies"])
+        columnas["SENCILLO"].append(m["sencillo"])
+        columnas["PATINETA"].append(m["patineta"])
+        columnas["TRACTOMULA"].append(m["tractomula"])
+        columnas["REQUIERE_DESCARGUE"].append(m["requiere_descargue"])
+        columnas["PROMESA_ENTREGA_DIAS"].append(m["promesa_entrega_dias"])
+        total += 1
+
+    df = pd.DataFrame(columnas)
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Tarifas')
+
+        worksheet = writer.sheets['Tarifas']
+        for idx, col in enumerate(df.columns, 1):
+            columna_letra = chr(64 + idx)
+            worksheet.column_dimensions[columna_letra].width = 18
+
+    buffer.seek(0)
+    excel_data = buffer.getvalue()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_archivo = f"tarifas_rutas_fmc_{timestamp}.xlsx"
+
+    return Response(
+        content=excel_data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename={nombre_archivo}",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
+
+# ------------------------------
 # ✅ Descargar plantilla de tarifas en Excel (solo encabezados)
 # ------------------------------
 @ruta_tarifas_rutas_fmc.get("/descargar-plantilla")
