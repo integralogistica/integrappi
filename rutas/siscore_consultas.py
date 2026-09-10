@@ -3965,8 +3965,8 @@ def _escribir_fila_planilla(
         "FUNZA":        ("BODEGA INTEGRA FUNZA",    "FUNZA"),
         "GIRARDOTA":    ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),
         "MEDELLIN":     ("BODEGA INTEGRA GIRARDOTA",   "parque industrial del norte bodega 119"),  # alias bodega GIRARDOTA (analista guarda 'MEDELLIN')
-        "BARRANQUILLA": ("INTEGRA JUAN MINA",      "JUAN MINA"),
-        "JUAN MINA":       ("INTEGRA JUAN MINA",      "JUAN MINA"),      # alias bodega (operativo guarda 'JUAN MINA')
+        "BARRANQUILLA": ("BODEGA  INTEGRA JUAN MINA",      "JUAN MINA"),
+        "JUAN MINA":       ("BODEGA INTEGRA JUAN MINA",      "JUAN MINA"),      # alias bodega (operativo guarda 'JUAN MINA')
         "CALI":         ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),
         "YUMBO":        ("BODEGA INTEGRA YUMBO",       "Carrera 31 a #15-320"),  # alias bodega (operativo guarda 'YUMBO')
         "BUCARAMANGA":  ("BODEGA INTEGRA BUCARAMANGA", "Parque industrial provincia de soto 1"),
