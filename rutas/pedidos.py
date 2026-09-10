@@ -1838,6 +1838,200 @@ async def exportar_completados(
     )
 
 # ------------------------------
+# 📊 Exportar COMPLETADOS DETALLADO: 2 hojas (Vehículos agregado + Pedidos con todos los campos)
+# ------------------------------
+@ruta_pedidos.get(
+    "/exportar-completados-detallado",
+    summary="Exportar a excel DETALLADO por rango de fechas (hoja Vehículos + hoja Pedidos)"
+)
+async def exportar_completados_detallado(
+    usuario: str = Query(..., description="Usuario que exporta"),
+    fecha_inicial: str = Query(..., description="YYYY-MM-DD"),
+    fecha_final:   str = Query(..., description="YYYY-MM-DD"),
+    regionales: Optional[List[str]] = Query(None, description="Opcional: lista de regionales")
+):
+    # 1-3) Misma validación/filtro que /exportar-completados
+    user = coleccion_usuarios.find_one({"usuario": usuario.upper().strip()})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    perfil, reg_user = user["perfil"].upper(), user["regional"].upper()
+
+    try:
+        datetime.strptime(fecha_inicial, "%Y-%m-%d")
+        datetime.strptime(fecha_final,   "%Y-%m-%d")
+    except:
+        raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
+
+    filtro: Dict[str, any] = {
+        "fecha_creacion": {
+            "$gte": f"{fecha_inicial} 00:00:00",
+            "$lte": f"{fecha_final} 23:59:59"
+        }
+    }
+    if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "VISUALIZADOR"}:
+        if regionales:
+            filtro["regional"] = {"$in": [r.upper().strip() for r in regionales]}
+    else:
+        filtro["regional"] = reg_user
+
+    # 4) Una pasada sin $group (fila por pedido) con lookup de cliente; la hoja de
+    #    vehículos se agrupa en Python sobre los mismos docs.
+    pipeline = [
+        {"$match": filtro},
+        {"$lookup": {
+            "from": "clientes",
+            "localField": "nit_cliente",
+            "foreignField": "nit",
+            "as": "cliente"
+        }},
+        {"$unwind": {"path": "$cliente", "preserveNullAndEmptyArrays": True}},
+        {"$set": {"nombre_cliente": {"$ifNull": ["$cliente.nombre", None]}}},
+        {"$project": {"cliente": 0}},
+        {"$sort": {"fecha_creacion": 1, "consecutivo_vehiculo": 1}},
+    ]
+    docs = await asyncio.to_thread(lambda: list(coleccion_pedidos_completados.aggregate(pipeline, allowDiskUse=True)))
+    if not docs:
+        raise HTTPException(404, "No se encontraron pedidos en ese rango.")
+
+    def _num(v):
+        try:
+            n = float(v)
+            return n if n == n else 0.0  # NaN -> 0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _fecha_ddmmaaaa(s):
+        try:
+            return datetime.strptime((s or "")[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            return (s or "")[:10]
+
+    # 5) HOJA "Vehículos": 1 fila por vehículo (agregado en Python, mismo criterio
+    #    de coalesce que listar-vehiculo-completados)
+    grupos: Dict[str, list] = {}
+    for d in docs:
+        grupos.setdefault(d.get("consecutivo_vehiculo") or "", []).append(d)
+
+    filas_vehiculos = []
+    for veh, group in grupos.items():
+        first = group[0]
+        flete_sol = first.get("total_flete_solicitado")
+        flete_sol = _num(flete_sol) if flete_sol is not None else sum(_num(p.get("valor_flete")) for p in group)
+        cargue = first.get("total_cargue_descargue")
+        cargue = _num(cargue) if cargue is not None else sum(_num(p.get("cargue_descargue")) for p in group)
+        punto = first.get("total_punto_adicional")
+        punto = _num(punto) if punto is not None else sum(_num(p.get("punto_adicional")) for p in group)
+
+        diferencia = _num(first.get("diferencia_flete"))
+        causal = (first.get("Observaciones_ajustes") or "").strip()
+        estados = sorted({(p.get("estado") or "") for p in group if p.get("estado")})
+
+        filas_vehiculos.append({
+            "Fecha": _fecha_ddmmaaaa(first.get("fecha_creacion")),
+            "Vehículo": veh,
+            "Regional": first.get("regional") or "",
+            "Tipo Vehículo (sugerido)": first.get("tipo_vehiculo") or "",
+            "Tipo Vehículo SICETAC": first.get("tipo_vehiculo_sicetac") or "",
+            "Veh Solicitado (RUNT)": (first.get("tipo_vehiculo_sicetac") or "").split("_")[0],
+            "Destino": first.get("destino") or "",
+            "# Pedidos": len(group),
+            "Puntos": _num(first.get("total_puntos_vehiculo")),
+            "Cajas": _num(first.get("total_cajas_vehiculo")),
+            "Kg Reales": _num(first.get("total_kilos_vehiculo")),
+            "Kg Sicetac": _num(first.get("total_kilos_vehiculo_sicetac")),
+            "Flete Solicitado": flete_sol,
+            "Cargue/Descargue Solicitado": cargue,
+            "Punto Adicional Solicitado": punto,
+            "Desvío": _num(first.get("total_desvio_vehiculo")),
+            "Total Solicitado": _num(first.get("total_flete_vehiculo")),
+            "Sobre costo": diferencia,
+            "Causal del sobre costo": ("Sin causal" if diferencia > 0 and not causal else causal),
+            "Flete Teórico": _num(first.get("valor_flete_sistema")),
+            "Cargue/Descargue Teórico": _num(first.get("cargue_descargue_teorico")),
+            "Punto Adicional Teórico": _num(first.get("punto_adicional_teorico")),
+            "Total Teórico": _num(first.get("costo_teorico_vehiculo")),
+            "Ahorro": _num(first.get("ahorro")),
+            "Observación ahorro": (first.get("observacion") or ""),
+            "Estados": ", ".join(estados),
+            "Multiestado": "Sí" if len(estados) > 1 else "No",
+            "Usuario solicitó ajuste": first.get("usr_solicita_ajuste") or "",
+        })
+
+    # 6) HOJA "Pedidos": 1 fila por pedido/planilla con TODOS los campos disponibles
+    #    (incluye todas las columnas del export actual + detalle por pedido)
+    filas_pedidos = []
+    for d in docs:
+        diferencia = _num(d.get("diferencia_flete"))
+        causal = (d.get("Observaciones_ajustes") or "").strip()
+        filas_pedidos.append({
+            # Identificación
+            "Fecha": _fecha_ddmmaaaa(d.get("fecha_creacion")),
+            "Vehículo": d.get("consecutivo_vehiculo") or "",
+            "Planilla": d.get("planilla_siscore") or "",
+            "Regional": d.get("regional") or "",
+            "NIT Cliente": d.get("nit_cliente") or "",
+            "Cliente": d.get("nombre_cliente") or "",
+            "Consecutivo Integrapp": d.get("consecutivo_integrapp") or "",
+            "Nº Pedido": d.get("numero_pedido") or "",
+            # Ruta
+            "Origen": d.get("origen") or "",
+            "Ubicación Cargue": d.get("ubicacion_cargue") or "",
+            "Dirección Cargue": d.get("direccion_cargue") or "",
+            "Destino": d.get("destino") or "",
+            "Destino Real": d.get("destino_real") or "",
+            "Destinatario (Ubicación Descargue)": d.get("ubicacion_descargue") or "",
+            "Dirección Descargue": d.get("direccion_descargue") or "",
+            # Cantidades del pedido
+            "Cajas": _num(d.get("num_cajas")),
+            "Kilos": _num(d.get("num_kilos")),
+            "Kilos Sicetac": _num(d.get("num_kilos_sicetac")),
+            "Valor Declarado": _num(d.get("valor_declarado")),
+            "Valor Flete (pedido)": _num(d.get("valor_flete")),
+            "Cargue/Descargue (pedido)": _num(d.get("cargue_descargue")),
+            "Punto Adicional (pedido)": _num(d.get("punto_adicional")),
+            "Desvío (pedido)": _num(d.get("desvio")),
+            "Descargue Kabi (pedido)": _num(d.get("descargue_kabi")),
+            "Tipo Viaje": d.get("tipo_viaje") or "",
+            "Tipo Vehículo (sugerido)": d.get("tipo_vehiculo") or "",
+            "Tipo Vehículo SICETAC": d.get("tipo_vehiculo_sicetac") or "",
+            "Veh Solicitado (RUNT)": (d.get("tipo_vehiculo_sicetac") or "").split("_")[0],
+            # Totales del vehículo (se repiten en los pedidos del mismo vehículo)
+            "Flete Solicitado (vehículo)": _num(d.get("total_flete_solicitado")),
+            "Cargue/Descargue (vehículo)": _num(d.get("total_cargue_descargue")),
+            "Punto Adicional (vehículo)": _num(d.get("total_punto_adicional")),
+            "Desvío (vehículo)": _num(d.get("total_desvio_vehiculo")),
+            "Total Solicitado (vehículo)": _num(d.get("total_flete_vehiculo")),
+            "Flete Teórico (vehículo)": _num(d.get("valor_flete_sistema")),
+            "Cargue/Descargue Teórico (vehículo)": _num(d.get("cargue_descargue_teorico")),
+            "Punto Adicional Teórico (vehículo)": _num(d.get("punto_adicional_teorico")),
+            "Total Teórico (vehículo)": _num(d.get("costo_teorico_vehiculo")),
+            "Sobre costo (vehículo)": diferencia,
+            "Causal del sobre costo": ("Sin causal" if diferencia > 0 and not causal else causal),
+            "Ahorro (vehículo)": _num(d.get("ahorro")),
+            "Observación": (d.get("observacion") or ""),
+            "Usuario solicitó ajuste": d.get("usr_solicita_ajuste") or "",
+            # Estado y observaciones del pedido
+            "Estado": d.get("estado") or "",
+            "Observaciones": (d.get("observaciones") or ""),
+            "Observaciones Aprobador": (d.get("observaciones_aprobador") or ""),
+            "Creado Por": d.get("creado_por") or "",
+        })
+
+    # 7) Excel de 2 hojas
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        pd.DataFrame(filas_vehiculos).to_excel(writer, index=False, sheet_name="Vehículos")
+        pd.DataFrame(filas_pedidos).to_excel(writer, index=False, sheet_name="Pedidos")
+    out.seek(0)
+
+    fn = f"pedidos_completados_detallado_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    return StreamingResponse(
+        out,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fn}"}
+    )
+
+# ------------------------------
 # ✏️ Asignar causal de sobre costo a vehículos ya completados (arreglo de históricos)
 # ------------------------------
 class AsignarCausalCompletadoPayload(BaseModel):
