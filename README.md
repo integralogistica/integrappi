@@ -674,6 +674,34 @@ Cada transición del flujo ahora dispara un WhatsApp al actor que debe actuar a 
 
 El valor se formatea en COP con punto de miles (`320.000`). Requiere `WHATSAPP_API_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID` (las mismas vars que SolicitudVehiculos). Mientras las plantillas no estén aprobadas, los logs mostrarán `[NOTIF OC] WhatsApp NO enviado … revisar plantilla …` y el flujo seguirá funcionando. **Archivo**: `rutas/otros_costos.py`.
 
+## Actualizaciones Recientes (2026-09-11)
+
+### Pedidos — `cargar-numeros-pedido` acepta el MISMO Excel de Importar Vulcano (SV)
+
+`POST /pedidos/cargar-numeros-pedido` ahora acepta el mismo archivo que `POST /siscore/importar-vulcano` (mismos dos campos). Cambios en `rutas/pedidos.py`:
+- **Alias de columnas alineados**: además de `pedido`/`n° pedido`/`n. pedido`/`consecutivo`, ahora también `no. pedido`, `numero_pedido` y `consecutivo integrapp` (SV mapeaba `NO._PEDIDO`/`NUMERO_PEDIDO`/`CONSECUTIVO_INTEGRAPP` y en Pedidos fallaban).
+- **Normalización de encabezados tolerante**: `strip + lower + colapsar espacios` ("No.  Pedido" funciona).
+- **Validación de extensión** con 400 claro (`.xlsx`/`.xls`, engine explícito `openpyxl`/`xlrd`) igual que SV; antes `pd.read_excel` sin engine fallaba con error genérico.
+- **`xlrd==2.0.1` agregado a `requirements.txt`** (SV ya usaba `engine='xlrd'` pero la dependencia no estaba — los `.xls` fallaban en ambos).
+- Frontend: `accept=".xlsx,.xls"` en `importarPedidosVulcano.tsx` (era `.xlsm` incluido, que el backend nunca aceptó bien).
+- ⚠️ Ambos módulos comparten el FORMATO de consecutivo (`REGIONAL-YYYYMMDD-N`) pero escriben colecciones distintas (`pedidos` vs `pedidos_medical`): el mismo archivo sirve en ambos, cada uno actualiza lo suyo. En Pedidos sólo aplican filas cuyo consecutivo esté en estado `AUTORIZADO`.
+
+### SolicitudVehiculos — Autorización con perfil REAL en `actualizar-estado-planilla`
+
+Hasta ahora el control de quién aprueba/devuelve una planilla vivía **solo en el frontend**; el backend aceptaba cualquier `estado` + `aprobado_por` sin validar. Desde 2026-09-11 el endpoint resuelve el usuario (`aprobado_por`) en `baseusuarios` y autoriza cada transición con el **perfil real** (mismo patrón que `otros_costos._resolver_usuario`).
+
+- **Helper `_resolver_usuario_estado`** (`siscore_consultas.py`): 401 si falta/no existe el usuario, 403 si está inactivo; devuelve el `perfil` real.
+- **Reglas** (espejo del frontend; el ANALISTA ya no aprueba):
+  | Transición | Perfiles permitidos |
+  |------------|---------------------|
+  | `→ APROBADO` (desde PREAPROBADO/COORDINADOR) | ADMIN, CONTROL, COORDINADOR |
+  | `→ APROBADO` desde `REQUIERE_APROBACION_CONTROL` (>7%) | ADMIN, CONTROL |
+  | `→ CREADO` **con** motivo (devolución/rechazo) | ADMIN, CONTROL, COORDINADOR |
+  | `→ CREADO` **sin** motivo (reapertura) | ADMIN, ANALISTA |
+  | `→ PREAPROBADO` / `REQUIERE_APROBACION_*` (flujo Enviar) | ADMIN, OPERATIVO |
+- El frontend ahora muestra el `detail` real del 403/404 (helper `mostrarErrorEstado`) en vez del genérico "falló en BD".
+- ⚠️ Sigue siendo **identidad declarada** (no hay token/password en el flujo): evita que un perfil use la API para acciones de otro, pero no impersonación deliberada. El resto de endpoints de `/siscore` sigue sin validación de perfiles.
+
 ## Actualizaciones Recientes (2026-08-28)
 
 ### Otros Costos — Adjuntos (soportes) en Google Cloud Storage

@@ -1596,19 +1596,31 @@ async def cargar_numeros_pedido(
     if perfil not in {"ADMIN", "ANALISTA"}:
         raise HTTPException(403, "No tienes permiso para actualizar numero_pedido masivamente")
 
-    # Leer Excel como texto para no perder formato
-    df = pd.read_excel(archivo.file, dtype=str)
+    # Leer Excel como texto para no perder formato (mismas reglas que /siscore/importar-vulcano:
+    # acepta el MISMO archivo en ambos módulos).
+    nombre_archivo = (archivo.filename or "").lower()
+    if not nombre_archivo.endswith(('.xlsx', '.xls')):
+        raise HTTPException(400, "Solo se aceptan archivos Excel (.xlsx, .xls)")
+    df = pd.read_excel(
+        archivo.file,
+        engine='openpyxl' if nombre_archivo.endswith('.xlsx') else 'xlrd',
+        dtype=str
+    )
     df = df.dropna(how="all")
 
-    # Normalizar encabezados
-    df.columns = df.columns.str.strip().str.lower()
+    # Normalizar encabezados (quita espacios redundantes para tolerar "No.  Pedido", etc.)
+    df.columns = df.columns.str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
 
-    # Mapear encabezados del archivo a los que espera la API
+    # Mapear encabezados del archivo a los que espera la API (mismos alias que
+    # /siscore/importar-vulcano: PEDIDO, NO._PEDIDO, NUMERO_PEDIDO, CONSECUTIVO, CONSECUTIVO_INTEGRAPP)
     rename_map = {
         "pedido": "numero_pedido",
         "n° pedido": "numero_pedido",
         "n. pedido": "numero_pedido",
+        "no. pedido": "numero_pedido",
+        "numero_pedido": "numero_pedido",
         "consecutivo": "consecutivo_integrapp",
+        "consecutivo integrapp": "consecutivo_integrapp",
         "consecutivo_integrapp": "consecutivo_integrapp",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})

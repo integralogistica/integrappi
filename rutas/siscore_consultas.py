@@ -3372,6 +3372,30 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
         )
 
 
+# ── Autorización por perfil REAL en actualizar-estado-planilla ──────────────────
+# El backend NO confía en el frontend: resuelve el usuario (aprobado_por) en
+# baseusuarios y autoriza cada transición con el perfil real (mismo patrón que
+# otros_costos._resolver_usuario).
+PERFILES_APROBAR = {"ADMIN", "CONTROL", "COORDINADOR"}
+PERFILES_APROBAR_CONTROL = {"ADMIN", "CONTROL"}       # REQUIERE_APROBACION_CONTROL (>7%)
+PERFILES_DEVOLVER = {"ADMIN", "CONTROL", "COORDINADOR"}  # CREADO con motivo (rechazo)
+PERFILES_REABRIR = {"ADMIN", "ANALISTA"}              # CREADO sin motivo (reapertura)
+PERFILES_ENVIAR = {"ADMIN", "OPERATIVO"}              # CREADO → PREAPROBADO / REQUIERE_APROBACION_*
+
+
+def _resolver_usuario_estado(usuario: str) -> dict:
+    """Perfil real del usuario desde baseusuarios. 401 si falta/no existe, 403 si inactivo."""
+    if not usuario or not str(usuario).strip():
+        raise HTTPException(status_code=401, detail="No autenticado")
+    u = str(usuario).strip().upper()
+    doc = coleccion_baseusuarios.find_one({"usuario": u})
+    if not doc:
+        raise HTTPException(status_code=401, detail=f"Usuario '{u}' no válido")
+    if not doc.get("activo", True):
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
+    return {"usuario": doc["usuario"], "perfil": (doc.get("perfil") or "").strip().upper()}
+
+
 @router.put("/actualizar-estado-planilla")
 async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
     """
@@ -3400,6 +3424,37 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         # para que el operativo corrija). Se distingue de la reapertura genérica (sin motivo).
         motivo = (request.motivo_devolucion or "").strip()
         es_devolucion = request.estado == "CREADO" and bool(motivo)
+
+        # ── Autorización con perfil REAL (baseusuarios), no el del frontend ──
+        info_usuario = _resolver_usuario_estado(request.aprobado_por)
+        perfil_real = info_usuario["perfil"]
+        if request.estado == "APROBADO":
+            if perfil_real not in PERFILES_APROBAR:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Su perfil ({perfil_real}) no tiene permiso para aprobar planillas.",
+                )
+            if estado_anterior == "REQUIERE_APROBACION_CONTROL" and perfil_real not in PERFILES_APROBAR_CONTROL:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Esta planilla requiere aprobación de CONTROL; su perfil ({perfil_real}) no puede aprobarla.",
+                )
+        elif request.estado == "CREADO":
+            permitidos = PERFILES_DEVOLVER if es_devolucion else PERFILES_REABRIR
+            accion = "devolver planillas" if es_devolucion else "reabrir planillas"
+            if perfil_real not in permitidos:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Su perfil ({perfil_real}) no tiene permiso para {accion}.",
+                )
+        else:
+            # PREAPROBADO / REQUIERE_APROBACION_* (flujo "Enviar" del operativo)
+            if perfil_real not in PERFILES_ENVIAR:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Su perfil ({perfil_real}) no tiene permiso para cambiar el estado de esta planilla.",
+                )
+        logger.info(f"[AUTORIZACION] {request.planilla}: {request.estado} por {info_usuario['usuario']} ({perfil_real})")
 
         # Si el estado cambió, agregar al historial
         if request.estado != estado_anterior:

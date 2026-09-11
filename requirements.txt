@@ -43,6 +43,8 @@ motor==3.7.1
 numpy==2.3.1
 openai==1.79.0
 openpyxl==3.1.5
+# Lectura de .xls legados (importar-vulcano y cargar-numeros-pedido usan engine='xlrd')
+xlrd==2.0.1
 orjson==3.10.18
 pandas==2.3.0
 pdfplumber==0.11.6
