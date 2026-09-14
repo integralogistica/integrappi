@@ -119,6 +119,13 @@ _RE_POLIZA = re.compile(
     r"(\d{8,})\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+"
     r"(.{3,60}?)\s+(\d{2,4})\s+(?:check_circle\s+|cancel\s+)?(VIGENTE|NO\s+VIGENTE|VENCIDO)",
 )
+# Fila del Certificado RTM (tabla expandida, calibrada con MVX48E 2026-09-14):
+# "REVISION TECNICO-MECANICO 04/10/2025 04/10/2026 CENTRO DE DIAGNOSTICO
+#  AUTOMOTOR LA AGUACATALA SI 184404264 SI download" — la PRIMERA es la vigente.
+_RE_RTM = re.compile(
+    r"(REVISI[oÓ]N\s+TECNICO-?\s?MEC[aÁ]NICO)\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+"
+    r"(.{3,80}?)\s+(SI|NO)\s+(\d{6,})\s+(SI|NO)", re.IGNORECASE,
+)
 
 
 class BotRuntError(Exception):
@@ -220,18 +227,21 @@ _TERMINADORES_EXTRA = {
 
 
 async def _leer_resultado(pagina) -> Dict[str, Any]:
-    """Lee la página info-vehiculo: datos del vehículo + panel SOAT expandido.
+    """Lee la página info-vehiculo: datos del vehículo + paneles expandidos.
 
-    Devuelve {datos_vehiculo, soat, polizas, no_registra, mensaje}. Los paneles
-    SOAT/RTM están colapsados con carga perezosa: se expanden por título antes
-    de leer (descubierto con la sonda 2026-08-30).
+    Devuelve {datos_vehiculo, soat, polizas, rtm, no_registra, mensaje}. Los
+    paneles están colapsados con carga perezosa: se expanden por título antes
+    de leer (descubierto con la sonda 2026-08-30; RTM/RC/Tarjeta de Operación
+    agregados 2026-09-14 — mejor esfuerzo: un panel que no abra NO tumba la
+    fuente, su sección queda vacía).
     """
-    # Expandir SOAT (la tabla de pólizas se carga al abrir el panel).
-    try:
-        await pagina.locator("mat-expansion-panel-header", has_text="Póliza SOAT").first.click(timeout=8000)
-        await pagina.wait_for_timeout(2500)  # carga Ajax de la tabla
-    except Exception as exc:
-        logger.warning("[BOT RUNT] panel SOAT no se pudo expandir: %s", exc)
+    # Expandir SOAT + RTM (las tablas se cargan al abrir el panel).
+    for titulo in ("Póliza SOAT", "Certificado de revisión técnico mecánica"):
+        try:
+            await pagina.locator("mat-expansion-panel-header", has_text=titulo).first.click(timeout=8000)
+            await pagina.wait_for_timeout(2500)  # carga Ajax de la tabla
+        except Exception as exc:
+            logger.warning("[BOT RUNT] panel %r no se pudo expandir: %s", titulo, exc)
     texto_plano = _ICONOS_MATERIAL.sub(" ", " ".join((await pagina.inner_text("body")).split()))
     SALIDA.mkdir(exist_ok=True)
     (SALIDA / "resultado_ultimo.html").write_text(await pagina.content(), encoding="utf-8")
@@ -295,10 +305,39 @@ async def _leer_resultado(pagina) -> Dict[str, Any]:
             "vigente": _soat_vigente(actual["fecha_fin_vigencia"]),
         }
 
+    # 5) RTM (2026-09-14): certificado más reciente; vigente_hoy si la fecha de
+    #    vigencia ≥ hoy. "Tarjeta de Operación" existe como panel pero solo
+    #    trae datos en vehículos de carga — pendiente calibrar con una placa de
+    #    flota (documentado en SEGURIDAD.md).
+    revisiones: List[Dict[str, Any]] = []
+    for mm in _RE_RTM.finditer(texto_plano):
+        revisiones.append({
+            "tipo": " ".join(mm.group(1).upper().split()),
+            "fecha_expedicion": _fecha_iso(mm.group(2)),
+            "fecha_vigencia": _fecha_iso(mm.group(3)),
+            "cda": _limpiar_valor(mm.group(4)),
+            "vigente_portal": mm.group(5).upper() == "SI",
+            "numero_certificado": mm.group(6),
+            "informacion_consistente": mm.group(7).upper() == "SI",
+        })
+    rtm: Optional[Dict[str, Any]] = None
+    if revisiones:
+        vigente = revisiones[0]
+        rtm = {
+            "numero_certificado": vigente["numero_certificado"],
+            "cda": vigente["cda"],
+            "fecha_expedicion": vigente["fecha_expedicion"],
+            "fecha_vigencia": vigente["fecha_vigencia"],
+            "vigente_portal": vigente["vigente_portal"],
+            "vigente": _soat_vigente(vigente["fecha_vigencia"]),
+        }
+
     return {
         "datos_vehiculo": datos_vehiculo,
         "soat": soat,
         "polizas": polizas[:10],
+        "rtm": rtm,
+        "revisiones": revisiones[:5],
         "no_registra": no_registra,
         "mensaje": mensaje[:300],
     }
@@ -310,9 +349,11 @@ async def consultar_vehiculo_runt(placa: str, cedula: str, headed: bool = False)
     Requiere que la cédula sea de un propietario ACTIVO de la placa (validación
     del propio portal). Retorna: placa, cedula, no_registra (bool | None),
     datos_vehiculo (dict), soat (dict | None: póliza más reciente con
-    semáforo), polizas (historial ≤10), nombre_propietario ("" — el portal no
-    lo expone en la vista ciudadana), mensaje, texto_resultado, pdf_bytes
-    (None), pdf_ruta (None) y html.
+    semáforo), polizas (historial ≤10), rtm (dict | None: revisión
+    técnico-mecánica vigente con semáforo, 2026-09-14), revisiones (historial
+    ≤5), nombre_propietario ("" — el portal no lo expone en la vista
+    ciudadana), mensaje, texto_resultado, pdf_bytes (None), pdf_ruta (None) y
+    html.
     """
     placa_norm = re.sub(r"[^A-Za-z0-9]", "", placa or "").upper()
     if not re.fullmatch(r"[A-Z]{3}[0-9]{2}[0-9A-Z]|[A-Z]{2}[0-9]{4}", placa_norm):

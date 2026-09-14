@@ -156,7 +156,9 @@ class TestGenerarPDF(unittest.TestCase):
         estudio["fuentes"]["sena"] = _fuente_sena()
 
         paginas = _texto_por_pagina(generar_pdf_estudio(estudio))
-        self.assertEqual(4, len(paginas))
+        # La sección RUNT creció con el historial RTM (2026-09-14) y ocupa
+        # página propia: el informe pasó de 4 a 5 páginas.
+        self.assertEqual(5, len(paginas))
 
         titulos = (
             "Manifiestosdecarga—RNDC",
@@ -171,7 +173,7 @@ class TestGenerarPDF(unittest.TestCase):
             for pagina in paginas
         ]
         self.assertEqual(
-            [[], list(titulos[:3]), list(titulos[3:5]), [titulos[5]]],
+            [[], list(titulos[:3]), [titulos[3]], list(titulos[4:]), []],
             fuentes_por_pagina,
         )
         self.assertLessEqual(max(map(len, fuentes_por_pagina)), 3)
@@ -179,7 +181,7 @@ class TestGenerarPDF(unittest.TestCase):
         # el título de la fuente debe aparecer inmediatamente después.
         self.assertLess(paginas[1].index(titulos[0]), 55)
         self.assertLess(paginas[2].index(titulos[3]), 55)
-        self.assertLess(paginas[3].index(titulos[5]), 55)
+        self.assertLess(paginas[3].index(titulos[4]), 55)
 
     def test_bytes_pdf_validos(self):
         contenido = generar_pdf_estudio(estudio_fixture())
@@ -428,7 +430,7 @@ class TestSeccionPolicia(unittest.TestCase):
         self.assertIn("Ley1238de2008", texto)
 
 
-def _fuente_runt(estado="EXITO", no_registra=None, soat=None, datos=None, polizas=None, mensaje=""):
+def _fuente_runt(estado="EXITO", no_registra=None, soat=None, datos=None, polizas=None, mensaje="", rtm=None, revisiones=None):
     return {
         "estado": estado,
         "origen": "portal",
@@ -451,6 +453,18 @@ def _fuente_runt(estado="EXITO", no_registra=None, soat=None, datos=None, poliza
                 "fecha_inicio_vigencia": "2025-10-23", "fecha_fin_vigencia": "2099-10-22",
                 "aseguradora": "AXA COLPATRIA SEGUROS SA", "codigo_tarifa": "112", "estado": "VIGENTE",
             }
+        ],
+        "rtm": rtm if rtm is not None else {
+            "numero_certificado": "184404264",
+            "cda": "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA",
+            "fecha_expedicion": "2025-10-04", "fecha_vigencia": "2026-10-04",
+            "vigente_portal": True, "vigente": True,
+        },
+        "revisiones": revisiones if revisiones is not None else [
+            {"numero_certificado": "184404264", "fecha_vigencia": "2026-10-04",
+             "cda": "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA", "vigente_portal": True},
+            {"numero_certificado": "176330660", "fecha_vigencia": "2025-10-04",
+             "cda": "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA", "vigente_portal": False},
         ],
         "intentos": 1,
         "duraciones_s": [15.2],
@@ -487,6 +501,32 @@ class TestSeccionRunt(unittest.TestCase):
             },
         )))
         self.assertIn("SOATVENCIDO", texto)
+
+    # ── RTM del vehículo (2026-09-14) ──────────────────────────────────────
+
+    def test_rtm_vigente_en_banner_y_historial(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt()))
+        plano = texto.replace(" ", "")
+        self.assertIn("RTMVIGENTE", plano)  # banner verde la incluye
+        self.assertIn("184404264", plano)   # certificado vigente
+        self.assertIn("AGUACATALA", plano)  # CDA
+        self.assertIn("Historialderevisionestécnico-mecánicas", plano)
+
+    def test_rtm_vencida_banner_rojo_con_soat_al_dia(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_runt(
+            estado="ADVERTENCIA",
+            rtm={
+                "numero_certificado": "176330660",
+                "cda": "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA",
+                "fecha_expedicion": "2024-10-04", "fecha_vigencia": "2025-10-04",
+                "vigente_portal": False, "vigente": False,
+            },
+        )))
+        plano = texto.replace(" ", "")
+        self.assertIn("RTM)VENCIDA", plano)
+        self.assertIn("NOALDÍAENREVISIÓN", plano)
+        # La fila resumen también lo nombra.
+        self.assertIn("RTMvencida", plano)
 
     def test_placa_sin_informacion_neutro(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_runt(
@@ -874,6 +914,61 @@ class TestSeccionOfac(unittest.TestCase):
         self.assertIn("OFAC—EmpresaporNIT", texto)
         self.assertIn("COINCIDENCIAEXACTADENIT", texto)
         self.assertIn("EMPRESADEPRUEBA", texto)
+
+
+class TestSeccionSanciones(unittest.TestCase):
+    """Sección 4g del PDF: listas internacionales ONU/UE (molde OFAC)."""
+
+    def _con_onu_ue(self, aplica=False, no_disponibles=None):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["onu_ue"] = {
+            "estado": "ADVERTENCIA" if aplica else "EXITO",
+            "origen": "portal",
+            "aplica": aplica,
+            "no_registra": not aplica,
+            "total_coincidencias": 1 if aplica else 0,
+            "listas": {
+                "ONU": {"fecha_publicacion": "2026-09-12", "total_registros_lista": 736,
+                        "sha256_dataset": "a" * 64},
+                "UE": {"fecha_publicacion": "2026-08-05", "total_registros_lista": 4462,
+                       "sha256_dataset": "b" * 64},
+            },
+            "listas_no_disponibles": no_disponibles or [],
+            "coincidencias": ([{
+                "lista": "ONU", "uid": "6907993", "nombre": "ERIC BADEGE",
+                "programas": ["DRC"], "referencia": "CDi.001",
+            }] if aplica else []),
+            "intentos": 1,
+            "duraciones_s": [0.1],
+            "error": None,
+        }
+        return estudio
+
+    def test_coincidencia_exacta_exige_revision_humana(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_onu_ue(aplica=True)))
+        plano = texto.replace(" ", "")
+        self.assertIn("Listasinternacionalesdesanciones", plano)
+        self.assertIn("COINCIDENCIAEXACTADEIDENTIFICACIÓN", plano)
+        self.assertIn("REQUIEREREVISIÓNHUMANA", plano)
+        self.assertIn("ERICBADEGE", plano)
+        self.assertIn("DRC", plano)
+        self.assertIn("listaONU", plano)
+        # Metadatos POR LISTA: publicaciones de ambas.
+        self.assertIn("12/09/2026", plano)  # fecha ONU legible dd/mm/aaaa
+        self.assertIn("05/08/2026", plano)  # fecha UE legible dd/mm/aaaa
+        self.assertIn("ONU/UE:1intento(s)", plano)
+
+    def test_sin_coincidencia_y_lista_caida(self):
+        texto = _texto_plano(
+            generar_pdf_estudio(self._con_onu_ue(aplica=False, no_disponibles=["UE"]))
+        )
+        plano = texto.replace(" ", "")
+        self.assertIn("SINCOINCIDENCIAEXACTADEIDENTIFICACIÓN", plano)
+        self.assertNotIn("REQUIEREREVISIÓNHUMANA", plano)
+        self.assertIn("Listasnodisponibles", plano)
+        self.assertIn("UE", plano)
+        # Fila resumen: sin coincidencia + UE no disponible.
+        self.assertIn("Sincoincidenciaexactadeidentificación", plano)
 
 
 def _fuente_rues(

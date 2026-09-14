@@ -676,6 +676,22 @@ El valor se formatea en COP con punto de miles (`320.000`). Requiere `WHATSAPP_A
 
 ## Actualizaciones Recientes (2026-09-11)
 
+### SolicitudVehiculos — Bloqueo por municipio restringido (activable por .env)
+
+**Variable de entorno**: `VALIDAR_MUNICIPIOS_RESTRINGIDOS` (valores que la ACTIVAN: `SI`, `TRUE`, `1`, `ON`; ausente o cualquier otra cosa = desactivado, el sistema queda exactamente como antes del cambio).
+
+**Regla**: una planilla de regional **FUNZA** o **JUAN MINA/BARRANQUILLA** cuyo campo Municipio tenga **VARIOS municipios mezclados** y uno de ellos sea **BOGOTA** (caso FUNZA) o **BARRANQUILLA** (caso JUAN MINA) **no puede quedar en PREAPROBADO**: pasa a `REQUIERE_APROBACION_COORDINADOR` (aprueban COORDINADOR, CONTROL o ADMIN — cualquiera de los dos), igual que cuando el flete excede el teórico. Municipio único (aunque sea el restringido) NO bloquea. Si además hay sobrecosto >7%, gana el estado más restrictivo (`REQUIERE_APROBACION_CONTROL`).
+
+**Pares configurados** (`PARES_REGIONAL_MUNICIPIO`): `FUNZA→BOGOTA`, `JUAN MINA→BARRANQUILLA`, `BARRANQUILLA→BARRANQUILLA`. La regional se toma del campo `regional` del documento (para OPERATIVO ya viene como bodega: JUAN MINA) con fallback al prefijo del `consecutivo`. Municipios desde `municipios_con_pedidos` (o `municipios_destino_lista`); comparación normalizada (sin acentos: BOGOTÁ = BOGOTA).
+
+**Aplicación (backend, `siscore_consultas.py` — el frontend recibe la config y replica la regla para UX)**:
+- `guardar-busqueda`: al guardar planilla nueva y al re-consultar una existente (si el estado resultante es PREAPROBADO y aplica la regla → COORDINADOR).
+- `actualizar-estado-planilla`: al "Enviar" desde CREADO — muta `request.estado` ANTES del historial/notificaciones para que el aviso WhatsApp al COORDINADOR dispare con el estado real.
+- `actualizar-planilla-pedidos`: la edición no puede dejar la planilla en PREAPROBADO si aplica la regla.
+- `GET /siscore/config-municipios-restringidos`: devuelve `{activo, pares}` — el frontend lo consulta al cargar la página (fire-and-forget, default inactivo), así **prender/apagar la variable en Render surte efecto sin re-desplegar el frontend**.
+- Log de auditoría `[BLOQUEO MUNICIPIO]` en cada punto.
+- Frontend: helper `requiereAutorizacionMunicipio` aplicado en `determinarEstado`, `calcularEstadoPorValores` y los 2 cálculos de estado del modal de edición. La fila queda ámbar con badge COORDINADOR automáticamente (mismo estilo del sobrecosto).
+
 ### Pedidos — `cargar-numeros-pedido` acepta el MISMO Excel de Importar Vulcano (SV)
 
 `POST /pedidos/cargar-numeros-pedido` ahora acepta el mismo archivo que `POST /siscore/importar-vulcano` (mismos dos campos). Cambios en `rutas/pedidos.py`:

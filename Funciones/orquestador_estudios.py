@@ -50,6 +50,7 @@ from Funciones.bot_contraloria import (
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
+from Funciones.bot_sanciones import BotSancionesError, consultar_sanciones_sync
 from Funciones.bot_rues import BotRuesError, BotRuesSinResultado, consultar_rues_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
@@ -110,7 +111,7 @@ MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial", "rues")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -295,6 +296,8 @@ def _clasificar_error(exc: Exception, nombre: str = "") -> tuple[str, dict]:
     """(estado de la fuente, error {tipo, mensaje}) — NO_DISPONIBLE vs ERROR."""
     if isinstance(exc, BotOfacError):
         return "NO_DISPONIBLE", {"tipo": "ofac_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSancionesError):
+        return "NO_DISPONIBLE", {"tipo": "sanciones_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotRuesSinResultado):
         # El API respondió sin un resultado determinante (anti-envenenamiento).
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
@@ -363,13 +366,18 @@ def _estado_runt(seccion: dict) -> str:
 
     - SOAT vencido → ADVERTENCIA (el vehículo NO está asegurado: el estudio no
       puede afirmar que todo está en orden, aunque los datos sí llegaron).
+    - RTM vencida (2026-09-14, decisión análoga: el vehículo NO está al día en
+      revisión técnico-mecánica) → ADVERTENCIA.
     - "No propietario activo" (no_registra False) → EXITO: el portal dio una
       respuesta determinante y negativa (no es un fallo de la fuente).
-    - Sin info de SOAT (portal sin tabla o placa sin pólizas) → EXITO con lo
-      que haya (no se inventa una advertencia que el portal no reportó).
+    - Sin info de SOAT/RTM (portal sin tabla o placa sin pólizas) → EXITO con
+      lo que haya (no se inventa una advertencia que el portal no reportó).
     """
     soat = seccion.get("soat") or {}
     if soat and soat.get("vigente") is False:
+        return "ADVERTENCIA"
+    rtm = seccion.get("rtm") or {}
+    if rtm and rtm.get("vigente") is False:
         return "ADVERTENCIA"
     return "EXITO"
 
@@ -489,12 +497,19 @@ async def _ejecutar_fuente(
             soat = dict(cache.get("soat") or {})
             if soat.get("fecha_fin_vigencia"):
                 soat["vigente"] = _soat_vigente(soat["fecha_fin_vigencia"])
+            # RTM: el semáforo también se recalcula en cada hit (la revisión
+            # pudo vencer desde que se cacheó — mismo criterio que el SOAT).
+            rtm = dict(cache.get("rtm") or {})
+            if rtm.get("fecha_vigencia"):
+                rtm["vigente"] = _soat_vigente(rtm["fecha_vigencia"])
             seccion.update({
                 "no_registra": cache.get("no_registra"),
                 "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
                 "datos_vehiculo": cache.get("datos_vehiculo") or {},
                 "soat": soat,
                 "polizas": (cache.get("polizas") or [])[:10],
+                "rtm": rtm,
+                "revisiones": (cache.get("revisiones") or [])[:5],
                 "placa": cache.get("placa", ""),
             })
             seccion["estado"] = _estado_runt(seccion)
@@ -534,6 +549,20 @@ async def _ejecutar_fuente(
                 "fecha_publicacion": cache.get("fecha_publicacion"),
                 "total_registros_lista": cache.get("total_registros_lista"),
                 "sha256_dataset": cache.get("sha256_dataset"),
+                "metodo": cache.get("metodo"),
+            })
+            seccion["estado"] = _estado_ofac(seccion)
+        elif nombre == "onu_ue":
+            # Listas internacionales ONU/UE: mismo shape de OFAC (coincidencia
+            # exacta → ADVERTENCIA + revisión humana) + metadatos POR LISTA.
+            seccion.update({
+                "aplica": bool(cache.get("aplica")),
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "total_coincidencias": int(cache.get("total_coincidencias") or 0),
+                "coincidencias": (cache.get("coincidencias") or [])[:10],
+                "listas": cache.get("listas") or {},
+                "listas_no_disponibles": cache.get("listas_no_disponibles") or [],
                 "metodo": cache.get("metodo"),
             })
             seccion["estado"] = _estado_ofac(seccion)
@@ -648,6 +677,12 @@ async def _ejecutar_fuente(
 
         async def invocar() -> dict:
             return await asyncio.to_thread(consultar_ofac_nit_sync, cedula)
+    elif nombre == "onu_ue":
+
+        async def invocar() -> dict:
+            # Listas ONU + UE agregadas (datasets oficiales indexados en
+            # memoria; sin captcha ni navegador, molde bot_ofac).
+            return await asyncio.to_thread(consultar_sanciones_sync, cedula)
     elif nombre == "rues":
 
         async def invocar() -> dict:
@@ -816,6 +851,8 @@ async def _ejecutar_fuente(
         datos_vehiculo = resultado.get("datos_vehiculo") or {}
         soat = resultado.get("soat")
         polizas = (resultado.get("polizas") or [])[:10]
+        rtm = resultado.get("rtm")
+        revisiones = (resultado.get("revisiones") or [])[:5]
         no_registra = resultado.get("no_registra")
         mensaje = (resultado.get("mensaje") or "").strip()
         # Anti-envenenamiento (segunda barrera: el bot ya lanza BotRuntSinResultado;
@@ -838,6 +875,8 @@ async def _ejecutar_fuente(
             "datos_vehiculo": datos_vehiculo,
             "soat": soat,
             "polizas": polizas,
+            "rtm": rtm,
+            "revisiones": revisiones,
             "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
             "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
@@ -853,10 +892,13 @@ async def _ejecutar_fuente(
             "datos_vehiculo": datos_vehiculo,
             "soat": soat,
             "polizas": polizas,
+            "rtm": rtm,
+            "revisiones": revisiones,
             "placa": doc_cache["placa"],
         })
-        # El semáforo de SOAT decide el estado: vencido = ADVERTENCIA (decisión
-        # de negocio 2026-08-30: el estudio no puede afirmar "todo en orden").
+        # Los semáforos de SOAT y RTM deciden el estado: vencido = ADVERTENCIA
+        # (decisión de negocio 2026-08-30 SOAT · 2026-09-14 RTM: el estudio no
+        # puede afirmar "todo en orden").
         seccion["estado"] = _estado_runt(seccion)
     elif nombre == "simit":
         # Estado de cuenta de comparendos por placa (portal público FCM, SIN
@@ -1028,6 +1070,41 @@ async def _ejecutar_fuente(
         for campo in (
             "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
             "fecha_publicacion", "total_registros_lista", "sha256_dataset", "metodo",
+        ):
+            seccion[campo] = doc_cache[campo]
+        seccion["estado"] = _estado_ofac(seccion)
+    elif nombre == "onu_ue":
+        coincidencias = (resultado.get("coincidencias") or [])[:10]
+        aplica = bool(resultado.get("aplica"))
+        listas = resultado.get("listas") or {}
+        no_disponibles = resultado.get("listas_no_disponibles") or []
+        # Anti-envenenamiento análogo al de OFAC: sin metadatos de NINGUNA
+        # lista no hubo descarga válida que respalde el veredicto.
+        if not listas:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {"tipo": "dataset_incompleto", "mensaje": "Ninguna lista de sanciones (ONU/UE) entregó metadatos."},
+            })
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "aplica": aplica, "no_registra": not aplica,
+            "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+            "total_coincidencias": len(coincidencias), "coincidencias": coincidencias,
+            "listas": listas, "listas_no_disponibles": no_disponibles,
+            "metodo": resultado.get("metodo"),
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(doc_cache)
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché sanciones ONU/UE %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        for campo in (
+            "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
+            "listas", "listas_no_disponibles", "metodo",
         ):
             seccion[campo] = doc_cache[campo]
         seccion["estado"] = _estado_ofac(seccion)

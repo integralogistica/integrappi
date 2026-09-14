@@ -1253,6 +1253,187 @@ class TestFuenteRues(unittest.TestCase):
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
 
 
+class TestFuenteOnuUe(unittest.TestCase):
+    """Fuente "onu_ue" (listas ONU+UE agregadas, molde ofac): coincidencia
+    exacta por cédula → ADVERTENCIA + revisión humana; metadatos POR LISTA y
+    degradación honesta cuando una lista no pudo descargarse."""
+
+    RESULTADO = {
+        "cedula": "123456789", "aplica": True, "no_registra": False,
+        "total_coincidencias": 1,
+        "coincidencias": [{
+            "lista": "ONU", "uid": "6907993", "nombre": "ERIC BADEGE",
+            "tipo": "Individual", "programas": ["DRC"], "referencia": "CDi.001",
+            "tipo_documento": "national identification number",
+            "numero_documento": "123.456.789", "pais_documento": "Democratic Republic of the Congo",
+        }],
+        "listas": {
+            "ONU": {"fecha_publicacion": "2026-09-12", "total_registros_lista": 736, "sha256_dataset": "a" * 64},
+            "UE": {"fecha_publicacion": "2026-08-05", "total_registros_lista": 4462, "sha256_dataset": "b" * 64},
+        },
+        "listas_no_disponibles": [],
+        "metodo": "coincidencia_exacta_identificacion",
+        "mensaje": "Coincidencia exacta de identificación en listas de sanciones (1 registro(s): ONU, UE).",
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_coincidencia_cachea_por_cedula_y_es_advertencia(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_sanciones_sync", return_value=dict(self.RESULTADO)):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("onu_ue", "123456789", actor_consultador(), False)
+                    )
+        buscar.assert_called_once_with("onu_ue", "123456789", False, placa=None)
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["coincidencias"][0]["lista"], "ONU")
+        self.assertEqual(seccion["listas"]["UE"]["total_registros_lista"], 4462)
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "onu_ue")
+        self.assertEqual(doc_cache["cedula"], "123456789")
+        self.assertEqual(doc_cache["total_coincidencias"], 1)
+
+    def test_sin_coincidencia_es_exito(self):
+        resultado = {**self.RESULTADO, "aplica": False, "no_registra": True,
+                     "total_coincidencias": 0, "coincidencias": []}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sanciones_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("onu_ue", "123456789", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertTrue(seccion["no_registra"])
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(), "tipo": "onu_ue", "cedula": "123456789",
+            "aplica": False, "no_registra": True, "total_coincidencias": 0,
+            "coincidencias": [], "mensaje": "Sin coincidencias",
+            "listas": {"ONU": {"fecha_publicacion": "2026-09-12", "total_registros_lista": 736}},
+            "listas_no_disponibles": ["UE"], "metodo": "coincidencia_exacta_identificacion",
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            with patch.object(orch, "consultar_sanciones_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("onu_ue", "123456789", actor_consultador(), False)
+                )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["listas_no_disponibles"], ["UE"])
+        bot.assert_not_called()
+
+    def test_sin_metadatos_de_lista_es_no_disponible_sin_cachear(self):
+        # Anti-envenenamiento análogo al de OFAC: sin metadatos de NINGUNA
+        # lista no hubo descarga válida que respalde el veredicto.
+        resultado = {**self.RESULTADO, "listas": {}, "listas_no_disponibles": ["ONU", "UE"]}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sanciones_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("onu_ue", "123456789", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "dataset_incompleto")
+        col.insert_one.assert_not_called()
+
+    def test_bot_caido_es_no_disponible(self):
+        from Funciones.bot_sanciones import BotSancionesError
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_sanciones_sync") as bot:
+                bot.side_effect = BotSancionesError("internet caído")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("onu_ue", "123456789", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "sanciones_no_disponible")
+
+
+class TestRuntRtm(unittest.TestCase):
+    """RTM del vehículo (2026-09-14): regex calibrado con el texto plano real
+    del portal (MVX48E 2026-09-14) y semáforo RTM vencida → ADVERTENCIA
+    (decisión análoga al SOAT vencido, recálculo en cada hit de caché)."""
+
+    # Fragmento real del dump descargas_runt/resultado_ultimo.html (tablas
+    # SOAT recortadas; la primera fila RTM es la vigente).
+    TEXTO_RTM = (
+        "Certificado de revisión técnico mecánica y de emisiones contaminantes (RTM) "
+        "Tipo Revisión Fecha Expedición Fecha Vigencia CDA expide RTM Vigente "
+        "Nro. certificado Información consistente Acciones "
+        "REVISION TECNICO-MECANICO 04/10/2025 04/10/2026 "
+        "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA SI 184404264 SI download "
+        "REVISION TECNICO-MECANICO 04/10/2024 04/10/2025 "
+        "CENTRO DE DIAGNOSTICO AUTOMOTOR LA AGUACATALA NO 176330660 SI "
+        "Registros por página 10 1 - 5 de 5 eco"
+    )
+
+    def test_regex_parsea_filas_calibradas(self):
+        from Funciones import bot_runt
+
+        filas = list(bot_runt._RE_RTM.finditer(self.TEXTO_RTM))
+        self.assertEqual(len(filas), 2)
+        primera = filas[0]
+        self.assertEqual(primera.group(3), "04/10/2026")           # vigencia
+        self.assertTrue(primera.group(5).upper() == "SI")          # vigente portal
+        self.assertEqual(primera.group(6), "184404264")            # certificado
+        self.assertIn("AGUACATALA", primera.group(4))              # CDA
+
+    def test_rtm_vencida_es_advertencia(self):
+        self.assertEqual(
+            orch._estado_runt({"soat": {"vigente": True}, "rtm": {"vigente": False}}),
+            "ADVERTENCIA",
+        )
+        # Sin RTM reportada no se inventa la advertencia.
+        self.assertEqual(orch._estado_runt({"soat": {"vigente": True}, "rtm": None}), "EXITO")
+        self.assertEqual(
+            orch._estado_runt({"soat": {"vigente": True}, "rtm": {"vigente": True}}),
+            "EXITO",
+        )
+        # El SOAT vencido sigue mandando.
+        self.assertEqual(
+            orch._estado_runt({"soat": {"vigente": False}, "rtm": {"vigente": False}}),
+            "ADVERTENCIA",
+        )
+
+    def test_cache_hit_recalcula_vigencia_rtm(self):
+        from datetime import date
+
+        from Funciones.bot_runt import _soat_vigente
+
+        # La caché guarda la revisión con fecha_vigencia ya vencida: el hit
+        # debe degradar el semáforo aunque se cacheó como vigente.
+        vencida_ayer = (date.today() - __import__("datetime").timedelta(days=1)).isoformat()
+        cache = {
+            "_id": ObjectId(), "tipo": "runt", "cedula": "1010213062", "placa": "MVX48E",
+            "no_registra": None, "mensaje": "", "datos_vehiculo": {"marca": "HONDA"},
+            "soat": {"numero": "3453028900", "aseguradora": "AXA",
+                     "fecha_inicio_vigencia": "2025-10-23",
+                     "fecha_fin_vigencia": "2099-10-22", "estado_portal": "VIGENTE"},
+            "polizas": [], "rtm": {"numero_certificado": "184404264", "cda": "CDA",
+                                   "fecha_expedicion": "2025-10-04",
+                                   "fecha_vigencia": vencida_ayer,
+                                   "vigente_portal": True, "vigente": True},
+            "revisiones": [],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            with patch.object(orch, "consultar_vehiculo_runt_sync") as bot:
+                seccion = asyncio.run(
+                    orch._ejecutar_fuente("runt", "1010213062", actor_consultador(), False, placa="MVX48E")
+                )
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertFalse(seccion["rtm"]["vigente"])  # recalculada contra hoy
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        bot.assert_not_called()
+
+
 class TestFuentesHabilitadasEfectivas(unittest.TestCase):
     """2026-09-01 (pedido del usuario): EL PLAN ES EL GATE — editar
     `fuentes_incluidas` de un plan (o agregar una fuente al catálogo) queda
@@ -1273,7 +1454,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial", "rues"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(

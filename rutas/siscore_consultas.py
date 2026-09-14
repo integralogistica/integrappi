@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 _OFFSET_COLOMBIA = timedelta(hours=5)
 from dotenv import load_dotenv
 import os
+import unicodedata
 import pandas as pd
 from pymongo import MongoClient
 from Funciones.whatsapp_utils_integra import enviar_template_sync
@@ -81,6 +82,62 @@ coleccion_historico = db["pedidos_medical_historico"]
 coleccion_anulados = db["pedidos_anulados"]
 coleccion_causales = db["causales"]
 coleccion_baseusuarios = db["baseusuarios"]
+
+# ── Bloqueo por municipio restringido (activable por .env) ─────────────────────
+# Con VALIDAR_MUNICIPIOS_RESTRINGIDOS=SI, una planilla de FUNZA o JUAN MINA
+# (Barranquilla) cuyo campo Municipio tenga VARIOS municipios mezclados y uno de
+# ellos sea BOGOTA (caso FUNZA) o BARRANQUILLA (caso JUAN MINA) NO puede quedar
+# en PREAPROBADO: pasa a REQUIERE_APROBACION_COORDINADOR (aprueban COORDINADOR,
+# CONTROL o ADMIN), igual que cuando el flete excede el teórico.
+# Con la variable ausente o en NO, todo funciona como antes del cambio.
+PARES_REGIONAL_MUNICIPIO = {
+    "FUNZA": "BOGOTA",
+    "JUAN MINA": "BARRANQUILLA",    # bodega de BARRANQUILLA (regional guardada del OPERATIVO)
+    "BARRANQUILLA": "BARRANQUILLA",
+}
+
+
+def _bloqueo_municipios_activo() -> bool:
+    return str(os.getenv("VALIDAR_MUNICIPIOS_RESTRINGIDOS", "NO")).strip().upper() in {"SI", "TRUE", "1", "ON"}
+
+
+def _normalizar_municipio_txt(t) -> str:
+    """Normaliza quitando acentos (BOGOTÁ → BOGOTA), espacios y mayúsculas."""
+    s = unicodedata.normalize("NFD", str(t or "")).encode("ascii", "ignore").decode("ascii")
+    return s.strip().upper()
+
+
+def _requiere_autorizacion_municipio(doc: dict) -> bool:
+    """True si el documento aplica al bloqueo por municipio restringido:
+    regional FUNZA/JUAN MINA, VARIOS municipios en el campo Municipio y uno de
+    ellos es el municipio restringido de esa regional."""
+    if not _bloqueo_municipios_activo():
+        return False
+    regional = _normalizar_municipio_txt(doc.get("regional"))
+    if not regional:
+        # Fallback: prefijo del consecutivo (FUNZA-..., BARRANQUILLA-...)
+        regional = _normalizar_municipio_txt(str(doc.get("consecutivo") or "").split("-")[0])
+    municipio_restringido = PARES_REGIONAL_MUNICIPIO.get(regional)
+    if not municipio_restringido:
+        return False
+    con_pedidos = doc.get("municipios_con_pedidos") or {}
+    if con_pedidos:
+        municipios = list(con_pedidos.keys())
+    else:
+        municipios = [m.strip() for m in str(doc.get("municipios_destino_lista") or "").split(",") if m.strip()]
+    if len(municipios) <= 1:
+        return False  # Municipio único (aunque sea el restringido): flujo normal
+    return any(_normalizar_municipio_txt(m) == municipio_restringido for m in municipios)
+
+
+@router.get("/config-municipios-restringidos")
+async def config_municipios_restringidos():
+    """Config del bloqueo por municipio para el frontend (se consulta al cargar la página;
+    permite prender/apagar con la variable de entorno SIN re-desplegar el frontend)."""
+    return {
+        "activo": _bloqueo_municipios_activo(),
+        "pares": PARES_REGIONAL_MUNICIPIO,
+    }
 
 # Índice sobre `consecutivo` en ambas colecciones. La generación de consecutivos
 # consulta por prefijo (regional+fecha) y, tras Importar Vulcano, también consulta
@@ -2604,6 +2661,17 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 "registros_detalle": resultado.get("registros_detalle", []),
             }
 
+            # Bloqueo por municipio restringido (.env): si nacería PREAPROBADO y aplica
+            # la regla (FUNZA/JUAN MINA, varios municipios + BOGOTA/BARRANQUILLA), sube
+            # a REQUIERE_APROBACION_COORDINADOR.
+            if planilla_doc.get("estado") == "PREAPROBADO" and _requiere_autorizacion_municipio(planilla_doc):
+                planilla_doc["estado"] = "REQUIERE_APROBACION_COORDINADOR"
+                logger.info(
+                    f"[BLOQUEO MUNICIPIO] Planilla {planilla_doc.get('planilla')} ({planilla_doc.get('consecutivo')}): "
+                    f"varios municipios incluyendo {PARES_REGIONAL_MUNICIPIO.get(_normalizar_municipio_txt(planilla_doc.get('regional')), 'el restringido')} "
+                    f"→ REQUIERE_APROBACION_COORDINADOR"
+                )
+
             # Verificar si ya existe un documento con esta planilla
             existente = coleccion_pedidos_medical.find_one({"planilla": resultado.get("planilla")})
 
@@ -2614,6 +2682,11 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 # fecha de visibilidad.
                 planilla_doc["estado"] = existente.get("estado") or estado_inicial
                 planilla_doc["fecha_preaprobado"] = existente.get("fecha_preaprobado") or planilla_doc.get("fecha_preaprobado")
+                # Re-aplicar el bloqueo por municipio también al re-consultar: si el
+                # estado preservado es PREAPROBADO y la regla ahora aplica, subir a COORDINADOR.
+                if planilla_doc["estado"] == "PREAPROBADO" and _requiere_autorizacion_municipio(planilla_doc):
+                    planilla_doc["estado"] = "REQUIERE_APROBACION_COORDINADOR"
+                    logger.info(f"[BLOQUEO MUNICIPIO] Planilla {planilla_doc.get('planilla')} re-consultada → REQUIERE_APROBACION_COORDINADOR")
                 if existente.get("consecutivo"):
                     # Mantener el consecutivo existente y ACTUALIZAR cons_info para devolver al frontend
                     planilla_doc["consecutivo"] = existente.get("consecutivo")
@@ -3243,6 +3316,11 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
 
         # Registrar cambio de estado
         estado_anterior = doc_actual.get("estado", "PREAPROBADO")
+        # Bloqueo por municipio restringido (.env): la edición no puede dejar la planilla
+        # en PREAPROBADO si aplica la regla (mismo criterio que el sobrecosto de flete).
+        if request.estado == "PREAPROBADO" and _requiere_autorizacion_municipio(doc_actual):
+            request.estado = "REQUIERE_APROBACION_COORDINADOR"
+            logger.info(f"[BLOQUEO MUNICIPIO] Planilla {request.planilla}: edición → REQUIERE_APROBACION_COORDINADOR (municipio restringido)")
         if request.estado is not None and request.estado != estado_anterior:
             campos_modificados.append({
                 "campo": "estado",
@@ -3424,6 +3502,14 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         # para que el operativo corrija). Se distingue de la reapertura genérica (sin motivo).
         motivo = (request.motivo_devolucion or "").strip()
         es_devolucion = request.estado == "CREADO" and bool(motivo)
+
+        # Bloqueo por municipio restringido (.env): al "Enviar" una planilla que aplicaría
+        # a PREAPROBADO con varios municipios incluyendo el restringido de su regional,
+        # sube a REQUIERE_APROBACION_COORDINADOR. Se muta request.estado ANTES para que
+        # el historial y la notificación al coordinador usen el estado final real.
+        if request.estado == "PREAPROBADO" and _requiere_autorizacion_municipio(doc_actual):
+            request.estado = "REQUIERE_APROBACION_COORDINADOR"
+            logger.info(f"[BLOQUEO MUNICIPIO] Planilla {request.planilla}: Enviar → REQUIERE_APROBACION_COORDINADOR (municipio restringido)")
 
         # ── Autorización con perfil REAL (baseusuarios), no el del frontend ──
         info_usuario = _resolver_usuario_estado(request.aprobado_por)

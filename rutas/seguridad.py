@@ -39,6 +39,7 @@ from Funciones.bot_contraloria import (
 )
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
+from Funciones.bot_sanciones import BotSancionesError, consultar_sanciones_sync
 from Funciones.bot_runt import BotRuntError, BotRuntSinCaptchaKey, consultar_vehiculo_runt_sync
 from Funciones.bot_sena import BotSenaError, BotSenaSinCaptchaKey, consultar_sena_sync
 from Funciones.bot_simit import BotSimitError, BotSimitSinResultado, consultar_comparendos_simit_sync
@@ -633,6 +634,48 @@ async def consultar_ofac(
         col_consultas.insert_one(doc)
     except Exception as exc:
         logger.error("Consulta OFAC %s no se pudo auditar: %s", cedula_norm, exc)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/sanciones")
+async def consultar_sanciones(
+    cedula: str = Query(..., min_length=3, max_length=20, description="Número de identificación"),
+    force: bool = Query(False, description="Ignorar caché de consulta"),
+    actor: dict = Depends(actor_actual),
+):
+    """Coincidencia exacta por identificación en las listas ONU y UE (personas).
+
+    Agrega la lista consolidada del Consejo de Seguridad de la ONU y el
+    Consolidated Financial Sanctions File 1.1 de la UE en una sola consulta;
+    solo se comparan identificadores inequívocos de documento de identidad
+    (sin búsqueda difusa por nombre). Si una lista no pudo descargarse, la
+    respuesta lo declara en ``listas_no_disponibles`` y sale con la otra.
+    """
+    _requiere_seguridad(actor)
+    cedula_norm = _normalizar_cedula(cedula)
+    cache = _buscar_cache("onu_ue", cedula_norm, force)
+    if cache:
+        return _envolver_cache(cache)
+    try:
+        resultado = await asyncio.to_thread(consultar_sanciones_sync, cedula_norm)
+    except BotSancionesError as exc:
+        raise HTTPException(status_code=503, detail=f"No fue posible consultar las listas ONU/UE: {exc}") from exc
+    ahora = _utcnow()
+    doc = {
+        "tipo": "onu_ue", "cedula": cedula_norm,
+        **{k: resultado.get(k) for k in (
+            "aplica", "no_registra", "mensaje", "total_coincidencias", "coincidencias",
+            "listas", "listas_no_disponibles", "metodo",
+        )},
+        "usuario": actor["usuario"], "perfil": actor["perfil"],
+        "empresa_id": actor.get("empresa_id"), "consultado_en": ahora,
+        "expira_en": ahora + timedelta(hours=HORAS_CACHE), "forzado": bool(force),
+    }
+    try:
+        col_consultas.insert_one(doc)
+    except Exception as exc:
+        logger.error("Consulta sanciones ONU/UE %s no se pudo auditar: %s", cedula_norm, exc)
     doc.pop("_id", None)
     return doc
 

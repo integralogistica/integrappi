@@ -321,6 +321,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     sena = fuentes.get("sena") or {}
     ofac = fuentes.get("ofac") or {}
     ofac_nit = fuentes.get("ofac_nit") or {}
+    onu_ue = fuentes.get("onu_ue") or {}
     bdme = fuentes.get("bdme") or {}
     bdme_nit = fuentes.get("bdme_nit") or {}
     rama_judicial = fuentes.get("rama_judicial") or {}
@@ -518,6 +519,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     if _corrio(ofac_nit):
         etiqueta_ofac_nit, _ = ESTADO_FUENTE_TEXTO.get(ofac_nit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append(["OFAC — Empresas por NIT", etiqueta_ofac_nit, _texto_veredicto_ofac(ofac_nit)])
+    if _corrio(onu_ue):
+        etiqueta_onu, _ = ESTADO_FUENTE_TEXTO.get(onu_ue.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "ONU/UE — Listas internacionales de sanciones",
+            etiqueta_onu,
+            _texto_veredicto_onu_ue(onu_ue),
+        ])
     for fuente_bdme, etiqueta in ((bdme, "BDME — Persona por cédula"), (bdme_nit, "BDME — Empresa por NIT")):
         if _corrio(fuente_bdme):
             estado_txt, _ = ESTADO_FUENTE_TEXTO.get(fuente_bdme.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -543,7 +551,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, bdme, bdme_nit, rama_judicial, rues)
+        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues)
         if _corrio(fuente)
     ]
     tabla_resumen = Table(
@@ -816,6 +824,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         cuento.append(Spacer(0, 2 * mm))
     if runt.get("estado") in {"EXITO", "ADVERTENCIA"}:
         soat = runt.get("soat") or {}
+        rtm = runt.get("rtm") or {}
         no_registra_runt = runt.get("no_registra")
         if no_registra_runt is True:
             # Sobre la PLACA, no sobre la persona: nunca presentar como "limpio".
@@ -824,8 +833,19 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             texto_runt, color_runt = "LA CÉDULA NO CORRESPONDE A UN PROPIETARIO ACTIVO DEL VEHÍCULO", COLOR_ADVERTENCIA
         elif soat.get("vigente") is False:
             texto_runt, color_runt = "SOAT VENCIDO — VEHÍCULO SIN SEGURO VIGENTE", COLOR_FALLO
+        elif rtm and rtm.get("vigente") is False:
+            # RTM vencida (2026-09-14): el vehículo no está al día en revisión
+            # técnico-mecánica aunque el SOAT esté vigente.
+            texto_runt, color_runt = (
+                "REVISIÓN TÉCNICO-MECÁNICA (RTM) VENCIDA"
+                + (f" EL {_fecha_legible(rtm.get('fecha_vigencia'))}" if rtm.get("fecha_vigencia") else "")
+                + " — VEHÍCULO NO AL DÍA EN REVISIÓN"
+            ), COLOR_FALLO
         elif soat and soat.get("vigente") is True:
-            texto_runt, color_runt = f"SOAT VIGENTE — VENCE {_fecha_legible(soat.get('fecha_fin_vigencia'))}", COLOR_EXITO
+            sufijo_rtm = ""
+            if rtm and rtm.get("vigente") is True:
+                sufijo_rtm = f" · RTM VIGENTE (VENCE {_fecha_legible(rtm.get('fecha_vigencia'))})"
+            texto_runt, color_runt = f"SOAT VIGENTE — VENCE {_fecha_legible(soat.get('fecha_fin_vigencia'))}{sufijo_rtm}", COLOR_EXITO
         else:
             texto_runt, color_runt = "VEHÍCULO SIN PÓLIZA SOAT REGISTRADA — VERIFICAR", COLOR_ADVERTENCIA
         tabla_veredicto_runt = Table(
@@ -862,6 +882,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                 f"{_fecha_legible(soat.get('fecha_inicio_vigencia'))} a {_fecha_legible(soat.get('fecha_fin_vigencia'))} "
                 f"({soat.get('estado_portal', '—')})"
             )])
+        if rtm:
+            detalle_runt.append(["RTM — certificado", str(rtm.get("numero_certificado", "—"))])
+            detalle_runt.append(["RTM — CDA", rtm.get("cda", "—")])
+            detalle_runt.append(["RTM — vigencia", (
+                f"expedada {_fecha_legible(rtm.get('fecha_expedicion'))} · "
+                f"vence {_fecha_legible(rtm.get('fecha_vigencia'))}"
+            )])
         if (runt.get("mensaje") or "").strip():
             detalle_runt.append(["Mensaje del portal", runt["mensaje"][:300]])
         if no_registra_runt is False:
@@ -884,12 +911,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
         cuento.append(tabla_runt)
-        # Historial de pólizas (máx 5 más recientes).
+        # Historial de pólizas SOAT (máx 5) y revisiones RTM (máx 3).
+        estilo_celda_pol = ParagraphStyle("celda_pol", parent=estilo_celda, fontSize=7.5, leading=9.5)
+        estilo_cab_pol = ParagraphStyle("cab_pol", parent=estilo_celda_pol, fontName="Helvetica-Bold", textColor=colors.white)
         polizas = runt.get("polizas") or []
         if polizas:
             cuento.append(Spacer(0, 2 * mm))
-            estilo_celda_pol = ParagraphStyle("celda_pol", parent=estilo_celda, fontSize=7.5, leading=9.5)
-            estilo_cab_pol = ParagraphStyle("cab_pol", parent=estilo_celda_pol, fontName="Helvetica-Bold", textColor=colors.white)
             filas_pol = [[
                 Paragraph("Póliza", estilo_cab_pol), Paragraph("Vigencia", estilo_cab_pol),
                 Paragraph("Aseguradora", estilo_cab_pol), Paragraph("Estado", estilo_cab_pol),
@@ -912,6 +939,28 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             ]))
             cuento.append(Paragraph("Historial de pólizas SOAT (más recientes)", ParagraphStyle("h_pol", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4)))
             cuento.append(tabla_polizas)
+        revisiones = runt.get("revisiones") or []
+        if revisiones:
+            cuento.append(Spacer(0, 2 * mm))
+            filas_rtm = [[
+                Paragraph("Certificado", estilo_cab_pol), Paragraph("Vigencia", estilo_cab_pol),
+                Paragraph("CDA", estilo_cab_pol),
+            ]]
+            for rev in revisiones[:3]:
+                filas_rtm.append([
+                    Paragraph(escape(str(rev.get("numero_certificado", "—"))), estilo_celda_pol),
+                    Paragraph(escape(f"hasta {_fecha_legible(rev.get('fecha_vigencia'))}"), estilo_celda_pol),
+                    Paragraph(escape(str(rev.get("cda", "—"))), estilo_celda_pol),
+                ])
+            tabla_rtm = Table(filas_rtm, colWidths=[30 * mm, 40 * mm, 90 * mm])
+            tabla_rtm.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            cuento.append(Paragraph("Historial de revisiones técnico-mecánicas (más recientes)", ParagraphStyle("h_rtm", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4)))
+            cuento.append(tabla_rtm)
     elif _corrio(runt):
         cuento.append(_parrafo_estado_fuente(runt, "el RUNT"))
 
@@ -1153,6 +1202,66 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(ofac_nit, "OFAC por NIT"))
 
+    # ── 4g. Listas internacionales ONU / UE ──────────────────────────────────
+    if _corrio(onu_ue):
+        _antes_de_seccion(onu_ue)
+        cuento.append(Paragraph("Listas internacionales de sanciones — ONU / Unión Europea", estilo_h2))
+        if onu_ue.get("estado") in {"EXITO", "ADVERTENCIA"}:
+            aplica_onu = bool(onu_ue.get("aplica"))
+            no_disponibles = ", ".join(onu_ue.get("listas_no_disponibles") or [])
+            texto_onu = (
+                "COINCIDENCIA EXACTA DE IDENTIFICACIÓN — REQUIERE REVISIÓN HUMANA"
+                if aplica_onu else
+                "SIN COINCIDENCIA EXACTA DE IDENTIFICACIÓN EN LAS LISTAS CONSULTADAS"
+            )
+            color_onu = COLOR_ADVERTENCIA if aplica_onu else COLOR_EXITO
+            tabla_onu_banner = Table([[Paragraph(f"<b>{texto_onu}</b>", ParagraphStyle(
+                "veredicto_onu_ue", fontName="Helvetica", fontSize=10.5,
+                textColor=colors.white, alignment=1,
+            ))]], colWidths=[160 * mm])
+            tabla_onu_banner.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), color_onu),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            cuento.append(tabla_onu_banner)
+            filas_onu = [
+                ["Método", "Coincidencia exacta del número de identificación (sin búsqueda difusa por nombre)"],
+            ]
+            for etiqueta_lista, meta_lista in (onu_ue.get("listas") or {}).items():
+                filas_onu.append([
+                    f"Publicación {etiqueta_lista}",
+                    f"{_fecha_legible(meta_lista.get('fecha_publicacion'))} · "
+                    f"{int(meta_lista.get('total_registros_lista') or 0)} persona(s) · "
+                    f"SHA-256 {str(meta_lista.get('sha256_dataset') or '—')[:16]}…",
+                ])
+            filas_onu.append(["Coincidencias", str(onu_ue.get("total_coincidencias") or 0)])
+            if no_disponibles:
+                filas_onu.append(["Listas no disponibles", no_disponibles])
+            tabla_onu = Table([[celda(k, True), celda(v)] for k, v in filas_onu], colWidths=[45 * mm, 115 * mm])
+            tabla_onu.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            cuento.append(tabla_onu)
+            for coincidencia in (onu_ue.get("coincidencias") or [])[:10]:
+                cuento.append(Paragraph(
+                    "<b>Coincidencia:</b> "
+                    f"{escape(str(coincidencia.get('nombre') or '—'))} · lista {escape(str(coincidencia.get('lista') or '—'))} · "
+                    f"referencia {escape(str(coincidencia.get('referencia') or coincidencia.get('uid') or '—'))} · "
+                    f"programa(s) {escape(', '.join(coincidencia.get('programas') or []) or '—')}",
+                    estilo_normal,
+                ))
+            if aplica_onu:
+                cuento.append(Paragraph(
+                    "Una coincidencia técnica no sustituye el análisis de identidad, homonimia y alcance del "
+                    "programa de sanciones. Debe ser revisada por una persona responsable antes de cualquier "
+                    "decisión.", estilo_peq,
+                ))
+        else:
+            cuento.append(_parrafo_estado_fuente(onu_ue, "las listas ONU/UE"))
+
     # ── BDME personal y empresarial ────────────────────────────────────────
     for fuente_bdme, titulo_bdme in (
         (bdme, "BDME — Consulta personal por cédula"),
@@ -1319,7 +1428,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1409,6 +1518,17 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Departamento del Tesoro de los Estados Unidos. El resultado compara de manera exacta el número "
             "de identificación; una coincidencia requiere validación humana y análisis de identidad, programa "
             "y alcance, y no constituye por sí sola una decisión automática de rechazo."
+        )
+    if _corrio(onu_ue):
+        bloques_legal.append(
+            "<b>Listas internacionales de sanciones (ONU/UE):</b> la verificación se efectuó contra la Lista "
+            "Consolidada del Comité de Sanciones del Consejo de Seguridad de las Naciones Unidas y el Consolidated "
+            "Financial Sanctions File 1.1 publicado por la Comisión Europea — ambos datasets oficiales de "
+            "distribución pública. El resultado compara de manera EXACTA el número de identificación contra "
+            "documentos de identidad registrados en las listas (sin búsqueda difusa por nombre); una coincidencia "
+            "requiere validación humana de identidad, nacionalidad y alcance del régimen de sanciones, y no "
+            "constituye por sí sola una decisión automática de rechazo. La ausencia de coincidencia refleja las "
+            "listas en su fecha de publicación."
         )
     if _corrio(rues):
         bloques_legal.append(
@@ -1543,10 +1663,14 @@ def _texto_veredicto_runt(runt: dict) -> str:
     if no_registra is False:
         return "Cédula no corresponde al propietario activo del vehículo"
     soat = runt.get("soat") or {}
+    rtm = runt.get("rtm") or {}
     if soat.get("vigente") is False:
         return "SOAT vencido — ver detalle"
+    if rtm and rtm.get("vigente") is False:
+        return f"RTM vencida ({_fecha_legible(rtm.get('fecha_vigencia'))}) — ver detalle"
     if soat and soat.get("vigente") is True:
-        return f"SOAT vigente (vence {_fecha_legible(soat.get('fecha_fin_vigencia'))})"
+        sufijo = f" · RTM vigente ({_fecha_legible(rtm.get('fecha_vigencia'))})" if rtm and rtm.get("vigente") is True else ""
+        return f"SOAT vigente (vence {_fecha_legible(soat.get('fecha_fin_vigencia'))}){sufijo}"
     marca = (runt.get("datos_vehiculo") or {}).get("marca", "")
     return f"Vehículo identificado{f' ({marca})' if marca else ''} — sin póliza SOAT registrada"
 
@@ -1592,6 +1716,20 @@ def _texto_veredicto_sena(sena: dict) -> str:
     if total > 0:
         return f"{total} certificado(s) de formación — ver detalle"
     return "Sin certificados de formación registrados"
+
+
+def _texto_veredicto_onu_ue(onu_ue: dict) -> str:
+    """Veredicto de la fuente onu_ue para la fila resumen: igual que OFAC, una
+    coincidencia exacta exige revisión humana (nunca rechazo automático)."""
+    if onu_ue.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(onu_ue)
+    if onu_ue.get("aplica"):
+        return f"Coincidencia exacta ({int(onu_ue.get('total_coincidencias') or 1)}) — revisar"
+    no_disponibles = ", ".join(onu_ue.get("listas_no_disponibles") or [])
+    veredicto = "Sin coincidencia exacta de identificación"
+    if no_disponibles:
+        veredicto += f" ({no_disponibles} no disponible)"
+    return veredicto
 
 
 def _texto_veredicto_rues(rues: dict) -> str:

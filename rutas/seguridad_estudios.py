@@ -847,6 +847,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "sena": "SENA — Certificados de formación",
         "ofac": "OFAC — Personas por cédula",
         "ofac_nit": "OFAC — Empresas por NIT",
+        "onu_ue": "ONU/UE — Listas internacionales de sanciones",
         "bdme": "BDME — Persona por cédula",
         "bdme_nit": "BDME — Empresa por NIT",
         "rama_judicial": "Rama Judicial — Procesos por nombre",
@@ -1111,7 +1112,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "bdme", "bdme_nit", "rama_judicial"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
 }
 
 
