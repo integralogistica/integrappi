@@ -971,6 +971,44 @@ class TestSeccionSanciones(unittest.TestCase):
         self.assertIn("Sincoincidenciaexactadeidentificación", plano)
 
 
+class TestSeccionDelitos(unittest.TestCase):
+    """Sección 3c del PDF: inhabilidades Ley 1918 (calibrada con caso real)."""
+
+    def _con_delitos(self, no_registra=True):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["delitos_sexuales"] = {
+            "estado": "EXITO" if no_registra else "ADVERTENCIA",
+            "origen": "portal",
+            "no_registra": no_registra,
+            "mensaje": (
+                "No registra inhabilidad por delitos sexuales contra menores (Ley 1918 de 2018)"
+                if no_registra else "…REGISTRA INHABILIDAD…"
+            ),
+            "fecha_consulta": "14/09/2026 19:15:28",
+            "empresa_consultante": "GLAMPEROS S.A.S.",
+            "intentos": 1,
+            "duraciones_s": [20.1],
+            "error": None,
+        }
+        return estudio
+
+    def test_no_registra_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_delitos())).replace(" ", "")
+        self.assertIn("Inhabilidades—Delitossexualescontramenores(Ley1918)", texto)
+        self.assertIn("NOREGISTRAINHABILIDAD(LEY1918DE2018)", texto)
+        self.assertIn("ConsultaantelaDIJIN", texto)
+        self.assertIn("14/09/202619:15:28", texto)
+        self.assertIn("Empresaconsultante", texto)
+        self.assertIn("GLAMPEROSS.A.S.", texto)
+        self.assertIn("Inhabilidades1918:1intento(s)", texto)
+        self.assertIn("Noregistrainhabilidad(Ley1918)", texto)  # fila resumen
+
+    def test_registra_banner_rojo(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_delitos(no_registra=False))).replace(" ", "")
+        self.assertIn("REGISTRAINHABILIDAD—REVISIÓNHUMANAOBLIGATORIA", texto)
+        self.assertIn("Decreto753de2019", texto)  # párrafo legal honesto
+
+
 def _fuente_rues(
     estado="EXITO", estado_matricula="ACTIVA", no_registra=False,
     razon_social="GLAMPEROS S.A.S.", representantes=None,

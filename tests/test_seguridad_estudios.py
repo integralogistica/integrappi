@@ -1434,6 +1434,101 @@ class TestRuntRtm(unittest.TestCase):
         bot.assert_not_called()
 
 
+class TestFuenteDelitos(unittest.TestCase):
+    """Fuente "delitos_sexuales" (inhabilidades Ley 1918, DIJIN): caché por
+    (tipo, cédula), semáforo registra → ADVERTENCIA, y anti-envenenamiento
+    análogo contraloría (sin veredicto NO se cachea)."""
+
+    RESULTADO = {
+        "cedula": "1010213062", "no_registra": True,
+        "mensaje": "No registra inhabilidad por delitos sexuales contra menores (Ley 1918 de 2018)",
+        "fecha_consulta": "14/09/2026 19:15:28",
+        "empresa_consultante": "GLAMPEROS S.A.S.",
+        "fecha_expedicion": "14/02/2012",
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_exito_cachea_por_cedula(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_inhabilidades_sync", return_value=dict(self.RESULTADO)):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente(
+                            "delitos_sexuales", "1010213062", actor_consultador(), False,
+                            fecha_expedicion="14/02/2012",
+                            empresa_consultante={"nombre": "GLAMPEROS S.A.S.", "nit": "901923029-2"},
+                        )
+                    )
+        buscar.assert_called_once_with("delitos_sexuales", "1010213062", False, placa=None)
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertTrue(seccion["no_registra"])
+        self.assertEqual(seccion["empresa_consultante"], "GLAMPEROS S.A.S.")
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "delitos_sexuales")
+        self.assertEqual(doc_cache["fecha_consulta"], "14/09/2026 19:15:28")
+
+    def test_registra_inhabilidad_es_advertencia(self):
+        resultado = {**self.RESULTADO, "no_registra": False,
+                     "mensaje": "…REGISTRA INHABILIDAD…"}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_inhabilidades_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("delitos_sexuales", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(), "tipo": "delitos_sexuales", "cedula": "1010213062",
+            "no_registra": True, "mensaje": "No registra inhabilidad",
+            "fecha_consulta": "14/09/2026 19:15:28",
+            "empresa_consultante": "GLAMPEROS S.A.S.",
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            with patch.object(orch, "consultar_inhabilidades_sync") as bot_fn:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("delitos_sexuales", "1010213062", actor_consultador(), False)
+                )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "cache")
+        bot_fn.assert_not_called()
+
+    def test_sin_veredicto_es_no_disponible_sin_cachear(self):
+        # Fecha de expedición equivocada → el portal responde sin fórmula:
+        # NO se cachea (anti-envenenamiento).
+        resultado = {**self.RESULTADO, "no_registra": None, "mensaje": "",
+                     "texto_resultado": "página de error del portal"}
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_inhabilidades_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("delitos_sexuales", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_delitos_sexuales import BotDelitosSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_inhabilidades_sync") as bot_fn:
+                bot_fn.side_effect = BotDelitosSinResultado("sin veredicto")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("delitos_sexuales", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
 class TestFuentesHabilitadasEfectivas(unittest.TestCase):
     """2026-09-01 (pedido del usuario): EL PLAN ES EL GATE — editar
     `fuentes_incluidas` de un plan (o agregar una fuente al catálogo) queda
@@ -1454,7 +1549,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(

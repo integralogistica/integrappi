@@ -464,6 +464,10 @@ class CrearEstudio(BaseModel):
     # esas variantes del captcha caen a Gemini/reintento.
     nombres: str | None = None
     apellidos: str | None = None
+    # Fecha de EXPEDICIÓN de la cédula (DD/MM/AAAA o aaaa-mm-dd, 2026-09-14):
+    # el portal de inhabilidades (Ley 1918) la PIDE junto con la cédula.
+    # Obligatoria cuando el plan incluye delitos_sexuales (422 accionable).
+    fecha_expedicion: str | None = None
 
 
 @router.post("", status_code=201)
@@ -623,6 +627,17 @@ async def crear_estudio(
             detail="La fuente Rama Judicial requiere nombres y apellidos completos",
         )
 
+    # Fecha de expedición de la cédula: la exige el portal de inhabilidades
+    # de la Ley 1918 (valida el par cédula+fecha). Se acepta DD/MM/AAAA o
+    # ISO; el bot la normaliza.
+    fecha_expedicion = (getattr(datos, "fecha_expedicion", None) or "").strip()
+    if "delitos_sexuales" in habilitadas and not fecha_expedicion:
+        raise HTTPException(
+            status_code=422,
+            detail="La fuente Inhabilidades Ley 1918 requiere la fecha de expedición de la cédula "
+                   "(campo fecha_expedicion, formato DD/MM/AAAA)",
+        )
+
     # Actor efectivo para el doc: la empresa de atribución (ADMIN_INTEGA puede
     # actuar sobre otra empresa sin perder su identidad).
     actor_doc = {**actor, "empresa_id": str(empresa["_id"])}
@@ -660,6 +675,7 @@ async def crear_estudio(
         nombres=nombres,
         apellidos=apellidos,
         nit=nit,
+        fecha_expedicion=fecha_expedicion or None,
     )
 
     try:
@@ -677,6 +693,7 @@ async def crear_estudio(
             nombres=nombres,
             apellidos=apellidos,
             nit=nit,
+            fecha_expedicion=fecha_expedicion or None,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -841,6 +858,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "manifiestos_rndc": "RNDC — Historial de viajes",
         "procuraduria": "Procuraduría — Antecedentes disciplinarios",
         "contraloria": "Contraloría — Antecedentes fiscales",
+        "delitos_sexuales": "Policía — Inhabilidades Ley 1918 (delitos sexuales contra menores)",
         "policia": "Policía — Antecedentes judiciales",
         "runt": "RUNT — Información del vehículo",
         "simit": "SIMIT — Estado de cuenta de la placa",
@@ -1112,7 +1130,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
 }
 
 

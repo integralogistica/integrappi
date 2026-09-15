@@ -51,6 +51,12 @@ from Funciones.bot_contraloria import (
 from Funciones.bot_rndc2 import BotRNDC2Error, consultar_historial_viajes, consultar_historial_viajes_sync
 from Funciones.bot_ofac import BotOfacError, consultar_ofac_nit_sync, consultar_ofac_sync
 from Funciones.bot_sanciones import BotSancionesError, consultar_sanciones_sync
+from Funciones.bot_delitos_sexuales import (
+    BotDelitosCaptchaFallido,
+    BotDelitosSinCaptchaKey,
+    BotDelitosSinResultado,
+    consultar_inhabilidades, consultar_inhabilidades_sync,
+)
 from Funciones.bot_rues import BotRuesError, BotRuesSinResultado, consultar_rues_sync
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
@@ -111,7 +117,7 @@ MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -162,6 +168,7 @@ _SYNC_ORIGINALES = {
     "consultar_sena_sync": consultar_sena_sync,
     "consultar_bdme_sync": consultar_bdme_sync,
     "consultar_procesos_sync": consultar_procesos_sync,
+    "consultar_inhabilidades_sync": consultar_inhabilidades_sync,
 }
 
 
@@ -323,6 +330,14 @@ def _clasificar_error(exc: Exception, nombre: str = "") -> tuple[str, dict]:
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotContraloriaCaptchaFallido):
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotDelitosSinCaptchaKey):
+        # Falta de configuración (no del portal): NO_DISPONIBLE para que una
+        # causa pura de config no dispare la cadena de reembolso.
+        return "NO_DISPONIBLE", {"tipo": "configuracion_faltante", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotDelitosSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotDelitosCaptchaFallido):
+        return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotPoliciaSinCaptchaKey):
         # Falta de configuración (no del portal): NO_DISPONIBLE para que una
         # causa pura de config no dispare la cadena "todas fallidas → ERROR
@@ -440,7 +455,8 @@ async def _ejecutar_fuente(
     nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
     cedula_propietario: str | None = None,
     nombres: str | None = None, apellidos: str | None = None,
-    nit: str | None = None,
+    nit: str | None = None, fecha_expedicion: str | None = None,
+    empresa_consultante: dict | None = None,
 ) -> dict:
     """Ejecuta una fuente (caché → portal con reintento) y devuelve su sección
     lista para el doc del estudio. NUNCA lanza: una fuente caída queda
@@ -450,7 +466,9 @@ async def _ejecutar_fuente(
     simit consulta SOLO por placa: su caché va sin cédula (la identidad del
     dato es la placa, no la persona evaluada). `nombres`/`apellidos` (SIN
     tildes, mayúsculas) son la pista del consultante para el captcha de la
-    PGN que pregunta por el nombre de la persona consultada."""
+    PGN que pregunta por el nombre de la persona consultada.
+    `fecha_expedicion` (DD/MM/AAAA o ISO) la exige el portal de inhabilidades
+    (Ley 1918) junto con la empresa consultante (nombre/NIT del estudio)."""
     if nombre == "runt":
         # El RUNT valida la cédula contra el PROPIETARIO ACTIVO de la placa:
         # cuando el conductor evaluado no es el dueño, la consulta (y la caché,
@@ -619,6 +637,16 @@ async def _ejecutar_fuente(
                 "codigo_verificacion": cache.get("codigo_verificacion", ""),
             })
             seccion["estado"] = "EXITO" if seccion["no_registra"] else "ADVERTENCIA"
+        elif nombre == "delitos_sexuales":
+            # Inhabilidades Ley 1918 (DIJIN): veredicto tri-estado análogo +
+            # la fecha/hora que estampa el portal y la empresa consultante.
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "fecha_consulta": cache.get("fecha_consulta", ""),
+                "empresa_consultante": cache.get("empresa_consultante", ""),
+            })
+            seccion["estado"] = "EXITO" if seccion["no_registra"] else "ADVERTENCIA"
         else:
             seccion.update({
                 "no_registra": cache.get("no_registra"),
@@ -711,6 +739,20 @@ async def _ejecutar_fuente(
             async with _SEMAFORO_NAVEGADORES:
                 return await _invocar_playwright(
                     consultar_antecedentes_fiscales, "consultar_antecedentes_fiscales_sync", cedula
+                )
+    elif nombre == "delitos_sexuales":
+
+        async def invocar() -> dict:
+            # Inhabilidades Ley 1918: cédula + FECHA DE EXPEDICIÓN del
+            # documento + empresa consultante (la estampa en el resultado);
+            # reCAPTCHA v2 resuelto por 2Captcha dentro del bot.
+            ec = empresa_consultante or {}
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_inhabilidades, "consultar_inhabilidades_sync", cedula,
+                    fecha_expedicion or "",
+                    ec.get("nombre") or "INTEGRA LOGISTICA",
+                    ec.get("nit") or "901923029-2",
                 )
     else:
         # procuraduría (rama por defecto): los nombres/apellidos del
@@ -1169,6 +1211,49 @@ async def _ejecutar_fuente(
         # 2026-09-03, análoga a SOAT vencido / saldo SIMIT exigible).
         seccion["estado"] = _estado_rues(seccion)
     else:
+        if nombre == "delitos_sexuales":
+            no_registra = resultado.get("no_registra")
+            # La DIJIN solo es concluyente cuando entrega una fórmula (NO
+            # REGISTRA / REGISTRA INHABILIDAD). Sin ella no se cachea nada
+            # (anti-envenenamiento; cubre también la fecha de expedición
+            # equivocada, que el portal responde sin fórmula legible).
+            if no_registra is None:
+                seccion.update({
+                    "estado": "NO_DISPONIBLE",
+                    "error": {
+                        "tipo": "portal_inconsistente",
+                        "mensaje": "El portal de inhabilidades (Ley 1918) no entregó un veredicto. "
+                                   "Verifique la fecha de expedición de la cédula e intente de nuevo.",
+                    },
+                })
+                logger.warning(
+                    "Inhabilidades sin veredicto para %s (sin cachear): %s",
+                    enmascarar_cedula(cedula), (resultado.get("texto_resultado") or "")[:150] or "(sin texto)",
+                )
+                return seccion
+            doc_cache = {
+                "tipo": nombre, "cedula": cedula,
+                "no_registra": no_registra,
+                "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+                "fecha_consulta": (resultado.get("fecha_consulta") or "")[:30],
+                "empresa_consultante": (resultado.get("empresa_consultante") or "")[:80],
+                "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+                "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+                "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+            }
+            try:
+                col_consultas.insert_one(doc_cache)
+                seccion["cache_id"] = str(doc_cache["_id"])
+            except Exception as exc:
+                logger.error("Caché inhabilidades %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+            seccion.update({
+                "estado": "EXITO" if no_registra else "ADVERTENCIA",
+                "no_registra": no_registra,
+                "mensaje": (resultado.get("mensaje") or "")[:MAX_MENSAJE],
+                "fecha_consulta": (resultado.get("fecha_consulta") or "")[:30],
+                "empresa_consultante": (resultado.get("empresa_consultante") or "")[:80],
+            })
+            return seccion
         if nombre == "contraloria":
             no_registra = resultado.get("no_registra")
             # La CGR solo es concluyente cuando entrega un veredicto (NO SE
@@ -1309,6 +1394,7 @@ async def ejecutar_estudio(
     nombres: str | None = None,
     apellidos: str | None = None,
     nit: str | None = None,
+    fecha_expedicion: str | None = None,
 ) -> dict:
     """Ejecuta fuentes en paralelo, calcula estado, persiste y devuelve el doc.
 
@@ -1318,6 +1404,8 @@ async def ejecutar_estudio(
     se usa config.fuentes_habilitadas como antes. `placa`/`cedula_propietario`
     solo los usa runt (vehículo del propietario, que puede ≠ persona evaluada).
     `nombres`/`apellidos` (SIN tildes, mayúsculas) son pista del captcha PGN.
+    `fecha_expedicion` (DD/MM/AAAA o ISO) la exige el portal de inhabilidades
+    (Ley 1918) junto con la empresa consultante (nombre/NIT del `empresa`).
     """
     inicio = time.monotonic()
     habilitadas = list(fuentes) if fuentes is not None else fuentes_habilitadas_efectivas(empresa)
@@ -1328,13 +1416,20 @@ async def ejecutar_estudio(
         return _fuente_deshabilitada(nombre)
 
     async with _SEMAFORO_ESTUDIOS:
+        # La empresa CONSULTANTE que exige el portal de la Ley 1918 (la estampa
+        # en el resultado): la empresa del estudio; fallback Integra.
+        empresa_consultante = {
+            "nombre": (empresa.get("nombre") or "").strip() or "INTEGRA LOGISTICA",
+            "nit": (empresa.get("nit") or "").strip() or "901923029-2",
+        }
         resultados = await asyncio.gather(
             *[
                 _ejecutar_fuente(
                     nombre, cedula, actor, forzar,
                     placa=placa, cedula_propietario=cedula_propietario,
                     nombres=nombres, apellidos=apellidos,
-                    nit=nit,
+                    nit=nit, fecha_expedicion=fecha_expedicion,
+                    empresa_consultante=empresa_consultante,
                 )
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
@@ -1426,7 +1521,7 @@ def crear_documento_estudio(
     consulta_id: str, cedula: str, actor: dict, empresa: dict, forzar: bool, auditoria: dict,
     *, placa: str | None = None, cedula_propietario: str | None = None,
     nombres: str | None = None, apellidos: str | None = None,
-    nit: str | None = None,
+    nit: str | None = None, fecha_expedicion: str | None = None,
 ) -> str:
     """Inserta el doc EN_PROGRESO y retorna el consulta_id. Se llama ANTES de
     ejecutar fuentes: la consulta queda trazada aunque todo falle después.
@@ -1463,6 +1558,9 @@ def crear_documento_estudio(
             # nombre verificado (ese llega por la cascada PGN→Policía).
             "nombres": nombres,
             "apellidos": apellidos,
+            # Fecha de expedición de la cédula que informó el CONSULTANTE
+            # (DD/MM/AAAA): la exige el portal de inhabilidades (Ley 1918).
+            "fecha_expedicion": fecha_expedicion,
             "placa": placa,
             # Vehículos validados por runt: cada uno con SU propietario (puede
             # ser distinto de la persona evaluada). `placa` top-level queda

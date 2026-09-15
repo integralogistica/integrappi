@@ -315,6 +315,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     rndc = fuentes.get("manifiestos_rndc") or {}
     proc = fuentes.get("procuraduria") or {}
     cgr = fuentes.get("contraloria") or {}
+    delitos = fuentes.get("delitos_sexuales") or {}
     pol = fuentes.get("policia") or {}
     runt = fuentes.get("runt") or {}
     simit = fuentes.get("simit") or {}
@@ -481,6 +482,13 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             etiqueta_cgr,
             _texto_veredicto_contraloria(cgr),
         ])
+    if _corrio(delitos):
+        etiqueta_del, _ = ESTADO_FUENTE_TEXTO.get(delitos.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Policía — Inhabilidades Ley 1918 (delitos sexuales contra menores)",
+            etiqueta_del,
+            _texto_veredicto_delitos(delitos),
+        ])
     if _corrio(pol):
         etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
@@ -551,7 +559,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, proc, cgr, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues)
+        for fuente in (rndc, proc, cgr, delitos, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues)
         if _corrio(fuente)
     ]
     tabla_resumen = Table(
@@ -737,6 +745,59 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ))
     elif _corrio(cgr):
         cuento.append(_parrafo_estado_fuente(cgr, "la Contraloría"))
+
+    # ── 3c. Detalle Inhabilidades Ley 1918 (delitos sexuales contra menores) ─
+    if _corrio(delitos):
+        _antes_de_seccion(delitos)
+        cuento.append(Paragraph("Inhabilidades — Delitos sexuales contra menores (Ley 1918)", estilo_h2))
+    if delitos.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        no_registra_del = delitos.get("no_registra")
+        if no_registra_del is True:
+            texto_del, color_del = "NO REGISTRA INHABILIDAD (LEY 1918 DE 2018)", COLOR_EXITO
+        elif no_registra_del is False:
+            texto_del, color_del = "REGISTRA INHABILIDAD — REVISIÓN HUMANA OBLIGATORIA", COLOR_FALLO
+        else:
+            texto_del, color_del = "VEREDICTO NO CONCLUSIVO — VER MENSAJE DEL PORTAL", COLOR_ADVERTENCIA
+        tabla_veredicto_del = Table(
+            [[Paragraph(f"<b>{texto_del}</b>", ParagraphStyle("veredicto_del", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_del.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_del),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_del)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_del = [
+            ["Resultado de la consulta", (delitos.get("mensaje") or "—")[:300]],
+        ]
+        if delitos.get("fecha_consulta"):
+            detalle_del.append(["Consulta ante la DIJIN", delitos["fecha_consulta"]])
+        if delitos.get("empresa_consultante"):
+            detalle_del.append(["Empresa consultante", delitos["empresa_consultante"]])
+        detalle_del.append(["Origen de datos", _texto_origen(delitos)])
+        tabla_del = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_del],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_del.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_del)
+        cuento.append(Spacer(0, 2 * mm))
+        cuento.append(Paragraph(
+            "Consulta en línea del registro de inhabilidades de la Policía Nacional (DIJIN). El "
+            "resultado corresponde al veredicto del portal en la fecha indicada, emitido para la "
+            "empresa consultante identificada arriba.",
+            estilo_peq,
+        ))
+    elif _corrio(delitos):
+        cuento.append(_parrafo_estado_fuente(delitos, "las inhabilidades Ley 1918"))
 
     # ── 4. Detalle Policía (antecedentes judiciales) ────────────────────────
     if _corrio(pol):
@@ -1428,7 +1489,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
+            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1503,6 +1564,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "en procesos de contratación (Decreto 2150 de 1995). El veredicto corresponde a lo certificado por "
             "la CGR en la fecha de la consulta; la ausencia de reporte no constituye certificación de "
             "responsabilidad fiscal futura."
+        )
+    if _corrio(delitos):
+        bloques_legal.append(
+            "<b>Inhabilidades por delitos sexuales contra menores (Ley 1918 de 2018):</b> la consulta "
+            "se efectuó en el registro en línea que administra la Policía Nacional (DIJIN), creado por "
+            "la Ley 1918 de 2018 y reglamentado por el Decreto 753 de 2019 EXACTAMENTE para verificación "
+            "de aspirantes a cargos, oficios o profesiones por parte de entidades y empresas (la Ley 2375 "
+            "de 2024 extendió su alcance). El resultado corresponde al veredicto del registro en la fecha "
+            "de la consulta; una inhabilidad reportada exige revisión humana del antecedente y del alcance "
+            "de la sanción antes de cualquier decisión, conforme a las Leyes 1581 de 2012 y 1712 de 2014."
         )
     if _corrio(sena):
         bloques_legal.append(
@@ -1624,6 +1695,18 @@ def _texto_veredicto(proc: dict) -> str:
     if no_registra is False:
         return "Registra anotaciones disciplinarias"
     return "Veredicto no concluyente"
+
+
+def _texto_veredicto_delitos(delitos: dict) -> str:
+    """Veredicto de la fuente delitos_sexuales para la fila resumen (Ley 1918)."""
+    if delitos.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(delitos)
+    no_registra = delitos.get("no_registra")
+    if no_registra is True:
+        return "No registra inhabilidad (Ley 1918)"
+    if no_registra is False:
+        return "REGISTRA INHABILIDAD — revisión humana"
+    return "Veredicto no concluyente — ver mensaje del portal"
 
 
 def _texto_veredicto_contraloria(cgr: dict) -> str:

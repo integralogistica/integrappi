@@ -60,7 +60,7 @@ EMPRESA_INICIAL = {
         # el gate real es el PLAN (fuentes_habilitadas_efectivas): las fuentes
         # default corren para toda empresa SIN tocar este config — este
         # listado solo persiste las opt-in y documenta el estado inicial.
-        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
+        "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
     },
 }
 
