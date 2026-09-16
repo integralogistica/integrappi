@@ -4812,7 +4812,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         ws.title = "Historico Pedidos"
 
         columnas = [
-            "Consecutivo", "Planilla", "Pedido Vulcano", "Fecha Preaprobado", "Estado",
+            "Consecutivo", "Planilla", "Pedido Vulcano", "Fecha Preaprobado", "Fecha Creación", "Estado",
             "Total Solicitado", "Diferencia", "Regional", "Placa", "Piezas",
             "Peso Real", "Peso SICETAC", "Cant. Pedidos", "Ruta", "Tipo Vehículo",
             "Vehículo SICETAC", "Flete Teórico", "Flete Solicitado",
@@ -4836,6 +4836,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         # Anchos por columna
         anchos = {
             "Consecutivo": 22, "Planilla": 14, "Pedido Vulcano": 16, "Fecha Preaprobado": 20,
+            "Fecha Creación": 20,
             "Estado": 18, "Total Solicitado": 16, "Diferencia": 16, "Regional": 16,
             "Placa": 12, "Piezas": 10, "Peso Real": 12, "Peso SICETAC": 14,
             "Cant. Pedidos": 12, "Ruta": 18, "Tipo Vehículo": 14,
@@ -4977,6 +4978,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                     doc.get("planilla", ""),
                     doc.get("pedido_vulcano", ""),
                     fmt_fecha(doc.get("fecha_preaprobado") or doc.get("fecha_creacion")),
+                    fmt_fecha(doc.get("fecha_creacion")),
                     estado,
                     total_solicitado,
                     diferencia,
@@ -5069,6 +5071,159 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
 
         # Congelar primera fila
         ws.freeze_panes = "A2"
+
+        # ── Hoja 2: "Detalle por Pedido" ─────────────────────────────────────
+        # UNA FILA POR PEDIDO VULCANO (el negocio, no la guía de Siscore):
+        # cada carro/planilla original tiene su propio `pedido_vulcano` y el
+        # documento raíz de una fusión queda amarrado a un CONSECUTIVO FINAL.
+        # Columnas: Consecutivo Final (raíz), Consecutivo Original (carro),
+        # Planilla, Pedido Vulcano, Cliente, Piezas, Peso y el Costo Asignado
+        # (cuánto terminó costando ese pedido Vulcano).
+        # El costo se reparte proporcionalmente por piezas (cajas): el
+        # total_solicitado del doc fusionado entre sus originales
+        # (_repartir_flete por piezas, igual que _expandir_doc_a_filas) y, si
+        # un mismo carro tuviera varios pedidos Vulcano, equitativamente entre
+        # ellos → la suma de todas las filas es EXACTAMENTE el total_solicitado
+        # de cada planilla. En no fusionadas, ambos consecutivos coinciden.
+        from openpyxl.utils import get_column_letter
+
+        ws2 = wb.create_sheet("Detalle por Pedido")
+        columnas_detalle = [
+            "Consecutivo Final", "Consecutivo Original", "Fecha Creación", "Planilla",
+            "Pedido Vulcano", "Cliente", "Piezas", "Peso (kg)", "Costo Asignado",
+        ]
+        anchos_detalle = {
+            "Consecutivo Final": 22, "Consecutivo Original": 22, "Fecha Creación": 17,
+            "Planilla": 14, "Pedido Vulcano": 18, "Cliente": 30, "Piezas": 9,
+            "Peso (kg)": 11, "Costo Asignado": 15,
+        }
+        for col_idx, columna in enumerate(columnas_detalle, 1):
+            cell = ws2.cell(row=1, column=col_idx, value=columna)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+            ws2.column_dimensions[get_column_letter(col_idx)].width = anchos_detalle.get(columna, 16)
+
+        fila_detalle = 2
+        tot_piezas = 0
+        tot_peso = 0.0
+        tot_costo = 0
+        for i, doc in enumerate(planillas_db):
+            try:
+                row_fill_det = even_fill if i % 2 == 0 else None
+                cons_final = doc.get("consecutivo", "")
+
+                fusion_info = doc.get("fusion_info") or {}
+                datos_originales = fusion_info.get("datos_originales") or []
+                if fusion_info.get("es_fusionada") is True and datos_originales:
+                    # Fusión: repartir el total entre los carros por piezas.
+                    piezas_carros = []
+                    for d in datos_originales:
+                        try:
+                            piezas_carros.append(int(round(float(d.get("piezas", 0) or 0))))
+                        except (TypeError, ValueError):
+                            piezas_carros.append(0)
+                    reparto_carros = _repartir_flete(doc.get("total_solicitado"), piezas_carros)
+                    carros = [
+                        {
+                            "cons_orig": _consecutivo_original(d, idx, cons_final),
+                            "fecha": d.get("fecha_creacion") or doc.get("fecha_creacion"),
+                            "planilla": d.get("planilla") or doc.get("planilla", ""),
+                            "pedido_vulcano": str(d.get("pedido_vulcano") or "").strip(),
+                            "cliente": d.get("cliente_origen", ""),
+                            "piezas": d.get("piezas", 0),
+                            "peso": d.get("peso_real", 0),
+                            "flete": reparto_carros[idx] if idx < len(reparto_carros) else 0,
+                        }
+                        for idx, d in enumerate(datos_originales)
+                    ]
+                else:
+                    # Planilla normal: una sola entrada con su propio pedido Vulcano.
+                    pv_raiz = str(doc.get("pedido_vulcano") or "").strip()
+                    carros = [{
+                        "cons_orig": cons_final,
+                        "fecha": doc.get("fecha_creacion"),
+                        "planilla": doc.get("planilla", ""),
+                        "pedido_vulcano": pv_raiz,
+                        "cliente": doc.get("cliente_origen", ""),
+                        "piezas": doc.get("piezas", 0),
+                        "peso": doc.get("peso_real", 0),
+                        "flete": doc.get("total_solicitado", 0),
+                    }]
+
+                for carro in carros:
+                    # Un carro normalmente tiene UN pedido Vulcano; si trae varios
+                    # (concatenados en docs viejos) se abre una fila por pedido con
+                    # el flete repartido equitativamente (piezas/peso sólo en la
+                    # primera para no duplicar los totales).
+                    pedidos_pv = [
+                        c.strip() for c in carro["pedido_vulcano"].replace(";", ",").split(",")
+                        if c.strip()
+                    ] or ["-"]
+                    reparto_pv = _repartir_flete(carro["flete"], [0] * len(pedidos_pv))
+
+                    for j, pv in enumerate(pedidos_pv):
+                        piezas_fila = int(round(num(carro["piezas"]))) if j == 0 else 0
+                        peso_fila = num(carro["peso"]) if j == 0 else 0
+                        valores_det = [
+                            cons_final,
+                            carro["cons_orig"],
+                            fmt_fecha(carro["fecha"]),
+                            carro["planilla"],
+                            pv,
+                            carro["cliente"],
+                            piezas_fila,
+                            peso_fila,
+                            reparto_pv[j] if j < len(reparto_pv) else 0,
+                        ]
+                        for col_idx, valor in enumerate(valores_det, 1):
+                            cell = ws2.cell(row=fila_detalle, column=col_idx, value=valor)
+                            cell.border = thin_border
+                            if row_fill_det:
+                                cell.fill = row_fill_det
+                            col_name = columnas_detalle[col_idx - 1]
+                            if col_name == "Costo Asignado":
+                                cell.number_format = '$#,##0'
+                                cell.alignment = number_alignment
+                                cell.font = money_font
+                            elif col_name in ("Piezas", "Peso (kg)"):
+                                cell.alignment = number_alignment
+                                if col_name == "Peso (kg)":
+                                    cell.number_format = '#,##0.0'
+                            else:
+                                cell.alignment = data_alignment
+                        tot_piezas += piezas_fila
+                        tot_peso += peso_fila
+                        tot_costo += int(round(num(reparto_pv[j] if j < len(reparto_pv) else 0)))
+                        fila_detalle += 1
+            except Exception as e:
+                logger.error(f"Error procesando detalle de {doc.get('planilla', '?')}: {str(e)}")
+                continue
+
+        # Fila de totales
+        if fila_detalle > 2:
+            tot_font = Font(bold=True, color="FFFFFF", size=10)
+            tot_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+            ws2.cell(row=fila_detalle, column=1, value="TOTALES")
+            ws2.cell(row=fila_detalle, column=7, value=tot_piezas)
+            ws2.cell(row=fila_detalle, column=8, value=round(tot_peso, 1))
+            ws2.cell(row=fila_detalle, column=9, value=tot_costo)
+            for col_idx in range(1, len(columnas_detalle) + 1):
+                cell = ws2.cell(row=fila_detalle, column=col_idx)
+                cell.font = tot_font
+                cell.fill = tot_fill
+                cell.border = thin_border
+                if col_idx in (7, 8, 9):
+                    cell.alignment = number_alignment
+                    if col_idx == 9:
+                        cell.number_format = '$#,##0'
+                    elif col_idx == 8:
+                        cell.number_format = '#,##0.0'
+
+        ws2.auto_filter.ref = f"A1:{get_column_letter(len(columnas_detalle))}{max(fila_detalle - 1, 2)}"
+        ws2.freeze_panes = "A2"
+        logger.info(f"Hoja 'Detalle por Pedido' generada: {fila_detalle - 2} filas")
 
         output = io.BytesIO()
         wb.save(output)

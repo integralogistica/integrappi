@@ -126,6 +126,8 @@ CLIENTES_OTROS_COSTOS_DEFAULT = [
     "DISTRIBUIDORA COMTEK S.A.S.",
     "QUIMICA AVANZADA SAS",
     "MINISO COLOMBIA SAS",
+    "HUNTER DOUGLAS DE COLOMBIA SAS",
+    
 ]
 ESTADOS_VALIDOS = [
     "borrador", "pendiente_aprobacion", "devuelto", "rechazado",

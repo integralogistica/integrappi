@@ -718,6 +718,17 @@ Hasta ahora el control de quién aprueba/devuelve una planilla vivía **solo en 
 - El frontend ahora muestra el `detail` real del 403/404 (helper `mostrarErrorEstado`) en vez del genérico "falló en BD".
 - ⚠️ Sigue siendo **identidad declarada** (no hay token/password en el flujo): evita que un perfil use la API para acciones de otro, pero no impersonación deliberada. El resto de endpoints de `/siscore` sigue sin validación de perfiles.
 
+## Actualizaciones Recientes (2026-09-16)
+
+### Histórico de Pedidos — hoja «Detalle por Pedido» en el Excel (`POST /siscore/historico/exportar-excel`)
+
+El Excel ahora tiene 2 hojas: la de siempre (una fila por planilla) y la nueva **«Detalle por Pedido»** con **UNA FILA POR PEDIDO VULCANO** (el negocio, no la guía de Siscore): **Consecutivo Final** (`consecutivo` del doc raíz — al que quedan amarrados todos los carros de una fusión) + **Consecutivo Original** (el del carro, vía `_consecutivo_original`; iguales en no fusionadas) + Planilla + **Pedido Vulcano** (el `pedido_vulcano` de cada carro en `fusion_info.datos_originales`; el del doc en no fusionadas) + **Cliente** (`cliente_origen` del carro) + Piezas + Peso + **Costo Asignado** — cuánto terminó costando ese pedido Vulcano.
+
+- **Reparto del costo, suma exacta**: en una fusión, `_repartir_flete` reparte el `total_solicitado` entre los carros por piezas (misma política que `_expandir_doc_a_filas` y que el indicador de costo-operación); cada carro entrega su flete a su pedido Vulcano. Carro sin pedido Vulcano → fila con «-» (conserva su costo). Carro con varios pedidos concatenados (docs viejos) → una fila por pedido, flete equitativo y piezas/peso sólo en la primera.
+- **Fecha Creación** en ambas hojas (2026-09-16, a pedido del usuario): columna «Fecha Creación» en la hoja 1 (junto a «Fecha Preaprobado») y en la hoja 2 (tras los consecutivos). Es la `fecha_creacion` del doc; en la hoja 2 la del carro original (`datos_originales[].fecha_creacion`) con fallback a la del raíz. Formato `YYYY-MM-DD HH:MM` (UTC, igual que las demás fechas del Excel).
+- **Sin `registros_detalle`** (docs viejos): una fila por pedido del campo `codigo_pedido` (separadores `,`/`;`), cliente del doc y reparto equitativo del flete.
+- Fila TOTALES al final, auto-filtro y freeze panes. El request/respuesta no cambian (misma descarga con una hoja más); el frontend no se tocó.
+
 ## Actualizaciones Recientes (2026-08-28)
 
 ### Otros Costos — Adjuntos (soportes) en Google Cloud Storage
