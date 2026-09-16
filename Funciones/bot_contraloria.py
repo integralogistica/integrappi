@@ -46,6 +46,12 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 logger = logging.getLogger(__name__)
 
+# Fix 2026-09-15: el portal Liferay (PORTAL_URL) quedó detrás de un WAF (Azure
+# Application Gateway v2) que responde 403 incluso a Chromium real → el iframe
+# jamás cargaba y la fuente caía "portal_inconsistente". El WebForms responde
+# DIRECTO, así que se entra al aspx de una vez (si algún día volviera a venir
+# embebido, el loop de abajo lo encuentra igual).
+FORM_URL = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
 PORTAL_URL = "https://www.contraloria.gov.co/web/guest/persona-natural"
 IFRAME_HOST = "cfiscal.contraloria.gov.co"
 SALIDA = Path(__file__).resolve().parents[1] / "descargas_contraloria"
@@ -158,18 +164,22 @@ async def consultar_antecedentes_fiscales(cedula: str, headed: bool = False) -> 
             )
             pagina = await contexto.new_page()
 
-            # 1) Portal institucional (Liferay) → el form vive en el iframe de
-            #    cfiscal.contraloria.gov.co. Entrar por la página oficial.
-            await pagina.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
+            # 1) Formulario WebForms DIRECTO (fix 2026-09-15). Si la página
+            #    principal ES el WebForms, el "vista" es el frame principal;
+            #    si viniera embebido en iframe (como antes), se busca el frame.
+            await pagina.goto(FORM_URL, wait_until="domcontentloaded", timeout=_TIMEOUT_MS)
             vista = None
-            for _ in range(10):
-                for marco in pagina.frames:
-                    if IFRAME_HOST in (marco.url or ""):
-                        vista = marco
+            if IFRAME_HOST in (pagina.url or ""):
+                vista = pagina.main_frame
+            else:
+                for _ in range(10):
+                    for marco in pagina.frames:
+                        if IFRAME_HOST in (marco.url or ""):
+                            vista = marco
+                            break
+                    if vista:
                         break
-                if vista:
-                    break
-                await pagina.wait_for_timeout(1000)
+                    await pagina.wait_for_timeout(1000)
             if vista is None:
                 raise BotContraloriaSinResultado(
                     f"El portal de la Contraloría no mostró el formulario (iframe {IFRAME_HOST} ausente)"
