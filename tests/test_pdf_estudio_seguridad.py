@@ -156,32 +156,36 @@ class TestGenerarPDF(unittest.TestCase):
         estudio["fuentes"]["sena"] = _fuente_sena()
 
         paginas = _texto_por_pagina(generar_pdf_estudio(estudio))
-        # La sección RUNT creció con el historial RTM (2026-09-14) y ocupa
-        # página propia: el informe pasó de 4 a 5 páginas.
-        self.assertEqual(5, len(paginas))
+        # Procuraduría SIEMPRE es la última fuente del informe (2026-09-15);
+        # su sección compacta al final empaqueta el informe en 4 páginas.
+        self.assertEqual(4, len(paginas))
 
         titulos = (
             "Manifiestosdecarga—RNDC",
-            "Antecedentesdisciplinarios—Procuraduría",
             "Antecedentesjudiciales—Policía",
             "Vehículo—RUNT",
             "Comparendos—SIMIT",
             "FormaciónSENA—Certificados",
+            "Antecedentesdisciplinarios—Procuraduría",
         )
         fuentes_por_pagina = [
             [titulo for titulo in titulos if titulo in pagina]
             for pagina in paginas
         ]
         self.assertEqual(
-            [[], list(titulos[:3]), [titulos[3]], list(titulos[4:]), []],
+            [[], list(titulos[:3]), list(titulos[3:5]), [titulos[5]]],
             fuentes_por_pagina,
         )
+        # Procuraduría es la última fuente y abre la página final, junto a la
+        # trazabilidad (nunca queda huérfana a mitad de página).
+        self.assertIn("Trazabilidadyauditoría", paginas[3])
         self.assertLessEqual(max(map(len, fuentes_por_pagina)), 3)
-        # Cada página conserva primero el encabezado fijo (~40 caracteres);
-        # el título de la fuente debe aparecer inmediatamente después.
+        # Cada página que ABRE con una fuente conserva primero el encabezado
+        # fijo (~40 caracteres); el título debe aparecer inmediatamente después.
+        # (La página 2 abre con la continuación de la tabla RTM del RUNT, así
+        # que SIMIT queda a media página — continuación legítima, no huérfano.)
         self.assertLess(paginas[1].index(titulos[0]), 55)
-        self.assertLess(paginas[2].index(titulos[3]), 55)
-        self.assertLess(paginas[3].index(titulos[4]), 55)
+        self.assertLess(paginas[3].index(titulos[5]), 55)
 
     def test_bytes_pdf_validos(self):
         contenido = generar_pdf_estudio(estudio_fixture())

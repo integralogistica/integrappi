@@ -468,13 +468,6 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             etiqueta_rndc,
             f"{rndc.get('total', 0)} viajes registrados" if rndc.get("estado") == "EXITO" else _resumen_error(rndc),
         ])
-    if _corrio(proc):
-        etiqueta_proc, _ = ESTADO_FUENTE_TEXTO.get(proc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-        filas_resumen.append([
-            "Procuraduría General de la Nación",
-            etiqueta_proc,
-            _texto_veredicto(proc),
-        ])
     if _corrio(cgr):
         etiqueta_cgr, _ = ESTADO_FUENTE_TEXTO.get(cgr.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
@@ -557,9 +550,19 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             etiqueta_rues,
             _texto_veredicto_rues(rues),
         ])
+    # Procuraduría SIEMPRE de última en el resumen (pedido 2026-09-15): es la
+    # fuente más lenta (300 s) y el usuario quiere el veredicto disciplinario
+    # como cierre del informe.
+    if _corrio(proc):
+        etiqueta_proc, _ = ESTADO_FUENTE_TEXTO.get(proc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Procuraduría General de la Nación",
+            etiqueta_proc,
+            _texto_veredicto(proc),
+        ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, proc, cgr, delitos, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues)
+        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, proc)
         if _corrio(fuente)
     ]
     tabla_resumen = Table(
@@ -652,49 +655,6 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                 ))
     elif _corrio(rndc):
         cuento.append(_parrafo_estado_fuente(rndc, "RNDC"))
-
-    # ── 3. Detalle Procuraduría ──────────────────────────────────────────────
-    if _corrio(proc):
-        _antes_de_seccion(proc)
-        cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
-    if proc.get("estado") in {"EXITO", "ADVERTENCIA"}:
-        no_registra = proc.get("no_registra")
-        if no_registra is True:
-            texto, color = "NO REGISTRA SANCIONES NI INHABILIDADES VIGENTES", COLOR_EXITO
-        elif no_registra is False:
-            texto, color = "REGISTRA ANOTACIONES DISCIPLINARIAS", COLOR_FALLO
-        else:
-            texto, color = "VEREDICTO NO CONCLUSIVO", COLOR_ADVERTENCIA
-        tabla_veredicto = Table(
-            [[Paragraph(f"<b>{texto}</b>", ParagraphStyle("veredicto", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
-            colWidths=[160 * mm],
-        )
-        tabla_veredicto.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), color),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ]))
-        cuento.append(tabla_veredicto)
-        cuento.append(Spacer(0, 2 * mm))
-        detalle_proc = [
-            ["Nombre consultado", proc.get("nombre_certificado") or proc.get("nombre_consultado") or "No disponible"],
-            ["Resultado de la consulta", (proc.get("mensaje") or "—")[:300]],
-            ["Origen de datos", _texto_origen(proc)],
-        ]
-        tabla_proc = Table(
-            [[celda(k, negrita=True), celda(v)] for k, v in detalle_proc],
-            colWidths=[45 * mm, 115 * mm],
-        )
-        tabla_proc.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]))
-        cuento.append(tabla_proc)
-    elif _corrio(proc):
-        cuento.append(_parrafo_estado_fuente(proc, "la Procuraduría"))
 
     # ── 3b. Detalle Contraloría (antecedentes fiscales) ──────────────────────
     if _corrio(cgr):
@@ -1477,6 +1437,51 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(rues, "el RUES"))
 
+    # ── 3. Detalle Procuraduría — SIEMPRE LA ÚLTIMA fuente del informe ───────
+    # (pedido 2026-09-15: el veredicto disciplinario de la PGN queda como
+    # cierre; además es la fuente más lenta, 300 s de presupuesto propio).
+    if _corrio(proc):
+        _antes_de_seccion(proc)
+        cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
+    if proc.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        no_registra = proc.get("no_registra")
+        if no_registra is True:
+            texto, color = "NO REGISTRA SANCIONES NI INHABILIDADES VIGENTES", COLOR_EXITO
+        elif no_registra is False:
+            texto, color = "REGISTRA ANOTACIONES DISCIPLINARIAS", COLOR_FALLO
+        else:
+            texto, color = "VEREDICTO NO CONCLUSIVO", COLOR_ADVERTENCIA
+        tabla_veredicto = Table(
+            [[Paragraph(f"<b>{texto}</b>", ParagraphStyle("veredicto", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_proc = [
+            ["Nombre consultado", proc.get("nombre_certificado") or proc.get("nombre_consultado") or "No disponible"],
+            ["Resultado de la consulta", (proc.get("mensaje") or "—")[:300]],
+            ["Origen de datos", _texto_origen(proc)],
+        ]
+        tabla_proc = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_proc],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_proc.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_proc)
+    elif _corrio(proc):
+        cuento.append(_parrafo_estado_fuente(proc, "la Procuraduría"))
+
     # ── 5. Trazabilidad / auditoría ──────────────────────────────────────────
     cuento.append(CondPageBreak(60 * mm))  # la tabla de trazabilidad no arranca al pie
     cuento.append(Paragraph("Trazabilidad y auditoría", estilo_h2))
@@ -1489,7 +1494,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Procuraduría", proc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues))
+            for nombre, f in (("RNDC", rndc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues), ("Procuraduría", proc))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1551,11 +1556,6 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "corresponden a lo reportado por los organismos de tránsito en la fecha de consulta y los saldos "
             "son informativos."
         )
-    if _corrio(proc):
-        bloques_legal.append(
-            "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
-            "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas."
-        )
     if _corrio(cgr):
         bloques_legal.append(
             "<b>Antecedentes fiscales (Contraloría General de la República):</b> la información se obtuvo del "
@@ -1609,6 +1609,12 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "a lo reportado por la cámara de comercio correspondiente en la fecha de consulta y son de "
             "carácter informativo; NO constituyen el Certificado de Existencia y Representación Legal ni "
             "certificación mercantil expedida por la cámara."
+        )
+    if _corrio(proc):
+        # Procuraduría siempre de última (pedido 2026-09-15), también aquí.
+        bloques_legal.append(
+            "<b>Ley 1238 de 2008:</b> habilita a entidades públicas y privadas a consultar el certificado de "
+            "antecedentes disciplinarios de la Procuraduría General de la Nación de aspirantes a cargos o contratistas."
         )
     bloques_legal.append(
         "<b>Ley 1581 de 2012 (Régimen General de Protección de Datos Personales):</b> los datos aquí contenidos "
