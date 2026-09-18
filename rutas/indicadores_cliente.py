@@ -534,6 +534,193 @@ def get_guias_cliente(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Uso de vehículos por tipo solicitado ─────────────────────────────────────
+# % de uso de cada Veh Solicitado (tipo_vehiculo_sicetac) = kg REALES del
+# vehículo (total_kilos_vehiculo) / tope de kg de la categoría solicitada.
+# La tabla de categorías es la de la operación (CARRY ≤1.000 … TRACTOMULA
+# >17.000); TRACTOMULA no tiene tope natural → 34.000 kg (máxima capacidad
+# legal, configuración 6 ejes) como referencia. uso_pct puede superar 100:
+# viajaron más kg de los que el tipo solicitado admite.
+
+TOPES_TIPO_VEH = {
+    "CARRY": 1000,
+    "NHR": 2300,
+    "TURBO": 4500,
+    "NIES": 6100,
+    "SENCILLO": 9000,
+    "PATINETA": 17000,
+    "TRACTOMULA": 34000,
+}
+
+
+def _tipo_solicitado(valor) -> str:
+    """'SENCILLO_…' → 'SENCILLO' (split por '_', como en los Excel); vacío o
+    desconocido → 'SIN TIPO' (sin tope → uso None)."""
+    t = str(valor or "").strip().upper().split("_")[0]
+    return t if t in TOPES_TIPO_VEH else "SIN TIPO"
+
+
+def _categoria_por_kilos(kg) -> str:
+    """Categoría que corresponde a un peso REAL según la tabla de la operación."""
+    k = float(kg or 0)
+    if k <= 1000:
+        return "CARRY"
+    if k <= 2300:
+        return "NHR"
+    if k <= 4500:
+        return "TURBO"
+    if k <= 6100:
+        return "NIES"
+    if k <= 9000:
+        return "SENCILLO"
+    if k <= 17000:
+        return "PATINETA"
+    return "TRACTOMULA"
+
+
+@router.get("/{cliente_id}/uso-vehiculos")
+def get_uso_vehiculos_cliente(
+    cliente_id: str,
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
+    q: Optional[str] = Query(None, description="Trazabilidad: número de pedido Vulcano (numero_pedido)"),
+):
+    """% de uso de los vehículos solicitados, UNA FILA POR VEHÍCULO (media milla).
+
+    Misma base que /cajas (filtro por ``fecha_creacion`` + NIT del cliente ANTES
+    del dedup por ``consecutivo_vehiculo``). El drill-down (tipo → período →
+    destino → consecutivo) lo arma el frontend con estas filas — son pocos
+    cientos de vehículos por período, igual patrón que el informe de guías.
+
+    Con ``q`` (trazabilidad): SIN filtro de fecha, trae los vehículos con un
+    pedido Vulcano (``numero_pedido`` — así se guarda en esta colección el
+    número que llega del Excel Vulcano) que coincida (regex, case-insensitive).
+    """
+    cliente = CLIENTES.get(cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+
+    try:
+        consulta = (q if isinstance(q, str) else "").strip()
+        if consulta:
+            import re as _re
+            match_veh = {
+                "$and": [
+                    cliente["match_media_milla"](),
+                    {"numero_pedido": {"$regex": _re.escape(consulta), "$options": "i"}},
+                ]
+            }
+        else:
+            match_veh = {"$and": [
+                _filtro_media_milla(anio or [], mes or []),
+                cliente["match_media_milla"](),
+            ]}
+        pipeline = [
+            {"$match": match_veh},
+            # Orden por fecha desc antes del $group: determina el $first.
+            {"$sort": {"fecha_creacion": -1}},
+            {"$group": {
+                "_id": "$consecutivo_vehiculo",
+                "fecha_creacion": {"$first": "$fecha_creacion"},
+                "tipo_sic": {"$first": "$tipo_vehiculo_sicetac"},
+                "tipo_sug": {"$first": "$tipo_vehiculo"},
+                "kilos": {"$first": _num("total_kilos_vehiculo")},
+                # Costo real del vehículo (Total Solicitado: flete+desvío+
+                # puntos+cargue). En pedidos_completados el campo es
+                # total_flete_vehiculo (costo_real_vehiculo no existe aquí);
+                # $max cae al que tenga valor en docs de otros flujos.
+                "costo": {"$first": {"$max": [_num("costo_real_vehiculo"), _num("total_flete_vehiculo")]}},
+                "costo_teorico": {"$first": _num("costo_teorico_vehiculo")},
+                # Sobrecosto = costo_real − costo_teorico (>0 sobrecosto,
+                # <0 ahorro — mismo campo diferencia_flete de PedidosCompletados).
+                "sobrecosto": {"$first": _num("diferencia_flete")},
+                "destino": {"$first": "$destino"},
+            }},
+            {"$sort": {"fecha_creacion": -1}},
+            {"$limit": MAX_VEHICULOS},
+        ]
+        vehiculos = list(col_completados.aggregate(pipeline, allowDiskUse=True))
+
+        # Desglose por PEDIDO del vehículo (lo que muestra el "+" de
+        # PedidosCompletados): destinatario (ubicacion_descargue), entrega
+        # (planilla_siscore — puede traer varias guías por coma) y kilos por
+        # pedido. Los docs son UNO POR PEDIDO y el $match de NIT (Kabi) solo
+        # deja pasar los de Kabi — los pedidos de OTROS clientes en el mismo
+        # vehículo se consultan aparte (mismo consecutivo, SIN filtro de NIT)
+        # para que el detalle muestre TODO lo que llevaba el vehículo.
+        pedidos_por_veh: dict = {}
+        ids = [v["_id"] for v in vehiculos]
+        if ids:
+            pipeline_pedidos = [
+                {"$match": {"consecutivo_vehiculo": {"$in": ids}}},
+                {"$lookup": {
+                    "from": "clientes",
+                    "localField": "nit_cliente",
+                    "foreignField": "nit",
+                    "as": "cliente",
+                }},
+                {"$unwind": {"path": "$cliente", "preserveNullAndEmptyArrays": True}},
+                {"$group": {
+                    "_id": "$consecutivo_vehiculo",
+                    "pedidos": {"$push": {
+                        "pedido": {"$ifNull": ["$consecutivo_integrapp", ""]},
+                        "pedido_vulcano": {"$ifNull": ["$numero_pedido", ""]},
+                        "destinatario": {"$ifNull": ["$ubicacion_descargue", ""]},
+                        "destino_real": {"$ifNull": ["$destino_real", ""]},
+                        "cliente": {"$ifNull": ["$cliente.nombre", ""]},
+                        "entrega": {"$ifNull": ["$planilla_siscore", ""]},
+                        "kilos": {"$ifNull": [_num("num_kilos"), 0]},
+                    }},
+                }},
+            ]
+            for g in col_completados.aggregate(pipeline_pedidos, allowDiskUse=True):
+                lst = []
+                for p in g.get("pedidos") or []:
+                    lst.append({
+                        "pedido": str(p.get("pedido") or "").strip(),
+                        "pedido_vulcano": str(p.get("pedido_vulcano") or "").strip(),
+                        "destinatario": str(p.get("destinatario") or "").strip(),
+                        "destino_real": str(p.get("destino_real") or "").strip(),
+                        "cliente": str(p.get("cliente") or "").strip(),
+                        "entrega": str(p.get("entrega") or "").strip(),
+                        "kilos": round(float(p.get("kilos") or 0), 1),
+                    })
+                # Por peso desc: lo más pesado del vehículo primero.
+                lst.sort(key=lambda x: -x["kilos"])
+                pedidos_por_veh[g["_id"]] = lst
+
+        filas = []
+        for v in vehiculos:
+            tipo = _tipo_solicitado(v.get("tipo_sic") or v.get("tipo_sug"))
+            kg = float(v.get("kilos") or 0)
+            tope = TOPES_TIPO_VEH.get(tipo)
+            filas.append({
+                "consecutivo_vehiculo": v["_id"],
+                "fecha": _fecha_iso(v.get("fecha_creacion")),
+                "tipo_solicitado": tipo,
+                "kg_reales": round(kg, 1),
+                "destino": str(v.get("destino") or "").strip().upper(),
+                "categoria_real": _categoria_por_kilos(kg),
+                "uso_pct": round(kg / tope * 100, 1) if tope else None,
+                "costo_vehiculo": round(float(v.get("costo") or 0), 0),
+                "costo_teorico": round(float(v.get("costo_teorico") or 0), 0),
+                "sobrecosto": round(float(v.get("sobrecosto") or 0), 0),
+                "pedidos": pedidos_por_veh.get(v["_id"], []),
+            })
+
+        return {
+            "success": True,
+            "data": {
+                "cliente": cliente["nombre"],
+                "filas": filas,
+                "topes": TOPES_TIPO_VEH,
+            },
+        }
+    except Exception as e:
+        logger.exception(f"[indicadores-cliente] Error en uso de vehículos de {cliente_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Carga de citas (plan B) ──────────────────────────────────────────────────
 
 @router.post("/citas")
