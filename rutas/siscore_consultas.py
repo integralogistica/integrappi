@@ -3455,6 +3455,7 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
 # baseusuarios y autoriza cada transición con el perfil real (mismo patrón que
 # otros_costos._resolver_usuario).
 PERFILES_APROBAR = {"ADMIN", "CONTROL", "COORDINADOR"}
+PERFILES_APROBAR_PREAPROBADO = {"ADMIN", "CONTROL", "COORDINADOR", "ANALISTA"}  # PREAPROBADO → APROBADO (2026-09-17: ANALISTA vuelve a aprobar, solo las que NO requieren autorización)
 PERFILES_APROBAR_CONTROL = {"ADMIN", "CONTROL"}       # REQUIERE_APROBACION_CONTROL (>7%)
 PERFILES_DEVOLVER = {"ADMIN", "CONTROL", "COORDINADOR"}  # CREADO con motivo (rechazo)
 PERFILES_REABRIR = {"ADMIN", "ANALISTA"}              # CREADO sin motivo (reapertura)
@@ -3515,7 +3516,15 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         info_usuario = _resolver_usuario_estado(request.aprobado_por)
         perfil_real = info_usuario["perfil"]
         if request.estado == "APROBADO":
-            if perfil_real not in PERFILES_APROBAR:
+            # Desde PREAPROBADO (no requiere autorización) también aprueba ANALISTA;
+            # desde REQUIERE_APROBACION_COORDINADOR sigue siendo COORDINADOR/CONTROL/ADMIN.
+            permitidos_aprobar = PERFILES_APROBAR_PREAPROBADO if estado_anterior == "PREAPROBADO" else PERFILES_APROBAR
+            if perfil_real not in permitidos_aprobar:
+                if estado_anterior == "REQUIERE_APROBACION_COORDINADOR":
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Esta planilla requiere autorización (sobrecosto); su perfil ({perfil_real}) no puede aprobarla.",
+                    )
                 raise HTTPException(
                     status_code=403,
                     detail=f"Su perfil ({perfil_real}) no tiene permiso para aprobar planillas.",

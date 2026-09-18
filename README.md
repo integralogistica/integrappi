@@ -205,7 +205,7 @@ if bodega:
 | ADMIN | ✅ | ✅ | ✅ | Puede aprobar todo |
 | CONTROL | ✅ | ✅ | ✅ | Puede aprobar todo |
 | COORDINADOR | ✅ | ❌ | ✅ | Solo hasta 7% y sin tarifa |
-| ANALISTA | ❌ | ❌ | ❌ | No puede aprobar |
+| ANALISTA | ❌ | ❌ | ✅ | Solo PREAPROBADO → APROBADO (sin sobrecosto; 2026-09-17) |
 | OPERATIVO | ❌ | ❌ | ❌ | No puede aprobar |
 
 **Caso especial: Flete teórico = $0**
@@ -707,10 +707,11 @@ El valor se formatea en COP con punto de miles (`320.000`). Requiere `WHATSAPP_A
 Hasta ahora el control de quién aprueba/devuelve una planilla vivía **solo en el frontend**; el backend aceptaba cualquier `estado` + `aprobado_por` sin validar. Desde 2026-09-11 el endpoint resuelve el usuario (`aprobado_por`) en `baseusuarios` y autoriza cada transición con el **perfil real** (mismo patrón que `otros_costos._resolver_usuario`).
 
 - **Helper `_resolver_usuario_estado`** (`siscore_consultas.py`): 401 si falta/no existe el usuario, 403 si está inactivo; devuelve el `perfil` real.
-- **Reglas** (espejo del frontend; el ANALISTA ya no aprueba):
+- **Reglas** (espejo del frontend; desde 2026-09-17 el ANALISTA vuelve a aprobar, pero SOLO PREAPROBADO → APROBADO — las que no requieren autorización):
   | Transición | Perfiles permitidos |
   |------------|---------------------|
-  | `→ APROBADO` (desde PREAPROBADO/COORDINADOR) | ADMIN, CONTROL, COORDINADOR |
+  | `→ APROBADO` desde `PREAPROBADO` | ADMIN, CONTROL, COORDINADOR, **ANALISTA** |
+  | `→ APROBADO` desde `REQUIERE_APROBACION_COORDINADOR` (≤7%) | ADMIN, CONTROL, COORDINADOR |
   | `→ APROBADO` desde `REQUIERE_APROBACION_CONTROL` (>7%) | ADMIN, CONTROL |
   | `→ CREADO` **con** motivo (devolución/rechazo) | ADMIN, CONTROL, COORDINADOR |
   | `→ CREADO` **sin** motivo (reapertura) | ADMIN, ANALISTA |
@@ -728,6 +729,15 @@ El Excel ahora tiene 2 hojas: la de siempre (una fila por planilla) y la nueva *
 - **Fecha Creación** en ambas hojas (2026-09-16, a pedido del usuario): columna «Fecha Creación» en la hoja 1 (junto a «Fecha Preaprobado») y en la hoja 2 (tras los consecutivos). Es la `fecha_creacion` del doc; en la hoja 2 la del carro original (`datos_originales[].fecha_creacion`) con fallback a la del raíz. Formato `YYYY-MM-DD HH:MM` (UTC, igual que las demás fechas del Excel).
 - **Sin `registros_detalle`** (docs viejos): una fila por pedido del campo `codigo_pedido` (separadores `,`/`;`), cliente del doc y reparto equitativo del flete.
 - Fila TOTALES al final, auto-filtro y freeze panes. El request/respuesta no cambian (misma descarga con una hoja más); el frontend no se tocó.
+
+## Actualizaciones Recientes (2026-09-17)
+
+### SolicitudVehiculos — ANALISTA vuelve a aprobar PREAPROBADO → APROBADO
+
+El ANALISTA recupera la aprobación, pero **solo sobre planillas PREAPROBADAS** (las que NO requieren autorización: sin sobrecosto). Sigue sin poder aprobar `REQUIERE_APROBACION_COORDINADOR` ni `REQUIERE_APROBACION_CONTROL`.
+
+- **`rutas/siscore_consultas.py`**: nueva constante `PERFILES_APROBAR_PREAPROBADO = {ADMIN, CONTROL, COORDINADOR, ANALISTA}`. En `actualizar-estado-planilla`, cuando el objetivo es `APROBADO` se elige el conjunto según el `estado_anterior`: desde `PREAPROBADO` entra el ANALISTA; desde `REQUIERE_APROBACION_COORDINADOR` y `REQUIERE_APROBACION_CONTROL` quedan las reglas de siempre (el >7% sigue siendo solo ADMIN/CONTROL). Mensajes 403 diferenciados.
+- **Frontend** (`SolicitudVehiculos/page.tsx`): `puedeAprobarPlanilla` deja pasar al ANALISTA solo en `PREAPROBADO` (Swal informativo si intenta una con sobrecosto); el botón de aprobar individual y el **Aprobar masivo** (que de por sí solo toca PREAPROBADO) incluyen al ANALISTA.
 
 ## Actualizaciones Recientes (2026-08-28)
 
