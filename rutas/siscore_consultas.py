@@ -3041,6 +3041,12 @@ async def dividir_consecutivo(request: DividirConsecutivoRequest):
         carros_creados = []   # [{planilla, letra, peso}] para division_info
         docs_a_insertar = []
 
+        # Estado de los carros: si la original era borrador CREADO (operativo trabajando),
+        # los carros heredan CREADO para que el operativo pueda seguir editándolos
+        # (misma regla que guardar-busqueda y la fusión). En cualquier otro estado,
+        # la división invalida lo anterior y los carros vuelven a PREAPROBADO.
+        estado_carros = "CREADO" if original.get("estado") == "CREADO" else "PREAPROBADO"
+
         for i, carro in enumerate(carros):
             cons = consecutivos[i]
             peso_carro = float(carro.get("peso", 0) or 0)
@@ -3087,7 +3093,7 @@ async def dividir_consecutivo(request: DividirConsecutivoRequest):
                 "placa": original.get("placa"),
                 "tipo_veh_sicetac": original.get("tipo_veh_sicetac"),
                 "fecha_creacion": fecha_now,
-                "estado": "PREAPROBADO",
+                "estado": estado_carros,
                 "aprobado_por": None,
                 "fecha_aprobacion": None,
                 "consecutivo": cons["consecutivo"],
