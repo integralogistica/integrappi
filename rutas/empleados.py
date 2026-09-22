@@ -1,11 +1,15 @@
 import os
 import base64
 from datetime import datetime
+from io import BytesIO
 from typing import Optional, List
 import math
 from fastapi import FastAPI, APIRouter, HTTPException, status, Query, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import resend
@@ -247,6 +251,118 @@ async def enviar_certificado(
 
     return JSONResponse(
         status_code=200, content={"message": "Correo enviado correctamente"}
+    )
+
+
+@ruta_empleado.get("/exportar-excel")
+async def exportar_empleados_excel():
+    """
+    Descarga en Excel la tabla de empleados cargada (salarios y auxilios),
+    con los campos normalizados que usa el certificado laboral y una fila
+    de totales al final para las columnas de dinero.
+    """
+    docs = list(coleccion_empleados.find())
+    if not docs:
+        raise HTTPException(status_code=404, detail="No hay empleados cargados")
+
+    empleados = [transformar_empleado(doc) for doc in docs]
+
+    COLUMNAS = [
+        ("Identificación", lambda e: e.identificacion, None),
+        ("Nombre", lambda e: e.nombre, None),
+        ("Cargo", lambda e: e.cargo, None),
+        ("Tipo Contrato", lambda e: e.tipoContrato, None),
+        ("Fecha Ingreso", lambda e: e.fechaIngreso, None),
+        ("Básico", lambda e: e.basico, "dinero"),
+        ("Auxilio Vivienda", lambda e: e.auxilioVivienda, "dinero"),
+        ("Auxilio Alimentación", lambda e: e.auxilioAlimentacion, "dinero"),
+        ("Auxilio Movilidad", lambda e: e.auxilioMovilidad, "dinero"),
+        ("Auxilio Rodamiento", lambda e: e.auxilioRodamiento, "dinero"),
+        ("Auxilio Productividad", lambda e: e.auxilioProductividad, "dinero"),
+        ("Auxilio Comunicaciones", lambda e: e.auxilioComunic, "dinero"),
+        ("Total Devengado", None, "dinero"),
+        ("Correo", lambda e: e.correo, None),
+    ]
+
+    def _total_devengado(e: Empleado) -> float:
+        return sum(
+            v
+            for v in (
+                e.basico,
+                e.auxilioVivienda,
+                e.auxilioAlimentacion,
+                e.auxilioMovilidad,
+                e.auxilioRodamiento,
+                e.auxilioProductividad,
+                e.auxilioComunic,
+            )
+            if v is not None
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Empleados"
+
+    # Encabezado
+    fuente_header = Font(bold=True, color="FFFFFF")
+    fondo_header = PatternFill("solid", fgColor="005f56")
+    ws.append([nombre for nombre, _, _ in COLUMNAS])
+    for celda in ws[1]:
+        celda.font = fuente_header
+        celda.fill = fondo_header
+
+    # Filas (una por empleado)
+    cols_dinero = [
+        i for i, (_, _, tipo) in enumerate(COLUMNAS, start=1) if tipo == "dinero"
+    ]
+    for e in empleados:
+        fila = []
+        for nombre, getter, _ in COLUMNAS:
+            if getter is None:  # Total Devengado
+                fila.append(_total_devengado(e))
+            else:
+                fila.append(getter(e))
+        ws.append(fila)
+
+    # Formato de moneda en celdas numéricas de dinero
+    for fila_cells in ws.iter_rows(min_row=2):
+        for idx in cols_dinero:
+            celda = fila_cells[idx - 1]
+            if isinstance(celda.value, (int, float)):
+                celda.number_format = "#,##0"
+
+    # Fila de totales
+    fila_totales = ["TOTALES"] + [""] * (len(COLUMNAS) - 1)
+    ws.append(fila_totales)
+    fila_n = ws.max_row
+    ws.cell(row=fila_n, column=1).font = Font(bold=True)
+    for idx in cols_dinero:
+        letra = get_column_letter(idx)
+        celda = ws.cell(row=fila_n, column=idx)
+        celda.value = f"=SUM({letra}2:{letra}{fila_n - 1})"
+        celda.font = Font(bold=True)
+        celda.number_format = "#,##0"
+
+    # Ancho automático
+    for col in range(1, len(COLUMNAS) + 1):
+        letra = get_column_letter(col)
+        max_len = max(
+            (len(str(celda.value or "")) for celda in ws[letra]),
+            default=10,
+        )
+        ws.column_dimensions[letra].width = min(max_len + 2, 35)
+
+    archivo = BytesIO()
+    wb.save(archivo)
+    archivo.seek(0)
+
+    fecha_hoy = datetime.now().strftime("%Y%m%d")
+    return StreamingResponse(
+        archivo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="empleados_{fecha_hoy}.xlsx"'
+        },
     )
 
 
