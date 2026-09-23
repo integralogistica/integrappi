@@ -10,7 +10,10 @@
       "Bash(mv \"bd/subirEmpleados.spec\" \"scripts/subirEmpleados.spec\")",
       "Bash(mv \"bd/empleados.xlsx\" \"scripts/empleados.xlsx\")",
       "Bash(mv \"MANUAL WS TRACKING INTEGRA.docx\" \"docs/MANUAL WS TRACKING INTEGRA.docx\")",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(npx tsc *)",
+      "Bash(\"/c/Users/ASUS/OneDrive - Integra Logistica/Desarrollos/integra/integrapp-next/node_modules/.bin/tsc\" -p \"/c/Users/ASUS/OneDrive - Integra Logistica/Desarrollos/integra/integrapp-next/tsconfig.json\" --noEmit)",
+      "Bash(curl -s --max-time 5 http://127.0.0.1:8000/siscore/nombres-usuarios)"
     ]
   }
 }

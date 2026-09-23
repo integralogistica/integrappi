@@ -780,3 +780,27 @@ Catálogo de datos bancarios/conductor por placa, **scoped por regional**, para 
   ```
 
   `{{1}}` nombre conductor · `{{2}}` consecutivo · `{{3}}` manifiesto · `{{4}}` valor total (`$385.000`, el `$` lo manda el backend) · `{{5}}` valor tras retenciones (`$372.450`) o `No registrado` · `{{6}}` observaciones o `Ninguna`. Requiere aprobación en Meta; sin teléfono del conductor solo queda en log y el pago se completa igual.
+
+## Actualizaciones Recientes (2026-09-23)
+
+### Histórico — nombres legibles de los actores en `GET /siscore/historico`
+
+El modal de detalle de `/HistoricoPedidos` ahora muestra la **trazabilidad del flujo** de cada consecutivo (quién registró, quién aprobó, etc.), pero los documentos guardan **usernames** (`usuario_registro`, `aprobado_por`, …). Para que el frontend muestre **nombre y apellido**, `obtener_historico` (`rutas/siscore_consultas.py`) resuelve los usuarios al responder:
+
+- Recolecta los usernames de los 6 campos de actor (`usuario_registro`, `usuario_solicitud_autorizacion`, `usuario_modificacion`, `aprobado_por`, `devuelto_por`, `usuario_pedido_vulcano`) + el `usuario` de cada entrada de `historial_cambios`, de todos los docs del resultado.
+- Una sola consulta `$in` a `baseusuarios` (mismo patrón que el Excel histórico) y agrega a cada doc los campos **`*_nombre`** (ej: `aprobado_por_nombre`, `usuario_registro_nombre`) y a cada entrada del historial el campo `usuario_nombre`.
+- Si el username no existe en `baseusuarios`, el campo `*_nombre` queda con el username tal cual (fallback, no rompe). Sólo cambia la respuesta de `/historico`; nada se escribe en Mongo.
+
+### Trazabilidad con nombres también en `GET /siscore/obtener-resultados-recientes` (mismo día)
+
+El modal «Editar/Ver Planilla» de SolicitudVehiculos también muestra la trazabilidad, así que la resolución de nombres se extrajo a un helper compartido:
+
+- **`_resolver_nombres_trazabilidad(docs)`** (module-level, junto a los endpoints de histórico): enriquece in-place una lista de docs de planilla con `<campo>_nombre` para los 6 campos de actor de `_CAMPOS_USUARIO_TRAZABILIDAD` y `usuario_nombre` en cada entrada de `historial_cambios`. Una sola consulta `$in` a `baseusuarios`; fallback al username si no existe; no escribe en Mongo.
+- Lo usan `GET /historico` y **`GET /obtener-resultados-recientes`** (pedidos_medical, rama activa). En este último se aplica después del `find` y antes de serializar.
+
+### `GET /siscore/nombres-usuarios` — mapa username → nombre para el frontend
+
+Los usuarios no quieren ver usernames sino **nombres de personas**. Aunque `/historico` y `/obtener-resultados-recientes` ya devuelven `*_nombre`, quedaban huecos: el aviso de fila «⚠️ Devuelta por …» de SolicitudVehiculos y el estado local recién actualizado (aprobar/devolver actualiza el doc en el frontend y los `*_nombre` aún no existen hasta el próximo fetch).
+
+- Nuevo endpoint que devuelve `{USUARIO_UPPER: nombre}` de `baseusuarios` (projection sólo `usuario`+`nombre`; no expone correo/celular como sí hace `GET /baseusuarios/`).
+- Los frontends de SolicitudVehiculos e HistóricoPedidos lo consultan **una vez al montar** y resuelven con el helper `nombrePersona(valor)`: prioriza el `*_nombre` del backend, luego el mapa local, y como último recurso deja el valor tal cual. Aplica a la trazabilidad del modal, al historial de cambios y al aviso «Devuelta por» de las filas.

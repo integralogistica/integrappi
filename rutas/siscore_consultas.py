@@ -130,6 +130,19 @@ def _requiere_autorizacion_municipio(doc: dict) -> bool:
     return any(_normalizar_municipio_txt(m) == municipio_restringido for m in municipios)
 
 
+@router.get("/nombres-usuarios")
+async def obtener_nombres_usuarios():
+    """Mapa {USUARIO: nombre} de baseusuarios (solo esos dos campos). Lo consulta el
+    frontend al cargar SolicitudVehiculos/HistóricoPedidos para mostrar el NOMBRE de
+    las personas (no el username) en trazabilidad y avisos, incluso sobre estado local
+    recién actualizado donde los campos *_nombre del backend aún no llegan."""
+    return {
+        str(u.get("usuario", "")).upper(): (u.get("nombre") or "").strip()
+        for u in coleccion_baseusuarios.find({}, {"usuario": 1, "nombre": 1, "_id": 0})
+        if u.get("usuario")
+    }
+
+
 @router.get("/config-municipios-restringidos")
 async def config_municipios_restringidos():
     """Config del bloqueo por municipio para el frontend (se consulta al cargar la página;
@@ -4632,6 +4645,59 @@ async def exportar_planillas_detalle_excel(request: ExportarDetalleRequest):
 
 # ============= ENDPOINTS HISTÓRICO PEDIDOS =============
 
+# Campos de actor de una planilla cuyos usernames se resuelven a nombre legible.
+_CAMPOS_USUARIO_TRAZABILIDAD = (
+    "usuario_registro", "usuario_solicitud_autorizacion", "usuario_modificacion",
+    "aprobado_por", "devuelto_por", "usuario_pedido_vulcano",
+)
+
+
+def _resolver_nombres_trazabilidad(docs):
+    """
+    Enriquece IN-PLACE una lista de documentos de planilla con los nombres legibles
+    (baseusuarios) de sus actores: agrega `<campo>_nombre` por cada campo de
+    `_CAMPOS_USUARIO_TRAZABILIDAD` y `usuario_nombre` en cada entrada de
+    `historial_cambios`. Una sola consulta $in por llamada; si el usuario no
+    existe, el campo queda con el username tal cual (fallback). No escribe en Mongo.
+    Lo usan `GET /historico` y `GET /obtener-resultados-recientes` (modal de
+    trazabilidad del frontend).
+    """
+    todos_usuarios = set()
+    for doc in docs:
+        for _k in _CAMPOS_USUARIO_TRAZABILIDAD:
+            _u = (doc.get(_k) or "").strip()
+            if _u:
+                todos_usuarios.add(_u)
+        for _h in (doc.get("historial_cambios") or []):
+            if isinstance(_h, dict):
+                _u = (_h.get("usuario") or "").strip()
+                if _u:
+                    todos_usuarios.add(_u)
+
+    nombres_map = {}
+    if todos_usuarios:
+        for _udoc in coleccion_baseusuarios.find(
+            {"usuario": {"$in": [u.upper() for u in todos_usuarios]}},
+            {"usuario": 1, "nombre": 1, "_id": 0},
+        ):
+            _usr = str(_udoc.get("usuario", "")).upper()
+            if _usr:
+                nombres_map[_usr] = (_udoc.get("nombre") or "").strip()
+
+    def _nombre_usuario(u):
+        if not u:
+            return None
+        us = str(u).strip()
+        return nombres_map.get(us.upper()) or us or None
+
+    for doc in docs:
+        for _k in _CAMPOS_USUARIO_TRAZABILIDAD:
+            doc[f"{_k}_nombre"] = _nombre_usuario(doc.get(_k))
+        for _h in (doc.get("historial_cambios") or []):
+            if isinstance(_h, dict):
+                _h["usuario_nombre"] = _nombre_usuario(_h.get("usuario"))
+
+
 @router.get("/historico")
 async def obtener_historico(
     fecha_inicio: str = "",
@@ -4675,6 +4741,9 @@ async def obtener_historico(
         logger.info(f"[HISTORICO] Filtro: {filtro}")
 
         docs = list(coleccion_historico.find(filtro).sort("fecha_movimiento_historico", -1))
+
+        # Nombres legibles de los actores para la trazabilidad del modal del frontend.
+        _resolver_nombres_trazabilidad(docs)
 
         for doc in docs:
             doc["_id"] = str(doc["_id"])
@@ -5311,6 +5380,9 @@ async def obtener_resultados_recientes(limite: int = 100, perfil: str = "", cent
         # Traer planillas filtradas. Se INCLUYE registros_detalle para que el frontend
         # pueda expandir cada planilla y mostrar el listado de pedidos (decisión 2026-07-06).
         planillas = list(coleccion_pedidos_medical.find(filtro).sort("fecha_creacion", -1).limit(limite))
+
+        # Nombres legibles de los actores para la trazabilidad del modal del frontend.
+        _resolver_nombres_trazabilidad(planillas)
 
         # Convertir ObjectId a string
         for planilla in planillas:
