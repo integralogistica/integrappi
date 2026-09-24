@@ -1,0 +1,332 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head id="Head1"><meta http-equiv="origin-trial" content="A7vZI3v+Gz7JfuRolKNM4Aff6zaGuT7X0mf3wtoZTnKv6497cVMnhy03KDqX7kBz/q/iidW7srW31oQbBt4VhgoAAACUeyJvcmlnaW4iOiJodHRwczovL3d3dy5nb29nbGUuY29tOjQ0MyIsImZlYXR1cmUiOiJEaXNhYmxlVGhpcmRQYXJ0eVN0b3JhZ2VQYXJ0aXRpb25pbmczIiwiZXhwaXJ5IjoxNzU3OTgwODAwLCJpc1N1YmRvbWFpbiI6dHJ1ZSwiaXNUaGlyZFBhcnR5Ijp0cnVlfQ=="><title>
+	Afiliado Web
+</title><link rel="stylesheet" type="text/css" href="../Css/estilos.css">
+    <style type="text/css">
+        
+        .nuevoEstilo1 {
+            border-style: double;
+        }
+        .g-recaptcha div {
+            width:100% !important;
+            margin-left: 5%;
+        }        
+    </style>
+
+    <script type="text/javascript" async="" charset="utf-8" src="https://www.gstatic.com/recaptcha/releases/zqB-6Xpbd3lCIvi7Tr2D0pob/recaptcha__es_419.js" crossorigin="anonymous" integrity="sha384-KPYrDFX8Zg0NahyRmZsnBxe6K4m+vgQPiN8VptIFOg3WZDHK8S+Exoh/K82kf9kS"></script><script src="https://www.google.com/recaptcha/enterprise.js?render=6LdjqjksAAAAAAduGUnDTl7-kSoeSDI7S-vAazXp"></script>
+
+<script>
+    var invocado = false;
+    var padre = null;
+    padre.postMessage(true, '*');
+    function ValidaCarga() {
+        window.addEventListener('message', function (event) {
+            padre = event.source.window;
+            if (~event.origin.indexOf('https://www.adres.gov.co')) {
+                invocado = true;
+            } else {
+                redirect();
+                return;
+            }
+        });
+
+        setTimeout(function () {
+            if (invocado == false) {
+                redirect();
+            } else {
+            }
+        }, 1000);
+    }
+
+    function redirect() {
+        var iframe = document.getElementById("content");
+        var parent = iframe.parentNode;
+        iframe.parentNode.removeChild(iframe);
+
+        var pNode = document.createElement("p");
+        pNode.innerHTML = "<p>Usted accedio desde un sitio externo a la página oficial de la ADRES. Para realizar la consulta por favor dirigirse al siguiente link:<br/><a href='https://www.adres.gov.co/BDUA/Consulta-Afiliados-BDUA' target='_blank' class='texto-link' >https://www.adres.gov.co/BDUA/Consulta-Afiliados-BDUA</a></p>"
+
+        parent.append(pNode);
+    }
+
+    async function getRecaptchaToken() {
+        return new Promise((resolve, reject) => {
+            grecaptcha.enterprise.ready(async () => {
+                try {
+                    const token = await grecaptcha.enterprise.execute(
+                        '6LdjqjksAAAAAAduGUnDTl7-kSoeSDI7S-vAazXp',
+                        { action: 'LOGIN' }
+                    );
+                    resolve(token);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+    }
+
+    function validateRecaptchaToken(token) {
+        // XMLHttpRequest no es `async` por naturaleza, así que lo envolvemos en una Promise
+        // para que se comporte como una y podamos usar `await` con ella.
+        return new Promise((resolve, reject) => {
+            const url = `https://recaptcha.adres.gov.co/api/recaptcha-servi/check/token`;
+            const body = JSON.stringify({
+                token: token
+            });
+
+            // 1. Crear el objeto de la petición
+            const xhr = new XMLHttpRequest();
+
+            // 2. Configurar la petición (método, URL)
+            xhr.open("POST", url, true);
+
+            // 3. Establecer las cabeceras (headers)
+            xhr.setRequestHeader("Content-Type", "application/json");
+
+            // 4. Definir qué hacer cuando la petición se complete exitosamente
+            xhr.onload = function () {
+                // `status` 200-299 significa que la petición fue exitosa
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    // Parseamos la respuesta y resolvemos la promesa
+                    resolve(JSON.parse(xhr.responseText));
+                } else {
+                    // Si hay un error de servidor (ej. 404, 500), rechazamos la promesa
+                    reject(new Error(`Error en la API de reCAPTCHA: ${xhr.statusText}`));
+                }
+            };
+
+            // 5. Definir qué hacer si hay un error de red
+            xhr.onerror = function () {
+                reject(new Error("Error de red al intentar validar reCAPTCHA."));
+            };
+
+            // 6. Enviar la petición con el cuerpo (body)
+            xhr.send(body);
+        });
+    }
+
+    async function setRecaptchaToken(e) {
+        e.preventDefault();
+        console.log("setRecaptchaToken");('btnConsultar', ''); 
+        //if (true) return true;
+        //grecaptcha.enterprise.ready(async () => {
+        try {
+            const token = await getRecaptchaToken();
+            console.log("Token obtenido:", token);      
+            try {
+                const data = await validateRecaptchaToken(token);
+                console.log("Respuesta:", data);
+
+                if (data.data.valid) {
+                    __doPostBack('btnConsultar', '');
+                }
+
+            } catch (error) {
+                console.error("Error al consumir la API:", error);
+                __doPostBack('btnConsultar', '');
+                if (true) return true;
+            }
+
+        } catch (error) {
+            // Code to handle the error
+            console.error("An error occurred:", error);
+        }
+        return true;
+
+            /*
+            
+            */
+
+        //});
+    }
+
+    function onClick(e) {
+        e.preventDefault();
+    }
+
+</script>
+
+
+</head>
+
+<body class="parrafo" style="width: 970px; height: 651px; font-weight: normal;">
+    <div id="content" align="center">
+
+
+        <div style="width:100%; text-align:center; font-size:30px;" align="center">
+            <label style="color:#46A1DE;">Importante</label>
+            <div style="width:85%; margin:0 auto; background-color:#46A1DE;color:#fff; font-family:'Arial Narrow', sans-serif">
+                ADRES valida y refleja en su consulta la información de afiliación reportada por las EPS.
+            </div>
+        </div>
+
+
+
+        <p class="title">
+            Fecha de actualización: <span id="lblfecha">23 de Septiembre de 2026</span>
+        </p>
+   
+
+        <!--img src="../Images/imagen_consulta_bdua.png" /-->
+        <p align="justify">
+            Obtenga información sobre su afiliación en el Régimen Subsidiado o el Régimen Contributivo, como resultado de los reportes realizados por las Empresas Promotoras de Salud – EPS, de acuerdo con los tiempos establecidos para tal fin por parte de las entidades responsables del aseguramiento en salud.
+        </p>
+        <p id="pie_foto" align="justify">
+            Para obtener un resultado óptimo de la consulta se sugiere el uso del navegador Google Chrome, tener en cuenta que debe desactivar el bloqueo predeterminado de las ventanas emergentes en su navegador y elegir de manera precisa las imágenes de validación que genera la prueba Captcha, una vez se selecciona la casilla “No soy un robot”.
+        </p>
+        <br>
+        <form name="afiliado" method="post" action="./ConsultarAfiliadoWeb_2.aspx" onsubmit="javascript:return WebForm_OnSubmit();" id="afiliado">
+<div>
+<input type="hidden" name="RadScriptManager1_TSM" id="RadScriptManager1_TSM" value=";;System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35:es-CO:dd3ac3d5-1e29-4112-8fed-529caffa8f24:ea597d4b:b25378d2;Telerik.Web.UI, Version=2014.2.724.35, Culture=neutral, PublicKeyToken=121fae78165ba3d4:es-CO:cbcc33a2-4a25-4f6b-85e3-8e20bc385048:16e4e7cd:ed16cbdc" style="">
+<input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="" style="">
+<input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="" style="">
+<input type="hidden" name="__LASTFOCUS" id="__LASTFOCUS" value="" style="">
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="/wEPDwUKMTA4MjQ2MzQ2NA9kFgQCAQ8PFgIeBFRleHQFGDIzIGRlIFNlcHRpZW1icmUgZGUgMjAyNmRkAgIPZBYEAgcPEA8WBh4ORGF0YVZhbHVlRmllbGQFClRQU19JRE5fSUQeDURhdGFUZXh0RmllbGQFDlRQU19JRE5fTk9NQlJFHgtfIURhdGFCb3VuZGdkEBUOFUNlZHVsYSBkZSBDaXVkYWRhbsOtYRRUYXJqZXRhIGRlIElkZW50aWRhZBZDZWR1bGEgZGUgRXh0cmFuamVyw61hCVBhc2Fwb3J0ZQ5SZWdpc3RybyBDaXZpbBpOby4gw5puaWNvIGRlIElkLiBQZXJzb25hbBpBZHVsdG8gc2luIGlkZW50aWZpY2FjacOzbhlNZW5vciBzaW4gSWRlbnRpZmljYWNpw7NuE0Nhcm5ldCBkaXBsb23DoXRpY28XQ2VydGlmaWNhZG8gTmFjaWRvIFZpdm8OU2Fsdm8gQ29uZHVjdG8YUGVyIEVzcGVjaWFsIFBlcm1hbmVuY2lhIFBlcm1pc28gcG9yIFByb3RlY2Npw7NuIFRlbXBvcmFsCVBFUC1UdXRvchUOAkNDAlRJAkNFAlBBAlJDAk5VAkFTAk1TAkNEAkNOAlNDAlBFAlBUAlBDFCsDDmdnZ2dnZ2dnZ2dnZ2dnFgFmZAINDw8WAh4UVmFsaWRhdGlvbkV4cHJlc3Npb24FJl4oKFswLTldKXsxLDE0fSkkfF4oKFtBLVowLTldKXs4LDEwfSkkZGRkdQwcS4/Yxk77JBCBmtO3bFSdcO8JmqtZTwPouR7SNPA=" style="">
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var theForm = document.forms['afiliado'];
+if (!theForm) {
+    theForm = document.afiliado;
+}
+function __doPostBack(eventTarget, eventArgument) {
+    if (!theForm.onsubmit || (theForm.onsubmit() != false)) {
+        theForm.__EVENTTARGET.value = eventTarget;
+        theForm.__EVENTARGUMENT.value = eventArgument;
+        theForm.submit();
+    }
+}
+//]]>
+</script>
+
+
+<script src="/BDUA_Internet/WebResource.axd?d=qG7aBT_OETUNl1RMGXvZQqJIjb2LfuD1N_OunRXNF4s7x_1isSxHhldzkGYZw-HsTYksaQkYPRPnFye4KbMhz9WLLqRAP-oekzvIfbC7FKs1&amp;t=639190653332169432" type="text/javascript"></script>
+
+
+<script src="/BDUA_Internet/ScriptResource.axd?d=hYFQTa07T4k2phGJDm1l6NL4kDLN-qpLmacrornk0QRoywDwQhPvmbJsI8MQPUdUK2ZjlKIgHdjup7VzVNNN3FR1ZyEYIc3a5QUWerU4QuTsf_kuFJB_6tJ86azowXt2DUgh5HW973ESu3d2iQBIEmMOC1aBvGlj9GENBiHbE7Q1&amp;t=ffffffffa5405632" type="text/javascript"></script>
+<script src="/BDUA_Internet/Telerik.Web.UI.WebResource.axd?_TSM_HiddenField_=RadScriptManager1_TSM&amp;compress=1&amp;_TSM_CombinedScripts_=%3b%3bSystem.Web.Extensions%2c+Version%3d4.0.0.0%2c+Culture%3dneutral%2c+PublicKeyToken%3d31bf3856ad364e35%3aes-CO%3add3ac3d5-1e29-4112-8fed-529caffa8f24%3aea597d4b%3ab25378d2%3bTelerik.Web.UI%2c+Version%3d2014.2.724.35%2c+Culture%3dneutral%2c+PublicKeyToken%3d121fae78165ba3d4%3aes-CO%3acbcc33a2-4a25-4f6b-85e3-8e20bc385048%3a16e4e7cd%3aed16cbdc" type="text/javascript"></script>
+<script type="text/javascript">
+//<![CDATA[
+function WebForm_OnSubmit() {
+if (typeof(ValidatorOnSubmit) == "function" && ValidatorOnSubmit() == false) return false;
+return true;
+}
+//]]>
+</script>
+
+<div>
+
+	<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="6E080EAE" style="">
+	<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="/wEdABO4bpBtzeTnxvjSLHLzzKNqfM1ddZeM7+1N6B+q46LFz630yDzve0ACl+EHqoYtPF9xLo6Dbf/LoUnyY0Xwr4z/bqPTkeieTy3OV2ke2w41fYLeRfkvT4ygbYqTGQsEfPkedW8mPwBFkyU8Z/2Tpga3pHW3/SLAJTLX/0N7kllymz7U1CKqJL2HgoXRbkP2KEghlTVqDZgH34TpxKeXaiEq1Enm2tf/a6irOE8WCCFYpVAknI7SAnGOaycDH86NvevLPFO4Rb7R0EvbZq8jwsxS9kky5Jb6vwHI2qP/RgFQ0kOBJ5DpZnjO2C4sk8uNRfHz1y+KGTfJ6+Y0rwWE96KCOLXxGoO0dvveIN4zIa3Iv3/ed93Zez799nst5kE8CvKECrD8jc5xpRI7GCI9w78rH4SWVgMX4Qd22FZDT6F2G3oHByMapHmPxVdP1mhZxYw=" style="">
+</div>
+        <!-- 2014.2.724.35 --><div id="RadAjaxManager1SU" style="display: none;">
+	<span id="RadAjaxManager1" style="display:none;"></span>
+</div>
+        <script type="text/javascript">
+//<![CDATA[
+Sys.WebForms.PageRequestManager._initialize('RadScriptManager1', 'afiliado', ['tRadAjaxManager1SU',''], [], [], 90, '');
+//]]>
+</script>
+
+        <div id="formulario" style="margin: 0px 0px 0px 100px; align:center;">
+            <span id="lbTipoDoc" class="label">Tipo Documento:</span>
+            <select name="tipoDoc" onchange="javascript:setTimeout('__doPostBack(\'tipoDoc\',\'\')', 0)" id="tipoDoc" class="txtBox">
+	<option selected="selected" value="CC">Cedula de Ciudadanía</option>
+	<option value="TI">Tarjeta de Identidad</option>
+	<option value="CE">Cedula de Extranjería</option>
+	<option value="PA">Pasaporte</option>
+	<option value="RC">Registro Civil</option>
+	<option value="NU">No. Único de Id. Personal</option>
+	<option value="AS">Adulto sin identificación</option>
+	<option value="MS">Menor sin Identificación</option>
+	<option value="CD">Carnet diplomático</option>
+	<option value="CN">Certificado Nacido Vivo</option>
+	<option value="SC">Salvo Conducto</option>
+	<option value="PE">Per Especial Permanencia</option>
+	<option value="PT">Permiso por Protección Temporal</option>
+	<option value="PC">PEP-Tutor</option>
+
+</select>
+            <br>
+            <br>
+            <span id="lbNumDoc" class="label">Número:</span>
+            <input name="txtNumDoc" type="text" id="txtNumDoc" class="txtBox" style="">
+            <br>
+            <br>
+            <span id="RegularExpressionValidator1" style="color:Red;visibility:hidden;">Número de Identificación No Válida.</span>
+            <br>
+            <span id="RequiredFieldValidator1" style="color:Red;font-weight:bold;visibility:hidden;">El campo Número de Identificación es requerido</span>
+            <br>
+            <span id="Error" style="color:Red;font-weight:bold;"></span>
+            <br>
+            <!--*---Capcha---*-->
+            
+            
+
+            <input type="hidden" name="recaptchaToken" id="recaptchaToken" style="">
+
+            <input type="submit" name="btnConsultar" value="Consultar" onclick="return setRecaptchaToken(event);WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;btnConsultar&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, false))" id="btnConsultar" class="StandardButton" style="margin-left: 155px;">
+        </div>
+        
+<script type="text/javascript">
+//<![CDATA[
+var Page_Validators =  new Array(document.getElementById("RegularExpressionValidator1"), document.getElementById("RequiredFieldValidator1"));
+//]]>
+</script>
+
+<script type="text/javascript">
+//<![CDATA[
+var RegularExpressionValidator1 = document.all ? document.all["RegularExpressionValidator1"] : document.getElementById("RegularExpressionValidator1");
+RegularExpressionValidator1.controltovalidate = "txtNumDoc";
+RegularExpressionValidator1.errormessage = "Número de Identificación No Válida.";
+RegularExpressionValidator1.evaluationfunction = "RegularExpressionValidatorEvaluateIsValid";
+RegularExpressionValidator1.validationexpression = "^(([0-9]){1,14})$|^(([A-Z0-9]){8,10})$";
+var RequiredFieldValidator1 = document.all ? document.all["RequiredFieldValidator1"] : document.getElementById("RequiredFieldValidator1");
+RequiredFieldValidator1.controltovalidate = "txtNumDoc";
+RequiredFieldValidator1.errormessage = "El campo Número de Identificación es requerido";
+RequiredFieldValidator1.evaluationfunction = "RequiredFieldValidatorEvaluateIsValid";
+RequiredFieldValidator1.initialvalue = "";
+//]]>
+</script>
+
+
+<script type="text/javascript">
+//<![CDATA[
+
+var Page_ValidationActive = false;
+if (typeof(ValidatorOnLoad) == "function") {
+    ValidatorOnLoad();
+}
+
+function ValidatorOnSubmit() {
+    if (Page_ValidationActive) {
+        return ValidatorCommonOnSubmit();
+    }
+    else {
+        return true;
+    }
+}
+        Sys.Application.add_init(function() {
+    $create(Telerik.Web.UI.RadAjaxManager, {"_updatePanels":"","ajaxSettings":[],"clientEvents":{OnRequestStart:"",OnResponseEnd:""},"defaultLoadingPanelID":"","enableAJAX":true,"enableHistory":false,"links":[],"styles":[],"uniqueID":"RadAjaxManager1","updatePanelsRenderMode":0}, null, null, $get("RadAjaxManager1"));
+});
+
+document.getElementById('RegularExpressionValidator1').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('RegularExpressionValidator1'));
+}
+
+document.getElementById('RequiredFieldValidator1').dispose = function() {
+    Array.remove(Page_Validators, document.getElementById('RequiredFieldValidator1'));
+}
+//]]>
+</script>
+</form>
+
+
+
+
+
+    </div>
+
+
+
+<div><div class="grecaptcha-badge" data-style="bottomright" style="width: 256px; height: 60px; display: block; transition: right 0.3s; position: fixed; bottom: 14px; right: -186px; box-shadow: gray 0px 0px 5px; border-radius: 2px; overflow: hidden;"><div class="grecaptcha-logo"><iframe title="reCAPTCHA" width="256" height="60" role="presentation" name="a-3r460atu3ui6" frameborder="0" scrolling="no" sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-top-navigation allow-modals allow-popups-to-escape-sandbox allow-storage-access-by-user-activation" src="https://www.google.com/recaptcha/enterprise/anchor?ar=1&amp;k=6LdjqjksAAAAAAduGUnDTl7-kSoeSDI7S-vAazXp&amp;co=aHR0cHM6Ly9hcGxpY2FjaW9uZXMuYWRyZXMuZ292LmNvOjQ0Mw..&amp;hl=es-419&amp;v=zqB-6Xpbd3lCIvi7Tr2D0pob&amp;size=invisible&amp;anchor-ms=20000&amp;execute-ms=30000&amp;cb=nmvqcw5co249"></iframe></div><div class="grecaptcha-error"></div><textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="width: 250px; height: 40px; border: 1px solid rgb(193, 193, 193); margin: 10px 25px; padding: 0px; resize: none; display: none;"></textarea></div><iframe style="display: none;"></iframe></div></body></html>

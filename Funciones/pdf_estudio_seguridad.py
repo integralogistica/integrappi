@@ -724,8 +724,10 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     def _celda_nombre_resumen(fila: list):
         clave = fila[3] if len(fila) > 3 else None
         if clave and evidencias_resumen.get(clave):
+            # Link interno SIN subrayado (pedido del usuario): solo el color
+            # azul distingue que es clicable.
             return Paragraph(
-                f'<a href="#ev_{clave}" color="#0F2A43"><u>{escape(str(fila[0]))}</u></a>',
+                f'<a href="#ev_{clave}" color="#0F2A43">{escape(str(fila[0]))}</a>',
                 estilo_celda,
             )
         return celda(fila[0])
