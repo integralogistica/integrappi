@@ -302,16 +302,17 @@ class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
         self.assertEqual(estado, "NO_DISPONIBLE")
         self.assertEqual(error["tipo"], "portal_inconsistente")
 
-    def test_procuraduria_tiene_presupuesto_propio_90s(self):
-        """2026-09-24: el presupuesto de procuraduría baja de 300 s a 90 s
-        (decisión del usuario; SEGURIDAD_PROCURADURIA_TIMEOUT_S puede subirlo
-        sin deploy); las demás siguen con el global (150 s). El mensaje de
+    def test_procuraduria_tiene_presupuesto_propio_150s(self):
+        """2026-09-24: el presupuesto de procuraduría pasó de 300→90→150 s
+        (decisión del usuario; con 90 reventaba en horas pico: postback PGN
+        real de 101 s; SEGURIDAD_PROCURADURIA_TIMEOUT_S puede cambiarlo sin
+        deploy); las demás siguen con el global (150 s). El mensaje de
         timeout debe nombrar el presupuesto de LA fuente, no el global."""
-        self.assertEqual(orch._timeout_fuente("procuraduria"), 90.0)
+        self.assertEqual(orch._timeout_fuente("procuraduria"), 150.0)
         self.assertEqual(orch._timeout_fuente("runt"), orch.TIMEOUT_FUENTE_S)
         self.assertEqual(orch._timeout_fuente("simit"), 150.0)
         estado, error = orch._clasificar_error(asyncio.TimeoutError(), "procuraduria")
-        self.assertIn("90", error["mensaje"])
+        self.assertIn("150", error["mensaje"])
         estado, error = orch._clasificar_error(asyncio.TimeoutError(), "runt")
         self.assertIn("150", error["mensaje"])
 

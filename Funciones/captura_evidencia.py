@@ -32,3 +32,32 @@ async def capturar_viewport_jpeg(pagina, timeout_ms: int = 5000) -> bytes | None
     except Exception as exc:  # noqa: BLE001 — nunca tumba la consulta
         logger.warning("[CAPTURA EVIDENCIA] no se pudo capturar: %s", exc)
         return None
+
+
+def certificado_pdf_a_jpeg(pdf_bytes: bytes, indice_pagina: int = 0) -> bytes | None:
+    """Rasteriza una página de un PDF DESCARGADO (ej. certificado de la CGR).
+
+    Evidencia de fuentes cuyo resultado llega como descarga (la página del
+    portal no cambia tras el postback): la hoja del certificado ES el
+    resultado — el pantallazo del form solo probaría que se abrió el portal.
+    Best-effort: ante cualquier fallo devuelve None (el bot cae al viewport).
+    """
+    try:
+        import io
+
+        import pypdfium2 as pdfium
+
+        documento = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
+        try:
+            if len(documento) <= indice_pagina:
+                return None
+            bitmap = documento[indice_pagina].render(scale=2.0)
+            imagen = bitmap.to_pil().convert("RGB")
+            buffer = io.BytesIO()
+            imagen.save(buffer, "JPEG", quality=CALIDAD_JPEG)
+            return buffer.getvalue()
+        finally:
+            documento.close()
+    except Exception as exc:  # noqa: BLE001 — nunca tumba la consulta
+        logger.warning("[CAPTURA EVIDENCIA] PDF no rasterizable: %s", exc)
+        return None

@@ -42,9 +42,9 @@ from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 try:  # importado como paquete (orquestador) o standalone (CLI)
-    from Funciones.captura_evidencia import capturar_viewport_jpeg
+    from Funciones.captura_evidencia import capturar_viewport_jpeg, certificado_pdf_a_jpeg
 except ImportError:  # pragma: no cover - ejecución como script
-    from captura_evidencia import capturar_viewport_jpeg
+    from captura_evidencia import capturar_viewport_jpeg, certificado_pdf_a_jpeg
 
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -245,9 +245,15 @@ async def consultar_antecedentes_fiscales(cedula: str, headed: bool = False) -> 
 
             # Dump de debug (jamás tumba la consulta).
             html = await vista.content()
-            # Evidencia: el certificado SOLO llega como descarga — la captura
-            # del formulario SIBOR respalda que la consulta se realizó.
-            captura = await capturar_viewport_jpeg(pagina)
+            # Evidencia: el certificado SOLO llega como descarga y la página
+            # del form NO cambia tras el postback — la evidencia real es la
+            # HOJA del certificado (se rasteriza la primera página). Si el
+            # rasterizado falla, cae al pantallazo del portal.
+            captura = None
+            if pdf_bytes:
+                captura = certificado_pdf_a_jpeg(pdf_bytes)
+            if captura is None:
+                captura = await capturar_viewport_jpeg(pagina)
             try:
                 SALIDA.mkdir(exist_ok=True)
                 if pdf_bytes:

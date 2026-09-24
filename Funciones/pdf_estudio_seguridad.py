@@ -65,6 +65,16 @@ _TZ_BOGOTA = timezone(timedelta(hours=-5))  # Colombia es UTC−5
 ANCHO, ALTO = A4
 MARGEN = 16 * mm
 
+# --- Marca del producto (seguriDatia) -----------------------------------------
+# Logo horizontal con transparencia (1448×396): va en la cabecera de TODAS
+# las páginas (_encabezado). Best-effort: si el archivo falta, el PDF sale
+# sin logo pero idéntico en todo lo demás.
+MARCA = "seguriDatia"
+LOGO_SEGURIDATIA = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "imagenes", "Logo seguriDatia.png",
+)
+
 # Colores de estado (plan): EXITO verde, ADVERTENCIA ámbar, fallo rojo.
 COLOR_EXITO = colors.HexColor("#1A7F37")
 COLOR_ADVERTENCIA = colors.HexColor("#B58900")
@@ -221,28 +231,67 @@ class NumberedCanvas(canvas_module.Canvas):
         kwargs.setdefault("invariant", 1)
         super().__init__(*args, **kwargs)
         self._saved: list = []
+        self._destinos_pagina: list = []
+
+    def bookmarkPage(self, key, *args, **kwargs):
+        """Registra qué anclas (<a name>) se dibujan en la página ACTUAL.
+
+        Con el two-pass, el bookmarkPage del armado liga el destino a la
+        única página del doc que existe entonces; en save() se re-liga a la
+        página real que se emite.
+        """
+        resultado = super().bookmarkPage(key, *args, **kwargs)
+        self._destinos_pagina.append(key)
+        return resultado
 
     def showPage(self):
-        self._saved.append(dict(self.__dict__))
+        self._saved.append((dict(self.__dict__), list(self._destinos_pagina)))
+        self._destinos_pagina = []
         self._startPage()
 
     def save(self):
         total = len(self._saved)
-        for estado in self._saved:
+        for estado, destinos in self._saved:
             self.__dict__.update(estado)
+            if destinos:
+                # Los enlaces internos (botón ver evidencia del resumen)
+                # deben caer en la página que se va a emitir AHORA.
+                pageref = self._doc.thisPageRef()
+                for clave in destinos:
+                    destino = self._destinations.get(clave)
+                    if destino is not None:
+                        destino.setPage(pageref)
             self._dibujar_pie(total)
             super().showPage()
         super().save()
 
     def _dibujar_pie(self, total: int):
+        from reportlab.lib.utils import simpleSplit
+
         self.saveState()
+        # Bloque legal seguriDatia (pedido 2026-09-24): disclaimer de calidad
+        # del dato + trazabilidad de quién generó el reporte, en TODAS las
+        # páginas. 5.2 pt gris para caber entre el marco (14 mm) y el borde.
+        disclaimer = getattr(self, "_pie_disclaimer", "")
+        generado = getattr(self, "_pie_generado", "")
+        y = 13.2 * mm
+        for linea in simpleSplit(disclaimer, "Helvetica", 5.2, ANCHO - 2 * MARGEN) if disclaimer else []:
+            self.setFont("Helvetica", 5.2)
+            self.setFillColor(COLOR_NEUTRO)
+            self.drawCentredString(ANCHO / 2, y, linea)
+            y -= 2.3 * mm
+        if generado:
+            self.setFont("Helvetica-Bold", 5.4)
+            self.setFillColor(COLOR_NEUTRO)
+            for linea in simpleSplit(generado, "Helvetica-Bold", 5.4, ANCHO - 2 * MARGEN):
+                self.drawCentredString(ANCHO / 2, y, linea)
+                y -= 2.4 * mm
         self.setFont("Helvetica", 7)
         self.setFillColor(COLOR_NEUTRO)
-        self.drawString(MARGEN, 8 * mm, "Documento confidencial — uso restringido al proceso de selección")
         consulta_id = getattr(self, "_consulta_id_pdf", "")
         if consulta_id:
-            self.drawRightString(ANCHO - MARGEN, 8 * mm, consulta_id)
-        self.drawCentredString(ANCHO / 2, 8 * mm, f"Página {self._pageNumber} de {total}")
+            self.drawRightString(ANCHO - MARGEN, 2.5 * mm, consulta_id)
+        self.drawCentredString(ANCHO / 2, 2.5 * mm, f"Página {self._pageNumber} de {total}")
         self.restoreState()
 
 
@@ -253,6 +302,8 @@ class CanvasEstudio(NumberedCanvas):
     _consulta_id_pdf = ""
     _wm_l1 = ""
     _wm_l2 = ""
+    _pie_disclaimer = ""
+    _pie_generado = ""
 
 
 def _marca_agua(cv: canvas_module.Canvas, doc: BaseDocTemplate):
@@ -273,17 +324,55 @@ def _marca_agua(cv: canvas_module.Canvas, doc: BaseDocTemplate):
     cv.restoreState()
 
 
+_LOGO_CACHE: dict = {}
+
+
+def _lector_logo():
+    """ImageReader del logo seguriDatia, pre-escalado y cacheado UNA vez.
+
+    El PNG original (1448×396, 400 KB) re-procesado por página hacía la
+    generación ~2× más lenta: se reduce a ~420 px de ancho (suficiente para
+    ~28 mm impresos) y se reutiliza en todas las páginas.
+    """
+    if "lector" not in _LOGO_CACHE:
+        buffer = io.BytesIO()
+        from PIL import Image as ImagenPIL
+
+        with ImagenPIL.open(LOGO_SEGURIDATIA) as img:
+            ancho_objetivo = 420
+            alto_objetivo = round(img.height * ancho_objetivo / img.width)
+            img = img.resize((ancho_objetivo, alto_objetivo), ImagenPIL.LANCZOS)
+            img.save(buffer, "PNG")
+        buffer.seek(0)
+        _LOGO_CACHE["lector"] = ImageReader(buffer)
+    return _LOGO_CACHE["lector"]
+
+
 def _encabezado(cv: canvas_module.Canvas, doc: BaseDocTemplate):
-    """Línea superior de identificación en cada página."""
+    """Cabecera de cada página: identificación + logo seguriDatia (derecha)."""
     cv.saveState()
     cv.setFont("Helvetica", 7)
     cv.setFillColor(COLOR_NEUTRO)
-    cv.drawString(MARGEN, ALTO - 10 * mm, "ESTUDIO DE SEGURIDAD")
     consulta_id = getattr(CanvasEstudio, "_consulta_id_pdf", "")
-    if consulta_id:
-        cv.drawRightString(ANCHO - MARGEN, ALTO - 10 * mm, f"Consulta {consulta_id}")
+    titulo = "ESTUDIO DE SEGURIDAD" + (f" — Consulta {consulta_id}" if consulta_id else "")
+    cv.drawString(MARGEN, ALTO - 10 * mm, titulo)
+    # Logo seguriDatia arriba a la derecha (PNG con alfa; ~3,66:1). El fallo
+    # del logo JAMÁS rompe el informe.
+    try:
+        lector_logo = _lector_logo()
+        ancho_logo, alto_logo = lector_logo.getSize()
+        alto_dibujo = 7.5 * mm
+        ancho_dibujo = alto_dibujo * (ancho_logo / alto_logo)
+        cv.drawImage(
+            lector_logo,
+            ANCHO - MARGEN - ancho_dibujo, ALTO - 13 * mm,
+            width=ancho_dibujo, height=alto_dibujo,
+            mask="auto",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Logo seguriDatia no se pudo dibujar: %s", exc)
     cv.setStrokeColor(COLOR_FONDO_TABLA)
-    cv.line(MARGEN, ALTO - 12 * mm, ANCHO - MARGEN, ALTO - 12 * mm)
+    cv.line(MARGEN, ALTO - 15 * mm, ANCHO - MARGEN, ALTO - 15 * mm)
     cv.restoreState()
 
 
@@ -320,6 +409,19 @@ def _hora_colombia(valor) -> str:
         return dt.astimezone(_TZ_BOGOTA).strftime("%d/%m/%Y %H:%M")
     except Exception:
         return ""
+
+
+_MESES_ABREV = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+                7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+
+
+def _fecha_pie_generado(dt: datetime | None) -> str:
+    """datetime (ya en Colombia) → '24, Sep 2026 a las 11:22AM' (pie seguriDatia)."""
+    if not dt:
+        return ""
+    hora12 = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.day}, {_MESES_ABREV.get(dt.month, '')} {dt.year} a las {hora12}:{dt.minute:02d}{ampm}"
 
 
 # --- Construcción del PDF ------------------------------------------------------
@@ -366,7 +468,24 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     fecha_wm = creado.replace(tzinfo=timezone.utc).astimezone(_TZ_BOGOTA).strftime("%d/%m/%Y %H:%M") if creado else ""
     CanvasEstudio._consulta_id_pdf = consulta_id
     CanvasEstudio._wm_l1 = f"{estudio.get('empresa_nombre', '')} | {estudio.get('usuario', '')} | {fecha_wm}"
-    CanvasEstudio._wm_l2 = f"{consulta_id} | Generado por Integra Logística"
+    CanvasEstudio._wm_l2 = f"{consulta_id} | Generado por {MARCA}"
+    # Pie legal seguriDatia en TODAS las páginas (pedido 2026-09-24): la fecha
+    # sale del creado_en del doc (reproducible) y el generador del usuario
+    # del estudio (variable: quien lanzó la consulta).
+    CanvasEstudio._pie_disclaimer = (
+        f"El informe de {MARCA} es el resultado de la obtención de datos públicos en su origen. "
+        "El uso de la información y sus decisiones resultantes son responsabilidad del usuario final. "
+        f"La calidad del dato es atribuible a la fuente y no a {MARCA}. Para mayor certeza puede "
+        f"acudir directamente a la fuente pública que ofrece la información. {MARCA} no administra "
+        "o gestiona las fuentes de consulta."
+    )
+    creado_co = creado.replace(tzinfo=timezone.utc).astimezone(_TZ_BOGOTA) if creado else None
+    generador = estudio.get("usuario_nombre") or estudio.get("usuario") or "—"
+    correo_gen = estudio.get("usuario_correo") or "—"
+    CanvasEstudio._pie_generado = (
+        f"Este reporte fue generado el {_fecha_pie_generado(creado_co)}. "
+        f"Reporte generado por: {generador}. Correo: {correo_gen}."
+    )
 
     doc = BaseDocTemplate(
         buffer,
@@ -487,6 +606,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Manifiestos RNDC (365 días)",
             etiqueta_rndc,
             f"{rndc.get('total', 0)} viajes registrados" if rndc.get("estado") == "EXITO" else _resumen_error(rndc),
+            "manifiestos_rndc",
         ])
     if _corrio(cgr):
         etiqueta_cgr, _ = ESTADO_FUENTE_TEXTO.get(cgr.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -494,6 +614,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Contraloría General de la República — Antecedentes Fiscales",
             etiqueta_cgr,
             _texto_veredicto_contraloria(cgr),
+            "contraloria",
         ])
     if _corrio(delitos):
         etiqueta_del, _ = ESTADO_FUENTE_TEXTO.get(delitos.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -501,6 +622,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Policía — Inhabilidades Ley 1918 (delitos sexuales contra menores)",
             etiqueta_del,
             _texto_veredicto_delitos(delitos),
+            "delitos_sexuales",
         ])
     if _corrio(pol):
         etiqueta_pol, _ = ESTADO_FUENTE_TEXTO.get(pol.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -508,6 +630,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Policía Nacional — Antecedentes Judiciales",
             etiqueta_pol,
             _texto_veredicto_policia(pol),
+            "policia",
         ])
     if _corrio(runt):
         etiqueta_runt, _ = ESTADO_FUENTE_TEXTO.get(runt.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -515,6 +638,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             f"RUNT — Vehículo {estudio.get('placa') or (runt.get('placa') or '')}".rstrip(),
             etiqueta_runt,
             _texto_veredicto_runt(runt),
+            "runt",
         ])
     if _corrio(simit):
         etiqueta_simit, _ = ESTADO_FUENTE_TEXTO.get(simit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -522,6 +646,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             f"SIMIT — Comparendos placa {estudio.get('placa') or (simit.get('placa') or '')}".rstrip(),
             etiqueta_simit,
             _texto_veredicto_simit(simit),
+            "simit",
         ])
     if _corrio(sena):
         etiqueta_sena, _ = ESTADO_FUENTE_TEXTO.get(sena.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -529,6 +654,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "SENA — Certificados de formación",
             etiqueta_sena,
             _texto_veredicto_sena(sena),
+            "sena",
         ])
     if _corrio(ofac):
         etiqueta_ofac, _ = ESTADO_FUENTE_TEXTO.get(ofac.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -536,25 +662,27 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "OFAC — Lista SDN (Lista Clinton)",
             etiqueta_ofac,
             _texto_veredicto_ofac(ofac),
+            "ofac",
         ])
     if _corrio(ofac_nit):
         etiqueta_ofac_nit, _ = ESTADO_FUENTE_TEXTO.get(ofac_nit.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
-        filas_resumen.append(["OFAC — Empresas por NIT", etiqueta_ofac_nit, _texto_veredicto_ofac(ofac_nit)])
+        filas_resumen.append(["OFAC — Empresas por NIT", etiqueta_ofac_nit, _texto_veredicto_ofac(ofac_nit), "ofac_nit"])
     if _corrio(onu_ue):
         etiqueta_onu, _ = ESTADO_FUENTE_TEXTO.get(onu_ue.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
             "ONU/UE — Listas internacionales de sanciones",
             etiqueta_onu,
             _texto_veredicto_onu_ue(onu_ue),
+            "onu_ue",
         ])
-    for fuente_bdme, etiqueta in ((bdme, "BDME — Persona por cédula"), (bdme_nit, "BDME — Empresa por NIT")):
+    for fuente_bdme, etiqueta, clave_bdme in ((bdme, "BDME — Persona por cédula", "bdme"), (bdme_nit, "BDME — Empresa por NIT", "bdme_nit")):
         if _corrio(fuente_bdme):
             estado_txt, _ = ESTADO_FUENTE_TEXTO.get(fuente_bdme.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
             if fuente_bdme.get("estado") in {"EXITO", "ADVERTENCIA"}:
                 veredicto = "REPORTADO EN EL BDME" if fuente_bdme.get("reportado") else "NO REPORTADO EN EL BDME"
             else:
                 veredicto = _resumen_error(fuente_bdme)
-            filas_resumen.append([etiqueta, estado_txt, veredicto])
+            filas_resumen.append([etiqueta, estado_txt, veredicto, clave_bdme])
     if _corrio(rama_judicial):
         estado_txt, _ = ESTADO_FUENTE_TEXTO.get(rama_judicial.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         total_rama = int(rama_judicial.get("total_procesos") or 0)
@@ -562,13 +690,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                      if total_rama else "SIN PROCESOS PARA EL NOMBRE CONSULTADO")
         if rama_judicial.get("estado") not in {"EXITO", "ADVERTENCIA"}:
             veredicto = _resumen_error(rama_judicial)
-        filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto])
+        filas_resumen.append(["Rama Judicial — Procesos por nombre", estado_txt, veredicto, "rama_judicial"])
     if _corrio(rues):
         etiqueta_rues, _ = ESTADO_FUENTE_TEXTO.get(rues.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
             f"RUES — Registro Mercantil NIT {estudio.get('nit') or (rues.get('nit') or '')}".rstrip(),
             etiqueta_rues,
             _texto_veredicto_rues(rues),
+            "rues",
         ])
     # Procuraduría SIEMPRE de última en el resumen (pedido 2026-09-15): es la
     # fuente más lenta y el usuario quiere el veredicto disciplinario
@@ -579,17 +708,33 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "Procuraduría General de la Nación",
             etiqueta_proc,
             _texto_veredicto(proc),
+            "procuraduria",
         ])
     estados_resumen = [
         (fuente or {}).get("estado")
         for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, proc)
         if _corrio(fuente)
     ]
+    # Botón de navegación (pedido 2026-09-24): el nombre de la fuente en el
+    # resumen es un LINK INTERNO a la página de su evidencia (ancla ev_<fuente>
+    # en la sección final) — solo si la fuente tiene evidencia (las de
+    # API/dataset no generan captura).
+    evidencias_resumen = estudio.get("evidencias") or {}
+
+    def _celda_nombre_resumen(fila: list):
+        clave = fila[3] if len(fila) > 3 else None
+        if clave and evidencias_resumen.get(clave):
+            return Paragraph(
+                f'<a href="#ev_{clave}" color="#0F2A43"><u>{escape(str(fila[0]))}</u></a>',
+                estilo_celda,
+            )
+        return celda(fila[0])
+
     tabla_resumen = Table(
         [
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
         ] + [
-            [celda(v) for v in fila]
+            [_celda_nombre_resumen(fila), celda(fila[1]), celda(fila[2])]
             for fila in filas_resumen[1:]
         ],
         colWidths=[62 * mm, 38 * mm, 60 * mm],
@@ -1691,7 +1836,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                 (fuentes.get(fuente_ev) or {}).get("consultado_en")
             )
             sha_corto = (info_ev.get("sha256") or "")[:16]
-            cuento.append(Paragraph(escape(titulo_ev), estilo_h2))
+            # Ancla de destino del link del resumen (botón "ver evidencia").
+            cuento.append(Paragraph(f'<a name="ev_{fuente_ev}"/>' + escape(titulo_ev), estilo_h2))
             cuento.append(Paragraph(
                 f"Captura: {momento or '—'} · SHA-256: {sha_corto or '—'}",
                 estilo_peq,
