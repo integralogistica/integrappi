@@ -14,6 +14,9 @@ Estructura (referencia: reporte de TusDatos):
   6. Marca de agua diagonal en TODAS las páginas: empresa | usuario | fecha |
      consulta_id (identifica el origen de cualquier copia/screenshot).
   7. Footer "Página X de Y" (NumberedCanvas de dos pasadas).
+  8. Evidencias de consulta: pantallazo del portal por fuente (patrón
+     TusDatos; solo fuentes de navegador — las de API/dataset no generan
+     captura). Los bytes viven en GCS privado (`evidencias` del doc).
 """
 from __future__ import annotations
 
@@ -33,6 +36,8 @@ from reportlab.platypus import (
     BaseDocTemplate,
     CondPageBreak,
     Frame,
+    Image,
+    PageBreak,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -40,6 +45,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 from xml.sax.saxutils import escape
+
+from reportlab.lib.utils import ImageReader
 
 # PDF reproducible byte a byte: fija /CreationDate y el /ID del trailer.
 # Sin esto, el mismo doc de estudio generaría hashes distintos y la
@@ -302,6 +309,19 @@ def _qr_verificacion(url: str, tamano: float = 24 * mm):
         return Paragraph(f"Verificación: {url}", ParagraphStyle("qr_fallback", fontName="Helvetica", fontSize=6))
 
 
+def _hora_colombia(valor) -> str:
+    """Fecha/hora UTC (datetime o ISO naive) → 'dd/mm/aaaa HH:MM' Colombia."""
+    if not valor:
+        return ""
+    try:
+        dt = valor if isinstance(valor, datetime) else datetime.fromisoformat(str(valor))
+        if dt.tzinfo is None:  # fechas Mongo: naive pero UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_TZ_BOGOTA).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return ""
+
+
 # --- Construcción del PDF ------------------------------------------------------
 
 def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
@@ -551,7 +571,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             _texto_veredicto_rues(rues),
         ])
     # Procuraduría SIEMPRE de última en el resumen (pedido 2026-09-15): es la
-    # fuente más lenta (300 s) y el usuario quiere el veredicto disciplinario
+    # fuente más lenta y el usuario quiere el veredicto disciplinario
     # como cierre del informe.
     if _corrio(proc):
         etiqueta_proc, _ = ESTADO_FUENTE_TEXTO.get(proc.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
@@ -1439,7 +1459,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
 
     # ── 3. Detalle Procuraduría — SIEMPRE LA ÚLTIMA fuente del informe ───────
     # (pedido 2026-09-15: el veredicto disciplinario de la PGN queda como
-    # cierre; además es la fuente más lenta, 300 s de presupuesto propio).
+    # cierre; además es la fuente más lenta del módulo).
     if _corrio(proc):
         _antes_de_seccion(proc)
         cuento.append(Paragraph("Antecedentes disciplinarios — Procuraduría General de la Nación", estilo_h2))
@@ -1627,6 +1647,83 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         "responsable del tratamiento de este documento."
     )
     cuento.append(Paragraph(" ".join(bloques_legal), estilo_peq))
+
+    # ── 8. Evidencias de consulta (pantallazos del portal por fuente) ──────
+    # Patrón TusDatos: una página por fuente con la captura del viewport del
+    # portal en el momento de la consulta. Solo fuentes de navegador; las de
+    # API/dataset (OFAC, ONU/UE, RUES) no generan captura. Los bytes viven en
+    # GCS privado y el doc guarda la referencia → la REGENERACIÓN los relee.
+    evidencias = estudio.get("evidencias") or {}
+    if evidencias:
+        # Mismo orden canónico del informe (Procuraduría siempre de última).
+        orden_evidencias = (
+            "manifiestos_rndc", "contraloria", "delitos_sexuales", "policia",
+            "runt", "simit", "sena", "bdme", "bdme_nit", "rama_judicial",
+            "procuraduria",
+        )
+        nombres_evidencia = {
+            "manifiestos_rndc": "Manifiestos RNDC (365 días)",
+            "contraloria": "Contraloría General — Antecedentes Fiscales",
+            "delitos_sexuales": "Policía — Inhabilidades Ley 1918",
+            "policia": "Policía Nacional — Antecedentes Judiciales",
+            "runt": f"RUNT — Vehículo {estudio.get('placa') or ''}".rstrip(),
+            "simit": f"SIMIT — Comparendos placa {estudio.get('placa') or ''}".rstrip(),
+            "sena": "SENA — Certificados de formación",
+            "bdme": "BDME — Persona por cédula",
+            "bdme_nit": "BDME — Empresa por NIT",
+            "rama_judicial": "Rama Judicial — Consulta Nacional de Procesos",
+            "procuraduria": "Procuraduría General de la Nación",
+        }
+        cuento.append(PageBreak())
+        cuento.append(Paragraph("Evidencias de consulta", estilo_h2))
+        cuento.append(Paragraph(
+            "Capturas del área visible del portal en el momento de la consulta (una por fuente), "
+            "incluidas como soporte de auditoría de que la consulta se realizó contra la fuente "
+            "oficial. Corresponden a lo mostrado por el portal en la fecha y hora indicadas; las "
+            "fuentes consultadas por API o dataset oficial (OFAC, ONU/UE, RUES) no generan captura.",
+            estilo_peq,
+        ))
+        for fuente_ev in [f for f in orden_evidencias if f in evidencias]:
+            info_ev = evidencias[fuente_ev] or {}
+            titulo_ev = nombres_evidencia.get(fuente_ev, fuente_ev)
+            cuento.append(PageBreak())
+            momento = _hora_colombia(info_ev.get("capturado_en")) or _hora_colombia(
+                (fuentes.get(fuente_ev) or {}).get("consultado_en")
+            )
+            sha_corto = (info_ev.get("sha256") or "")[:16]
+            cuento.append(Paragraph(escape(titulo_ev), estilo_h2))
+            cuento.append(Paragraph(
+                f"Captura: {momento or '—'} · SHA-256: {sha_corto or '—'}",
+                estilo_peq,
+            ))
+            cuento.append(Spacer(0, 3 * mm))
+            datos_img = None
+            try:
+                from Funciones import storage_seguridad
+
+                datos_img = storage_seguridad.descargar_blob(info_ev.get("gcs_ruta") or "")
+            except Exception as exc:
+                logger.error("Evidencia %s no se pudo descargar de GCS: %s", fuente_ev, exc)
+            incrustada = False
+            if datos_img:
+                try:
+                    lector = ImageReader(io.BytesIO(datos_img))
+                    w_img, h_img = lector.getSize()
+                    ancho_util = ANCHO - 2 * MARGEN
+                    alto_util = ALTO - 30 * mm - 60 * mm  # marco menos título+metadatos
+                    escala = min(ancho_util / w_img, alto_util / h_img)
+                    # Image() exige str/file-like (un ImageReader lo rechaza en
+                    # reportlab 4.x: "expected str, bytes or os.PathLike object")
+                    cuento.append(Image(io.BytesIO(datos_img), width=w_img * escala, height=h_img * escala))
+                    incrustada = True
+                except Exception as exc:
+                    logger.error("Evidencia %s no se pudo incrustar: %s", fuente_ev, exc)
+            if not incrustada:
+                cuento.append(Paragraph(
+                    f"Evidencia de {escape(titulo_ev)} no disponible en este momento "
+                    "(la captura no se pudo recuperar del almacenamiento privado).",
+                    estilo_normal,
+                ))
 
     doc.build(cuento, canvasmaker=CanvasEstudio)
     buffer.seek(0)

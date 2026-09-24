@@ -1154,5 +1154,89 @@ class TestFechaLegible(unittest.TestCase):
             self.assertNotIn(fecha_iso, texto, f"{fecha_iso} debió ir como {_fecha_legible(fecha_iso)}")
 
 
+def _jpeg_prueba(ancho=200, alto=120) -> bytes:
+    """JPEG real de tamaño conocido (Pillow ya es dependencia del proyecto)."""
+    import io
+
+    from PIL import Image as ImagenPIL
+
+    buffer = io.BytesIO()
+    ImagenPIL.new("RGB", (ancho, alto), color=(30, 60, 120)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+class TestSeccionEvidencias(unittest.TestCase):
+    """Sección final 'Evidencias de consulta' (pantallazos por fuente, patrón
+    TusDatos): una página por fuente con la imagen de GCS; si el blob no se
+    puede recuperar, placeholder honesto en vez de romper el informe."""
+
+    def _fixture_con_evidencias(self):
+        estudio = estudio_fixture()
+        estudio["evidencias"] = {
+            "manifiestos_rndc": {
+                "gcs_ruta": "SeguridadEstudios/x/2026/ES-TEST0001_captura_manifiestos_rndc.jpg",
+                "sha256": "ab12" * 16,
+                "tamano": 20480,
+                "capturado_en": datetime(2026, 9, 24, 14, 30, 0),
+            },
+            "procuraduria": {
+                "gcs_ruta": "SeguridadEstudios/x/2026/ES-TEST0001_captura_procuraduria.jpg",
+                "sha256": "cd34" * 16,
+                "tamano": 18432,
+                "capturado_en": datetime(2026, 9, 24, 14, 31, 0),
+            },
+        }
+        return estudio
+
+    def test_con_evidencias_agrega_paginas_con_titulo_por_fuente(self):
+        from unittest.mock import patch
+
+        from Funciones import storage_seguridad
+
+        jpeg = _jpeg_prueba()
+        estudio = self._fixture_con_evidencias()
+        paginas_base = len(_texto_por_pagina(generar_pdf_estudio(estudio_fixture())))
+        with patch.object(storage_seguridad, "descargar_blob", return_value=jpeg):
+            contenido = generar_pdf_estudio(estudio)
+        self.assertTrue(contenido.startswith(b"%PDF"))
+        paginas = _texto_por_pagina(contenido)
+        self.assertEqual(len(paginas), paginas_base + 1 + len(estudio["evidencias"]))
+        texto = _texto_plano(contenido)
+        self.assertIn("Evidenciasdeconsulta", texto)
+        # Una página por fuente con su título legible (orden canónico, PGN última).
+        self.assertIn("ManifiestosRNDC", texto)
+        self.assertIn("ProcuraduríaGeneraldelaNación", texto)
+
+    def test_sin_evidencias_el_pdf_queda_igual(self):
+        # Docs previos (o fuentes sin navegador): la sección no aparece.
+        texto = _texto_plano(generar_pdf_estudio(estudio_fixture()))
+        self.assertNotIn("Evidenciasdeconsulta", texto)
+
+    def test_blob_irrecuperable_deja_placeholder_honesto(self):
+        from unittest.mock import patch
+
+        from Funciones import storage_seguridad
+
+        estudio = self._fixture_con_evidencias()
+        with patch.object(storage_seguridad, "descargar_blob", side_effect=RuntimeError("404")):
+            contenido = generar_pdf_estudio(estudio)
+        texto = _texto_plano(contenido)
+        self.assertIn("Evidenciasdeconsulta", texto)
+        self.assertIn("nodisponible", texto)
+        self.assertEqual(texto.count("nodisponible"), len(estudio["evidencias"]))
+
+    def test_evidencias_reproducible_byte_a_byte(self):
+        from unittest.mock import patch
+
+        from Funciones import storage_seguridad
+
+        jpeg = _jpeg_prueba()
+        estudio = self._fixture_con_evidencias()
+        with patch.object(storage_seguridad, "descargar_blob", return_value=jpeg):
+            primero = generar_pdf_estudio(estudio)
+            segundo = generar_pdf_estudio(estudio)
+        self.assertEqual(primero, segundo)
+
+
 if __name__ == "__main__":
     unittest.main()

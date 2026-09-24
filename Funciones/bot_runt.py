@@ -51,6 +51,11 @@ import requests
 from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -476,6 +481,7 @@ async def consultar_vehiculo_runt(placa: str, cedula: str, headed: bool = False)
 
             resultado = await _leer_resultado(pagina)
             texto_resultado = _ICONOS_MATERIAL.sub(" ", " ".join((await pagina.inner_text("body")).split()))
+            captura = await capturar_viewport_jpeg(pagina)
 
             # 7) Anti-envenenamiento: sin datos del vehículo, sin pólizas y sin
             #    mensaje determinante = respuesta incompleta; NUNCA cachear.
@@ -496,6 +502,7 @@ async def consultar_vehiculo_runt(placa: str, cedula: str, headed: bool = False)
                 "texto_resultado": texto_resultado[:1500],
                 "pdf_bytes": None,
                 "pdf_ruta": None,
+                "captura_jpg": captura,
                 "html": await pagina.content(),
             }
         finally:

@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 logger = logging.getLogger(__name__)
 
 PORTAL_URL = "https://rndc2.mintransporte.gov.co/logistica/ctl/HistorialViajes/mid/394"
@@ -184,6 +189,7 @@ async def _extraer_resultados(pagina, filtros: Dict[str, Any], captcha_usado: st
         "columnas": columnas,
         "viajes": viajes,
         "mensaje_portal": _mensaje_relevante(cuerpo),
+        "captura_jpg": await capturar_viewport_jpeg(pagina),
         "html": await pagina.content(),
     }
 

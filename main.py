@@ -51,6 +51,7 @@ from rutas.seguridad_estudios import admin_router as ruta_seguridad_admin, route
 from rutas.seguridad_cobro import router as ruta_seguridad_cobro
 from rutas.inventario_escaner import ruta_inventario_escaner
 from rutas.controlador_gastos import ruta_controlador_gastos
+from rutas.tusdatos import ruta_tusdatos
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,7 @@ app.include_router(ruta_seguridad_admin)
 app.include_router(ruta_seguridad_cobro)
 app.include_router(ruta_inventario_escaner)
 app.include_router(ruta_controlador_gastos)
+app.include_router(ruta_tusdatos)
 
 @app.get("/", tags=['Home'])
 async def root():

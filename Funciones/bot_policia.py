@@ -42,6 +42,11 @@ import requests
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -235,6 +240,7 @@ async def consultar_antecedentes_policia(cedula: str, headed: bool = False) -> D
 
             html = await pagina.content()
             texto_resultado = " ".join((await pagina.inner_text("body")).split())
+            captura = await capturar_viewport_jpeg(pagina)
 
             # Dump de debug: la carpeta se crea aquí (no en la rama del PDF) y
             # JAMÁS tumba la consulta (fix 2026-08-30: FileNotFoundError por
@@ -299,6 +305,7 @@ async def consultar_antecedentes_policia(cedula: str, headed: bool = False) -> D
                 "texto_resultado": texto_resultado[:1500],
                 "pdf_bytes": pdf_bytes,
                 "pdf_ruta": pdf_ruta,
+                "captura_jpg": captura,
                 "html": html,
             }
         finally:

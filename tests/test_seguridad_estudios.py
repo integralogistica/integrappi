@@ -302,15 +302,16 @@ class TestFuenteProcuraduriaAntiEnvenenamiento(unittest.TestCase):
         self.assertEqual(estado, "NO_DISPONIBLE")
         self.assertEqual(error["tipo"], "portal_inconsistente")
 
-    def test_procuraduria_tiene_presupuesto_propio_300s(self):
-        """2026-09-04: procuraduría recibe 300 s (el postback de la PGN es la
-        fuente más lenta); las demás siguen con el global (150 s). El mensaje
-        de timeout debe nombrar el presupuesto de LA fuente, no el global."""
-        self.assertEqual(orch._timeout_fuente("procuraduria"), 300.0)
+    def test_procuraduria_tiene_presupuesto_propio_90s(self):
+        """2026-09-24: el presupuesto de procuraduría baja de 300 s a 90 s
+        (decisión del usuario; SEGURIDAD_PROCURADURIA_TIMEOUT_S puede subirlo
+        sin deploy); las demás siguen con el global (150 s). El mensaje de
+        timeout debe nombrar el presupuesto de LA fuente, no el global."""
+        self.assertEqual(orch._timeout_fuente("procuraduria"), 90.0)
         self.assertEqual(orch._timeout_fuente("runt"), orch.TIMEOUT_FUENTE_S)
         self.assertEqual(orch._timeout_fuente("simit"), 150.0)
         estado, error = orch._clasificar_error(asyncio.TimeoutError(), "procuraduria")
-        self.assertIn("300", error["mensaje"])
+        self.assertIn("90", error["mensaje"])
         estado, error = orch._clasificar_error(asyncio.TimeoutError(), "runt")
         self.assertIn("150", error["mensaje"])
 
@@ -2147,3 +2148,180 @@ class TestReintentoVacioSinConfirmar(unittest.TestCase):
         )
         self.assertIsNone(error)
         self.assertEqual(intentos, 1)  # vacío confirmado es válido a la primera
+
+
+class TestEvidenciasConsulta(unittest.TestCase):
+    """Evidencias visuales (pantallazos del portal por fuente, patrón
+    TusDatos, 2026-09-24): el bot retorna `captura_jpg` → sección `_captura`
+    (volátil, jamás al doc) → caché 24 h (un hit muestra la MISMA evidencia) y
+    GCS privado del estudio (referencia en `evidencias` del doc)."""
+
+    ACTOR = {"usuario": "U", "perfil": "SEGURIDAD", "empresa_id": "e", "usuario_id": "u"}
+
+    def _correr_policia(self, resultado):
+        with patch.object(orch, "_buscar_cache", return_value=None), \
+             patch.object(orch, "_llamar_con_reintento",
+                          return_value=(resultado, 1, [1.0], None)), \
+             patch.object(orch.col_consultas, "insert_one") as insert_cache:
+            seccion = asyncio.run(
+                orch._ejecutar_fuente("policia", "1033688842", self.ACTOR, forzar=False)
+            )
+        return seccion, insert_cache
+
+    def test_captura_del_bot_va_a_la_seccion_y_a_la_cache(self):
+        resultado = {
+            "no_registra": True, "mensaje": "NO TIENE ASUNTOS PENDIENTES",
+            "nombre_consultado": "FULANO DE TAL", "captura_jpg": b"JPEG_POLICIA",
+        }
+        seccion, insert_cache = self._correr_policia(resultado)
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["_captura"], b"JPEG_POLICIA")
+        doc_cache = insert_cache.call_args[0][0]
+        self.assertEqual(doc_cache["captura_jpg"], b"JPEG_POLICIA")
+
+    def test_sin_captura_la_cache_no_lleva_la_clave(self):
+        resultado = {"no_registra": True, "mensaje": "x", "nombre_consultado": "F"}
+        seccion, insert_cache = self._correr_policia(resultado)
+        self.assertIsNone(seccion.get("_captura"))
+        self.assertNotIn("captura_jpg", insert_cache.call_args[0][0])
+
+    def test_hit_de_cache_restaura_la_captura(self):
+        cache = {
+            "_id": ObjectId(), "tipo": "policia", "cedula": "1033688842",
+            "no_registra": True, "mensaje": "x", "nombre_consultado": "F",
+            "captura_jpg": b"JPEG_CACHE",
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            seccion = asyncio.run(
+                orch._ejecutar_fuente("policia", "1033688842", self.ACTOR, forzar=False)
+            )
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["_captura"], b"JPEG_CACHE")
+
+    def test_limpiar_seccion_descarta_la_captura(self):
+        limpia = orch._limpiar_seccion({"estado": "EXITO", "mensaje": "x", "_captura": b"J"})
+        self.assertNotIn("_captura", limpia)
+        self.assertEqual(limpia["mensaje"], "x")
+
+    def test_con_captura_solo_para_fuentes_de_navegador(self):
+        self.assertEqual(orch._con_captura({}, "policia", b"J")["captura_jpg"], b"J")
+        self.assertEqual(orch._con_captura({}, "policia", None), {})
+        self.assertEqual(orch._con_captura({}, "ofac", b"J"), {})  # API/dataset: sin captura
+
+    def test_ejecutar_estudio_sube_evidencias_y_persiste_referencias(self):
+        from Funciones import storage_seguridad
+
+        empresa = {"_id": "emp", "nombre": "E", "config": {}}
+        doc_inicial = {"_id": "x", "consulta_id": "ES-EV"}
+        persistido: dict = {}
+
+        def _find_one(query=None, *a, **k):
+            return persistido.get("doc") or doc_inicial
+
+        def _update_one(query, update):
+            persistido["doc"] = {**doc_inicial, **update.get("$set", {})}
+
+        async def _fuente(nombre, cedula, actor, forzar, **kwargs):
+            seccion = {"estado": "EXITO", "origen": "portal", "intentos": 1,
+                       "duraciones_s": [2.0], "error": None}
+            if nombre == "policia":
+                seccion["_captura"] = b"JPEG_POLICIA"
+            return seccion
+
+        subidas = []
+
+        def _subir(contenido, ruta, cedula, content_type="application/pdf"):
+            subidas.append((contenido, ruta, content_type))
+            return {"gcs_ruta": ruta, "sha256": "ab" * 32, "tamano": len(contenido)}
+
+        with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \
+             patch.object(orch.col_estudios, "update_one", side_effect=_update_one), \
+             patch.object(orch, "_ejecutar_fuente", side_effect=_fuente), \
+             patch.object(storage_seguridad, "ruta_blob",
+                          side_effect=lambda e, a, c, s="", ext=".pdf":
+                          f"{storage_seguridad.CARPETA_SEGURIDAD}/{e}/{a}/{c}{s}{ext}"), \
+             patch.object(storage_seguridad, "subir_pdf", side_effect=_subir):
+            resultado = asyncio.run(orch.ejecutar_estudio(
+                consulta_id="ES-EV", cedula="1033688842",
+                actor={"usuario": "U", "usuario_id": "x", "empresa_id": "emp"},
+                empresa=empresa, forzar=False, auditoria={},
+                registrar_evento=lambda *a, **k: None,
+                fuentes=["policia"],
+            ))
+        self.assertEqual(len(subidas), 1)
+        contenido, ruta, ctype = subidas[0]
+        self.assertEqual(contenido, b"JPEG_POLICIA")
+        self.assertEqual(ctype, "image/jpeg")
+        self.assertIn("_captura_policia.jpg", ruta)
+        self.assertEqual(persistido["doc"]["evidencias"]["policia"]["gcs_ruta"], ruta)
+        # La captura JAMÁS llega al doc de la fuente (clave volátil `_`).
+        self.assertNotIn("_captura", persistido["doc"]["fuentes"]["policia"])
+        self.assertEqual(resultado["estado"], "COMPLETADA")
+
+    def test_fallo_de_subida_de_evidencia_no_tumba_el_estudio(self):
+        from Funciones import storage_seguridad
+
+        empresa = {"_id": "emp", "nombre": "E", "config": {}}
+        doc_inicial = {"_id": "x", "consulta_id": "ES-EV2"}
+        persistido: dict = {}
+
+        def _find_one(query=None, *a, **k):
+            return persistido.get("doc") or doc_inicial
+
+        def _update_one(query, update):
+            persistido["doc"] = {**doc_inicial, **update.get("$set", {})}
+
+        async def _fuente(nombre, cedula, actor, forzar, **kwargs):
+            return {"estado": "EXITO", "origen": "portal", "intentos": 1,
+                    "duraciones_s": [2.0], "error": None, "_captura": b"J"}
+
+        with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \
+             patch.object(orch.col_estudios, "update_one", side_effect=_update_one), \
+             patch.object(orch, "_ejecutar_fuente", side_effect=_fuente), \
+             patch.object(storage_seguridad, "subir_pdf", side_effect=RuntimeError("GCS abajo")):
+            resultado = asyncio.run(orch.ejecutar_estudio(
+                consulta_id="ES-EV2", cedula="1033688842",
+                actor={"usuario": "U", "usuario_id": "x", "empresa_id": "emp"},
+                empresa=empresa, forzar=False, auditoria={},
+                registrar_evento=lambda *a, **k: None,
+                fuentes=["policia"],
+            ))
+        self.assertEqual(resultado["estado"], "COMPLETADA")  # la fuente salió bien
+        self.assertEqual(persistido["doc"]["evidencias"], {})  # sin evidencia, sin referencia
+        self.assertIn("evidencia_error", persistido["doc"]["fuentes"]["policia"])
+
+
+class TestCapturaEvidenciaHelper(unittest.TestCase):
+    """capturar_viewport_jpeg: best-effort — un fallo del screenshot devuelve
+    None y NUNCA tumba la consulta."""
+
+    def test_screenshot_fallido_devuelve_none(self):
+        from Funciones.captura_evidencia import capturar_viewport_jpeg
+
+        class PaginaRota:
+            async def screenshot(self, **kwargs):
+                raise RuntimeError("navegador cerrado")
+
+        self.assertIsNone(asyncio.run(capturar_viewport_jpeg(PaginaRota())))
+
+    def test_screenshot_ok_devuelve_bytes_jpeg(self):
+        from Funciones.captura_evidencia import capturar_viewport_jpeg
+
+        class PaginaFake:
+            async def screenshot(self, **kwargs):
+                assert kwargs.get("type") == "jpeg"
+                assert 1 <= kwargs.get("quality", 0) <= 100
+                return b"IMAGEN_JPEG"
+
+        self.assertEqual(asyncio.run(capturar_viewport_jpeg(PaginaFake())), b"IMAGEN_JPEG")
+
+
+class TestRutaBlobExtension(unittest.TestCase):
+    def test_extension_parametrizable_para_capturas(self):
+        from Funciones import storage_seguridad
+
+        ruta = storage_seguridad.ruta_blob("emp", 2026, "ES-1", "_captura_policia", ext=".jpg")
+        self.assertTrue(ruta.endswith("ES-1_captura_policia.jpg"))
+        # Compat: sin ext sigue siendo .pdf (todas las rutas existentes).
+        por_defecto = storage_seguridad.ruta_blob("emp", 2026, "ES-1")
+        self.assertTrue(por_defecto.endswith("ES-1.pdf"))

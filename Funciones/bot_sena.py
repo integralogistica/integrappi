@@ -47,6 +47,11 @@ import requests
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -290,6 +295,7 @@ async def consultar_sena(cedula: str, headed: bool = False) -> Dict[str, Any]:
             except Exception:
                 pass  # un dump jamás tumba la consulta
             texto_resultado = " ".join((await pagina.inner_text("body")).split())
+            captura = await capturar_viewport_jpeg(pagina)
 
             no_registra = not certificados
             mensaje = "" if certificados else "La cédula no registra certificados disponibles en el SENA"
@@ -303,6 +309,7 @@ async def consultar_sena(cedula: str, headed: bool = False) -> Dict[str, Any]:
                 "texto_resultado": texto_resultado[:1500],
                 "pdf_bytes": None,   # el PDF de cada certificado se descarga por
                 "pdf_ruta": None,    # link propio — fuera de alcance (solo listado)
+                "captura_jpg": captura,
                 "html": await pagina.content(),
             }
         finally:

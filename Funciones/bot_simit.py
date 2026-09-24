@@ -47,6 +47,11 @@ from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 logger = logging.getLogger(__name__)
 
 PORTAL_URL = "https://www.fcm.org.co/simit/#/estado-cuenta"
@@ -289,6 +294,7 @@ async def consultar_comparendos_simit(placa: str, headed: bool = False) -> Dict[
 
             leido = await _leer_resultado(pagina)
             texto_resultado = " ".join((await pagina.inner_text("body")).split())
+            captura = await capturar_viewport_jpeg(pagina)
             if resultado == "limpio":
                 leido.update({
                     "total_comparendos": 0,
@@ -305,6 +311,7 @@ async def consultar_comparendos_simit(placa: str, headed: bool = False) -> Dict[
                 "texto_resultado": texto_resultado[:1500],
                 "pdf_bytes": None,
                 "pdf_ruta": None,
+                "captura_jpg": captura,
                 "html": await pagina.content(),
             }
         finally:

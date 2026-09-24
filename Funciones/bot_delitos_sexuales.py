@@ -47,6 +47,11 @@ import requests
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 # Cargar .env del proyecto para la key del captcha cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -253,6 +258,7 @@ async def consultar_inhabilidades(
                 logger.warning("[BOT DELITOS] dump de debug no se pudo escribir: %s", exc)
 
             texto_resultado = " ".join((await pagina.inner_text("body")).split())
+            captura = await capturar_viewport_jpeg(pagina)
 
             # 7) Veredicto: el "NO" primero (las fórmulas se contienen). La
             #    página debe traer la cédula consultada (garantía de que el
@@ -294,6 +300,7 @@ async def consultar_inhabilidades(
                 "fecha_expedicion": fecha_norm,
                 "empresa_consultante": empresa_norm,
                 "texto_resultado": texto_resultado[:1500],
+                "captura_jpg": captura,
                 "html": await pagina.content(),
             }
         finally:

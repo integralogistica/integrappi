@@ -1,0 +1,287 @@
+﻿python : test_en_pdf_completo_no_queda_fecha_iso 
+(tests.test_pdf_estudio_seguridad.TestFechaLegible.test_en_pdf_completo_no_queda_fecha_iso)
+En línea: 1 Carácter: 382
++ ... ntegrappi"; python -m unittest tests.test_pdf_estudio_seguridad tests ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (test_en_pdf_com...ueda_fecha_iso):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+El informe fixture trae fechas ISO en runt/simit/sena/rues: ninguna ... ok
+test_fecha_imposible_no_se_reescribe (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_fecha_imposible_no_se_reescribe) ... ok
+test_iso_con_hora_de_rama_judicial (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_iso_con_hora_de_rama_judicial) ... ok
+test_iso_de_runt_simit_sena_rues (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_iso_de_runt_simit_sena_rues) ... ok
+test_slash_del_rndc (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_slash_del_rndc) ... ok
+test_texto_libre_y_vacios (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_texto_libre_y_vacios) ... ok
+test_us_de_ofac (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_us_de_ofac) ... ok
+test_ya_legible_pasa_intacto (tests.test_pdf_estudio_seguridad.TestFechaLegible.test_ya_legible_pasa_intacto) ... ok
+test_bytes_pdf_validos (tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_bytes_pdf_validos) ... ok
+test_estado_error_no_muestra_veredicto_positivo 
+(tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_estado_error_no_muestra_veredicto_positivo) ... ok
+test_fuentes_compactas_maximo_tres_por_pagina_sin_titulo_huerfano 
+(tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_fuentes_compactas_maximo_tres_por_pagina_sin_titulo_huerfano)
+Una cuarta fuente no queda colgada al final de la página. ... ok
+test_marca_de_agua_identifica_origen (tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_marca_de_agua_identifica_origen) ... ok
+test_multipagina_con_muchos_viajes (tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_multipagina_con_muchos_viajes) ... ok
+test_reproducibilidad (tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_reproducibilidad)
+Mismo doc → mismo PDF byte a byte (sin timestamps del entorno). ... ok
+test_secciones_presentes (tests.test_pdf_estudio_seguridad.TestGenerarPDF.test_secciones_presentes) ... ok
+test_reportado_es_advertencia (tests.test_pdf_estudio_seguridad.TestSeccionContraloria.test_reportado_es_advertencia) ... ok
+test_veredicto_y_codigo_de_verificacion 
+(tests.test_pdf_estudio_seguridad.TestSeccionContraloria.test_veredicto_y_codigo_de_verificacion) ... ok
+test_no_registra_banner_verde (tests.test_pdf_estudio_seguridad.TestSeccionDelitos.test_no_registra_banner_verde) ... ok
+test_registra_banner_rojo (tests.test_pdf_estudio_seguridad.TestSeccionDelitos.test_registra_banner_rojo) ... ok
+test_blob_irrecuperable_deja_placeholder_honesto 
+(tests.test_pdf_estudio_seguridad.TestSeccionEvidencias.test_blob_irrecuperable_deja_placeholder_honesto) ... Evidencia 
+manifiestos_rndc no se pudo descargar de GCS: 404
+Evidencia procuraduria no se pudo descargar de GCS: 404
+ok
+test_con_evidencias_agrega_paginas_con_titulo_por_fuente 
+(tests.test_pdf_estudio_seguridad.TestSeccionEvidencias.test_con_evidencias_agrega_paginas_con_titulo_por_fuente) ... Evidencia 
+manifiestos_rndc no se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+Evidencia procuraduria no se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+ok
+test_evidencias_reproducible_byte_a_byte 
+(tests.test_pdf_estudio_seguridad.TestSeccionEvidencias.test_evidencias_reproducible_byte_a_byte) ... Evidencia manifiestos_rndc no 
+se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+Evidencia procuraduria no se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+Evidencia manifiestos_rndc no se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+Evidencia procuraduria no se pudo incrustar: expected str, bytes or os.PathLike object, not ImageReader
+ok
+test_sin_evidencias_el_pdf_queda_igual 
+(tests.test_pdf_estudio_seguridad.TestSeccionEvidencias.test_sin_evidencias_el_pdf_queda_igual) ... ok
+test_coincidencia_exacta_exige_revision_humana 
+(tests.test_pdf_estudio_seguridad.TestSeccionOfac.test_coincidencia_exacta_exige_revision_humana) ... ok
+test_ofac_nit_es_seccion_empresarial_separada 
+(tests.test_pdf_estudio_seguridad.TestSeccionOfac.test_ofac_nit_es_seccion_empresarial_separada) ... ok
+test_sin_coincidencia_exacta (tests.test_pdf_estudio_seguridad.TestSeccionOfac.test_sin_coincidencia_exacta) ... ok
+test_disposiciones_legales_honestas (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_disposiciones_legales_honestas) ... ok
+test_exito_no_registra_banner_verde (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_exito_no_registra_banner_verde) ... ok
+test_fuente_fallida_muestra_estado (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_fuente_fallida_muestra_estado) ... ok
+test_leyenda_oficial_su458_completa (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_leyenda_oficial_su458_completa)
+2026-09-01: la leyenda oficial COMPLETA de la SU-458 se imprime en ... ok
+test_no_conclusivo_advertencia (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_no_conclusivo_advertencia) ... ok
+test_registra_banner_rojo (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_registra_banner_rojo) ... ok
+test_resumen_con_tres_fuentes (tests.test_pdf_estudio_seguridad.TestSeccionPolicia.test_resumen_con_tres_fuentes) ... ok
+test_imprime_demandante_y_demandado (tests.test_pdf_estudio_seguridad.TestSeccionRamaJudicial.test_imprime_demandante_y_demandado) 
+... ok
+test_fuente_fallida_muestra_estado_no_disponible 
+(tests.test_pdf_estudio_seguridad.TestSeccionRues.test_fuente_fallida_muestra_estado_no_disponible) ... ok
+test_matricula_activa_banner_verde_y_datos 
+(tests.test_pdf_estudio_seguridad.TestSeccionRues.test_matricula_activa_banner_verde_y_datos) ... ok
+test_matricula_distinta_de_activa_es_advertencia 
+(tests.test_pdf_estudio_seguridad.TestSeccionRues.test_matricula_distinta_de_activa_es_advertencia) ... ok
+test_nit_sin_registro_neutro (tests.test_pdf_estudio_seguridad.TestSeccionRues.test_nit_sin_registro_neutro) ... ok
+test_disposicion_legal_runt (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_disposicion_legal_runt) ... ok
+test_doc_viejo_sin_vehiculos_no_rompe (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_doc_viejo_sin_vehiculos_no_rompe)
+Docs previos a 2026-08-30 (solo placa top-level): se asume que el ... ok
+test_fuente_fallida_muestra_estado (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_fuente_fallida_muestra_estado) ... ok
+test_historial_polizas (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_historial_polizas) ... ok
+test_no_propietario_activo (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_no_propietario_activo) ... ok
+test_placa_sin_informacion_neutro (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_placa_sin_informacion_neutro) ... ok
+test_propietario_distinto_badge_y_fila_persona 
+(tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_propietario_distinto_badge_y_fila_persona)
+El dueño del vehículo NO es el evaluado: badge ámbar en la sección ... ok
+test_propietario_distinto_en_trazabilidad 
+(tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_propietario_distinto_en_trazabilidad) ... ok
+test_propietario_es_el_evaluado_sin_badge 
+(tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_propietario_es_el_evaluado_sin_badge) ... ok
+test_rechazo_propietario_explica_cedula_consultada 
+(tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_rechazo_propietario_explica_cedula_consultada)
+'No propietario activo' debe decir CON QUÉ cédula se consultó para ... ok
+test_resumen_con_cuatro_fuentes (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_resumen_con_cuatro_fuentes)
+2026-09-01: el resumen (y el informe) muestra SOLO las fuentes que ... ok
+test_rtm_vencida_banner_rojo_con_soat_al_dia 
+(tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_rtm_vencida_banner_rojo_con_soat_al_dia) ... ok
+test_rtm_vigente_en_banner_y_historial (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_rtm_vigente_en_banner_y_historial) ... 
+ok
+test_soat_vencido_banner_rojo (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_soat_vencido_banner_rojo) ... ok
+test_soat_vigente_banner_verde (tests.test_pdf_estudio_seguridad.TestSeccionRunt.test_soat_vigente_banner_verde) ... ok
+test_coincidencia_exacta_exige_revision_humana 
+(tests.test_pdf_estudio_seguridad.TestSeccionSanciones.test_coincidencia_exacta_exige_revision_humana) ... ok
+test_sin_coincidencia_y_lista_caida (tests.test_pdf_estudio_seguridad.TestSeccionSanciones.test_sin_coincidencia_y_lista_caida) ... ok
+test_con_certificados_banner_y_tabla (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_con_certificados_banner_y_tabla) ... ok
+test_disposicion_legal_sena (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_disposicion_legal_sena) ... ok
+test_fila_de_resumen (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_fila_de_resumen) ... ok
+test_fuente_fallida_muestra_estado (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_fuente_fallida_muestra_estado) ... ok
+test_resumen_solo_fuentes_corridas (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_resumen_solo_fuentes_corridas)
+Un estudio SIN sena (clave ausente, fuente posterior): su sección no ... ok
+test_sin_certificados_banner_verde (tests.test_pdf_estudio_seguridad.TestSeccionSena.test_sin_certificados_banner_verde) ... ok
+test_deuda_historica_sin_saldo_es_neutro (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_deuda_historica_sin_saldo_es_neutro) 
+... ok
+test_disposicion_legal_simit (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_disposicion_legal_simit) ... ok
+test_limpio_banner_verde (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_limpio_banner_verde) ... ok
+test_resumen_con_cinco_fuentes (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_resumen_con_cinco_fuentes) ... ok
+test_saldo_exigible_banner_ambar (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_saldo_exigible_banner_ambar) ... ok
+test_solo_las_fuentes_del_plan (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_solo_las_fuentes_del_plan)
+2026-09-01: un plan que SOLO consulta algunas fuentes produce un ... ok
+test_solo_simit_sin_filas_de_propietario (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_solo_simit_sin_filas_de_propietario)
+Estudio SIN runt (DESHABILITADA por el plan): la placa es de simit — ... ok
+test_tabla_de_comparendos (tests.test_pdf_estudio_seguridad.TestSeccionSimit.test_tabla_de_comparendos) ... ok
+test_anchos_respetan_el_ancho_util (tests.test_pdf_estudio_seguridad.TestTablaViajes.test_anchos_respetan_el_ancho_util) ... ok
+test_celdas_son_paragraph (tests.test_pdf_estudio_seguridad.TestTablaViajes.test_celdas_son_paragraph) ... ok
+test_cerrar_dos_veces_409 (tests.test_seguridad_cobro.TestCierrePeriodo.test_cerrar_dos_veces_409) ... ok
+test_cerrar_periodo_actual_rechazado (tests.test_seguridad_cobro.TestCierrePeriodo.test_cerrar_periodo_actual_rechazado) ... ok
+test_cierre_con_precio_snapshot (tests.test_seguridad_cobro.TestCierrePeriodo.test_cierre_con_precio_snapshot) ... ok
+test_reabrir_descongela_movimientos (tests.test_seguridad_cobro.TestCierrePeriodo.test_reabrir_descongela_movimientos) ... ok
+test_estudio_completado_consumiendo_cupo 
+(tests.test_seguridad_cobro.TestCrearEstudioIntegraConsumo.test_estudio_completado_consumiendo_cupo) ... C:\Users\ASUS\OneDrive - 
+Integra Logistica\Desarrollos\integra\integrappi\rutas\seguridad_estudios.py:67: DeprecationWarning: datetime.datetime.utcnow() is 
+deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: 
+datetime.datetime.now(datetime.UTC).
+  return datetime.utcnow()
+ok
+test_estudio_error_reembolsa (tests.test_seguridad_cobro.TestCrearEstudioIntegraConsumo.test_estudio_error_reembolsa) ... ok
+test_crear_estudio_sincroniza_antes_de_reservar 
+(tests.test_seguridad_cobro.TestEndpointsSync.test_crear_estudio_sincroniza_antes_de_reservar)
+crear_estudio debe materializar la fuente nueva ANTES de que ... ok
+test_dashboard_excluye_cupo_retirado (tests.test_seguridad_cobro.TestEndpointsSync.test_dashboard_excluye_cupo_retirado) ... ok
+test_listar_empresas_sincroniza_y_marca_retirada 
+(tests.test_seguridad_cobro.TestEndpointsSync.test_listar_empresas_sincroniza_y_marca_retirada) ... ok
+test_admin_con_todo_retirado_sigue_exento (tests.test_seguridad_cobro.TestFuentesRetiradas.test_admin_con_todo_retirado_sigue_exento) 
+... ok
+test_fuente_todas_no_se_bloquea (tests.test_seguridad_cobro.TestFuentesRetiradas.test_fuente_todas_no_se_bloquea)
+La fuente sintética "todas" del fallback pre-backfill no debe ... ok
+test_fuentes_con_plan_excluye_retirada (tests.test_seguridad_cobro.TestFuentesRetiradas.test_fuentes_con_plan_excluye_retirada) ... ok
+test_reembolso_devuelve_cupo_a_entrada_retirada 
+(tests.test_seguridad_cobro.TestFuentesRetiradas.test_reembolso_devuelve_cupo_a_entrada_retirada)
+Regresión: aunque la fuente se retiró del catálogo DESPUÉS del ... ok
+test_reservar_consumos_no_consume_retirada 
+(tests.test_seguridad_cobro.TestFuentesRetiradas.test_reservar_consumos_no_consume_retirada) ... ok
+test_ajuste_en_periodo_cerrado_409 (tests.test_seguridad_cobro.TestPagosYAjustes.test_ajuste_en_periodo_cerrado_409) ... ok
+test_ajuste_requiere_motivo_en_router (tests.test_seguridad_cobro.TestPagosYAjustes.test_ajuste_requiere_motivo_en_router) ... ok
+test_pago_en_periodo_cerrado_permitido (tests.test_seguridad_cobro.TestPagosYAjustes.test_pago_en_periodo_cerrado_permitido)
+Pagar la cuenta de un mes pasado cerrado es el flujo natural del ... ok
+test_pago_reduc_deuda_y_marca_pagada (tests.test_seguridad_cobro.TestPagosYAjustes.test_pago_reduc_deuda_y_marca_pagada) ... ok
+test_bytes_pdf_validos (tests.test_seguridad_cobro.TestPdfCuentaCobro.test_bytes_pdf_validos) ... ok
+test_multipagina_y_contenido (tests.test_seguridad_cobro.TestPdfCuentaCobro.test_multipagina_y_contenido) ... ok
+test_reproducible (tests.test_seguridad_cobro.TestPdfCuentaCobro.test_reproducible) ... ok
+test_cruce_de_medianoche_utc (tests.test_seguridad_cobro.TestPeriodoColombia.test_cruce_de_medianoche_utc) ... ok
+test_medianoche_colombia (tests.test_seguridad_cobro.TestPeriodoColombia.test_medianoche_colombia) ... ok
+test_consumo_sin_tope_nunca_bloquea (tests.test_seguridad_cobro.TestPlanIlimitado.test_consumo_sin_tope_nunca_bloquea) ... ok
+test_reembolso_ilimitado_solo_revierte_contador 
+(tests.test_seguridad_cobro.TestPlanIlimitado.test_reembolso_ilimitado_solo_revierte_contador) ... ok
+test_consumo_exento_no_genera_reembolso (tests.test_seguridad_cobro.TestReembolso.test_consumo_exento_no_genera_reembolso) ... ok
+test_reembolso_con_cambio_de_plan_solo_monetario 
+(tests.test_seguridad_cobro.TestReembolso.test_reembolso_con_cambio_de_plan_solo_monetario) ... ok
+test_reembolso_devuelve_cupo_y_cop (tests.test_seguridad_cobro.TestReembolso.test_reembolso_devuelve_cupo_y_cop) ... ok
+test_reembolso_doble_bloqueado (tests.test_seguridad_cobro.TestReembolso.test_reembolso_doble_bloqueado) ... ok
+test_cambio_de_precio_no_toca_consumos_viejos 
+(tests.test_seguridad_cobro.TestReservarConsumo.test_cambio_de_precio_no_toca_consumos_viejos) ... ok
+test_consumo_atomico_decrementa_cupo (tests.test_seguridad_cobro.TestReservarConsumo.test_consumo_atomico_decrementa_cupo) ... ok
+test_dos_consumos_con_cupo_1_solo_uno_pasa 
+(tests.test_seguridad_cobro.TestReservarConsumo.test_dos_consumos_con_cupo_1_solo_uno_pasa) ... ok
+test_plan_vencido_402 (tests.test_seguridad_cobro.TestReservarConsumo.test_plan_vencido_402) ... ok
+test_sin_plan_402_y_admin_exento (tests.test_seguridad_cobro.TestReservarConsumo.test_sin_plan_402_y_admin_exento) ... ok
+test_admin_sin_planes_exento_unico (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_admin_sin_planes_exento_unico) 
+... ok
+test_consumo_marca_canal_portal_o_api 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_consumo_marca_canal_portal_o_api)
+Canal del consumo (2026-08-30): actor humano → "portal"; actor de API ... ok
+test_cupo_agotado_en_segunda_compensa_la_primera 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_cupo_agotado_en_segunda_compensa_la_primera) ... ok
+test_dos_fuentes_dos_consumos_con_precios_distintos 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_dos_fuentes_dos_consumos_con_precios_distintos) ... ok
+test_error_global_reembolsa_todos (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_error_global_reembolsa_todos) ... 
+ok
+test_fallback_subdoc_viejo (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_fallback_subdoc_viejo)
+Empresa con subdoc plan viejo (pre-backfill): delega en la reserva ... ok
+test_fuentes_con_plan_incluye_policia 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_fuentes_con_plan_incluye_policia) ... ok
+test_fuera_sin_plan_se_omite (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_fuera_sin_plan_se_omite) ... ok
+test_ilimitado_por_fuente (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_ilimitado_por_fuente)
+Plan ilimitado (RNDC) + plan con tope (PROC): cada fuente bajo SU ... ok
+test_multi_plan_misma_fuente_fifo (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_multi_plan_misma_fuente_fifo)
+Dos planes acumulados en la MISMA fuente: se consume primero el ... ok
+test_multi_plan_misma_fuente_todos_agotados_402 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_multi_plan_misma_fuente_todos_agotados_402) ... ok
+test_ninguna_fuente_con_plan_402 (tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_ninguna_fuente_con_plan_402) ... ok
+test_plan_con_runt_consume_como_cualquier_fuente 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_plan_con_runt_consume_como_cualquier_fuente)
+v3.5 (2026-08-30): EL PLAN SE COBRA POR CONSULTA. Un plan de $1.800 ... ok
+test_plan_con_simit_consume_como_cualquier_fuente 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_plan_con_simit_consume_como_cualquier_fuente)
+simit (2026-09-01) es una fuente más del catálogo: un plan que la ... ok
+test_plan_multifuente_un_consumo_por_consulta 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_plan_multifuente_un_consumo_por_consulta)
+Regresión v3.5 del caso del usuario: plan AVANZADO $3.000 con 4 ... ok
+test_plan_solo_policia_cobra_una_fuente 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_plan_solo_policia_cobra_una_fuente)
+La fuente "policia" es una más del catálogo: un plan mono-fuente ... ok
+test_reembolso_doble_por_consumo_bloqueado 
+(tests.test_seguridad_cobro.TestReservarConsumosMultiFuente.test_reembolso_doble_por_consumo_bloqueado) ... ok
+test_crear_plan_retorna_json_serializable 
+(tests.test_seguridad_cobro.TestSerializacionRespuestas.test_crear_plan_retorna_json_serializable) ... ok
+test_agrega_fuente_nueva_con_precio_actual 
+(tests.test_seguridad_cobro.TestSincronizarFuentes.test_agrega_fuente_nueva_con_precio_actual) ... ok
+test_carrera_dos_syncs_una_entrada (tests.test_seguridad_cobro.TestSincronizarFuentes.test_carrera_dos_syncs_una_entrada)
+Dos syncs paralelos ven el mismo hueco: el guard $not $elemMatch ... ok
+test_clona_de_la_hermana_mas_antigua (tests.test_seguridad_cobro.TestSincronizarFuentes.test_clona_de_la_hermana_mas_antigua) ... ok
+test_error_de_escritura_degrada (tests.test_seguridad_cobro.TestSincronizarFuentes.test_error_de_escritura_degrada) ... sync fuentes 
+de EMPRESA A degradado (mongo caído); se continúa con las entradas actuales
+ok
+test_fuente_de_otro_plan_no_bloquea_la_entrada 
+(tests.test_seguridad_cobro.TestSincronizarFuentes.test_fuente_de_otro_plan_no_bloquea_la_entrada)
+Regresión 2026-09-01: el skip de la sync debe ser por PAR (plan, ... ok
+test_hermana_ilimitada_clona_ilimitada (tests.test_seguridad_cobro.TestSincronizarFuentes.test_hermana_ilimitada_clona_ilimitada) ... 
+ok
+test_idempotente (tests.test_seguridad_cobro.TestSincronizarFuentes.test_idempotente) ... ok
+test_no_resetea_entradas_hermanas (tests.test_seguridad_cobro.TestSincronizarFuentes.test_no_resetea_entradas_hermanas) ... ok
+test_plan_inactivo_no_agrega (tests.test_seguridad_cobro.TestSincronizarFuentes.test_plan_inactivo_no_agrega) ... ok
+test_plan_inexistente_no_agrega (tests.test_seguridad_cobro.TestSincronizarFuentes.test_plan_inexistente_no_agrega) ... ok
+test_subdoc_viejo_no_op (tests.test_seguridad_cobro.TestSincronizarFuentes.test_subdoc_viejo_no_op) ... ok
+test_totales_con_reembolso_y_pago (tests.test_seguridad_cobro.TestTotales.test_totales_con_reembolso_y_pago) ... ok
+
+----------------------------------------------------------------------
+Ran 135 tests in 32.189s
+
+OK
+Intentando conectar a MongoDB (intento 1/3)...
+Conexion exitosa a MongoDB
+<sys>:0: ResourceWarning: Unclosed MongoClient opened at:
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\__main__.py", line 18, in <module>
+    main(module=None)
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\main.py", line 103, in __init__
+    self.parseArgs(argv)
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\main.py", line 142, in parseArgs
+    self.createTests()
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\main.py", line 153, in createTests
+    self.test = self.testLoader.loadTestsFromNames(self.testNames,
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\loader.py", line 207, in loadTestsFromNames
+    suites = [self.loadTestsFromName(name, module) for name in names]
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\unittest\loader.py", line 137, in loadTestsFromName
+    module = __import__(module_name)
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\tests\test_seguridad_cobro.py", line 18, in <module>
+    from Funciones import cobro_seguridad as cobro
+  File "<frozen importlib._bootstrap>", line 1415, in _handle_fromlist
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\Funciones\cobro_seguridad.py", line 31, in <module>
+    from bd.bd_cliente import bd_cliente
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "C:\Users\ASUS\OneDrive - Integra Logistica\Desarrollos\integra\integrappi\bd\bd_cliente.py", line 25, in <module>
+    bd_cliente = MongoClient(
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\site-packages\pymongo\synchronous\mongo_client.py", line 884, in 
+__init__
+    self._get_topology()  # type: ignore[unused-coroutine]
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\site-packages\pymongo\synchronous\mongo_client.py", line 1737, in 
+_get_topology
+    self._resolve_srv()
+  File "C:\Users\ASUS\AppData\Local\Programs\Python\Python313\Lib\site-packages\pymongo\synchronous\mongo_client.py", line 953, in 
+_resolve_srv
+    self._init_based_on_options(seeds, srv_max_hosts, srv_service_name)
+Call MongoClient.close() to safely shut down your client and free up resources.

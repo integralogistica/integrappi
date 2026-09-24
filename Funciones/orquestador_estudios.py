@@ -98,12 +98,14 @@ INTENTOS_FUENTE = int(os.getenv("SEGURIDAD_INTENTOS_FUENTE", "2"))        # tota
 BACKOFF_MS = int(os.getenv("SEGURIDAD_BACKOFF_MS", "3000"))
 TIMEOUT_FUENTE_S = float(os.getenv("SEGURIDAD_TIMEOUT_FUENTE_S", "150"))
 # Presupuesto POR FUENTE (sobrescribe el global): la PGN rediseñada tiene un
-# postback INLINE visto tardar >45 s + captcha de conocimiento (Gemini) y es
-# la fuente más lenta del módulo — 150 s la cortaba a mitad de postback en
-# horas pico (pedido del usuario 2026-09-04: 300 s para que el reintento
-# completo —2 intentos— quepa holgado).
+# postback INLINE visto tardar >45 s + captcha de conocimiento (Gemini). Fue
+# 300 s entre el 2026-09-04 y el 2026-09-24, 90 s el 2026-09-24 (timeout en
+# horas pico: el postback no llegaba) y 150 s desde el 2026-09-24 tarde
+# (punto medio del usuario: navegación+captcha+60 s de espera caben con
+# margen; el reintento completo no cabe). SEGURIDAD_PROCURADURIA_TIMEOUT_S
+# lo sube de nuevo sin deploy.
 TIMEOUTS_FUENTE_S: dict[str, float] = {
-    "procuraduria": float(os.getenv("SEGURIDAD_PROCURADURIA_TIMEOUT_S", "300")),
+    "procuraduria": float(os.getenv("SEGURIDAD_PROCURADURIA_TIMEOUT_S", "150")),
 }
 
 
@@ -118,6 +120,24 @@ MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
 FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
+
+# Fuentes que consultan un PORTAL con navegador y por tanto pueden dejar una
+# CAPTURA DE EVIDENCIA (pantallazo del resultado, patrón TusDatos). Las demás
+# (ofac, ofac_nit, onu_ue, rues) consumen datasets/APIs sin página que
+# fotografiar.
+FUENTES_NAVEGADOR = {
+    "manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales",
+    "policia", "runt", "simit", "sena", "bdme", "bdme_nit", "rama_judicial",
+}
+
+
+def _con_captura(doc_cache: dict, nombre: str, captura: bytes | None) -> dict:
+    """Adjunta la captura de evidencia al doc de caché (solo fuentes de
+    navegador): un hit de caché debe mostrar la MISMA evidencia que la
+    consulta original (decisión de negocio 2026-09-24, patrón TusDatos)."""
+    if nombre in FUENTES_NAVEGADOR and captura:
+        doc_cache["captura_jpg"] = captura
+    return doc_cache
 
 # Fuentes OPT-IN: exigen presencia EXPLÍCITA en `config.fuentes_habilitadas`
 # porque su legalidad de canal depende de decisión de cada empresa (hoy solo
@@ -499,6 +519,10 @@ async def _ejecutar_fuente(
     cache = _buscar_cache(nombre, None if nombre == "simit" else cedula, forzar, placa=placa)
     if cache:
         seccion.update({"estado": "EXITO", "origen": "cache", "intentos": 0, "cache_id": str(cache["_id"])})
+        # Evidencia de la consulta ORIGINAL (guardada junto al resultado en
+        # caché): un estudio servido de caché muestra la misma captura.
+        if nombre in FUENTES_NAVEGADOR:
+            seccion["_captura"] = cache.get("captura_jpg")
         if nombre == "manifiestos_rndc":
             viajes = cache.get("viajes", [])[:MAX_VIAJES_DOC]
             seccion.update({
@@ -782,6 +806,9 @@ async def _ejecutar_fuente(
         )
         return seccion
     seccion["origen"] = "portal"
+    # Captura de evidencia del bot (clave volátil `_` — jamás llega al doc).
+    if nombre in FUENTES_NAVEGADOR:
+        seccion["_captura"] = resultado.get("captura_jpg")
 
     ahora = _utcnow()
     expira = ahora + timedelta(hours=HORAS_CACHE)
@@ -823,7 +850,7 @@ async def _ejecutar_fuente(
             "mensaje_portal": mensaje_portal[:MAX_MENSAJE],
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché manifiestos %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -869,7 +896,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché policía %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -924,7 +951,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché runt %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -976,7 +1003,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché simit %s no se pudo auditar: %s", placa, exc)
@@ -1023,7 +1050,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché sena %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -1049,7 +1076,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché Rama Judicial no se pudo auditar: %s", exc)
@@ -1074,7 +1101,7 @@ async def _ejecutar_fuente(
             "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché BDME %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -1242,7 +1269,7 @@ async def _ejecutar_fuente(
                 "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
             }
             try:
-                col_consultas.insert_one(doc_cache)
+                col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
                 seccion["cache_id"] = str(doc_cache["_id"])
             except Exception as exc:
                 logger.error("Caché inhabilidades %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -1282,7 +1309,7 @@ async def _ejecutar_fuente(
                 "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
             }
             try:
-                col_consultas.insert_one(doc_cache)
+                col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
                 seccion["cache_id"] = str(doc_cache["_id"])
             except Exception as exc:
                 logger.error("Caché contraloría %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -1324,7 +1351,7 @@ async def _ejecutar_fuente(
             "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
         }
         try:
-            col_consultas.insert_one(doc_cache)
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
             seccion["cache_id"] = str(doc_cache["_id"])
         except Exception as exc:
             logger.error("Caché procuraduría %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
@@ -1455,6 +1482,28 @@ async def ejecutar_estudio(
             logger.error("Anexo %s no se pudo subir a GCS: %s", nombre_fuente, exc)
             fuentes[nombre_fuente]["anexo_error"] = str(exc)[:200]
 
+    # Evidencias de consulta (pantallazos del portal por fuente, patrón
+    # TusDatos): los bytes viven en GCS privado y el doc guarda la referencia
+    # (la regeneración del PDF los releé de ahí). Sólo fuentes de navegador.
+    evidencias: dict[str, dict] = {}
+    for nombre_fuente in FUENTES_NAVEGADOR & set(fuentes):
+        bytes_captura = (fuentes.get(nombre_fuente) or {}).pop("_captura", None)
+        if not bytes_captura:
+            continue
+        try:
+            from Funciones import storage_seguridad
+
+            ruta = storage_seguridad.ruta_blob(
+                actor["empresa_id"], _utcnow().year, consulta_id, f"_captura_{nombre_fuente}", ext=".jpg",
+            )
+            evidencias[nombre_fuente] = {
+                **storage_seguridad.subir_pdf(bytes_captura, ruta, cedula, content_type="image/jpeg"),
+                "capturado_en": _utcnow(),
+            }
+        except Exception as exc:
+            logger.error("Evidencia %s no se pudo subir a GCS: %s", nombre_fuente, exc)
+            fuentes[nombre_fuente]["evidencia_error"] = str(exc)[:200]
+
     estado_global = calcular_estado_global(fuentes)
     finalizado = _utcnow()
     duracion = round(time.monotonic() - inicio, 2)
@@ -1480,6 +1529,7 @@ async def ejecutar_estudio(
                 "anexo_policia": anexos.get("policia"),
                 "anexo_runt": anexos.get("runt"),
                 "anexo_simit": anexos.get("simit"),
+                "evidencias": evidencias,
                 "nombre_consultado": nombre_consultado,
                 "nit": nit,
             }
@@ -1586,6 +1636,7 @@ def crear_documento_estudio(
             "anexo_policia": None,
             "anexo_runt": None,
             "anexo_simit": None,
+            "evidencias": {},
             "retencion_expira_en": ahora + timedelta(days=retencion),
             "auditoria": auditoria,
         }

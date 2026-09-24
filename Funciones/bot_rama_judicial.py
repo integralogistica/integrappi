@@ -10,6 +10,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 PORTAL_URL = "https://consultaprocesos.ramajudicial.gov.co/Procesos/NombreRazonSocial"
 _TIMEOUT_MS = int(os.getenv("SEGURIDAD_RAMA_TIMEOUT_MS", "60000"))
 _MAX_PAGINAS = int(os.getenv("SEGURIDAD_RAMA_MAX_PAGINAS", "250"))
@@ -110,6 +115,9 @@ async def consultar_procesos(nombres: str, apellidos: str, headed: bool = False)
                 raise BotRamaJudicialSinResultado(
                     f"Respuesta incompleta: llegaron {len(procesos)} de {total} procesos"
                 )
+            # La paginación extra corre por fetch SIN cambio visible de la UI:
+            # asentar el resultado y fotografiar la primera página del listado.
+            await page.wait_for_timeout(1500)
             return {
                 "nombre_completo": nombre_completo,
                 "tipo_persona": "Natural",
@@ -117,6 +125,7 @@ async def consultar_procesos(nombres: str, apellidos: str, headed: bool = False)
                 "no_registra": total == 0,
                 "total_procesos": total,
                 "procesos": procesos,
+                "captura_jpg": await capturar_viewport_jpeg(page),
                 "mensaje": ("No se encontraron procesos para el nombre consultado" if total == 0
                             else f"Se encontraron {total} procesos; validar homonimia e identidad"),
             }

@@ -42,9 +42,9 @@ def _obtener_cliente():
     return _client
 
 
-def ruta_blob(empresa_id: str, anio: int, consulta_id: str, sufijo: str = "") -> str:
-    """Ruta del blob SIN cédula: SeguridadEstudios/{empresa_id}/{AAAA}/{consulta_id}{sufijo}.pdf"""
-    return f"{CARPETA_SEGURIDAD}/{str(empresa_id)}/{anio}/{consulta_id}{sufijo}.pdf"
+def ruta_blob(empresa_id: str, anio: int, consulta_id: str, sufijo: str = "", ext: str = ".pdf") -> str:
+    """Ruta del blob SIN cédula: SeguridadEstudios/{empresa_id}/{AAAA}/{consulta_id}{sufijo}{ext}"""
+    return f"{CARPETA_SEGURIDAD}/{str(empresa_id)}/{anio}/{consulta_id}{sufijo}{ext}"
 
 
 CARPETA_COBRO = os.getenv("SEGURIDAD_COBRO_CARPETA", "SeguridadCobro")
@@ -56,7 +56,10 @@ def ruta_blob_cuenta(empresa_id: str, periodo: str) -> str:
 
 
 def subir_pdf(contenido: bytes, ruta: str, cedula: str, content_type: str = "application/pdf") -> dict:
-    """Sube (o pisa) un PDF privado. Retorna {gcs_ruta, sha256, tamano}."""
+    """Sube (o pisa) bytes privados (PDF del estudio/anexos, JPEG de evidencia).
+
+    Retorna {gcs_ruta, sha256, tamano}.
+    """
     logger.info(
         "[STORAGE SEGURIDAD] subiendo %s bytes a gs://%s/%s",
         len(contenido), BUCKET_SEGURIDAD, ruta,

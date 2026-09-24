@@ -27,6 +27,11 @@ from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 # Cargar .env del proyecto para GEMINI_API_KEY cuando se ejecute standalone.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -43,6 +48,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 _LOCK = threading.Lock()
 _TIMEOUT_MS = int(os.getenv("SEGURIDAD_PROCURADURIA_TIMEOUT_MS", "90000"))
+# Espera del postback del resultado (2026-09-24): debe caber junto a
+# navegación+captcha dentro del presupuesto de 90 s de la fuente.
+_ESPERA_RESULTADO_MS = int(os.getenv("SEGURIDAD_PROCURADURIA_ESPERA_MS", "60000"))
 
 
 class BotProcuraduriaError(Exception):
@@ -306,14 +314,16 @@ async def consultar_antecedentes(
             # veredicto llega INLINE en .datosConsultado y #btnDescargar ya no
             # existe: esperar ambos marcadores (el que llegue primero) en vez
             # de un networkidle+3s que se rinde antes de que termine el postback.
-            # 180 s (2026-09-04): el orquestador le da a procuraduría 300 s de
-            # presupuesto — antes se rendía a los 60 s y leía la página antes
-            # de que terminara el postback (SinResultado prematuro), gastando
-            # el intento sin aprovechar el presupuesto. Navegación + captcha +
-            # 180 s de postback siguen cabiendo en los 300 s.
+            # 60 s (2026-09-24): el presupuesto de la fuente bajó a 90 s
+            # (pedido del usuario; era 300 s desde 2026-09-04). Navegación +
+            # captcha + 60 s de postback + settle ≈ 85-90 s — si el postback
+            # tarda más, es mejor leer SINResultado y reintentar/declarar
+            # NO_DISPONIBLE que dejar que el wait_for del orquestador corte a
+            # mitad de lectura. SEGURIDAD_PROCURADURIA_ESPERA_MS ajusta esto
+            # sin deploy.
             try:
                 await vista.wait_for_selector(
-                    ".datosConsultado, #btnDescargar", timeout=180000, state="attached",
+                    ".datosConsultado, #btnDescargar", timeout=_ESPERA_RESULTADO_MS, state="attached",
                 )
             except Exception:
                 pass  # puede ser error de captcha: leer la página igual
@@ -332,6 +342,14 @@ async def consultar_antecedentes(
                     pass
 
             texto_resultado = " ".join((await vista.inner_text("body")).split())
+
+            # Evidencia: el veredicto vive en el iframe — traerlo al viewport
+            # antes de fotografiar (best-effort, jamás tumba la consulta).
+            try:
+                await vista.locator(".datosConsultado").first.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            captura = await capturar_viewport_jpeg(pagina)
 
             # Nombre del consultado desde la sección "Datos del ciudadano"
             # (portal rediseñado 2026-09-02): el texto plano CONCATENA los
@@ -413,6 +431,7 @@ async def consultar_antecedentes(
                 "nombre_consultado": nombre_consultado,
                 "texto_resultado": texto_resultado[:1500],
                 "texto_pdf": texto_pdf[:2500],
+                "captura_jpg": captura,
                 "html": await vista.content(),
             }
         finally:

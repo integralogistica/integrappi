@@ -14,6 +14,11 @@ import requests
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
+try:  # importado como paquete (orquestador) o standalone (CLI)
+    from Funciones.captura_evidencia import capturar_viewport_jpeg
+except ImportError:  # pragma: no cover - ejecución como script
+    from captura_evidencia import capturar_viewport_jpeg
+
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 PORTAL_URL = "https://eris.contaduria.gov.co/BDME/"
 SITE_KEY = "6LcjpPwUAAAAAITxXi_1WDpOpzXfV0OztgN_Q2es"
@@ -193,7 +198,8 @@ async def consultar_bdme(documento: str, *, tipo: str = "cedula", headed: bool =
             filas = await page.locator("#panelPrincipal table tr").evaluate_all(
                 "trs=>trs.map(tr=>[...tr.querySelectorAll('th,td')].map(c=>c.innerText.trim())).filter(r=>r.some(Boolean))")
             resultado = _interpretar_resultado(cuerpo, filas)
-            resultado.update({"documento": documento, "tipo": tipo, "motivo": motivo})
+            resultado.update({"documento": documento, "tipo": tipo, "motivo": motivo,
+                              "captura_jpg": await capturar_viewport_jpeg(page)})
             return resultado
         finally:
             await browser.close()
