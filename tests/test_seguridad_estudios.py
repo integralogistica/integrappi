@@ -1551,7 +1551,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues", "situacion_militar"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(
@@ -1891,6 +1891,131 @@ class TestFuenteSisconmp(unittest.TestCase):
                     )
         self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
+class TestFuenteSituacionMilitar(unittest.TestCase):
+    """Fuente "situacion_militar" (libreta militar por CÉDULA): bot SIN
+    navegador (GET al generador de certificados del Ejército, $0), caché
+    (tipo, cédula), semáforo PENDIENTE/NO DEFINIDO/REMISO/APLAZADO →
+    ADVERTENCIA y anti-envenenamiento análogo (certificado sin estado no se
+    cachea)."""
+
+    RESULTADO_RESERVISTA = {
+        "cedula": "1010213062",
+        "no_registra": False,
+        "mensaje": "",
+        "nombres": "EDWIN MISAEL",
+        "apellidos": "ZARATE PEÑA",
+        "nombre_completo": "EDWIN MISAEL ZARATE PEÑA",
+        "tipo_documento": "Cédula de Ciudadanía",
+        "estado_tarjeta_militar": "RESERVISTA - 2DA CLASE",
+        "fecha_expedicion": "2026-09-24",
+        "pdf_bytes": b"%PDF-falso",
+        "pdf_ruta": None,
+        "captura_jpg": None,
+    }
+
+    RESULTADO_VACIO = {
+        "cedula": "99999999",
+        "no_registra": True,
+        "mensaje": "El ciudadano no registra situación militar con cédula de ciudadanía",
+        "nombres": "", "apellidos": "", "nombre_completo": "",
+        "estado_tarjeta_militar": "",
+        "fecha_expedicion": None,
+        "pdf_bytes": None, "pdf_ruta": None, "captura_jpg": None,
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_reservista_es_exito_y_cachea_por_cedula(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_situacion_militar_sync",
+                              return_value=self.RESULTADO_RESERVISTA) as bot:
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("situacion_militar", "1010213062", actor_consultador(), False)
+                    )
+        buscar.assert_called_once_with("situacion_militar", "1010213062", False, placa=None)
+        bot.assert_called_once_with("1010213062")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["estado_tarjeta_militar"], "RESERVISTA - 2DA CLASE")
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "situacion_militar")
+        self.assertEqual(doc_cache["cedula"], "1010213062")
+        # Minimización: el PDF del certificado NO se persiste en la caché.
+        self.assertNotIn("pdf_bytes", doc_cache)
+
+    def test_pendiente_es_advertencia(self):
+        # Semáforo (decisión 2026-09-25): obligación militar SIN definir =
+        # riesgo operativo para conducción → ADVERTENCIA (análogo SOAT/RTM).
+        resultado = dict(self.RESULTADO_RESERVISTA,
+                         estado_tarjeta_militar="PENDIENTE DE DEFINIR SITUACION MILITAR")
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_situacion_militar_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("situacion_militar", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+
+    def test_sin_registro_es_exito_determinante(self):
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_situacion_militar_sync",
+                              return_value=self.RESULTADO_VACIO):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("situacion_militar", "99999999", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertTrue(seccion["no_registra"])
+        self.assertEqual(col.insert_one.call_args[0][0]["no_registra"], True)
+
+    def test_cache_hit_reconstruye_seccion(self):
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "situacion_militar", "cedula": "1010213062",
+            "no_registra": False,
+            "mensaje": "",
+            "nombres": "EDWIN MISAEL", "apellidos": "ZARATE PEÑA",
+            "nombre_completo": "EDWIN MISAEL ZARATE PEÑA",
+            "estado_tarjeta_militar": "RESERVISTA - 2DA CLASE",
+            "fecha_expedicion": "2026-09-24",
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache) as buscar:
+            with patch.object(orch, "consultar_situacion_militar_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("situacion_militar", "1010213062", actor_consultador(), False)
+                )
+        buscar.assert_called_once_with("situacion_militar", "1010213062", False, placa=None)
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertEqual(seccion["estado"], "EXITO")
+        bot.assert_not_called()
+
+    def test_bot_error_es_no_disponible(self):
+        from Funciones.bot_situacion_militar import BotSituacionMilitarError
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_situacion_militar_sync") as bot:
+                bot.side_effect = BotSituacionMilitarError("API cayó")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("situacion_militar", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "situacion_militar_no_disponible")
+
+    def test_fecha_expedicion_del_certificado(self):
+        from Funciones.bot_situacion_militar import _fecha_expedicion
+
+        texto = ("Se firma y se expide en BOGOTÁ, D.C. a los 24 días del mes de "
+                 "SEPTIEMBRE de 2026, a las 21:22:55.")
+        self.assertEqual(_fecha_expedicion(texto), "2026-09-24")
+        self.assertIsNone(_fecha_expedicion("texto sin fecha"))
 
 
 class TestFechasSisconmp(unittest.TestCase):

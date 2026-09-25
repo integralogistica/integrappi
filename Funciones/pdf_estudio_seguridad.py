@@ -450,6 +450,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     bdme_nit = fuentes.get("bdme_nit") or {}
     rama_judicial = fuentes.get("rama_judicial") or {}
     rues = fuentes.get("rues") or {}
+    situacion_militar = fuentes.get("situacion_militar") or {}
 
     def _corrio(fuente: dict) -> bool:
         """La fuente corrió en ESTA consulta. DESHABILITADA = excluida por el
@@ -708,6 +709,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             _texto_veredicto_rues(rues),
             "rues",
         ])
+    if _corrio(situacion_militar):
+        etiqueta_sm, _ = ESTADO_FUENTE_TEXTO.get(situacion_militar.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "Ejército — Situación militar (libreta)",
+            etiqueta_sm,
+            _texto_veredicto_situacion_militar(situacion_militar),
+            "situacion_militar",
+        ])
     # Procuraduría SIEMPRE de última en el resumen (pedido 2026-09-15): es la
     # fuente más lenta y el usuario quiere el veredicto disciplinario
     # como cierre del informe.
@@ -721,7 +730,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, sisconmp, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, proc)
+        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, sisconmp, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, situacion_militar, proc)
         if _corrio(fuente)
     ]
     # Botón de navegación (pedido 2026-09-24): el nombre de la fuente en el
@@ -1706,6 +1715,62 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         else:
             cuento.append(_parrafo_estado_fuente(rues, "el RUES"))
 
+    # ── 4h. Detalle situación militar (libreta militar, Ejército) ───────────
+    if _corrio(situacion_militar):
+        _antes_de_seccion(situacion_militar)
+        cuento.append(Paragraph(
+            "Situación Militar — Libreta Militar (Ejército Nacional)", estilo_h2))
+    if situacion_militar.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        estado_tarjeta = (situacion_militar.get("estado_tarjeta_militar") or "").strip()
+        if situacion_militar.get("no_registra"):
+            texto_sm, color_sm = "CIUDADANO SIN REGISTRO DE SITUACIÓN MILITAR EN EL SISTEMA", COLOR_EXITO
+        elif situacion_militar.get("estado") == "ADVERTENCIA":
+            texto_sm, color_sm = f"SITUACIÓN MILITAR SIN DEFINIR — {estado_tarjeta}", COLOR_ADVERTENCIA
+        elif estado_tarjeta:
+            texto_sm, color_sm = f"SITUACIÓN MILITAR: {estado_tarjeta}", COLOR_EXITO
+        else:
+            texto_sm, color_sm = "CONSULTA REALIZADA — VER DETALLE", COLOR_PRIMARIO
+        tabla_veredicto_sm = Table(
+            [[Paragraph(f"<b>{texto_sm}</b>", ParagraphStyle("veredicto_sm", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_sm.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_sm),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_sm)
+        cuento.append(Spacer(0, 2 * mm))
+        detalle_sm = [
+            ["Ciudadano según el certificado", situacion_militar.get("nombre_completo") or "—"],
+            ["Estado tarjeta militar", estado_tarjeta or "—"],
+            ["Origen de datos", _texto_origen(situacion_militar)],
+        ]
+        if situacion_militar.get("fecha_expedicion"):
+            detalle_sm.insert(2, ["Expedición del certificado", _fecha_legible(situacion_militar.get("fecha_expedicion"))])
+        if (situacion_militar.get("mensaje") or "").strip():
+            detalle_sm.insert(1, ["Mensaje del portal", situacion_militar["mensaje"][:300]])
+        tabla_sm_resumen = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_sm],
+            colWidths=[55 * mm, 105 * mm],
+        )
+        tabla_sm_resumen.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_sm_resumen)
+        cuento.append(Paragraph(
+            "Certificación pública del Comando de Reclutamiento y Control Reservas del Ejército Nacional "
+            "(gratuita, sin valor como documento de identificación militar). La definición de la situación "
+            "militar corresponde a las Leyes 1861 de 2017 y 1184 de 2008 y al Decreto 977 de 2018.",
+            estilo_peq,
+        ))
+    elif _corrio(situacion_militar):
+        cuento.append(_parrafo_estado_fuente(situacion_militar, "la situación militar"))
+
     # ── 3. Detalle Procuraduría — SIEMPRE LA ÚLTIMA fuente del informe ───────
     # (pedido 2026-09-15: el veredicto disciplinario de la PGN queda como
     # cierre; además es la fuente más lenta del módulo).
@@ -1763,7 +1828,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("SISCONMP", sisconmp), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues), ("Procuraduría", proc))
+            for nombre, f in (("RNDC", rndc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("SISCONMP", sisconmp), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues), ("Situación militar", situacion_militar), ("Procuraduría", proc))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1889,6 +1954,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "carácter informativo; NO constituyen el Certificado de Existencia y Representación Legal ni "
             "certificación mercantil expedida por la cámara."
         )
+    if _corrio(situacion_militar):
+        bloques_legal.append(
+            "<b>Situación militar (libreta militar):</b> la información se obtuvo del certificado público de "
+            "estado de situación militar que expide en línea el Comando de Reclutamiento y Control Reservas "
+            "del Ejército Nacional, consulta abierta por documento de identidad que el propio portal declara "
+            "de carácter público y sin requerir autorización del titular (artículo 10 de la Ley 1581 de 2012), "
+            "conforme a la Ley 1861 de 2017, el Decreto 977 de 2018 y la Ley 1184 de 2008. El estado "
+            "corresponde a lo certificado por el Ejército en la fecha de consulta y es de carácter informativo; "
+            "la certificación no constituye documento de identificación militar ni reemplaza la tarjeta militar."
+        )
     if _corrio(proc):
         # Procuraduría siempre de última (pedido 2026-09-15), también aquí.
         bloques_legal.append(
@@ -1918,7 +1993,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         orden_evidencias = (
             "manifiestos_rndc", "contraloria", "delitos_sexuales", "policia",
             "runt", "simit", "sena", "sisconmp", "bdme", "bdme_nit", "rama_judicial",
-            "procuraduria",
+            "situacion_militar", "procuraduria",
         )
         nombres_evidencia = {
             "manifiestos_rndc": "Manifiestos RNDC (365 días)",
@@ -1929,6 +2004,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "simit": f"SIMIT — Comparendos placa {estudio.get('placa') or ''}".rstrip(),
             "sena": "SENA — Certificados de formación",
             "sisconmp": "SISCONMP — Capacitaciones Mercancías Peligrosas",
+            "situacion_militar": "Ejército Nacional — Certificado de situación militar",
             "bdme": "BDME — Persona por cédula",
             "bdme_nit": "BDME — Empresa por NIT",
             "rama_judicial": "Rama Judicial — Consulta Nacional de Procesos",
@@ -2180,6 +2256,21 @@ def _texto_veredicto_sisconmp(sisconmp: dict) -> str:
     if any(c.get("vigente") is False for c in caps):
         return f"{total} capacitación(es) — NINGUNA vigente (vencidas)"
     return f"{total} capacitación(es) — vigencia no reportada"
+
+
+def _texto_veredicto_situacion_militar(sm: dict) -> str:
+    """Veredicto de la fuente situacion_militar para la fila resumen:
+    informativo del estado certificado; la situación SIN DEFINIR es la
+    advertencia (decisión 2026-09-25: obligación militar vigente = riesgo
+    operativo para conducción)."""
+    if sm.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(sm)
+    if sm.get("no_registra"):
+        return "Sin registro de situación militar con cédula"
+    estado = (sm.get("estado_tarjeta_militar") or "").strip()
+    if sm.get("estado") == "ADVERTENCIA":
+        return f"Situación sin definir: {estado}" if estado else "Situación sin definir"
+    return estado or "Ver detalle"
 
 
 def _texto_veredicto_onu_ue(onu_ue: dict) -> str:

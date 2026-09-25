@@ -994,6 +994,80 @@ class TestSeccionSisconmp(unittest.TestCase):
         self.assertIn("Noconsultada".replace(" ", ""), texto)
 
 
+def _fuente_situacion_militar(estado="EXITO", no_registra=False, estado_tarjeta=None, mensaje=""):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": no_registra,
+        "mensaje": mensaje,
+        "nombres": "EDWIN MISAEL",
+        "apellidos": "ZARATE PEÑA",
+        "nombre_completo": "EDWIN MISAEL ZARATE PEÑA",
+        "estado_tarjeta_militar": estado_tarjeta if estado_tarjeta is not None else (
+            "" if no_registra else "RESERVISTA - 2DA CLASE"),
+        "fecha_expedicion": None if no_registra else "2026-09-24",
+        "intentos": 1,
+        "duraciones_s": [1.8],
+        "error": None,
+    }
+
+
+class TestSeccionSituacionMilitar(unittest.TestCase):
+    """Fuente "situacion_militar" en el PDF: fila de resumen, sección
+    Situación Militar con banner (estado certificado / sin definir / sin
+    registro), datos del certificado y disposición legal honesta (Ley
+    1581 art. 10, Leyes 1861/1184, Decreto 977)."""
+
+    def _con_sm(self, **kw):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["situacion_militar"] = _fuente_situacion_militar(**kw)
+        return estudio
+
+    def test_reservista_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm()))
+        self.assertIn("SituaciónMilitar—LibretaMilitar".replace(" ", ""), texto)
+        self.assertIn("SITUACIÓNMILITAR:RESERVISTA-2DACLASE".replace(" ", ""), texto)
+        self.assertIn("EDWINMISAELZARATEPEÑA".replace(" ", ""), texto)
+        self.assertIn("24/09/2026", texto)
+
+    def test_pendiente_banner_ambar(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm(
+            estado="ADVERTENCIA", estado_tarjeta="PENDIENTE DE DEFINIR",
+        )))
+        self.assertIn("SINDEFINIR", texto)
+
+    def test_sin_registro_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm(
+            no_registra=True,
+            mensaje="El ciudadano no registra situación militar con cédula de ciudadanía",
+        )))
+        self.assertIn("SINREGISTRODESITUACIÓNMILITAR".replace(" ", ""), texto)
+
+    def test_fila_de_resumen(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm()))
+        self.assertIn("Ejército—Situaciónmilitar(libreta)".replace(" ", ""), texto)
+        self.assertIn("RESERVISTA-2DACLASE", texto)
+
+    def test_resumen_solo_fuentes_corridas(self):
+        estudio = estudio_fixture()
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertNotIn("LibretaMilitar".replace(" ", ""), texto)
+
+    def test_disposicion_legal(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm()))
+        import unicodedata
+
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("Ley1581de2012".replace(" ", ""), plano.replace(" ", ""))
+        self.assertIn("Ley1861de2017".replace(" ", ""), plano.replace(" ", ""))
+
+    def test_fuente_fallida_muestra_estado(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sm(
+            estado="NO_DISPONIBLE", no_registra=None, estado_tarjeta="",
+        )))
+        self.assertIn("NODISPONIBLE", texto)
+
+
 class TestSeccionOfac(unittest.TestCase):
     def _con_ofac(self, aplica=False):
         estudio = estudio_fixture()

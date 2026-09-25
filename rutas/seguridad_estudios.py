@@ -864,6 +864,7 @@ def verificar_estudio(consulta_id: str, codigo: str = Query(..., min_length=4, m
         "simit": "SIMIT — Estado de cuenta de la placa",
         "sena": "SENA — Certificados de formación",
         "sisconmp": "SISCONMP — Capacitaciones Mercancías Peligrosas",
+        "situacion_militar": "Ejército — Situación militar (libreta)",
         "ofac": "OFAC — Personas por cédula",
         "ofac_nit": "OFAC — Empresas por NIT",
         "onu_ue": "ONU/UE — Listas internacionales de sanciones",
@@ -1040,6 +1041,7 @@ def estadisticas_estudios(
                     {"$eq": ["$fuentes.simit.origen", "cache"]},
                     {"$eq": ["$fuentes.sena.origen", "cache"]},
                     {"$eq": ["$fuentes.sisconmp.origen", "cache"]},
+                    {"$eq": ["$fuentes.situacion_militar.origen", "cache"]},
                 ]},
                 1, 0,
             ]}},
@@ -1132,7 +1134,7 @@ CONFIG_DEFAULT_EMPRESA = {
     # 2012 — requiere autorización documentada del titular, Ley 1581) y
     # documenta el estado inicial; para apagar una fuente puntual por empresa
     # usar `config.fuentes_excluidas`.
-    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial"],
+    "fuentes_habilitadas": ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "situacion_militar"],
 }
 
 

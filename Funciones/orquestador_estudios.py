@@ -58,6 +58,11 @@ from Funciones.bot_delitos_sexuales import (
     consultar_inhabilidades, consultar_inhabilidades_sync,
 )
 from Funciones.bot_rues import BotRuesError, BotRuesSinResultado, consultar_rues_sync
+from Funciones.bot_situacion_militar import (
+    BotSituacionMilitarError,
+    BotSituacionMilitarSinResultado,
+    consultar_situacion_militar_sync,
+)
 from Funciones.bot_runt import (
     BotRuntCaptchaFallido,
     BotRuntSinCaptchaKey,
@@ -125,15 +130,18 @@ MAX_CAPACITACIONES_DOC = int(os.getenv("SEGURIDAD_MAX_CAPACITACIONES_DOC", "20")
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues", "situacion_militar")
 
 # Fuentes que consultan un PORTAL con navegador y por tanto pueden dejar una
 # CAPTURA DE EVIDENCIA (pantallazo del resultado, patrón TusDatos). Las demás
 # (ofac, ofac_nit, onu_ue, rues) consumen datasets/APIs sin página que
-# fotografiar.
+# fotografiar. EXCEPCIÓN: situacion_militar no usa navegador (API directo),
+# pero su resultado es un CERTIFICADO PDF cuya 1ª hoja rasterizada ES la
+# evidencia (patrón CGR) — el bot la devuelve como captura_jpg.
 FUENTES_NAVEGADOR = {
     "manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales",
     "policia", "runt", "simit", "sena", "sisconmp", "bdme", "bdme_nit", "rama_judicial",
+    "situacion_militar",
 }
 
 
@@ -338,6 +346,12 @@ def _clasificar_error(exc: Exception, nombre: str = "") -> tuple[str, dict]:
     if isinstance(exc, BotRuesError):
         # API caído / passphrase rotada / NIT fuera del formato del buscador.
         return "NO_DISPONIBLE", {"tipo": "rues_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSituacionMilitarSinResultado):
+        # El certificado llegó sin estado legible (anti-envenenamiento).
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSituacionMilitarError):
+        # API del Ejército caído / respuesta inesperada.
+        return "NO_DISPONIBLE", {"tipo": "situacion_militar_no_disponible", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, asyncio.TimeoutError):
         # El timeout del wait_for es el presupuesto POR FUENTE (300 s para
         # procuraduría, el global para las demás).
@@ -503,6 +517,23 @@ def _estado_rues(seccion: dict) -> str:
     return "EXITO" if (seccion.get("estado_matricula") or "").upper() == "ACTIVA" else "ADVERTENCIA"
 
 
+def _estado_situacion_militar(seccion: dict) -> str:
+    """Estado de la fuente situacion_militar (decisión de negocio 2026-09-25).
+
+    - Situación SIN DEFINIR (PENDIENTE / NO DEFINIDO / REMISO / APLAZADO) →
+      ADVERTENCIA: el conductor tiene una obligación militar vigente — para
+      transporte es riesgo operativo (retención en puestos de control).
+    - Situación DEFINIDA (RESERVISTA 1RA/2DA CLASE, EXCLUIDO, …) → EXITO
+      informativo: el dato se muestra, la interpretación es del cliente.
+    - Ciudadano no registrado con CC (no_registra) → EXITO determinante
+      (el propio portal declara la consulta pública, art. 10 Ley 1581).
+    """
+    estado = (seccion.get("estado_tarjeta_militar") or "").upper()
+    if any(clave in estado for clave in ("PENDIENTE", "NO DEFINIDO", "REMISO", "APLAZADO")):
+        return "ADVERTENCIA"
+    return "EXITO"
+
+
 async def _ejecutar_fuente(
     nombre: str, cedula: str, actor: dict, forzar: bool, *, placa: str | None = None,
     cedula_propietario: str | None = None,
@@ -631,6 +662,19 @@ async def _ejecutar_fuente(
                 "capacitaciones": capacitaciones,
             })
             seccion["estado"] = _estado_sisconmp(seccion)
+        elif nombre == "situacion_militar":
+            # Situación militar (libreta militar, Ejército): el estado no
+            # "vence" con el reloj — la misma función pura del post-portal.
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "nombres": cache.get("nombres", ""),
+                "apellidos": cache.get("apellidos", ""),
+                "nombre_completo": cache.get("nombre_completo", ""),
+                "estado_tarjeta_militar": cache.get("estado_tarjeta_militar", ""),
+                "fecha_expedicion": cache.get("fecha_expedicion"),
+            })
+            seccion["estado"] = _estado_situacion_militar(seccion)
         elif nombre in {"ofac", "ofac_nit"}:
             seccion.update({
                 "aplica": bool(cache.get("aplica")),
@@ -801,6 +845,13 @@ async def _ejecutar_fuente(
             # rues consulta el API directo de la SPA (requests puro, sin
             # navegador ni captcha: ~1-2 s, costo $0).
             return await asyncio.to_thread(consultar_rues_sync, cedula)
+    elif nombre == "situacion_militar":
+
+        async def invocar() -> dict:
+            # Libreta militar: GET directo al generador de certificados del
+            # Ejército (requests puro, sin navegador ni captcha: ~1-2 s, $0).
+            # Devuelve el certificado PDF (parseado en memoria por el bot).
+            return await asyncio.to_thread(consultar_situacion_militar_sync, cedula)
     elif nombre in {"bdme", "bdme_nit"}:
 
         async def invocar() -> dict:
@@ -1173,6 +1224,57 @@ async def _ejecutar_fuente(
         # 2026-09-25, análogo SOAT/RTM); `vigente` ya viene calculado contra
         # hoy Colombia y se recalcula en cada hit de caché.
         seccion["estado"] = _estado_sisconmp(seccion)
+    elif nombre == "situacion_militar":
+        # Estado de situación militar por cédula (API público del Ejército,
+        # sin captcha ni navegador). El certificado PDF se procesa EN MEMORIA
+        # (veredicto + nombre + fecha) y NO se persiste (minimización); la
+        # evidencia es su 1ª hoja rasterizada (el bot la trae como captura).
+        no_registra = resultado.get("no_registra")
+        estado_tarjeta = (resultado.get("estado_tarjeta_militar") or "").strip()
+        mensaje = (resultado.get("mensaje") or "").strip()
+        # Anti-envenenamiento (segunda barrera; el bot ya lanza
+        # BotSituacionMilitarSinResultado sin estado legible): ni registro ni
+        # determinante NO es una consulta válida.
+        if not estado_tarjeta and no_registra is None and not mensaje:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El API de situación militar no entregó el certificado. Intente de nuevo.",
+                },
+            })
+            logger.warning("Situación militar sin resultado legible para %s (sin cachear)", enmascarar_cedula(cedula))
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "no_registra": bool(no_registra),
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "nombres": (resultado.get("nombres") or "")[:120],
+            "apellidos": (resultado.get("apellidos") or "")[:120],
+            "nombre_completo": (resultado.get("nombre_completo") or "")[:150],
+            "estado_tarjeta_militar": estado_tarjeta[:120],
+            "fecha_expedicion": resultado.get("fecha_expedicion"),
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché situación militar %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        seccion.update({
+            "no_registra": doc_cache["no_registra"],
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "nombres": doc_cache["nombres"],
+            "apellidos": doc_cache["apellidos"],
+            "nombre_completo": doc_cache["nombre_completo"],
+            "estado_tarjeta_militar": estado_tarjeta[:120],
+            "fecha_expedicion": doc_cache["fecha_expedicion"],
+        })
+        # Situación sin definir = ADVERTENCIA (decisión de negocio 2026-09-25);
+        # definida o no_registra = EXITO.
+        seccion["estado"] = _estado_situacion_militar(seccion)
     elif nombre == "rama_judicial":
         procesos = (resultado.get("procesos") or [])[:MAX_PROCESOS_DOC]
         total = int(resultado.get("total_procesos") or len(procesos))
