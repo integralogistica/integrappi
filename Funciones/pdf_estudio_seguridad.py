@@ -728,11 +728,23 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             _texto_veredicto(proc),
             "procuraduria",
         ])
-    estados_resumen = [
-        (fuente or {}).get("estado")
-        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, sisconmp, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, situacion_militar, proc)
-        if _corrio(fuente)
-    ]
+    # (pedido 2026-09-25) El cuadro "Resumen por fuente" solo lista las fuentes
+    # que SÍ trajeron respuesta (EXITO/ADVERTENCIA); las que no respondieron
+    # (NO_DISPONIBLE/ERROR) van a un cuadro aparte al final del resumen.
+    fuente_por_clave = {
+        "manifiestos_rndc": rndc, "contraloria": cgr, "delitos_sexuales": delitos,
+        "policia": pol, "runt": runt, "simit": simit, "sena": sena,
+        "sisconmp": sisconmp, "ofac": ofac, "ofac_nit": ofac_nit, "onu_ue": onu_ue,
+        "bdme": bdme, "bdme_nit": bdme_nit, "rama_judicial": rama_judicial,
+        "rues": rues, "situacion_militar": situacion_militar, "procuraduria": proc,
+    }
+
+    def _estado_de_fila(fila: list):
+        return (fuente_por_clave.get(fila[3] if len(fila) > 3 else None) or {}).get("estado")
+
+    filas_con_respuesta = [f for f in filas_resumen[1:] if _estado_de_fila(f) in {"EXITO", "ADVERTENCIA"}]
+    filas_sin_respuesta = [f for f in filas_resumen[1:] if _estado_de_fila(f) not in {"EXITO", "ADVERTENCIA"}]
+    estados_resumen = [_estado_de_fila(f) for f in filas_con_respuesta]
     # Botón de navegación (pedido 2026-09-24): el nombre de la fuente en el
     # resumen es un LINK INTERNO a la página de su evidencia (ancla ev_<fuente>
     # en la sección final) — solo si la fuente tiene evidencia (las de
@@ -755,7 +767,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             [Paragraph(escape(str(v)), estilo_celda_cab) for v in filas_resumen[0]]
         ] + [
             [_celda_nombre_resumen(fila), celda(fila[1]), celda(fila[2])]
-            for fila in filas_resumen[1:]
+            for fila in filas_con_respuesta
         ],
         colWidths=[62 * mm, 38 * mm, 60 * mm],
     )
@@ -785,6 +797,24 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     tabla_resumen.setStyle(TableStyle(estilos_tabla_resumen))
     cuento.append(tabla_resumen)
     cuento.append(Spacer(0, 4 * mm))
+
+    # Cuadro aparte (pedido 2026-09-25): fuentes que NO respondieron en esta
+    # consulta — SOLO se mencionan, sin estado ni motivo (pedido mismo día:
+    # una única columna; la indisponibilidad no debe generar alboroto).
+    if filas_sin_respuesta:
+        cuento.append(Paragraph("Fuentes sin respuesta en esta consulta", estilo_h2))
+        tabla_sin_respuesta = Table(
+            [
+                [Paragraph(escape("Fuente"), estilo_celda_cab)]
+            ] + [
+                [celda(fila[0])]
+                for fila in filas_sin_respuesta
+            ],
+            colWidths=[160 * mm],
+        )
+        tabla_sin_respuesta.setStyle(TableStyle(estilos_tabla_resumen[:9]))
+        cuento.append(tabla_sin_respuesta)
+        cuento.append(Spacer(0, 4 * mm))
 
     # QR de verificación de autenticidad (como la referencia TusDatos).
     codigo_verificacion = estudio.get("codigo_verificacion", "")
@@ -2363,20 +2393,42 @@ def _texto_veredicto_rues(rues: dict) -> str:
     return f"Matrícula {estado_mat or 'sin estado'} — empresa no activa"
 
 
+def _limpiar_mensaje_error(mensaje: str) -> str:
+    """Mensaje de error presentable: sin stacktraces técnicos.
+
+    Las excepciones crudas de Playwright traen la pila embebida en el str()
+    ("Page.evaluate: TypeError: Failed to fetch at eval (eval at
+    evaluate (:234:30), :2:37) at UtilityScript.evaluate...") — al lector del
+    informe solo le importa la falla, no la traza.
+    """
+    mensaje = (mensaje or "").strip()
+    if not mensaje:
+        return ""
+    # Cortar la pila: todo lo que sigue al primer " at eval/" at UtilityScript/"
+    # " at async " es traza interna del navegador/bot.
+    mensaje = re.split(r"\s+at\s+(?:eval\b|UtilityScript|async\b)", mensaje)[0].strip()
+    # Prefijos técnicos del arnés de automatización que no dicen nada al lector.
+    mensaje = re.sub(r"^(?:Page\.evaluate|page\.evaluate|Node\.evaluate):\s*", "", mensaje)
+    return mensaje[:160].strip()
+
+
 def _resumen_error(fuente: dict) -> str:
     error = fuente.get("error") or {}
-    mensaje = (error.get("mensaje") or "Fuente no disponible")[:80]
-    return f"No consultada: {mensaje}"
+    mensaje = _limpiar_mensaje_error(error.get("mensaje") or "") or "Fuente no disponible"
+    return f"Sin respuesta del portal: {mensaje}"
 
 
 def _parrafo_estado_fuente(fuente: dict, nombre: str) -> Paragraph:
-    etiqueta, color = ESTADO_FUENTE_TEXTO.get(fuente.get("estado", "ERROR"), (fuente.get("estado", ""), COLOR_NEUTRO))
-    error = fuente.get("error") or {}
-    detalle = (error.get("mensaje") or "").strip()
-    texto = f"<b>{nombre}</b>: {etiqueta}"
-    if detalle:
-        texto += f" — {detalle[:200]}"
+    """Aviso de fuente sin respuesta en su sección de detalle (pedido
+    2026-09-25): texto fijo en GRIS y discreto — la indisponibilidad y su
+    motivo ya quedan declarados en el cuadro "Fuentes sin respuesta" del
+    resumen; repetirlos aquí con color de alarma (y volcando el error técnico
+    del bot) generaba ruido en el informe. `nombre` se conserva por
+    compatibilidad de firma con los 17 puntos de llamada."""
     return Paragraph(
-        texto,
-        ParagraphStyle("estado_fuente", fontName="Helvetica", fontSize=9, leading=13, textColor=color),
+        "La fuente de consulta presenta indisponibilidad.",
+        ParagraphStyle(
+            "estado_fuente", fontName="Helvetica-Oblique", fontSize=9,
+            leading=13, textColor=COLOR_NEUTRO,
+        ),
     )

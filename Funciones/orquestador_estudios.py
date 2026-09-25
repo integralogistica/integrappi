@@ -1769,6 +1769,189 @@ async def ejecutar_estudio(
     return doc
 
 
+def fuentes_pendientes_estudio(doc: dict) -> list[str]:
+    """Fuentes que CORRIERON y quedaron sin respuesta (NO_DISPONIBLE/ERROR)
+    — las candidatas al completado del estudio (pedido 2026-09-25)."""
+    fuentes = doc.get("fuentes") or {}
+    return [
+        nombre for nombre in FUENTES
+        if isinstance(fuentes.get(nombre), dict)
+        and fuentes[nombre].get("estado") in {"NO_DISPONIBLE", "ERROR"}
+    ]
+
+
+async def reintentar_fuentes_estudio(
+    consulta_id: str,
+    actor: dict,
+    empresa: dict,
+    registrar_evento: Callable[..., None],
+) -> tuple[dict, list[str]]:
+    """Re-ejecuta SOLO las fuentes que no respondieron de un estudio ya
+    cerrado (pedido 2026-09-25) y devuelve (doc actualizado, fuentes corridas).
+
+    Completa el MISMO estudio: las secciones nuevas se mergean sobre las
+    existentes (lo que ya respondió NO se re-consulta), se recalcula el
+    estado global y se actualiza `nombre_consultado` con la cascada. Los
+    parámetros (cédula, placa, propietario, nombres, NIT, fecha de
+    expedición) salen del doc persistido. SIN consumo de cobro nuevo: la
+    consulta original ya se cobró (o se reembolsó por mayoría fallida).
+    Idempotente: sin fuentes pendientes devuelve el doc tal cual y [].
+    """
+    doc = col_estudios.find_one({"consulta_id": consulta_id})
+    if not doc:
+        raise ValueError("estudio no encontrado")
+    if doc.get("estado") == "EN_PROGRESO":
+        raise ValueError("el estudio sigue en progreso")
+
+    pendientes = fuentes_pendientes_estudio(doc)
+    if not pendientes:
+        return doc, []
+
+    # Parámetros de la consulta ORIGINAL (persistidos en el doc): el
+    # completado no puede pedirle nada nuevo al usuario.
+    cedula = doc.get("cedula") or ""
+    vehiculo = (doc.get("vehiculos") or [{}])[0] or {}
+    placa = doc.get("placa") or vehiculo.get("placa") or None
+    cedula_propietario = vehiculo.get("cedula_propietario")
+    nombres = doc.get("nombres")
+    apellidos = doc.get("apellidos")
+    nit = doc.get("nit")
+    fecha_expedicion = doc.get("fecha_expedicion")
+
+    empresa_consultante = {
+        "nombre": (empresa.get("nombre") or "").strip() or "INTEGRA LOGISTICA",
+        "nit": (empresa.get("nit") or "").strip() or "901923029-2",
+    }
+    async with _SEMAFORO_ESTUDIOS:
+        resultados = await asyncio.gather(*[
+            _ejecutar_fuente(
+                nombre, cedula, actor, False,
+                placa=placa, cedula_propietario=cedula_propietario,
+                nombres=nombres, apellidos=apellidos, nit=nit,
+                fecha_expedicion=fecha_expedicion,
+                empresa_consultante=empresa_consultante,
+            )
+            for nombre in pendientes
+        ])
+    nuevas = dict(zip(pendientes, resultados))
+
+    # Anexos de las fuentes re-corridas (si algún portal llegara a entregar).
+    anexos_nuevos: dict[str, dict] = {}
+    for nombre_fuente in {"policia", "runt", "simit"} & set(nuevas):
+        bytes_anexo = nuevas[nombre_fuente].pop("_pdf_bytes", None)
+        if not bytes_anexo:
+            continue
+        try:
+            from Funciones import storage_seguridad
+
+            ruta = storage_seguridad.ruta_blob(actor["empresa_id"], _utcnow().year, consulta_id, f"_{nombre_fuente}")
+            anexos_nuevos[nombre_fuente] = storage_seguridad.subir_pdf(bytes_anexo, ruta, cedula)
+        except Exception as exc:
+            logger.error("Anexo %s no se pudo subir a GCS: %s", nombre_fuente, exc)
+            nuevas[nombre_fuente]["anexo_error"] = str(exc)[:200]
+
+    # Evidencias de las fuentes re-corridas: MERGE con las existentes (las
+    # que ya respondieron conservan su captura original en GCS).
+    evidencias_nuevas: dict[str, dict] = {}
+    for nombre_fuente in FUENTES_NAVEGADOR & set(nuevas):
+        bytes_captura = nuevas[nombre_fuente].pop("_captura", None)
+        if not bytes_captura:
+            continue
+        try:
+            from Funciones import storage_seguridad
+
+            ruta = storage_seguridad.ruta_blob(
+                actor["empresa_id"], _utcnow().year, consulta_id, f"_captura_{nombre_fuente}", ext=".jpg",
+            )
+            evidencias_nuevas[nombre_fuente] = {
+                **storage_seguridad.subir_pdf(bytes_captura, ruta, cedula, content_type="image/jpeg"),
+                "capturado_en": _utcnow(),
+            }
+        except Exception as exc:
+            logger.error("Evidencia %s no se pudo subir a GCS: %s", nombre_fuente, exc)
+            nuevas[nombre_fuente]["evidencia_error"] = str(exc)[:200]
+
+    # Merge: lo que ya respondió queda INTACTO; solo se reemplazan las
+    # secciones re-corridas.
+    fuentes_finales = {
+        **(doc.get("fuentes") or {}),
+        **{k: _limpiar_seccion(v) for k, v in nuevas.items()},
+    }
+    estado_global = calcular_estado_global(fuentes_finales)
+    # Cascada del nombre consultado: la nueva respuesta manda; si ninguna
+    # fuente nueva lo trae, se conserva el del doc.
+    nombre_consultado = (
+        (nuevas.get("procuraduria") or {}).get("nombre_certificado")
+        or (nuevas.get("policia") or {}).get("nombre_consultado")
+        or doc.get("nombre_consultado")
+        or ""
+    )
+
+    actualizaciones: dict = {
+        "estado": estado_global,
+        "finalizado_en": _utcnow(),
+        "fuentes": fuentes_finales,
+        "evidencias": {**(doc.get("evidencias") or {}), **evidencias_nuevas},
+        "nombre_consultado": nombre_consultado,
+        "completado_en": _utcnow(),
+    }
+    actualizaciones.update({f"anexo_{k}": v for k, v in anexos_nuevos.items()})
+    col_estudios.update_one(
+        {"consulta_id": consulta_id},
+        {"$set": actualizaciones, "$inc": {"completar_intentos": 1}},
+    )
+
+    for nombre, fuente in nuevas.items():
+        if fuente.get("estado") in {"NO_DISPONIBLE", "ERROR"}:
+            registrar_evento(
+                "fuente_error", actor=actor, consulta_id=consulta_id, fuente=nombre,
+                detalle=f"Completado: Estado {fuente['estado']}: {(fuente.get('error') or {}).get('mensaje', '')[:150]}",
+            )
+    registrar_evento(
+        "estudio_completado",
+        actor=actor,
+        consulta_id=consulta_id,
+        detalle=f"Fuentes re-consultadas: {', '.join(pendientes)} · estado {estado_global}",
+    )
+
+    doc_actualizado = col_estudios.find_one({"consulta_id": consulta_id})
+    doc_actualizado.pop("_id", None)
+    return doc_actualizado, pendientes
+
+
+async def detectar_nombres(cedula: str, actor: dict) -> tuple[str | None, str | None]:
+    """Cascada de nombres (decisión del usuario 2026-09-25): obtiene
+    nombres/apellidos VERIFICADOS por cédula para alimentar el captcha de la
+    PGN y la búsqueda por nombre de la Rama Judicial SIN que el usuario los
+    digite (reprocesos fuera).
+
+    Orden por costo/latencia: `situacion_militar` (API del Ejército, $0,
+    ~1-2 s, certificado oficial con nombres separados — pero sin registro
+    para mujeres/extranjeros) → `sisconmp` (Mintransporte, $0, ~11 s, cubre
+    a quien tiene cursos de Mercancías Peligrosas). Ambas consultas llenan
+    la caché 24 h: si la fuente está en el plan, el gather principal sirve
+    del hit (no se consulta dos veces). Best-effort: fallo → (None, None) y
+    el endpoint resuelve (memoria antes, 422 pidiéndolos a mano después).
+    """
+    for nombre_fuente in ("situacion_militar", "sisconmp"):
+        try:
+            seccion = await asyncio.wait_for(
+                _ejecutar_fuente(nombre_fuente, cedula, actor, False),
+                timeout=45,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Cascada de nombres (%s) falló para %s: %s",
+                nombre_fuente, enmascarar_cedula(cedula), exc,
+            )
+            continue
+        nombres = (seccion.get("nombres") or "").strip()
+        apellidos = (seccion.get("apellidos") or "").strip()
+        if nombres and apellidos:
+            return nombres, apellidos
+    return None, None
+
+
 def _fuente_deshabilitada(nombre: str) -> dict:
     return {"estado": "DESHABILITADA", "origen": None, "intentos": 0, "duraciones_s": [], "error": None, "consultado_en": _utcnow()}
 

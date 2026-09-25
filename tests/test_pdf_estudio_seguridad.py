@@ -237,7 +237,10 @@ class TestGenerarPDF(unittest.TestCase):
             "error": {"tipo": "TimeoutError", "mensaje": "sin respuesta"},
         }
         texto = _texto_plano(generar_pdf_estudio(estudio))
-        self.assertIn("NODISPONIBLE", texto)
+        # La fuente caída: aviso gris en el detalle + mención en el cuadro
+        # aparte (el estado "NO DISPONIBLE" ya no se imprime por fuente).
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        self.assertIn("Fuentessinrespuestaenestaconsulta", texto)
         self.assertNotIn("PARCIALFUENTESNODISPONIBLES", texto)
         self.assertNotIn("NOREGISTRASANCIONES", texto)
 
@@ -409,7 +412,12 @@ class TestSeccionPolicia(unittest.TestCase):
         )
         estudio["fuentes"]["policia"]["error"] = {"tipo": "portal_inconsistente", "mensaje": "El portal de la Policía no entregó veredicto"}
         texto = _texto_plano(generar_pdf_estudio(estudio))
-        self.assertIn("noentregóveredicto", texto.replace("á", "a").replace("é", "e"))
+        # El detalle de la fuente caída dice SOLO el aviso gris discreto
+        # (2026-09-25) y el cuadro aparte SOLO menciona la fuente: ni el
+        # motivo técnico ni el estado repetido llegan al informe.
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        self.assertNotIn("noentregóveredicto", texto)
+        self.assertNotIn("NODISPONIBLE", texto)
 
     def test_resumen_con_tres_fuentes(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_policia()))
@@ -432,6 +440,71 @@ class TestSeccionPolicia(unittest.TestCase):
         )
         # La cita de la 1238 sigue presente pero SOLO para la Procuraduría.
         self.assertIn("Ley1238de2008", texto)
+
+
+class TestResumenFuentesSeparado(unittest.TestCase):
+    """(2026-09-25) El cuadro 'Resumen por fuente' solo lista fuentes con
+    respuesta (EXITO/ADVERTENCIA); NO_DISPONIBLE/ERROR van al cuadro aparte
+    'Fuentes sin respuesta en esta consulta' con motivo limpio."""
+
+    def _con_policia_caida(self, estado="NO_DISPONIBLE", mensaje="La fuente no respondió en 150 s", tipo="TimeoutError"):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["policia"] = {
+            "estado": estado,
+            "origen": "portal",
+            "intentos": 2,
+            "duraciones_s": [75.0, 75.0],
+            "error": {"tipo": tipo, "mensaje": mensaje},
+        }
+        return estudio
+
+    def test_cuadro_aparte_para_fuentes_caidas(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_policia_caida()))
+        self.assertIn("Fuentessinrespuestaenestaconsulta", texto)
+        # SOLO se menciona la fuente (pedido 2026-09-25): ni estado repetido
+        # ni motivo técnico en este cuadro.
+        self.assertIn("PolicíaNacional", texto)
+        self.assertNotIn("Lafuentenorespondióen150s", texto)
+
+    def test_resumen_principal_sin_fuentes_fallidas(self):
+        """La fila de la fuente caída NO va en 'Resumen por fuente': la
+        portada no muestra estados de fallo por fuente — la caída solo se
+        MENCIONA (nombre) en el cuadro aparte."""
+        paginas = _texto_por_pagina(generar_pdf_estudio(self._con_policia_caida()))
+        portada = paginas[0]
+        self.assertIn("Resumenporfuente", portada)
+        self.assertIn("Fuentessinrespuestaenestaconsulta", portada)
+        # Ningún estado de fallo por fuente en la portada (el cuadro aparte
+        # solo lista nombres).
+        self.assertNotIn("NODISPONIBLE", portada)
+        self.assertNotIn("ERROR", portada)
+
+    def test_stacktrace_playwright_no_aparece(self):
+        estudio = self._con_policia_caida(
+            estado="ERROR", tipo="Error",
+            mensaje=(
+                "Page.evaluate: TypeError: Failed to fetch at eval "
+                "(eval at evaluate (:234:30), :2:37) at UtilityScript.evaluate "
+                "(:241:19) at UtilityScript. (:1:"
+            ),
+        )
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        # El detalle de fuente caída es el aviso gris fijo y el cuadro aparte
+        # SOLO menciona la fuente: el stacktrace del bot no llega jamás al PDF.
+        self.assertNotIn("UtilityScript", texto)
+        self.assertNotIn("evalatevaluate", texto)
+        self.assertNotIn("TypeError:Failedtofetch", texto)
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+
+    def test_limpiar_mensaje_error_unitario(self):
+        from Funciones.pdf_estudio_seguridad import _limpiar_mensaje_error
+        self.assertEqual(_limpiar_mensaje_error(""), "")
+        self.assertEqual(
+            _limpiar_mensaje_error("Page.evaluate: TypeError: Failed to fetch at eval (x) at UtilityScript.y"),
+            "TypeError: Failed to fetch",
+        )
+        # Mensajes normales pasan intactos.
+        self.assertEqual(_limpiar_mensaje_error("La fuente no respondió en 150 s"), "La fuente no respondió en 150 s")
 
 
 def _fuente_runt(estado="EXITO", no_registra=None, soat=None, datos=None, polizas=None, mensaje="", rtm=None, revisiones=None):
@@ -610,7 +683,10 @@ class TestSeccionRunt(unittest.TestCase):
         estudio["fuentes"]["runt"]["error"] = {"tipo": "portal_inconsistente", "mensaje": "El portal del RUNT no entregó datos"}
         texto = _texto_plano(generar_pdf_estudio(estudio))
         self.assertIn("RUNT", texto)
-        self.assertIn("noentregódatos", texto.replace("á", "a"))
+        # Aviso gris fijo + mención simple en el cuadro aparte (2026-09-25):
+        # el mensaje técnico del bot NO llega al informe.
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        self.assertNotIn("noentregódatos", texto)
 
     def test_resumen_con_cuatro_fuentes(self):
         """2026-09-01: el resumen (y el informe) muestra SOLO las fuentes que
@@ -906,10 +982,12 @@ class TestSeccionSena(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(self._con_sena(
             estado="NO_DISPONIBLE", no_registra=None, certificados=[],
         )))
-        # La fuente fallida SIGUE mostrándose (honestidad): párrafo de estado.
+        # La fuente fallida SIGUE mostrándose (honestidad): aviso gris en su
+        # sección + mención en el cuadro aparte "Fuentes sin respuesta"
+        # (2026-09-25, sin estado ni motivo en el cuadro).
         self.assertIn("FormaciónSENA", texto.replace(" ", ""))
-        self.assertIn("NODISPONIBLE", texto.replace(" ", ""))
-        self.assertIn("Noconsultada", texto.replace(" ", ""))
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        self.assertIn("Fuentessinrespuestaenestaconsulta", texto.replace(" ", ""))
 
 
 class TestSeccionSisconmp(unittest.TestCase):
@@ -990,8 +1068,10 @@ class TestSeccionSisconmp(unittest.TestCase):
             estado="NO_DISPONIBLE", no_registra=None, capacitaciones=[],
         )))
         self.assertIn("SISCONMP", texto)
-        self.assertIn("NODISPONIBLE", texto)
-        self.assertIn("Noconsultada".replace(" ", ""), texto)
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        # Cuadro aparte de fuentes caídas (2026-09-25), solo el nombre.
+        self.assertIn("Fuentessinrespuestaenestaconsulta".replace(" ", ""), texto)
+        self.assertNotIn("NODISPONIBLE", texto)
 
 
 def _fuente_situacion_militar(estado="EXITO", no_registra=False, estado_tarjeta=None, mensaje=""):
@@ -1065,7 +1145,8 @@ class TestSeccionSituacionMilitar(unittest.TestCase):
         texto = _texto_plano(generar_pdf_estudio(self._con_sm(
             estado="NO_DISPONIBLE", no_registra=None, estado_tarjeta="",
         )))
-        self.assertIn("NODISPONIBLE", texto)
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        self.assertIn("Fuentessinrespuestaenestaconsulta", texto)
 
 
 class TestSeccionOfac(unittest.TestCase):
@@ -1319,7 +1400,10 @@ class TestSeccionRues(unittest.TestCase):
         estudio["fuentes"]["rues"]["error"] = {"tipo": "rues_no_disponible", "mensaje": "El API no respondió"}
         texto = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
         self.assertIn("RUES—RegistroMercantil(Confecámaras)", texto)
-        self.assertIn("NODISPONIBLE", texto)
+        self.assertIn("Lafuentedeconsultapresentaindisponibilidad", texto)
+        # El cuadro aparte solo MENCIONA la fuente (2026-09-25): sin motivo.
+        self.assertIn("Fuentessinrespuestaenestaconsulta", texto)
+        self.assertNotIn("ElAPInorespondió", texto)
 
 
 class TestFechaLegible(unittest.TestCase):

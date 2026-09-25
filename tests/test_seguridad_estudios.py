@@ -2825,3 +2825,484 @@ class TestEndpointPersonas(unittest.TestCase):
                 request=None, actor=actor, cedula="79882073", empresa_id=None,
             )
         self.assertEqual(ctx.exception.status_code, 422)
+
+
+class TestNombresVerificados(unittest.TestCase):
+    """El nombre que alimenta la memoria debe ser el VERIFICADO por un portal
+    oficial (situacion_militar/sisconmp separados), no el digitado a mano:
+    un nombre mal escrito la primera vez no debe envenenar la memoria."""
+
+    def _estudio(self, fuentes: dict) -> dict:
+        return {"fuentes": fuentes}
+
+    def test_situacion_militar_verificada_gana(self):
+        estudio = self._estudio({
+            "situacion_militar": {
+                "estado": "EXITO", "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            },
+        })
+        self.assertEqual(
+            se._nombres_verificados_del_estudio(estudio), ("DIDIER ALBEIRO", "PIÑEROS ARIZA")
+        )
+
+    def test_sisconmp_como_fallback(self):
+        estudio = self._estudio({
+            "situacion_militar": {"estado": "NO_DISPONIBLE", "nombres": "", "apellidos": ""},
+            "sisconmp": {
+                "estado": "EXITO", "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            },
+        })
+        self.assertEqual(
+            se._nombres_verificados_del_estudio(estudio), ("DIDIER ALBEIRO", "PIÑEROS ARIZA")
+        )
+
+    def test_fuente_advertencia_tambien_cuenta(self):
+        # ADVERTENCIA (p.ej. libreta REMISO) igual ENTREGÓ el nombre del acta.
+        estudio = self._estudio({
+            "situacion_militar": {
+                "estado": "ADVERTENCIA", "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            },
+        })
+        self.assertEqual(
+            se._nombres_verificados_del_estudio(estudio), ("DIDIER ALBEIRO", "PIÑEROS ARIZA")
+        )
+
+    def test_sin_fuente_verificada_retorna_none(self):
+        estudio = self._estudio({
+            "situacion_militar": {"estado": "NO_DISPONIBLE"},
+            "sisconmp": {"estado": "ERROR"},
+            "procuraduria": {"estado": "EXITO", "nombre_consultado": "PIÑEROS ARIZA DIDIER ALBEIRO"},
+        })
+        # La cascada PGN/Policía NO alimenta los campos separados (sin split
+        # confiable): sigue siendo (None, None) y la memoria conserva lo
+        # digitado.
+        self.assertEqual(se._nombres_verificados_del_estudio(estudio), (None, None))
+        self.assertEqual(se._nombres_verificados_del_estudio(None), (None, None))
+        self.assertEqual(se._nombres_verificados_del_estudio({}), (None, None))
+
+
+class TestCompletarFuentesPendientes(unittest.TestCase):
+    """(2026-09-25) Completado de fuentes: re-ejecutar SOLO las que quedaron
+    NO_DISPONIBLE/ERROR de un estudio cerrado, mergeando sobre lo que ya
+    respondió, SIN consumo de cobro nuevo y contando los intentos."""
+
+    def _doc(self) -> dict:
+        return {
+            "_id": "objid", "consulta_id": "ES-COMP01", "estado": "PARCIAL",
+            "cedula": "1033688842", "nombres": "JHOAM", "apellidos": "AMAYA",
+            "nit": None, "fecha_expedicion": "14/02/2012",
+            "placa": "MVX48E",
+            "vehiculos": [{"placa": "MVX48E", "cedula_propietario": "1010213062", "propietario_es_evaluado": False}],
+            "nombre_consultado": "NOMBRE VIEJO",
+            "evidencias": {"sena": {"gcs_ruta": "previa.jpg"}},
+            "fuentes": {
+                "manifiestos_rndc": {"estado": "EXITO", "origen": "cache"},
+                "procuraduria": {"estado": "NO_DISPONIBLE", "origen": None,
+                                 "error": {"tipo": "TimeoutError", "mensaje": "La fuente no respondió en 150 s"}},
+                "sena": {"estado": "ERROR", "origen": None, "error": {"tipo": "Error", "mensaje": "x"}},
+                "simit": {"estado": "DESHABILITADA", "origen": None},
+            },
+            "creado_en": datetime(2026, 9, 25, 12, 0, 0),
+        }
+
+    def _montar(self, doc, resultado_fuente):
+        """Parchea col_estudios y _ejecutar_fuente; devuelve (persistido, llamadas)."""
+        import asyncio
+        from unittest.mock import patch
+
+        from Funciones import orquestador_estudios as orch
+
+        persistido: dict = {"doc": doc}
+        llamadas: list[str] = []
+
+        def _find_one(query=None, *a, **k):
+            return persistido["doc"]
+
+        def _update_one(query, update):
+            doc.update(update.get("$set", {}))
+            doc["completar_intentos"] = doc.get("completar_intentos", 0) + update.get("$inc", {}).get("completar_intentos", 0)
+            return None
+
+        async def _fuente(nombre, cedula, actor, forzar, **kwargs):
+            llamadas.append(nombre)
+            return dict(resultado_fuente(nombre))
+
+        return persistido, llamadas, _find_one, _update_one, _fuente, orch
+
+    def test_reintenta_solo_las_fallidas_y_merjea(self):
+        import asyncio
+        from unittest.mock import patch
+
+        doc = self._doc()
+        persistido, llamadas, _find_one, _update_one, _fuente, orch = self._montar(
+            doc,
+            lambda n: {"estado": "EXITO", "origen": "portal", "intentos": 1,
+                       "duraciones_s": [5.0], "error": None,
+                       "nombre_certificado": "AMAYA TOVAR JHOAM"} if n == "procuraduria" else
+                      {"estado": "EXITO", "origen": "portal", "intentos": 1,
+                       "duraciones_s": [5.0], "error": None},
+        )
+        with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \
+             patch.object(orch.col_estudios, "update_one", side_effect=_update_one), \
+             patch.object(orch, "_ejecutar_fuente", side_effect=_fuente):
+            resultado, corridas = asyncio.run(orch.reintentar_fuentes_estudio(
+                consulta_id="ES-COMP01",
+                actor={"usuario": "U", "usuario_id": "x", "empresa_id": "emp"},
+                empresa={"_id": "emp", "nombre": "E", "nit": "9001"},
+                registrar_evento=lambda *a, **k: None,
+            ))
+        # Solo las dos fallidas se re-consultaron (no runt EXITO ni simit DESHABILITADA).
+        self.assertEqual(sorted(llamadas), ["procuraduria", "sena"])
+        self.assertEqual(sorted(corridas), ["procuraduria", "sena"])
+        # Merge: la fuente que ya respondió queda INTACTA.
+        self.assertEqual(resultado["fuentes"]["manifiestos_rndc"]["origen"], "cache")
+        self.assertEqual(resultado["fuentes"]["procuraduria"]["estado"], "EXITO")
+        # DESHABILITADA se conserva (fue decisión del plan, no un fallo).
+        self.assertEqual(resultado["fuentes"]["simit"]["estado"], "DESHABILITADA")
+        # Todas respondieron → estado global recalculado sin las deshabilitadas.
+        self.assertEqual(resultado["estado"], "COMPLETADA")
+        # La cascada del nombre NUEVO gana sobre la vieja.
+        self.assertEqual(resultado["nombre_consultado"], "AMAYA TOVAR JHOAM")
+        # Contador de intentos para el tope del endpoint.
+        self.assertEqual(resultado["completar_intentos"], 1)
+
+    def test_pasos_del_doc_original(self):
+        """La re-consulta usa los parámetros persistidos: placa + cédula del
+        PROPIETARIO (vehículos[0]), nombres, fecha de expedición."""
+        import asyncio
+        from unittest.mock import patch
+
+        doc = self._doc()
+        persistido, llamadas, _find_one, _update_one, _fuente, orch = self._montar(
+            doc, lambda n: {"estado": "EXITO", "origen": "portal", "intentos": 1, "error": None},
+        )
+        kwargs_vistos: list[dict] = []
+
+        async def _fuente_spy(nombre, cedula, actor, forzar, **kwargs):
+            kwargs_vistos.append({"nombre": nombre, "cedula": cedula, **kwargs})
+            return {"estado": "EXITO", "origen": "portal", "intentos": 1, "error": None}
+
+        with patch.object(orch.col_estudios, "find_one", side_effect=_find_one), \
+             patch.object(orch.col_estudios, "update_one", side_effect=_update_one), \
+             patch.object(orch, "_ejecutar_fuente", side_effect=_fuente_spy):
+            asyncio.run(orch.reintentar_fuentes_estudio(
+                "ES-COMP01", {"usuario": "U", "empresa_id": "emp"},
+                {"_id": "emp", "nombre": "E"}, lambda *a, **k: None,
+            ))
+        por_nombre = {k["nombre"]: k for k in kwargs_vistos}
+        self.assertEqual(por_nombre["procuraduria"]["cedula"], "1033688842")
+        self.assertEqual(por_nombre["procuraduria"]["nombres"], "JHOAM")
+        self.assertEqual(por_nombre["procuraduria"]["fecha_expedicion"], "14/02/2012")
+        self.assertEqual(por_nombre["procuraduria"]["apellidos"], "AMAYA")
+        # La empresa consultante viaja (la exige el portal Ley 1918).
+        self.assertEqual(por_nombre["procuraduria"]["empresa_consultante"]["nombre"], "E")
+
+    def test_sin_pendientes_es_idempotente(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from Funciones import orquestador_estudios as orch
+
+        doc = self._doc()
+        doc["fuentes"] = {"manifiestos_rndc": {"estado": "EXITO"}}
+        with patch.object(orch.col_estudios, "find_one", return_value=doc), \
+             patch.object(orch.col_estudios, "update_one") as upd:
+            resultado, corridas = asyncio.run(orch.reintentar_fuentes_estudio(
+                "ES-COMP01", {"usuario": "U", "empresa_id": "emp"}, {}, lambda *a, **k: None,
+            ))
+        self.assertEqual(corridas, [])
+        self.assertEqual(resultado["estado"], "PARCIAL")  # doc tal cual, sin tocar
+        upd.assert_not_called()
+
+    def test_fuentes_pendientes_estudio(self):
+        from Funciones import orquestador_estudios as orch
+
+        pendientes = orch.fuentes_pendientes_estudio(self._doc())
+        self.assertEqual(sorted(pendientes), ["procuraduria", "sena"])
+        # error_global (str) y claves ausentes no cuentan.
+        self.assertEqual(
+            orch.fuentes_pendientes_estudio({"fuentes": {"error_global": "boom"}}), [],
+        )
+
+
+class TestConsumosDelCompletado(unittest.TestCase):
+    """(2026-09-25, decisión del usuario) Cobro del completado de fuentes:
+    una consulta REEMBOLSADA (>51% fallidas) se vuelve a cobrar al completar
+    (el estudio completo se terminó entregando); una consulta ya cobrada
+    (≤51% caídas) completa gratis — esas fuentes ya se pagaron."""
+
+    def _doc(self) -> dict:
+        return {
+            "consulta_id": "ES-COB01", "empresa_id": EMPRESA_A,
+            "fuentes": {
+                "manifiestos_rndc": {"estado": "EXITO"},
+                "procuraduria": {"estado": "NO_DISPONIBLE"},
+                "simit": {"estado": "DESHABILITADA"},  # decisión del plan: no se cobró
+            },
+        }
+
+    def _fake_db(self, reembolso: bool, planes_consumo: list):
+        """db fake con movimientos_cobro y planes; find_one para el lookup de
+        REEMBOLSO y find para los CONSUMO con plan."""
+        reembolsos = [{"_id": 1}] if reembolso else []
+
+        class ColMov:
+            def find_one(self, q, *a, **k):
+                return reembolsos[0] if q.get("tipo") == "REEMBOLSO" and reembolsos else None
+
+            def find(self, q, *a, **k):
+                if q.get("tipo") == "CONSUMO":
+                    return iter([{"plan_id": p} for p in planes_consumo])
+                return iter([])
+
+            def aggregate(self, pipeline):
+                return iter([])
+
+        class ColEmp:
+            def find_one(self, q, *a, **k):
+                return None
+
+        return {
+            "movimientos_cobro_seguridad": ColMov(),
+            "planes_seguridad": ColEmp(),
+        }
+
+    def test_consulta_ya_cobrada_completa_gratis(self):
+        from Funciones import cobro_seguridad as cobro
+        from unittest.mock import patch
+
+        doc = self._doc()
+        with patch.object(se, "db", self._fake_db(reembolso=False, planes_consumo=[ObjectId()])) as db_fake, \
+             patch.object(cobro, "reservar_consumos") as reservar:
+            consumos = se._consumos_del_completado(
+                doc, {"_id": EMPRESA_A, "nombre": "E", "planes": []},
+                actor_consultador(EMPRESA_A), actor_consultador(EMPRESA_A),
+            )
+        self.assertEqual(consumos, [])
+        reservar.assert_not_called()  # ≤51% caídas: ya se cobró, completa gratis
+
+    def test_consulta_reembolsada_se_vuelve_a_cobrar(self):
+        from Funciones import cobro_seguridad as cobro
+        from unittest.mock import patch
+
+        doc = self._doc()
+        plan_original = ObjectId()
+        llamada: dict = {}
+
+        def reservar(empresa, actor, consulta_id, fuentes, plan_preferido_id=None, **kw):
+            llamada["fuentes"] = list(fuentes)
+            llamada["plan"] = plan_preferido_id
+            return [{"monto_cop": 3000, "fuente": "procuraduria", "plan_nombre": "AVANZADO",
+                     "precio_unitario_cop": 3000}]
+
+        with patch.object(se, "db", self._fake_db(reembolso=True, planes_consumo=[plan_original])), \
+             patch.object(cobro, "sincronizar_fuentes_planes", side_effect=lambda emp, *a, **k: emp), \
+             patch.object(cobro, "reservar_consumos", side_effect=reservar), \
+             patch.object(se, "registrar_evento"):
+            consumos = se._consumos_del_completado(
+                doc, {"_id": EMPRESA_A, "nombre": "E", "planes": []},
+                actor_consultador(EMPRESA_A), actor_consultador(EMPRESA_A),
+            )
+        self.assertEqual(len(consumos), 1)
+        # Se reserva para las fuentes que la original cobró (sin DESHABILITADA).
+        self.assertEqual(sorted(llamada["fuentes"]), ["manifiestos_rndc", "procuraduria"])
+        # Plan preferido = el de los CONSUMO originales (un solo plan).
+        self.assertEqual(llamada["plan"], plan_original)
+
+    def test_multi_plan_reserva_por_fifo(self):
+        from Funciones import cobro_seguridad as cobro
+        from unittest.mock import patch
+
+        doc = self._doc()
+        llamada: dict = {}
+
+        def reservar(empresa, actor, consulta_id, fuentes, plan_preferido_id=None, **kw):
+            llamada["plan"] = plan_preferido_id
+            return []
+
+        with patch.object(se, "db", self._fake_db(reembolso=True, planes_consumo=[ObjectId(), ObjectId()])), \
+             patch.object(cobro, "sincronizar_fuentes_planes", side_effect=lambda emp, *a, **k: emp), \
+             patch.object(cobro, "reservar_consumos", side_effect=reservar), \
+             patch.object(se, "registrar_evento"):
+            se._consumos_del_completado(
+                doc, {"_id": EMPRESA_A, "nombre": "E", "planes": []},
+                actor_consultador(EMPRESA_A), actor_consultador(EMPRESA_A),
+            )
+        self.assertIsNone(llamada["plan"])  # multi-plan: FIFO como en la creación
+
+
+class TestDetectarNombres(unittest.TestCase):
+    """Cascada de nombres (2026-09-25, decisión del usuario): cuando el plan
+    necesita nombres (captcha PGN / rama_judicial) y ni el body ni la memoria
+    los tienen, se detectan solos: situacion_militar (~1-2 s) → sisconmp
+    (~11 s) → (None, None) y el endpoint decide (422 como última barrera)."""
+
+    ACTOR = {"usuario": "U", "perfil": "SEGURIDAD", "empresa_id": "e", "usuario_id": "u"}
+
+    def _correr(self, respuestas: dict):
+        import asyncio
+        from unittest.mock import patch
+
+        from Funciones import orquestador_estudios as orch
+
+        async def _fuente(nombre, cedula, actor, forzar, **kw):
+            if nombre in respuestas:
+                return respuestas[nombre]
+            raise AssertionError(f"fuente inesperada en la cascada: {nombre}")
+
+        with patch.object(orch, "_ejecutar_fuente", side_effect=_fuente):
+            return asyncio.run(orch.detectar_nombres("1010213062", self.ACTOR))
+
+    def test_situacion_militar_responde_y_no_consulta_sisconmp(self):
+        nombres, apellidos = self._correr({
+            "situacion_militar": {"estado": "EXITO", "nombres": "EDWIN MISAEL", "apellidos": "ZARATE PEÑA"},
+            "sisconmp": AssertionError and {},
+        })
+        self.assertEqual((nombres, apellidos), ("EDWIN MISAEL", "ZARATE PEÑA"))
+
+    def test_sin_librete_cae_a_sisconmp(self):
+        # Mujer/extranjero sin registro de libreta: situacion_militar no
+        # entrega nombres → el fallback sisconmp resuelve.
+        nombres, apellidos = self._correr({
+            "situacion_militar": {"estado": "EXITO", "no_registra": True, "nombres": "", "apellidos": ""},
+            "sisconmp": {"estado": "EXITO", "nombres": "MARIA", "apellidos": "PEREZ GOMEZ"},
+        })
+        self.assertEqual((nombres, apellidos), ("MARIA", "PEREZ GOMEZ"))
+
+    def test_todo_falla_retorna_none(self):
+        nombres, apellidos = self._correr({
+            "situacion_militar": {"estado": "NO_DISPONIBLE", "nombres": "", "apellidos": ""},
+            "sisconmp": {"estado": "NO_DISPONIBLE", "nombres": "", "apellidos": ""},
+        })
+        self.assertEqual((nombres, apellidos), (None, None))
+
+
+class TestCambioYRecuperacionClave(unittest.TestCase):
+    """(2026-09-25) Autogestión de clave del portal: cambio autenticado
+    (menú del avatar) y recuperación por código de 6 dígitos por correo.
+    Los usuarios viven en `baseusuarios` — los endpoints de aut2 apuntan a
+    `usuarios` (Torre de Control) y NO les sirven a los clientes del portal."""
+
+    def _usuario(self, clave="secreta123"):
+        return {"_id": ObjectId(), "email": "mgomez@glamperos.com", "usuario": "mgomez",
+                "clave": clave, "activo": True}
+
+    def test_cambiar_clave_verifica_actual_y_hashea_nueva(self):
+        from Funciones.claves import crear_hash
+
+        usuario = self._usuario(clave=crear_hash("vieja123"))
+        actualizado: dict = {}
+
+        def _find_one(q, *a, **k):
+            if q.get("_id") == usuario["_id"]:
+                return usuario
+            return None
+
+        def _update_one(q, u):
+            actualizado.update(u.get("$set", {}))
+            return None
+
+        with patch.object(se.col_usuarios, "find_one", side_effect=_find_one), \
+             patch.object(se.col_usuarios, "update_one", side_effect=_update_one), \
+             patch.object(se, "registrar_evento"):
+            resp = se.cambiar_clave_estudios(
+                datos=se.CambiarClaveIn(clave_actual="vieja123", clave_nueva="nueva456"),
+                request=None,
+                actor={"usuario_id": str(usuario["_id"]), "usuario": "mgomez", "empresa_id": "e"},
+            )
+        self.assertEqual(resp["mensaje"], "Clave actualizada correctamente")
+        from Funciones.claves import verificar_clave
+        self.assertTrue(verificar_clave("nueva456", actualizado["clave"]))
+
+    def test_cambiar_clave_rechaza_actual_incorrecta(self):
+        usuario = self._usuario(clave="vieja123")  # sin hash = dual-mode plano
+        with patch.object(se.col_usuarios, "find_one", return_value=usuario), \
+             patch.object(se, "registrar_evento"):
+            with self.assertRaises(HTTPException) as ctx:
+                se.cambiar_clave_estudios(
+                    datos=se.CambiarClaveIn(clave_actual="equivocada", clave_nueva="nueva456"),
+                    request=None,
+                    actor={"usuario_id": str(usuario["_id"]), "usuario": "mgomez", "empresa_id": "e"},
+                )
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_cambiar_clave_rechaza_api_key(self):
+        with self.assertRaises(HTTPException) as ctx:
+            se.cambiar_clave_estudios(
+                datos=se.CambiarClaveIn(clave_actual="x", clave_nueva="nueva456"),
+                request=None,
+                actor={"usuario_id": None, "usuario": "API: SILO", "empresa_id": "e"},
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_recuperar_solicitar_neutro_y_guarda_codigo(self):
+        from fastapi import BackgroundTasks
+        from Funciones.claves import verificar_clave
+
+        usuario = self._usuario()
+        guardado: dict = {}
+
+        def _update_one(q, u):
+            guardado.update(u.get("$set", {}))
+            return None
+
+        with patch.object(se.col_usuarios, "find_one", return_value=usuario), \
+             patch.object(se.col_usuarios, "update_one", side_effect=_update_one), \
+             patch.object(se, "registrar_evento"), \
+             patch.object(se, "_enviar_correo_codigo") as correo:
+            bt = BackgroundTasks()
+            bt.add_task(lambda: None)  # la real se encola en el router
+            resp = se.recuperar_solicitar(
+                datos=se.RecuperarSolicitarIn(correo="MGOMEZ@GLAMPEROS.COM"),
+                request=None, background_tasks=bt,
+            )
+        # Respuesta neutra (mismo mensaje exista o no el correo).
+        self.assertIn("Si el correo está registrado", resp["mensaje"])
+        # Código guardado HASHEADO (nunca en plano) + expiración.
+        self.assertIn("reset_codigo_hash", guardado)
+        self.assertFalse(guardado["reset_codigo_hash"].isdigit())
+
+    def test_recuperar_confirmar_cambia_clave(self):
+        from Funciones.claves import crear_hash, verificar_clave
+
+        codigo_hash = crear_hash("123456")
+        desde = datetime(2026, 9, 25, 12, 0, 0)
+        expira = datetime(2026, 9, 25, 12, 15, 0)
+        usuario = {**self._usuario(), "reset_codigo_hash": codigo_hash,
+                   "reset_codigo_exp": expira, "reset_codigo_intentos": 0}
+        guardado: dict = {}
+
+        def _update_one(q, u):
+            guardado.update(u.get("$set", {}))
+            return None
+
+        with patch.object(se, "_utcnow", return_value=desde), \
+             patch.object(se.col_usuarios, "find_one", return_value=usuario), \
+             patch.object(se.col_usuarios, "update_one", side_effect=_update_one), \
+             patch.object(se, "registrar_evento"):
+            resp = se.recuperar_confirmar(
+                datos=se.RecuperarConfirmarIn(
+                    correo="mgomez@glamperos.com", codigo="123456", clave_nueva="nueva789"),
+                request=None,
+            )
+        self.assertIn("restablecida", resp["mensaje"])
+        self.assertTrue(verificar_clave("nueva789", guardado["clave"]))
+        # El código queda inservible.
+        self.assertIsNone(guardado["reset_codigo_hash"])
+
+    def test_recuperar_confirmar_codigo_vencido(self):
+        from Funciones.claves import crear_hash
+
+        usuario = {**self._usuario(), "reset_codigo_hash": crear_hash("123456"),
+                   "reset_codigo_exp": datetime(2026, 9, 25, 12, 15, 0)}
+        with patch.object(se, "_utcnow", return_value=datetime(2026, 9, 25, 13, 0, 0)), \
+             patch.object(se.col_usuarios, "find_one", return_value=usuario), \
+             patch.object(se.col_usuarios, "update_one") as upd, \
+             patch.object(se, "registrar_evento"):
+            with self.assertRaises(HTTPException) as ctx:
+                se.recuperar_confirmar(
+                    datos=se.RecuperarConfirmarIn(
+                        correo="mgomez@glamperos.com", codigo="123456", clave_nueva="nueva789"),
+                    request=None,
+                )
+        self.assertEqual(ctx.exception.status_code, 400)

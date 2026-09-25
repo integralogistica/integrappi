@@ -15,16 +15,18 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from bd.bd_cliente import bd_cliente
 from Funciones import personas_seguridad as personas
+from Funciones.claves import crear_hash, verificar_clave
 from Funciones.auth_seguridad import (
     ROL_ADMIN_EMPRESA,
     ROL_ADMIN_INTEGRA,
@@ -38,11 +40,14 @@ from Funciones.orquestador_estudios import (
     calcular_estado_global,
     crear_documento_estudio,
     codigo_verificacion,
+    detectar_nombres,
     enmascarar_cedula,
     ejecutar_estudio,
     fuentes_habilitadas_efectivas,
+    fuentes_pendientes_estudio,
     mayoria_fuentes_fallidas,
     nuevo_consulta_id,
+    reintentar_fuentes_estudio,
 )
 from rutas.seguridad import _normalizar_cedula, _normalizar_placa
 
@@ -265,6 +270,148 @@ def token_estudios(
     return {"access_token": token, "token_type": "bearer"}
 
 
+# === 1b. Claves: cambio autenticado y recuperación ==============================
+
+class CambiarClaveIn(BaseModel):
+    clave_actual: str
+    clave_nueva: str
+
+
+class RecuperarSolicitarIn(BaseModel):
+    correo: str
+
+
+class RecuperarConfirmarIn(BaseModel):
+    correo: str
+    codigo: str
+    clave_nueva: str
+
+
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+MAIL_FROM = os.getenv("MAIL_FROM", "no-reply@integralogistica.com")
+EXPIRE_MIN_RECUPERACION = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "15"))
+MAX_INTENTOS_CODIGO = 8
+
+
+def _enviar_correo_codigo(email_destino: str, codigo: str):
+    """Envía el código de recuperación por Resend (best-effort, background)."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY no configurada: código de recuperación no enviado por correo")
+        return
+    try:
+        import resend
+
+        resend.api_key = RESEND_API_KEY
+        resend.Emails.send({
+            "from": MAIL_FROM,
+            "to": [email_destino],
+            "subject": "seguriDatia · código para restablecer su contraseña",
+            "html": (
+                "<div style='font-family:Segoe UI,Arial,sans-serif;color:#22313f'>"
+                "<h2 style='color:#00a5b5;margin-bottom:4px'>seguriDatia</h2>"
+                "<p>Recibimos una solicitud para restablecer la contraseña de su cuenta "
+                f"de Consultas de Seguridad (<b>{email_destino}</b>).</p>"
+                f"<p style='font-size:1.6rem;letter-spacing:8px;font-weight:700'>{codigo}</p>"
+                f"<p>Este código vence en {EXPIRE_MIN_RECUPERACION} minutos. Si no lo solicitó, ignore este mensaje.</p>"
+                "</div>"
+            ),
+        })
+    except Exception as exc:
+        logger.error("Correo de recuperación a %s falló: %s", email_destino, exc)
+
+
+@router.post("/cambiar-clave")
+def cambiar_clave_estudios(datos: CambiarClaveIn, request: Request, actor: dict = Depends(actor_actual)):
+    """Cambio de clave AUTENTICADO (menú del avatar del portal). Verifica la
+    clave actual contra `baseusuarios` (bcrypt dual-mode de Funciones/claves)
+    y guarda la nueva hasheada."""
+    if len(datos.clave_nueva) < 6:
+        raise HTTPException(status_code=422, detail="La clave nueva debe tener al menos 6 caracteres")
+    if not actor.get("usuario_id"):
+        # Las API keys no son usuarios humanos: nada que cambiar.
+        raise HTTPException(status_code=403, detail="El cambio de clave aplica a usuarios del portal, no a API keys")
+    usuario = col_usuarios.find_one({"_id": ObjectId(actor["usuario_id"])})
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not verificar_clave(datos.clave_actual, usuario.get("clave") or ""):
+        registrar_evento("clave_cambio_fallido", actor=actor, request=request)
+        raise HTTPException(status_code=400, detail="La clave actual no es correcta")
+    col_usuarios.update_one(
+        {"_id": usuario["_id"]},
+        {"$set": {"clave": crear_hash(datos.clave_nueva)}},
+    )
+    registrar_evento("clave_cambiada", actor=actor, request=request)
+    return {"mensaje": "Clave actualizada correctamente"}
+
+
+@router.post("/recuperar/solicitar")
+def recuperar_solicitar(datos: RecuperarSolicitarIn, request: Request, background_tasks: BackgroundTasks):
+    """Paso 1 del 'olvidé mi contraseña' del PORTAL: genera un código de 6
+    dígitos de un solo uso (vence 15 min) y lo envía por correo vía Resend.
+    Respuesta NEUTRA: no revela si el correo existe (anti-enumeración)."""
+    correo = (datos.correo or "").strip().lower()
+    usuario = col_usuarios.find_one({"email": correo, "activo": True})
+    if usuario:
+        codigo = f"{secrets.randbelow(1_000_000):06d}"
+        col_usuarios.update_one(
+            {"_id": usuario["_id"]},
+            {"$set": {
+                "reset_codigo_hash": crear_hash(codigo),
+                "reset_codigo_exp": _utcnow() + timedelta(minutes=EXPIRE_MIN_RECUPERACION),
+                "reset_codigo_intentos": 0,
+            }},
+        )
+        background_tasks.add_task(_enviar_correo_codigo, correo, codigo)
+        registrar_evento(
+            "recuperacion_solicitada",
+            actor={"usuario_id": str(usuario["_id"]), "usuario": usuario.get("usuario", ""), "empresa_id": None},
+            request=request,
+        )
+    return {"mensaje": f"Si el correo está registrado, enviamos un código (vence en {EXPIRE_MIN_RECUPERACION} minutos)"}
+
+
+@router.post("/recuperar/confirmar")
+def recuperar_confirmar(datos: RecuperarConfirmarIn, request: Request):
+    """Paso 2: correo + código de 6 dígitos + clave nueva. Límite de intentos
+    por código (8) para frenar fuerza bruta; al acertar se cambia la clave y
+    el código queda inservible."""
+    if len(datos.clave_nueva) < 6:
+        raise HTTPException(status_code=422, detail="La clave nueva debe tener al menos 6 caracteres")
+    correo = (datos.correo or "").strip().lower()
+    usuario = col_usuarios.find_one({"email": correo, "activo": True})
+    codigo_hash = (usuario or {}).get("reset_codigo_hash")
+    exp = (usuario or {}).get("reset_codigo_exp")
+    valido = (
+        usuario and codigo_hash and exp
+        and isinstance(exp, datetime)
+        and exp > _utcnow()
+        and verificar_clave((datos.codigo or "").strip(), codigo_hash)
+    )
+    if not valido:
+        if usuario and codigo_hash:
+            intentos = int(usuario.get("reset_codigo_intentos") or 0) + 1
+            col_usuarios.update_one(
+                {"_id": usuario["_id"]},
+                {"$set": {"reset_codigo_intentos": intentos}},
+            )
+            if intentos >= MAX_INTENTOS_CODIGO:
+                col_usuarios.update_one(
+                    {"_id": usuario["_id"]},
+                    {"$set": {"reset_codigo_hash": None, "reset_codigo_exp": None}},
+                )
+        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    col_usuarios.update_one(
+        {"_id": usuario["_id"]},
+        {"$set": {"clave": crear_hash(datos.clave_nueva), "reset_codigo_hash": None, "reset_codigo_exp": None}},
+    )
+    registrar_evento(
+        "clave_restablecida",
+        actor={"usuario_id": str(usuario["_id"]), "usuario": usuario.get("usuario", ""), "empresa_id": None},
+        request=request,
+    )
+    return {"mensaje": "Su contraseña fue restablecida"}
+
+
 # === 2. Identidad ==============================================================
 
 @router.get("/me")
@@ -468,6 +615,30 @@ def _completar_desde_memoria(
     return nombres, apellidos, fecha_expedicion
 
 
+def _nombres_verificados_del_estudio(estudio: dict | None) -> tuple[str | None, str | None]:
+    """Nombres/apellidos VERIFICADOS por un portal oficial (2026-09-25).
+
+    situacion_militar y sisconmp devuelven `nombres`/`apellidos` SEPARADOS
+    del certificado oficial (Ejército / Mintransporte) — son la fuente de
+    verdad de la persona evaluada: si el consultante escribió el nombre mal,
+    el verificado lo REEMPLAZA en la memoria. El nombre completo de la
+    cascada PGN→Policía viene en un solo string (apellidos+nombres) sin
+    split confiable, así que queda como `nombre_consultado` (mostrar) y NO
+    alimenta los campos separados. Retorna (None, None) si ninguna fuente
+    verificada respondió: la memoria conserva lo escrito por el consultante.
+    """
+    fuentes = (estudio or {}).get("fuentes") or {}
+    for fuente in ("situacion_militar", "sisconmp"):
+        seccion = fuentes.get(fuente) or {}
+        if seccion.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+            continue
+        nombres = _normalizar_nombre(seccion.get("nombres"))
+        apellidos = _normalizar_nombre(seccion.get("apellidos"))
+        if nombres or apellidos:
+            return (nombres or None, apellidos or None)
+    return (None, None)
+
+
 class CrearEstudio(BaseModel):
     cedula: str | None = None
     nit: str | None = None  # fuente empresarial ofac_nit; separado de la cédula
@@ -658,10 +829,26 @@ async def crear_estudio(
         cedula, str(empresa["_id"]), nombres, apellidos, fecha_expedicion
     )
 
+    # Cascada de nombres (decisión del usuario 2026-09-25): si el plan
+    # necesita nombres (captcha de la PGN / búsqueda por nombre de la Rama
+    # Judicial) y ni el body ni la memoria los tienen, se DETECTAN solos desde
+    # fuentes que devuelven el nombre por cédula ($0: situacion_militar →
+    # sisconmp) — el usuario ya no digita nada. Lo que trae el body SIEMPRE
+    # gana; el 422 solo queda como última barrera.
+    if ("procuraduria" in habilitadas or "rama_judicial" in habilitadas) and (not nombres or not apellidos):
+        nombres_detectados, apellidos_detectados = await detectar_nombres(
+            cedula, {**actor, "empresa_id": str(empresa["_id"])}
+        )
+        nombres = nombres or nombres_detectados
+        apellidos = apellidos or apellidos_detectados
+
     if "rama_judicial" in habilitadas and (not nombres or not apellidos):
         raise HTTPException(
             status_code=422,
-            detail="La fuente Rama Judicial requiere nombres y apellidos completos",
+            detail="La fuente Rama Judicial requiere nombres y apellidos completos: no fue "
+                   "posible obtenerlos automáticamente (sin memoria previa ni registro en las "
+                   "fuentes oficiales). Intente de nuevo más tarde o comuníquese con Integra "
+                   "Logística; por API puede enviarlos en los campos nombres/apellidos",
         )
     if "delitos_sexuales" in habilitadas and not fecha_expedicion:
         raise HTTPException(
@@ -755,15 +942,18 @@ async def crear_estudio(
 
     # Memoria de personas (2026-09-25): registrar/actualizar la persona para
     # que la próxima consulta de esta empresa autollene nombres, fecha de
-    # expedición y el nombre VERIFICADO por los portales. Best-effort dentro
-    # del módulo (un fallo jamás tumba el estudio).
+    # expedición y el nombre VERIFICADO por los portales. El nombre verificado
+    # (situacion_militar/sisconmp separados) REEMPLAZA al escrito a mano —
+    # un nombre mal digitado la primera vez no envenena la memoria. Best-effort
+    # dentro del módulo (un fallo jamás tumba el estudio).
     if cedula:
         try:
+            nombres_verificados, apellidos_verificados = _nombres_verificados_del_estudio(estudio)
             personas.registrar_consulta_persona(
                 cedula,
                 str(empresa["_id"]),
-                nombres=nombres or None,
-                apellidos=apellidos or None,
+                nombres=nombres_verificados or nombres or None,
+                apellidos=apellidos_verificados or apellidos or None,
                 nombre_consultado=(estudio or {}).get("nombre_consultado") or None,
                 fecha_expedicion=fecha_expedicion or None,
             )
@@ -882,6 +1072,41 @@ def listar_estudios(
             logger.warning("Costos del historial no se pudieron calcular: %s", exc)
     for it in items:
         it["costo_cop"] = costos.get(it.get("consulta_id"), 0)
+
+    # Fuentes PENDIENTES por consulta (2026-09-25): las que quedaron sin
+    # respuesta (NO_DISPONIBLE/ERROR) — el historial del portal muestra la
+    # cantidad y despliega el listado al hacer clic en la fila. El doc de la
+    # página ya viene SIN `fuentes` (payload pesado): el cálculo va por
+    # aggregation ($objectToArray sobre la clave dinámica), igual que los
+    # costos: fallo ≠ fallo del listado.
+    pendientes_por_id: dict[str, list[str]] = {}
+    if ids:
+        try:
+            pipeline = [
+                {"$match": {"consulta_id": {"$in": ids}}},
+                {"$project": {
+                    "consulta_id": 1,
+                    "pendientes": {
+                        "$map": {
+                            "input": {
+                                "$filter": {
+                                    "input": {"$objectToArray": {"$ifNull": ["$fuentes", {}]}},
+                                    "as": "f",
+                                    "cond": {"$in": ["$$f.v.estado", ["NO_DISPONIBLE", "ERROR"]]},
+                                }
+                            },
+                            "as": "f",
+                            "in": "$$f.k",
+                        }
+                    },
+                }},
+            ]
+            for fila in col_estudios.aggregate(pipeline):
+                pendientes_por_id[str(fila.get("consulta_id"))] = list(fila.get("pendientes") or [])
+        except Exception as exc:
+            logger.warning("Fuentes pendientes del historial no se pudieron calcular: %s", exc)
+    for it in items:
+        it["fuentes_pendientes"] = pendientes_por_id.get(it.get("consulta_id"), [])
 
     return {"total": total, "items": items}
 
@@ -1087,6 +1312,210 @@ def regenerar_pdf(consulta_id: str, request: Request, actor: dict = Depends(acto
         request=request,
     )
     return {"consulta_id": consulta_id, "version": version, "sha256": subido["sha256"], "generado_en": info_pdf["generado_en"]}
+
+
+def _reemitir_pdf(doc: dict, empresa: dict | None, actor: dict, request: Request | None = None) -> dict:
+    """Regenera y sube el PDF del estudio SOBRE la misma ruta de GCS (versión
+    +1 con historial). Usado por el completado de fuentes pendientes: el
+    informe final reemplaza al parcial dejando rastro de versiones."""
+    from Funciones import storage_seguridad
+    from Funciones.pdf_estudio_seguridad import generar_pdf_estudio
+
+    consulta_id = doc["consulta_id"]
+    contenido = generar_pdf_estudio(doc, empresa)
+    anterior = doc.get("pdf") or {}
+    ruta = anterior.get("gcs_ruta") or storage_seguridad.ruta_blob(str(doc["empresa_id"]), doc["creado_en"].year, consulta_id)
+    subido = storage_seguridad.subir_pdf(contenido, ruta, doc.get("cedula", ""))
+    version = int(anterior.get("version", 0)) + 1
+    historial = list(anterior.get("historial") or [])
+    if anterior.get("sha256"):
+        historial.append({
+            "version": anterior.get("version", 1),
+            "sha256": anterior["sha256"],
+            "generado_en": anterior.get("generado_en"),
+            "por_usuario": anterior.get("por_usuario", doc.get("usuario")),
+        })
+    info_pdf = {
+        **subido,
+        "version": version,
+        "generado_en": _utcnow(),
+        "regeneraciones": int(anterior.get("regeneraciones", 0)) + 1,
+        "historial": historial,
+        "por_usuario": actor["usuario"],
+    }
+    col_estudios.update_one({"consulta_id": consulta_id}, {"$set": {"pdf": info_pdf}})
+    registrar_evento(
+        "pdf_regenerado",
+        actor=actor,
+        consulta_id=consulta_id,
+        detalle=f"v{version} (completado de fuentes pendientes)",
+        request=request,
+    )
+    return info_pdf
+
+
+MAX_COMPLETAR_INTENTOS = 5
+
+
+def _consumos_del_completado(
+    doc: dict, empresa: dict, actor_doc: dict, actor: dict, request: Request | None = None,
+) -> list[dict]:
+    """Cobro del completado de fuentes pendientes (decisión del usuario
+    2026-09-25): una consulta REEMBOLSADA (>51% de fuentes fallidas al crear)
+    que se completa estaba entregando el estudio completo SIN costo → al
+    completarla se cobra de nuevo el plan (misma reserva atómica que una
+    consulta nueva, con el plan de los CONSUMO originales como preferido).
+
+    Las consultas ya cobradas (≤51% caídas → PARCIAL cobrado) completan
+    GRATIS: esas fuentes ya se pagaron. Devuelve [] en ese caso.
+    """
+    from Funciones import cobro_seguridad as cobro
+
+    consulta_id = doc["consulta_id"]
+    col_mov = db["movimientos_cobro_seguridad"]
+    reembolsada = col_mov.find_one(
+        {"consulta_id": consulta_id, "tipo": "REEMBOLSO"}, {"_id": 1}
+    ) is not None
+    if not reembolsada:
+        return []
+
+    empresa = cobro.sincronizar_fuentes_planes(empresa, db["planes_seguridad"], col_empresas)
+    # Fuentes que la consulta original cobró: todas las que NO fueron
+    # decisión del plan (DESHABILITADA no se cobró).
+    fuentes_originales = [
+        nombre for nombre in FUENTES
+        if isinstance((doc.get("fuentes") or {}).get(nombre), dict)
+        and doc["fuentes"][nombre].get("estado") != "DESHABILITADA"
+    ]
+    # Plan preferido: el de los CONSUMO originales si fueron de UN solo plan
+    # (reproduce la elección del usuario); multi-plan → FIFO como en la
+    # creación sin plan_id.
+    planes_originales = {
+        str(m.get("plan_id"))
+        for m in col_mov.find(
+            {"consulta_id": consulta_id, "tipo": "CONSUMO", "plan_id": {"$ne": None}},
+            {"plan_id": 1},
+        )
+    }
+    plan_preferido = ObjectId(next(iter(planes_originales))) if len(planes_originales) == 1 else None
+    consumos = cobro.reservar_consumos(
+        empresa, actor_doc, consulta_id, fuentes_originales,
+        plan_preferido_id=plan_preferido,
+    )
+    for consumo in consumos:
+        if consumo.get("monto_cop", 0) != 0:
+            registrar_evento(
+                "consumo_registrado",
+                actor=actor,
+                consulta_id=consulta_id,
+                fuente=consumo.get("fuente"),
+                detalle=f"Completado · {empresa.get('nombre')} · {consumo.get('plan_nombre')} · "
+                        f"${consumo.get('precio_unitario_cop', 0)}",
+                request=request,
+            )
+    return consumos
+
+
+@router.post("/{consulta_id}/completar")
+async def completar_estudio(consulta_id: str, request: Request, actor: dict = Depends(actor_actual)):
+    """Vuelve a consultar SOLO las fuentes que no respondieron del estudio y
+    re-emite el PDF (mismo consulta_id, versión +1) — completar el informe,
+    no una consulta nueva (pedido 2026-09-25). SIN consumo de cobro: la
+    consulta original ya se cobró (o se reembolsó si falló la mayoría).
+    """
+    _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "completar estudios")
+    _verificar_rate_limit(actor)
+    doc = _obtener_estudio(consulta_id, actor, request)
+    if doc.get("estado") == "EN_PROGRESO":
+        raise HTTPException(status_code=409, detail="El estudio sigue en progreso")
+    pendientes = fuentes_pendientes_estudio(doc)
+    if not pendientes:
+        raise HTTPException(
+            status_code=422,
+            detail="El estudio no tiene fuentes pendientes: todas las fuentes consultadas respondieron",
+        )
+    if int(doc.get("completar_intentos") or 0) >= MAX_COMPLETAR_INTENTOS:
+        raise HTTPException(
+            status_code=429,
+            detail="Este estudio agotó los reintentos de completado. Genere una consulta nueva.",
+        )
+
+    empresa = col_empresas.find_one({"_id": ObjectId(doc["empresa_id"])}) if doc.get("empresa_id") else {}
+    actor_doc = {**actor, "empresa_id": str(doc["empresa_id"])}
+
+    # Cobro (solo si la consulta fue REEMBOLSADA; ver helper): 402 accionable
+    # ANTES de tocar portales si ya no hay cupo.
+    from Funciones import cobro_seguridad as cobro
+
+    consumos = _consumos_del_completado(doc, empresa, actor_doc, actor, request)
+
+    try:
+        estudio, corridas = await reintentar_fuentes_estudio(
+            consulta_id=consulta_id,
+            actor=actor_doc,
+            empresa=empresa or {},
+            registrar_evento=lambda *a, **k: registrar_evento(*a, request=request, **k),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Completado del estudio %s falló de forma inesperada", consulta_id)
+        raise HTTPException(status_code=502, detail=f"El completado falló: {str(exc)[:200]}")
+
+    # Reembolso con el MISMO criterio de la creación (>51% de las fuentes
+    # corridas fallidas): si el completado tampoco logró entregar, la consulta
+    # vuelve a quedar sin costo. Solo toca los consumos recién hechos (los
+    # originales ya tienen `reembolsado: True`).
+    cobrado = bool(consumos)
+    if consumos and mayoria_fuentes_fallidas(estudio.get("fuentes") or {}):
+        try:
+            cobro.reembolsar_consumos_consulta(
+                consulta_id, empresa, actor_doc,
+                motivo="Completado: seguía fallando la mayoría de las fuentes",
+                automatico=True,
+            )
+            registrar_evento(
+                "reembolso", actor=actor, consulta_id=consulta_id,
+                detalle="automático tras completado (mayoría de fuentes fallidas)",
+                request=request,
+            )
+            cobrado = False
+        except Exception as exc:
+            logger.error("Reembolso post-completado de %s falló: %s", consulta_id, exc)
+
+    # Memoria de personas: las fuentes recién corridas pueden traer el nombre
+    # VERIFICADO (situacion_militar/sisconmp) que actualiza la memoria. Best-effort.
+    if estudio.get("cedula"):
+        try:
+            nombres_verificados, apellidos_verificados = _nombres_verificados_del_estudio(estudio)
+            if nombres_verificados or apellidos_verificados:
+                personas.registrar_consulta_persona(
+                    estudio["cedula"], str(doc["empresa_id"]),
+                    nombres=nombres_verificados or None,
+                    apellidos=apellidos_verificados or None,
+                    nombre_consultado=estudio.get("nombre_consultado") or None,
+                    fecha_expedicion=estudio.get("fecha_expedicion"),
+                )
+        except Exception as exc:
+            logger.warning("Memoria de personas (%s) no actualizada al completar: %s", consulta_id, exc)
+
+    # Re-emitir el PDF consolidado (mismo estudio, versión +1).
+    try:
+        info_pdf = _reemitir_pdf(estudio, empresa, actor, request)
+        estudio["pdf"] = info_pdf
+    except Exception as exc:
+        logger.error("PDF del completado %s no se pudo generar/subir: %s", consulta_id, exc)
+        registrar_evento(
+            "pdf_generado", actor=actor, consulta_id=consulta_id,
+            detalle=f"ERROR tras completado: {str(exc)[:200]}", request=request,
+        )
+
+    estudio = _respuesta_estudio(estudio)
+    estudio["pdf_endpoint"] = f"/seguridad/estudios/{consulta_id}/pdf"
+    estudio["fuentes_completadas"] = corridas
+    estudio["fuentes_pendientes"] = fuentes_pendientes_estudio({"fuentes": estudio.get("fuentes") or {}})
+    estudio["cobrado"] = cobrado
+    return estudio
 
 
 # === 10-11. Estadísticas y eventos =============================================
