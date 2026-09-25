@@ -1464,12 +1464,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ]))
         cuento.append(tabla_ofac)
         for coincidencia in (ofac.get("coincidencias") or [])[:10]:
-            cuento.append(Paragraph(
-                "<b>Coincidencia:</b> "
-                f"{escape(str(coincidencia.get('nombre') or '—'))} · UID {escape(str(coincidencia.get('uid') or '—'))} · "
-                f"programa(s) {escape(', '.join(coincidencia.get('programas') or []) or '—')}",
-                estilo_normal,
-            ))
+            cuento.append(_ficha_coincidencia_ofac(coincidencia, titulo="Coincidencia"))
+            cuento.append(Paragraph("", estilo_normal))
         if aplica:
             cuento.append(Paragraph(
                 "Una coincidencia técnica no sustituye el análisis de identidad, homonimia, alcance del programa "
@@ -1493,11 +1489,8 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
                 f"Coincidencias: {int(ofac_nit.get('total_coincidencias') or 0)}", estilo_normal,
             ))
             for coincidencia in (ofac_nit.get("coincidencias") or [])[:10]:
-                cuento.append(Paragraph(
-                    "<b>Entidad:</b> "
-                    f"{escape(str(coincidencia.get('nombre') or '—'))} · UID {escape(str(coincidencia.get('uid') or '—'))} · "
-                    f"programa(s) {escape(', '.join(coincidencia.get('programas') or []) or '—')}", estilo_normal,
-                ))
+                cuento.append(_ficha_coincidencia_ofac(coincidencia, titulo="Entidad"))
+                cuento.append(Paragraph("", estilo_normal))
         else:
             cuento.append(_parrafo_estado_fuente(ofac_nit, "OFAC por NIT"))
 
@@ -2227,6 +2220,75 @@ def _texto_veredicto_ofac(ofac: dict) -> str:
     if ofac.get("aplica"):
         return f"Coincidencia exacta de identificación ({int(ofac.get('total_coincidencias') or 1)}) — revisar"
     return "Sin coincidencia exacta de identificación en SDN"
+
+
+def _ficha_coincidencia_ofac(coincidencia: dict, titulo: str = "Coincidencia") -> Table:
+    """FICHA COMPLETA del registro SDN que hizo match (2026-09-25, patrón
+    TusDatos): nombre, UID, programa, documento, nacimiento, nacionalidades,
+    ciudadanías, dirección, alias, observaciones y el LINK OFICIAL de
+    sanctionssearch — todo dato que ya viene en el XML (sin fuzzy por nombre).
+    Cachés previas sin los campos nuevos: las filas vacías simplemente no
+    se pintan (retro-compatible)."""
+    estilo_etiqueta = ParagraphStyle(
+        "ficha_ofac_etq", fontName="Helvetica-Bold", fontSize=8, leading=10,
+    )
+    estilo_valor = ParagraphStyle(
+        "ficha_ofac_val", fontName="Helvetica", fontSize=8, leading=10,
+        splitLongWords=1,
+    )
+
+    def celda(texto: str, negrita: bool = False) -> Paragraph:
+        return Paragraph(escape(str(texto or "—")), estilo_etiqueta if negrita else estilo_valor)
+
+    filas: list[list[str]] = []
+    filas.append([titulo, str(coincidencia.get("nombre") or "—")])
+    filas.append(["UID OFAC", str(coincidencia.get("uid") or "—")])
+    filas.append(["Programa(s)", ", ".join(coincidencia.get("programas") or []) or "—"])
+    documento = " ".join(
+        x for x in (
+            str(coincidencia.get("tipo_documento") or ""),
+            str(coincidencia.get("numero_documento") or ""),
+            f"({coincidencia.get('pais_documento')})" if coincidencia.get("pais_documento") else "",
+        ) if x
+    )
+    if documento:
+        filas.append(["Documento", documento])
+    # Campos enriquecidos (2026-09-25); ausentes en cachés previas.
+    if coincidencia.get("titulo"):
+        filas.append(["Título / cargo", str(coincidencia["titulo"])])
+    if coincidencia.get("fecha_nacimiento"):
+        filas.append(["Fecha de nacimiento", _fecha_legible(coincidencia["fecha_nacimiento"])])
+    if coincidencia.get("lugar_nacimiento"):
+        filas.append(["Lugar de nacimiento", str(coincidencia["lugar_nacimiento"])])
+    if coincidencia.get("nacionalidades"):
+        filas.append(["Nacionalidad", ", ".join(coincidencia["nacionalidades"])])
+    if coincidencia.get("ciudadanias"):
+        filas.append(["Ciudadanía", ", ".join(coincidencia["ciudadanias"])])
+    if coincidencia.get("direcciones"):
+        filas.append(["Dirección", "; ".join(coincidencia["direcciones"])])
+    if coincidencia.get("alias"):
+        filas.append(["Alias (a.k.a.)", "; ".join(coincidencia["alias"])])
+    if coincidencia.get("observaciones"):
+        filas.append(["Observaciones", str(coincidencia["observaciones"])])
+    celdas_fila = [[celda(k, True), celda(v)] for k, v in filas]
+    if coincidencia.get("fuente_url"):
+        # El link lleva markup <link> de reportlab: NO pasa por escape().
+        celdas_fila.append([
+            celda("Ficha oficial OFAC", True),
+            Paragraph(
+                f"<link href='{coincidencia['fuente_url']}' color='#1a56b0'><u>{escape(str(coincidencia['fuente_url']))}</u></link>",
+                estilo_valor,
+            ),
+        ])
+    tabla = Table(celdas_fila, colWidths=[42 * mm, 118 * mm])
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return tabla
 
 
 def _texto_veredicto_sena(sena: dict) -> str:

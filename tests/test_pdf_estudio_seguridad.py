@@ -1101,6 +1101,34 @@ class TestSeccionOfac(unittest.TestCase):
         self.assertIn("ILLICIT-DRUGS-EO14059", plano)
         self.assertIn("OFACcédula:1intento(s)", plano)
 
+    def test_ficha_sdn_completa_en_la_coincidencia(self):
+        """2026-09-25 (patrón TusDatos): la coincidencia pinta la FICHA
+        completa del registro SDN — nacimiento, ciudadanías, dirección y el
+        link oficial de sanctionssearch."""
+        estudio = self._con_ofac(aplica=True)
+        estudio["fuentes"]["ofac"]["coincidencias"][0].update({
+            "tipo_documento": "Cedula No.", "numero_documento": "208079",
+            "pais_documento": "Colombia",
+            "fecha_nacimiento": "19 Apr 1960",
+            "lugar_nacimiento": "Zipaquira, Colombia",
+            "nacionalidades": ["Colombia"],
+            "ciudadanias": ["Colombia", "Italy"],
+            "direcciones": ["Bogota, Colombia"],
+            "alias": ["Gustavo PETRO"],
+            "observaciones": "Member, ELN.",
+            "fuente_url": "https://sanctionssearch.ofac.treas.gov/Details.aspx?id=56062",
+        })
+        plano = _texto_plano(generar_pdf_estudio(estudio)).replace(" ", "")
+        self.assertIn("Fechadenacimiento", plano)
+        self.assertIn("19Apr1960", plano)  # formato SDN original, pasa intacto
+        self.assertIn("Zipaquira,Colombia", plano)
+        self.assertIn("Ciudadanía", plano)
+        self.assertIn("Colombia,Italy", plano)
+        self.assertIn("Bogota,Colombia", plano)
+        self.assertIn("GustavoPETRO", plano)
+        self.assertIn("sanctionssearch.ofac.treas.gov/Details.aspx?id=56062", plano)
+        self.assertIn("FichaoficialOFAC", plano)
+
     def test_sin_coincidencia_exacta(self):
         texto = _texto_plano(generar_pdf_estudio(self._con_ofac()))
         self.assertIn("SINCOINCIDENCIAEXACTADEIDENTIFICACIÓN", texto.replace(" ", ""))

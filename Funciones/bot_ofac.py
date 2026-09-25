@@ -49,6 +49,77 @@ def _texto(nodo: ET.Element, etiqueta: str) -> str:
     return (nodo.findtext(_NS + etiqueta) or "").strip()
 
 
+def _principal(nodo: ET.Element, ruta: str, campo: str) -> str:
+    """Valor del ítem marcado mainEntry (o el primero) de una lista SDN
+    (dateOfBirthList, placeOfBirthList)."""
+    for item in nodo.findall(ruta):
+        if (item.findtext(_NS + "mainEntry") or "").strip().lower() == "true":
+            return (item.findtext(_NS + campo) or "").strip()
+    items = nodo.findall(ruta)
+    return (items[0].findtext(_NS + campo) or "").strip() if items else ""
+
+
+def _paises(nodo: ET.Element, ruta: str) -> list[str]:
+    """Países de nationalityList/citizenshipList (deduplicados, en orden)."""
+    vistos: list[str] = []
+    for item in nodo.findall(ruta):
+        pais = (item.findtext(_NS + "country") or "").strip()
+        if pais and pais not in vistos:
+            vistos.append(pais)
+    return vistos
+
+
+def _direcciones(nodo: ET.Element) -> list[str]:
+    """Direcciones de addressList como texto legible ('Bogota, Colombia')."""
+    direcciones: list[str] = []
+    for dir_nodo in nodo.findall(_NS + "addressList/" + _NS + "address"):
+        partes = [
+            (dir_nodo.findtext(_NS + c) or "").strip()
+            for c in ("address", "city", "stateOrProvince", "country")
+        ]
+        legible = ", ".join(p for p in partes if p)
+        if legible:
+            direcciones.append(legible)
+    return direcciones[:3]
+
+
+def _alias(nodo: ET.Element, tope: int = 5) -> list[str]:
+    """Alias de akaList ('A.K.A. Juan PEREZ'), tope 5."""
+    alias: list[str] = []
+    for aka in nodo.findall(_NS + "akaList/" + _NS + "aka"):
+        nombre = " ".join(
+            x for x in (
+                (aka.findtext(_NS + "firstName") or "").strip(),
+                (aka.findtext(_NS + "lastName") or "").strip(),
+            ) if x
+        )
+        if nombre:
+            alias.append(nombre)
+    return alias[:tope]
+
+
+def _ficha_sdn(nodo: ET.Element, uid: str) -> dict:
+    """Campos de presentación del registro SDN (2026-09-25, patrón TusDatos):
+    cuando hay coincidencia el informe muestra la FICHA COMPLETA del registro
+    — programa, nacimiento, nacionalidades, dirección, alias, observaciones y
+    el link oficial de sanctionssearch — todos ya presentes en el XML."""
+    return {
+        "titulo": _texto(nodo, "title"),
+        "fecha_nacimiento": _principal(
+            nodo, _NS + "dateOfBirthList/" + _NS + "dateOfBirthItem", "dateOfBirth"
+        ),
+        "lugar_nacimiento": _principal(
+            nodo, _NS + "placeOfBirthList/" + _NS + "placeOfBirthItem", "placeOfBirth"
+        ),
+        "nacionalidades": _paises(nodo, _NS + "nationalityList/" + _NS + "nationality"),
+        "ciudadanias": _paises(nodo, _NS + "citizenshipList/" + _NS + "citizenship"),
+        "direcciones": _direcciones(nodo),
+        "alias": _alias(nodo),
+        "observaciones": _texto(nodo, "remarks")[:400],
+        "fuente_url": f"https://sanctionssearch.ofac.treas.gov/Details.aspx?id={uid}",
+    }
+
+
 def _construir_indices(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict]:
     indice: dict[str, list[dict]] = {}
     indice_nit: dict[str, list[dict]] = {}
@@ -69,6 +140,7 @@ def _construir_indices(xml_bytes: bytes) -> tuple[dict[str, list[dict]], dict[st
                     "tipo": _texto(nodo, "sdnType"),
                     "programas": programas,
                     "lista": "SDN",
+                    **_ficha_sdn(nodo, _texto(nodo, "uid")),
                 }
                 for documento in documentos:
                     tipo = _texto(documento, "idType")

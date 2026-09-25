@@ -2660,3 +2660,168 @@ class TestRutaBlobExtension(unittest.TestCase):
         # Compat: sin ext sigue siendo .pdf (todas las rutas existentes).
         por_defecto = storage_seguridad.ruta_blob("emp", 2026, "ES-1")
         self.assertTrue(por_defecto.endswith("ES-1.pdf"))
+
+
+# === Memoria de personas consultadas (personas_seguridad, 2026-09-25) ==========
+
+class ColPersonasFake:
+    """Fake mínimo de personas_seguridad: update_one upsert + find_one."""
+
+    def __init__(self):
+        self.docs: dict[str, dict] = {}
+
+    def update_one(self, filtro, update, upsert=False):
+        cedula = filtro.get("cedula")
+        doc = self.docs.get(cedula)
+        creado = doc is None
+        if creado:
+            if not upsert:
+                return
+            doc = {"cedula": cedula}
+            self.docs[cedula] = doc
+        if "$setOnInsert" in update and not creado:
+            pass  # solo aplica al insertar
+        for operador, campos in update.items():
+            if operador == "$set":
+                doc.update(campos)
+            elif operador == "$setOnInsert" and creado:
+                doc.update(campos)
+            elif operador == "$inc":
+                for k, v in campos.items():
+                    doc[k] = doc.get(k, 0) + v
+            elif operador == "$addToSet":
+                for k, v in campos.items():
+                    doc.setdefault(k, [])
+                    if v not in doc[k]:
+                        doc[k].append(v)
+
+    def find_one(self, filtro):
+        doc = self.docs.get(filtro.get("cedula"))
+        if doc is None:
+            return None
+        # El gate de visibilidad es el filtro por empresa.
+        if filtro.get("empresas") is not None and filtro["empresas"] not in doc.get("empresas", []):
+            return None
+        return dict(doc)
+
+
+class TestMemoriaPersonas(unittest.TestCase):
+    def setUp(self):
+        self.col = ColPersonasFake()
+        self.patcher = patch.object(se.personas, "col_personas", self.col)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_upsert_crea_e_incrementa(self):
+        from Funciones import personas_seguridad as ps
+
+        ps.registrar_consulta_persona("79882073", EMPRESA_A, nombres="DIDIER ALBEIRO", apellidos="PIÑEROS ARIZA")
+        ps.registrar_consulta_persona("79882073", EMPRESA_A)
+        doc = self.col.docs["79882073"]
+        self.assertEqual(doc["total_consultas"], 2)
+        self.assertEqual(doc["empresas"], [EMPRESA_A])
+        # La segunda consulta no traía nombres: los de la primera SOBREVIVEN.
+        self.assertEqual(doc["nombres"], "DIDIER ALBEIRO")
+        self.assertIn("primera_consulta_en", doc)
+
+    def test_nombre_consultado_verificado_gana(self):
+        from Funciones import personas_seguridad as ps
+
+        ps.registrar_consulta_persona("79882073", EMPRESA_A, nombre_consultado="PIÑEROS ARIZA DIDIER ALBEIRO")
+        ps.registrar_consulta_persona("79882073", EMPRESA_A, nombre_consultado="PIÑEROS ARIZA DIDIER ALBEIRO")
+        doc = self.col.docs["79882073"]
+        self.assertEqual(doc["nombre_consultado"], "PIÑEROS ARIZA DIDIER ALBEIRO")
+
+    def test_buscar_persona_aislada_por_empresa(self):
+        from Funciones import personas_seguridad as ps
+
+        ps.registrar_consulta_persona("79882073", EMPRESA_A, fecha_expedicion="14/02/2012")
+        self.assertIsNotNone(ps.buscar_persona("79882073", EMPRESA_A))
+        # OTRA empresa no la ha consultado: no ve la memoria (aislamiento).
+        self.assertIsNone(ps.buscar_persona("79882073", EMPRESA_B))
+        persona = ps.buscar_persona("79882073", EMPRESA_A)
+        self.assertEqual(persona["fecha_expedicion"], "14/02/2012")
+        self.assertEqual(persona["total_consultas"], 1)
+
+    def test_registrar_jamas_lanza(self):
+        from Funciones import personas_seguridad as ps
+
+        class ColQueExplota(ColPersonasFake):
+            def update_one(self, filtro, update, upsert=False):
+                raise RuntimeError("mongo caído")
+
+        with patch.object(ps, "col_personas", ColQueExplota()):
+            ps.registrar_consulta_persona("79882073", EMPRESA_A)  # no raise
+            self.assertIsNone(ps.buscar_persona("79882073", EMPRESA_A))
+
+
+class TestCompletarDesdeMemoria(unittest.TestCase):
+    def test_llena_vacios_con_memoria(self):
+        with patch.object(se.personas, "buscar_persona", return_value={
+            "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            "fecha_expedicion": "14/02/2012", "total_consultas": 3,
+        }):
+            nombres, apellidos, fecha = se._completar_desde_memoria(
+                "79882073", str(EMPRESA_A), None, None, ""
+            )
+        self.assertEqual(nombres, "DIDIER ALBEIRO")
+        self.assertEqual(apellidos, "PIÑEROS ARIZA")
+        self.assertEqual(fecha, "14/02/2012")
+
+    def test_lo_del_body_siempre_gana(self):
+        with patch.object(se.personas, "buscar_persona", return_value={
+            "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            "fecha_expedicion": "14/02/2012",
+        }):
+            nombres, apellidos, fecha = se._completar_desde_memoria(
+                "79882073", str(EMPRESA_A), "DIDIER ALBERTO", "PÉREZ", "01/01/2001"
+            )
+        self.assertEqual(nombres, "DIDIER ALBERTO")
+        self.assertEqual(apellidos, "PÉREZ")
+        self.assertEqual(fecha, "01/01/2001")
+
+    def test_sin_memoria_retorna_tal_cual(self):
+        with patch.object(se.personas, "buscar_persona", return_value=None):
+            nombres, apellidos, fecha = se._completar_desde_memoria(
+                "79882073", str(EMPRESA_A), None, None, ""
+            )
+        self.assertIsNone(nombres)
+        self.assertIsNone(apellidos)
+        self.assertEqual(fecha, "")
+
+
+class TestEndpointPersonas(unittest.TestCase):
+    def test_retorna_datos_para_empresa_correcta(self):
+        with patch.object(se.personas, "buscar_persona", return_value={
+            "nombres": "DIDIER ALBEIRO", "apellidos": "PIÑEROS ARIZA",
+            "nombre_consultado": "PIÑEROS ARIZA DIDIER ALBEIRO",
+            "fecha_expedicion": "14/02/2012", "total_consultas": 2,
+            "ultima_consulta_en": datetime(2026, 9, 25, 15, 0, 0),
+        }) as mock_buscar:
+            resp = se.buscar_persona_consultada(
+                request=None, actor=actor_consultador(EMPRESA_A), cedula="79882073",
+            )
+        self.assertTrue(resp["encontrada"])
+        self.assertEqual(resp["fecha_expedicion"], "14/02/2012")
+        self.assertEqual(resp["total_consultas"], 2)
+        self.assertTrue(resp["ultima_consulta_en"].endswith("Z"))
+        # Aislamiento: el lookup se hace contra la empresa del ACTOR.
+        mock_buscar.assert_called_once_with("79882073", str(EMPRESA_A))
+
+    def test_no_encontrada_otra_empresa(self):
+        with patch.object(se.personas, "buscar_persona", return_value=None):
+            resp = se.buscar_persona_consultada(
+                request=None, actor=actor_consultador(EMPRESA_B), cedula="79882073",
+            )
+        self.assertFalse(resp["encontrada"])
+
+    def test_admin_integra_sin_empresa_exige_empresa_id(self):
+        actor = actor_consultador(EMPRESA_A)
+        actor["rol"] = ROL_ADMIN_INTEGRA
+        actor["empresa_id"] = None
+        with self.assertRaises(HTTPException) as ctx:
+            # empresa_id explícito: llamado directo (el default es Query(None)).
+            se.buscar_persona_consultada(
+                request=None, actor=actor, cedula="79882073", empresa_id=None,
+            )
+        self.assertEqual(ctx.exception.status_code, 422)

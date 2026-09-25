@@ -24,6 +24,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from bd.bd_cliente import bd_cliente
+from Funciones import personas_seguridad as personas
 from Funciones.auth_seguridad import (
     ROL_ADMIN_EMPRESA,
     ROL_ADMIN_INTEGRA,
@@ -53,6 +54,9 @@ col_estudios = db["estudios_seguridad"]
 col_eventos = db["eventos_seguridad"]
 col_empresas = db["empresas_seguridad"]
 col_usuarios = db["baseusuarios"]
+
+# Índices de la memoria de personas (idempotentes; patrón cobro_seguridad).
+personas.asegurar_indices_personas()
 
 CONSULTAS_MIN_DEFAULT = int(os.getenv("SEGURIDAD_CONSULTAS_MIN", "10"))
 # Rate limit por empresa: ventana móvil de 60 s en memoria (una instancia).
@@ -444,6 +448,26 @@ def _normalizar_nit_sin_dv(valor: str | None) -> str:
     return re.sub(r"\D", "", crudo)
 
 
+def _completar_desde_memoria(
+    cedula: str, empresa_id: str,
+    nombres: str | None, apellidos: str | None, fecha_expedicion: str | None,
+) -> tuple[str | None, str | None, str]:
+    """Completa los campos que el body NO trajo con la memoria de personas
+    de ESTA empresa (2026-09-25). Lo que el usuario envió SIEMPRE gana; la
+    memoria solo rellena vacíos (nombres/apellidos para rama_judicial y el
+    captcha de la PGN; fecha de expedición para delitos_sexuales)."""
+    persona = personas.buscar_persona(cedula, empresa_id) if cedula else None
+    if not persona:
+        return nombres, apellidos, fecha_expedicion or ""
+    if not nombres:
+        nombres = _normalizar_nombre(persona.get("nombres"))
+    if not apellidos:
+        apellidos = _normalizar_nombre(persona.get("apellidos"))
+    if not fecha_expedicion:
+        fecha_expedicion = (persona.get("fecha_expedicion") or "").strip()
+    return nombres, apellidos, fecha_expedicion
+
+
 class CrearEstudio(BaseModel):
     cedula: str | None = None
     nit: str | None = None  # fuente empresarial ofac_nit; separado de la cédula
@@ -621,16 +645,24 @@ async def crear_estudio(
     # consultando").
     nombres = _normalizar_nombre(getattr(datos, "nombres", None))
     apellidos = _normalizar_nombre(getattr(datos, "apellidos", None))
-    if "rama_judicial" in habilitadas and (not nombres or not apellidos):
-        raise HTTPException(
-            status_code=422,
-            detail="La fuente Rama Judicial requiere nombres y apellidos completos",
-        )
 
     # Fecha de expedición de la cédula: la exige el portal de inhabilidades
     # de la Ley 1918 (valida el par cédula+fecha). Se acepta DD/MM/AAAA o
     # ISO; el bot la normaliza.
     fecha_expedicion = (getattr(datos, "fecha_expedicion", None) or "").strip()
+
+    # Memoria de personas (2026-09-25): lo que falte del body se completa con
+    # lo que ESTA empresa ya consultó de la persona — evita repetir la fecha
+    # de expedición y los nombres a mano, y salva el 422 de delitos_sexuales.
+    nombres, apellidos, fecha_expedicion = _completar_desde_memoria(
+        cedula, str(empresa["_id"]), nombres, apellidos, fecha_expedicion
+    )
+
+    if "rama_judicial" in habilitadas and (not nombres or not apellidos):
+        raise HTTPException(
+            status_code=422,
+            detail="La fuente Rama Judicial requiere nombres y apellidos completos",
+        )
     if "delitos_sexuales" in habilitadas and not fecha_expedicion:
         raise HTTPException(
             status_code=422,
@@ -720,6 +752,23 @@ async def crear_estudio(
             )
         except Exception as exc:
             logger.error("Reembolso automático de %s falló: %s", consulta_id, exc)
+
+    # Memoria de personas (2026-09-25): registrar/actualizar la persona para
+    # que la próxima consulta de esta empresa autollene nombres, fecha de
+    # expedición y el nombre VERIFICADO por los portales. Best-effort dentro
+    # del módulo (un fallo jamás tumba el estudio).
+    if cedula:
+        try:
+            personas.registrar_consulta_persona(
+                cedula,
+                str(empresa["_id"]),
+                nombres=nombres or None,
+                apellidos=apellidos or None,
+                nombre_consultado=(estudio or {}).get("nombre_consultado") or None,
+                fecha_expedicion=fecha_expedicion or None,
+            )
+        except Exception as exc:
+            logger.warning("Memoria de personas (%s) no registrada: %s", cedula, exc)
 
     # PDF consolidado (desde el doc persistido → reproducible) + subida a GCS.
     try:
@@ -835,6 +884,45 @@ def listar_estudios(
         it["costo_cop"] = costos.get(it.get("consulta_id"), 0)
 
     return {"total": total, "items": items}
+
+
+@router.get("/personas")
+def buscar_persona_consultada(
+    request: Request,
+    actor: dict = Depends(actor_actual),
+    cedula: str = Query(..., min_length=3, max_length=15, description="Cédula de la persona"),
+    empresa_id: str | None = Query(None, description="Solo ADMIN_INTEGRA sin empresa propia"),
+):
+    """Memoria de personas consultadas por la empresa del actor (2026-09-25).
+
+    Retorna los datos que la EMPRESA ya envió/verificó en consultas previas
+    de esa cédula (nombres, apellidos, nombre verificado por los portales,
+    fecha de expedición) para autollenar el formulario. Aislamiento: solo ve
+    personas que SU empresa consultó antes; otra empresa → encontrada=false
+    (no revela que un tercero la consultó).
+    """
+    _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "consultar personas")
+    if actor["rol"] == ROL_ADMIN_INTEGRA and not actor.get("empresa_id"):
+        if not (empresa_id or "").strip():
+            raise HTTPException(status_code=422, detail="Indique empresa_id para consultar su memoria de personas")
+        if not re.fullmatch(r"[0-9a-fA-F]{24}", empresa_id):
+            raise HTTPException(status_code=422, detail="empresa_id inválido")
+        eid = empresa_id
+    else:
+        eid = actor.get("empresa_id") or ""
+    persona = personas.buscar_persona(_normalizar_cedula(cedula), eid)
+    if not persona:
+        return {"encontrada": False}
+    ultima = persona.get("ultima_consulta_en")
+    return {
+        "encontrada": True,
+        "nombres": persona.get("nombres") or "",
+        "apellidos": persona.get("apellidos") or "",
+        "nombre_consultado": persona.get("nombre_consultado") or "",
+        "fecha_expedicion": persona.get("fecha_expedicion") or "",
+        "total_consultas": persona.get("total_consultas") or 0,
+        "ultima_consulta_en": ultima.isoformat() + "Z" if ultima else None,
+    }
 
 
 @router.get("/verificar/{consulta_id}")

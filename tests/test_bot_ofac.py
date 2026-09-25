@@ -14,6 +14,16 @@ XML = b'''<?xml version="1.0"?>
       <id><uid>123</uid><idType>Cedula No.</idType><idNumber>208079</idNumber><idCountry>Colombia</idCountry></id>
       <id><uid>124</uid><idType>Gender</idType><idNumber>Male</idNumber></id>
     </idList>
+    <addressList><address><city>Bogota</city><country>Colombia</country></address></addressList>
+    <nationalityList><nationality><country>Colombia</country><mainEntry>true</mainEntry></nationality></nationalityList>
+    <citizenshipList>
+      <citizenship><country>Colombia</country><mainEntry>true</mainEntry></citizenship>
+      <citizenship><country>Italy</country><mainEntry>false</mainEntry></citizenship>
+    </citizenshipList>
+    <dateOfBirthList><dateOfBirthItem><dateOfBirth>19 Apr 1960</dateOfBirth><mainEntry>true</mainEntry></dateOfBirthItem></dateOfBirthList>
+    <placeOfBirthList><placeOfBirthItem><placeOfBirth>Zipaquira, Colombia</placeOfBirth><mainEntry>true</mainEntry></placeOfBirthItem></placeOfBirthList>
+    <akaList><aka><firstName>Gustavo</firstName><lastName>PETRO</lastName></aka></akaList>
+    <remarks>Member, ELN.</remarks>
   </sdnEntry>
   <sdnEntry>
     <uid>90001</uid><lastName>EMPRESA DE PRUEBA S.A.S.</lastName><sdnType>Entity</sdnType>
@@ -52,6 +62,28 @@ class TestBotOfac(unittest.TestCase):
         self.assertFalse(resultado["aplica"])
         self.assertTrue(resultado["no_registra"])
         self.assertEqual(resultado["coincidencias"], [])
+
+    @patch.object(bot_ofac.requests, "get")
+    def test_ficha_sdn_completa_en_la_coincidencia(self, get):
+        """2026-09-25 (patrón TusDatos): el match arrastra la ficha completa
+        del registro SDN — nacimiento, nacionalidades, ciudadanías,
+        dirección, alias, observaciones y el link oficial de la ficha."""
+        get.return_value = self._respuesta()
+        c = bot_ofac.consultar_ofac_sync("208079")["coincidencias"][0]
+        self.assertEqual(c["fecha_nacimiento"], "19 Apr 1960")
+        self.assertEqual(c["lugar_nacimiento"], "Zipaquira, Colombia")
+        self.assertEqual(c["nacionalidades"], ["Colombia"])
+        self.assertEqual(c["ciudadanias"], ["Colombia", "Italy"])
+        self.assertEqual(c["direcciones"], ["Bogota, Colombia"])
+        self.assertEqual(c["alias"], ["Gustavo PETRO"])
+        self.assertEqual(c["observaciones"], "Member, ELN.")
+        self.assertEqual(
+            c["fuente_url"], "https://sanctionssearch.ofac.treas.gov/Details.aspx?id=56062"
+        )
+        # La entidad SIN esos campos no explota: claves vacías, sin excepción.
+        e = bot_ofac.consultar_ofac_nit_sync("900123456-7")["coincidencias"][0]
+        self.assertEqual(e["nacionalidades"], [])
+        self.assertEqual(e["fecha_nacimiento"], "")
 
     @patch.object(bot_ofac.requests, "get")
     def test_dataset_se_reutiliza_en_memoria(self, get):
