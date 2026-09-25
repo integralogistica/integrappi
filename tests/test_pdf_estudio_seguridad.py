@@ -800,6 +800,49 @@ def _fuente_sena(estado="EXITO", no_registra=False, certificados=None, mensaje="
     }
 
 
+def _fuente_sisconmp(estado="EXITO", no_registra=False, capacitaciones=None, mensaje=""):
+    return {
+        "estado": estado,
+        "origen": "portal",
+        "no_registra": no_registra,
+        "mensaje": mensaje,
+        "apellidos": "GOMEZ GOMEZ",
+        "nombres": "MARIO",
+        "total_capacitaciones": len(capacitaciones) if capacitaciones is not None else (0 if no_registra else 2),
+        "capacitaciones": capacitaciones if capacitaciones is not None else ([] if no_registra else [
+            {
+                "tipo_capacitacion": "CURSO BASICO",
+                "nombre": "Curso Básico para el Transporte de Mercancías Peligrosas",
+                "entidad_certificadora": "MEN",
+                "institucion_educativa": "ACADEMIA DE CONDUCCION INTEGRA",
+                "fecha_expedicion": "2020-01-10",
+                "fecha_vencimiento": "2099-12-31",  # vigente (fecha lejana: el test nunca caduca)
+                "fecha_registro": "2020-01-12",
+                "clase": "",
+                "descripcion_clase": "",
+                "tipo_vehiculo": "",
+                "vigente": True,
+            },
+            {
+                "tipo_capacitacion": "TITULACION NCL",
+                "nombre": "Titulación en la Norma de Competencia Laboral TMR",
+                "entidad_certificadora": "SENA",
+                "institucion_educativa": "SENA REGIONAL CUNDINAMARCA",
+                "fecha_expedicion": "2001-01-10",
+                "fecha_vencimiento": "2001-01-10",  # vencida hace décadas
+                "fecha_registro": "2001-01-12",
+                "clase": "3",
+                "descripcion_clase": "Líquidos inflamables",
+                "tipo_vehiculo": "TRACTOCAMION",
+                "vigente": False,
+            },
+        ]),
+        "intentos": 1,
+        "duraciones_s": [15.1],
+        "error": None,
+    }
+
+
 class TestSeccionSena(unittest.TestCase):
     """Fuente "sena" en el PDF: fila de resumen, sección Formación SENA con
     banner informativo (con certificados / sin certificados), tabla de
@@ -867,6 +910,88 @@ class TestSeccionSena(unittest.TestCase):
         self.assertIn("FormaciónSENA", texto.replace(" ", ""))
         self.assertIn("NODISPONIBLE", texto.replace(" ", ""))
         self.assertIn("Noconsultada", texto.replace(" ", ""))
+
+
+class TestSeccionSisconmp(unittest.TestCase):
+    """Fuente "sisconmp" en el PDF: fila de resumen, sección Capacitaciones
+    Mercancías Peligrosas con banner de vigencia (alguna vigente / todas
+    vencidas / sin capacitaciones), tabla de capacitaciones y disposición
+    legal honesta (Resolución 1223 de 2014, informativo)."""
+
+    def _con_sis(self, **kw):
+        estudio = estudio_fixture()
+        estudio["fuentes"]["sisconmp"] = _fuente_sisconmp(**kw)
+        return estudio
+
+    def test_con_capacitativas_banner_y_tabla(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis()))
+        self.assertIn("CapacitacionesenMercancíasPeligrosas".replace(" ", ""), texto)
+        self.assertIn("ALMENOSUNAVIGENTE", texto)
+        self.assertIn("Detalledecapacitaciones", texto)
+        # (wrap-tolerante: la celda ancha parte los textos largos entre líneas)
+        self.assertIn("ACADEMIADE", texto)
+        self.assertIn("CURSOBASICO", texto)
+        self.assertIn("VENCIDA", texto)
+
+    def test_todas_vencidas_banner_ambar(self):
+        caps = [
+            {
+                "tipo_capacitacion": "CURSO BASICO",
+                "nombre": "Curso Básico TMR",
+                "entidad_certificadora": "MEN",
+                "institucion_educativa": "ACADEMIA X",
+                "fecha_expedicion": "2001-01-10",
+                "fecha_vencimiento": "2001-01-10",
+                "clase": "", "descripcion_clase": "", "tipo_vehiculo": "",
+                "vigente": False,
+            },
+        ]
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis(capacitaciones=caps)))
+        self.assertIn("NINGUNAVIGENTE(VENCIDAS)", texto)
+
+    def test_sin_capacitaciones_banner_verde(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis(
+            no_registra=True,
+            mensaje="No se encontrarón registros sobre el ciudadano.",
+        )))
+        self.assertIn("SINCAPACITACIONES", texto)
+        self.assertIn("REGISTRADAS", texto)
+        self.assertNotIn("Detalledecapacitaciones", texto)
+        # El mensaje del portal aparece en el detalle.
+        self.assertIn("Noseencontrarónregistros".replace(" ", ""), texto)
+
+    def test_fila_de_resumen(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis()))
+        # (wrap-tolerante: el nombre largo de la fuente se parte en dos líneas
+        # de la celda y la extracción intercala las otras columnas)
+        self.assertIn("SISCONMP—CapacitacionesMercancías", texto)
+        self.assertIn("Peligrosas", texto)
+        # (la celda se parte en dos líneas y la extracción intercala la
+        # columna Estado: "almenosuna" … "Peligrosas" … "vigente")
+        self.assertIn("almenosuna", texto)
+
+    def test_resumen_solo_fuentes_corridas(self):
+        """Un estudio SIN sisconmp (clave ausente): sin fila fantasma ni sección."""
+        estudio = estudio_fixture()
+        texto = _texto_plano(generar_pdf_estudio(estudio))
+        self.assertNotIn("SISCONMP", texto)
+
+    def test_disposicion_legal_sisconmp(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis()))
+        import unicodedata
+
+        plano = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+        self.assertIn("Resolucion1223de2014".replace(" ", ""), plano.replace(" ", ""))
+        # Informativo: no promete inhabilidad por ausencia de capacitación.
+        self.assertIn("caracterinformativo".replace(" ", ""), plano.replace(" ", ""))
+
+    def test_fuente_fallida_muestra_estado(self):
+        texto = _texto_plano(generar_pdf_estudio(self._con_sis(
+            estado="NO_DISPONIBLE", no_registra=None, capacitaciones=[],
+        )))
+        self.assertIn("SISCONMP", texto)
+        self.assertIn("NODISPONIBLE", texto)
+        self.assertIn("Noconsultada".replace(" ", ""), texto)
 
 
 class TestSeccionOfac(unittest.TestCase):

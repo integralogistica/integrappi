@@ -1,0 +1,446 @@
+<!DOCTYPE html><html class=" js flexbox flexboxlegacy canvas canvastext webgl no-touch geolocation postmessage websqldatabase indexeddb hashchange history draganddrop websockets rgba hsla multiplebgs backgroundsize borderimage borderradius boxshadow textshadow opacity cssanimations csscolumns cssgradients cssreflections csstransforms csstransforms3d csstransitions fontface generatedcontent video audio localstorage sessionstorage webworkers no-applicationcache svg inlinesvg smil svgclippaths" style=""><head><meta http-equiv="origin-trial" content="A7vZI3v+Gz7JfuRolKNM4Aff6zaGuT7X0mf3wtoZTnKv6497cVMnhy03KDqX7kBz/q/iidW7srW31oQbBt4VhgoAAACUeyJvcmlnaW4iOiJodHRwczovL3d3dy5nb29nbGUuY29tOjQ0MyIsImZlYXR1cmUiOiJEaXNhYmxlVGhpcmRQYXJ0eVN0b3JhZ2VQYXJ0aXRpb25pbmczIiwiZXhwaXJ5IjoxNzU3OTgwODAwLCJpc1N1YmRvbWFpbiI6dHJ1ZSwiaXNUaGlyZFBhcnR5Ijp0cnVlfQ==">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Información de Conductores que Transportan Mercancías Peligrosas</title>
+
+    <link href="/SISCONMP2/Content/font-awesome.min.css" rel="stylesheet">
+    <link href="/SISCONMP2/Content/Site.css" rel="stylesheet" type="text/css">
+    <link href="/SISCONMP2/Content/bootstrap.min.css" rel="stylesheet" type="text/css">
+    <link href="/SISCONMP2/Content/select2.min.css" rel="stylesheet">
+
+    <script type="text/javascript" async="" charset="utf-8" src="https://www.gstatic.com/recaptcha/releases/zqB-6Xpbd3lCIvi7Tr2D0pob/recaptcha__es_419.js" crossorigin="anonymous" integrity="sha384-KPYrDFX8Zg0NahyRmZsnBxe6K4m+vgQPiN8VptIFOg3WZDHK8S+Exoh/K82kf9kS"></script><script src="/SISCONMP2/Scripts/modernizr-2.6.2.js"></script>
+    <script src="/SISCONMP2/Scripts/jquery-1.10.2.min.js"></script>
+    <script src="/SISCONMP2/Scripts/jquery.validate.min.js"></script>
+    <script src="/SISCONMP2/Scripts/bootstrap.min.js"></script>
+    <script src="/SISCONMP2/Scripts/bootstrap-waitingfor.min.js"></script>
+    <script src="/SISCONMP2/Scripts/select2.full.js"></script>
+    <script src="/SISCONMP2/Scripts/bootbox.min.js"></script>
+
+    <link rel="shortcut icon" href="https://www.mintransporte.gov.co/info/mintransporte/web/portal/imagenes/faviconMin1616.ico" type="image/x-icon">
+
+    <script type="text/javascript">
+        function pleaseWait() {
+            waitingDialog.show('Cargando, por favor espere...', { dialogSize: 'sm', progressType: 'info' });
+        }
+
+        function hideWait() {
+            waitingDialog.hide();
+        }
+
+        function isValidEmailAddress(emailAddress) {
+            var expr = /^([\w-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([\w-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)$/;
+            return expr.test(emailAddress);
+        }
+
+        function obtenerFecha(fecha) {
+            var valor;
+
+            if (fecha != null) {
+                valor = new Date(parseInt(fecha.replace(/(^.*\()|([+-].*$)/g, '')));
+            }
+
+            return valor;
+        }
+
+        function formatearFecha(fecha) {
+            var fechaFormateada;
+
+            if (fecha != null) {
+                var dia = fecha.getDate().toString();
+
+                dia = dia.length > 1 ? dia : '0' + dia;
+
+                var mes = (1 + fecha.getMonth()).toString();
+
+                mes = mes.length > 1 ? mes : '0' + mes;
+
+                var anho = fecha.getFullYear();
+
+                fechaFormateada = dia + '/' + mes + '/' + anho;
+            }
+
+            return fechaFormateada;
+        }
+
+        function pad(str, max) {
+            str = str.toString();
+
+            return str.length < max ? pad("0" + str, max) : str;
+        }
+
+        $(document).ready(function () {
+            pleaseWait();
+        });
+    </script>
+</head>
+<body style="">
+    <div class="navbar navbar-fixed-top" style="background-color: #ffffff;">
+        <div class="container">
+            <div class="navbar-header">
+                <div class="row">
+                    <div class="col-md-6 col-xs-6" style="text-align: center;">
+                        <a href="http://www.mintransporte.gov.co/" target="_blank"><img src="/SISCONMP2/img/logoMinisterio.png" class="logoMintra" alt="Ministerio de Transporte" title="Ministerio de Transporte" data-toggle="tooltip"></a>
+                    </div>
+                    <div class="col-md-1 col-xs-1">
+                        &nbsp;
+                    </div>
+                    <div class="col-md-4 col-xs-4" style="text-align: center;">
+                        <img src="/SISCONMP2/img/mercancias-peligrosas.png" class="logoSISCONMP" alt="Sistema de Información de Conductores que Transportan Mercancías Peligrosas" title="Sistema de Información de Conductores que Transportan Mercancías Peligrosas" data-toggle="tooltip">
+                        <br>
+                        <span class="soloDesktop">jueves, 24 de septiembre de 2026</span>
+                        <span class="soloMobile">24/09/2026</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <hr>
+
+    <div class="container tituloSISCONMP">
+        SISCONMP - Sistema de Información de Conductores que Transportan Mercancías Peligrosas
+    </div>
+
+    <div class="container body-content">
+        
+<script src="https://www.google.com/recaptcha/api.js?render=6Le9cpAsAAAAALcoFYDxQZ7CzxCJercReO-ORIq9"></script>
+<script type="text/javascript">
+    $(document).ready(function () {
+        $('#cboTDI').on('itemsCargados', function () {
+            $("#cboTDI option:contains('CC')").attr('selected', true);
+            $('#cboTDI').select2();
+        });
+        CargarTDI();
+    });
+
+    function CargarTDI() {
+        $("#cboTDI").html("");
+        $("#cboTDI").append('<option value="">- Seleccione -</option>');
+        $.getJSON('/SISCONMP2/ConsultasCapacitaciones/CargarTDI').success(function (data) {
+            $.each(data, function (i, tdi) {
+                $("#cboTDI").append($('<option></option>').val(tdi.ID).html(tdi.Codigo));
+            });
+            $("#cboTDI").trigger("itemsCargados");
+        });
+    }
+
+    function ConsultarConductor() {
+        $('#errNoDI').hide();
+        $('#divNombreCiudadano').html('');
+        $('#divResultados').html('');
+        $('#divNoHayRegistros').hide();
+        $('#divContenido').hide();
+        pleaseWait();
+
+        var TDI = $('#cboTDI option:selected').text();
+        var NDI = $('#txtNDI').val();
+
+        if (TDI != '' && NDI != '') {
+            grecaptcha.ready(function () {
+                grecaptcha.execute('6Le9cpAsAAAAALcoFYDxQZ7CzxCJercReO-ORIq9', { action: 'consultar_conductor' }).then(function (token) {
+                    realizarConsultaConductor(TDI, NDI, token);
+                });
+            });
+        } else {
+            hideWait();
+            $('#errNoDI').show();
+        }
+    }
+
+    function realizarConsultaConductor(TDI, NDI, recaptchaToken) {
+        var strPanel = '';
+        var apellidos = '';
+        var nombres = '';
+        $.ajax({
+            url: '/SISCONMP2/ConsultasCapacitaciones/ConsultarConductor',
+            type: 'POST',
+            data: { TDI: TDI, NDI: NDI, recaptchaToken: recaptchaToken },
+            success: function (data) {
+                if (data.length == 0) {
+                    $('#divNoHayRegistros').show();
+                }
+                else {
+                    $.each(data, function (i, capacitacion) {
+                        if (apellidos == '') {
+                            apellidos = capacitacion.Apellidos;
+                        }
+                        if (nombres == '') {
+                            nombres = capacitacion.Nombres;
+                        }
+                        if (capacitacion.NombreCapacitacion != '') {
+                            var colorPanel = 'panel-success';
+                            if (capacitacion.EntidadCertificadora == "MEN") {
+                                colorPanel = 'panel-info';
+                            }
+                            else if (capacitacion.EntidadCertificadora == "SENA") {
+                                colorPanel = 'panel-danger';
+                            }
+                            var titulacion = '[' + capacitacion.EntidadCertificadora + '] - ';
+                            var nombreCapacitacion = '';
+                            if (capacitacion.TipoCapacitacion == 'CURSO BASICO') {
+                                titulacion += 'Curso Básico para el Transporte de Mercancías Peligrosas:';
+                                nombreCapacitacion = 'Curso Básico:';
+                            }
+                            else {
+                                titulacion += 'Titulación en la Norma de Competencia Laboral para el Transporte de Mercancías Peligrosas:';
+                                nombreCapacitacion = 'Titulación en la Norma de Competencia Laboral:';
+                            }
+                            strPanel = '<div class="panel ' + colorPanel + '"> ';
+                            strPanel += '  <div class="panel-heading"> ';
+                            strPanel += '    <b>' + titulacion + '</b>';
+                            strPanel += '  </div> ';
+                            strPanel += '  <div class="panel-body"> ';
+                            strPanel += '    <div class="row"> ';
+                            strPanel += '      <div class="col-md-3 col-xs-5"> ';
+                            strPanel += '        <label class="control-label">Razón Social Institución Educativa:</label> ';
+                            strPanel += '      </div> ';
+                            strPanel += '      <div class="col-md-8 col-xs-6"> ';
+                            strPanel += capacitacion.InstitucionEducativa;
+                            strPanel += '      </div> ';
+                            strPanel += '    </div> ';
+                            strPanel += '    <div class="row"> ';
+                            strPanel += '      <div class="col-md-3 col-xs-5"> ';
+                            strPanel += '        <label class="control-label">Fecha de Expedición:</label> ';
+                            strPanel += '      </div> ';
+                            strPanel += '      <div class="col-md-8 col-xs-6"> ';
+                            strPanel += formatearFecha(obtenerFecha(capacitacion.FechaExpedicion));
+                            strPanel += '      </div> ';
+                            strPanel += '    </div> ';
+                            strPanel += '    <div class="row"> ';
+                            strPanel += '      <div class="col-md-3 col-xs-5"> ';
+                            strPanel += '        <label class="control-label">Fecha de Vencimiento:</label> ';
+                            strPanel += '      </div> ';
+                            strPanel += '      <div class="col-md-8 col-xs-6"> ';
+                            strPanel += formatearFecha(obtenerFecha(capacitacion.FechaVencimiento));
+                            strPanel += '      </div> ';
+                            strPanel += '    </div> ';
+                            strPanel += '    <div class="row"> ';
+                            strPanel += '      <div class="col-md-3 col-xs-5"> ';
+                            strPanel += '        <label class="control-label">' + nombreCapacitacion + '</label> ';
+                            strPanel += '      </div> ';
+                            strPanel += '      <div class="col-md-8 col-xs-6"> ';
+                            strPanel += capacitacion.NombreCapacitacion;
+                            strPanel += '      </div> ';
+                            strPanel += '    </div> ';
+                            if (capacitacion.TipoCapacitacion != 'CURSO BASICO') {
+                                strPanel += '    <div class="row"> ';
+                                strPanel += '      <div class="col-md-4 col-xs-8"> ';
+                                strPanel += '        <div class="row"> ';
+                                strPanel += '          <div class="col-md-9 col-xs-8"> ';
+                                strPanel += '            <label class="control-label">Clase de Mercancía Peligrosa:</label> ';
+                                strPanel += '          </div> ';
+                                strPanel += '          <div class="col-md-3 col-xs-3"> ';
+                                strPanel += capacitacion.Clase;
+                                strPanel += '          </div> ';
+                                strPanel += '        </div> ';
+                                strPanel += '        <div class="row"> ';
+                                strPanel += '          <div class="col-md-9 col-xs-8"> ';
+                                strPanel += '            <label class="control-label">Tipo de Vehículo:</label> ';
+                                strPanel += '          </div> ';
+                                strPanel += '          <div class="col-md-3 col-xs-3"> ';
+                                strPanel += capacitacion.TipoVehiculo;
+                                strPanel += '          </div> ';
+                                strPanel += '        </div> ';
+                                strPanel += '      </div> ';
+                                strPanel += '      <div class="col-md-4 col-xs-3"> ';
+                                var imagen = '/SISCONMP2/img/mp[0].png';
+                                imagen = imagen.replace("[0]", pad(capacitacion.ValorNumericoClase, 2));
+                                strPanel += '        <a href="javascript:MostrarClaseMercanciaPeligrosa(' + capacitacion.ValorNumericoClase + ', \'" + capacitacion.DescripcionClase + "\')"><img src="' + imagen + '" style="height: 50px; width: 50px;" ></a> ';
+                                strPanel += '      </div> ';
+                                strPanel += '    </div> ';
+                            }
+                            strPanel += '    <div class="row"> ';
+                            strPanel += '      <div class="col-md-3 col-xs-5"> ';
+                            strPanel += '        <label class="control-label">Fecha de Registro:</label> ';
+                            strPanel += '      </div> ';
+                            strPanel += '      <div class="col-md-8 col-xs-6"> ';
+                            strPanel += capacitacion.FechaRegistro != undefined ? formatearFecha(obtenerFecha(capacitacion.FechaRegistro)) : '-';
+                            strPanel += '      </div> ';
+                            strPanel += '    </div> ';
+                            strPanel += '  </div> ';
+                            strPanel += '</div>';
+                            $('#divResultados').append(strPanel);
+                        }
+                    });
+                    if (apellidos != '' && nombres != '') {
+                        strPanel = '  <div class="panel panel-primary"> ';
+                        strPanel += '    <div class="panel-heading"><b>Información del Ciudadano</b></div> ';
+                        strPanel += '    <div class="panel-body"> ';
+                        strPanel += '      <div class="row"> ';
+                        strPanel += '        <div class="col-md-1 col-xs-4"> ';
+                        strPanel += '          <label class="control-label">Apellidos:</label> ';
+                        strPanel += '        </div> ';
+                        strPanel += '        <div class="col-md-4 col-xs-4"> ';
+                        strPanel += apellidos;
+                        strPanel += '        </div> ';
+                        strPanel += '      </div> ';
+                        strPanel += '      <div class="row"> ';
+                        strPanel += '        <div class="col-md-1 col-xs-4"> ';
+                        strPanel += '          <label class="control-label">Nombres:</label> ';
+                        strPanel += '        </div> ';
+                        strPanel += '        <div class="col-md-4 col-xs-4"> ';
+                        strPanel += nombres;
+                        strPanel += '        </div> ';
+                        strPanel += '      </div> ';
+                        strPanel += '    </div>';
+                        strPanel += '  </div>';
+                        $('#divNombreCiudadano').append(strPanel);
+                    }
+                    $('#divContenido').show();
+                }
+                hideWait();
+            },
+            error: function (xhr, status, error) {
+                $('#divNoHayRegistros').show();
+            }
+        });
+    }
+
+    function MostrarClaseMercanciaPeligrosa(valorNumericoClase, descripcionClase) {
+        var imagen = '/SISCONMP2/img/mp[0].png';
+        imagen = imagen.replace("[0]", pad(valorNumericoClase, 2));
+        bootbox.dialog({
+            message: "<h1 style='color: red;'>" + descripcionClase + "</h1><hr /><div style='text-align: center;'><img src='" + imagen + "' alt='" + descripcionClase + "' title='" + descripcionClase + "' data-toggle='tooltip' /></div>",
+            title: "Clase de Mercancía Peligrosa: " + valorNumericoClase,
+            buttons: {
+                success: {
+                    label: "Aceptar",
+                    className: "btn-success"
+                }
+            }
+        });
+    }
+</script>
+
+<form action="/SISCONMP2/consultascapacitaciones" enctype="multipart/form-data" id="frmConsultaCapacitaciones" method="post">    <br>
+<input name="__RequestVerificationToken" type="hidden" value="szVal54S0ppcW7kgQFFe5o7hJ08B1S0l7as1a0WuFF_2n78p-mJdRSMvadq55KzgOxd1N4hQlgb8wqWVUDstdvpTgqCe3D5EwLiwgS2g9m81" style="">    <div class="row">
+        <div class="soloMobile">
+            <div class="dropdown" style="padding-left: 15px;">
+                <button class="btn btn-warning dropdown-toggle" type="button" data-toggle="dropdown">
+                    Enlaces de Interés
+                    <span class="caret"></span>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-left">
+                    <li><a href="https://www.mintransporte.gov.co/descargar.php?id=4742" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Resolución 1223 de 2014.</a></li>
+                    <li><a href="https://www.mintransporte.gov.co/descargar.php?id=5132" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Resolución 2328 de 2016.</a></li>
+                    <li><a href="https://www.mintransporte.gov.co/descargar.php?idFile=14947" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Resolución 5747 de 2016.</a></li>
+                    <li class="divider"></li>
+                    <li><a href="https://www.mintransporte.gov.co/publicaciones.php?id=2518" target="_blank" title="Haga click aquí si desea acceder al portal de Mercancías Peligrosas" data-toggle="tooltip">Portal de Mercancías Peligrosas.</a></li>
+                    <li><a href="/sisconmp/acceso.aspx" title="Haga click aquí para registrar información de conductores capacitados" data-toggle="tooltip">Registrar información de conductores.</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    <br>
+    <div class="row">
+        <div class="col-md-8">
+            <fieldset>
+                <legend>Ingrese el Documento de Identificación del ciudadano:</legend>
+                <div class="form-group">
+                    <div class="row">
+                        <div class="col-md-2">
+                            <label for="cboTDI" class="control-label">Tipo:</label>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-addon"><i class="glyphicon glyphicon-list"></i></span>
+                                <select id="cboTDI" name="cboTDI" class="form-control select2-hidden-accessible" tabindex="-1" aria-hidden="true"><option value="">- Seleccione -</option><option value="1" selected="selected">CC</option><option value="2">CE</option><option value="3">PPT</option></select><span class="select2 select2-container select2-container--default" dir="ltr" style="width: 321px;"><span class="selection"><span class="select2-selection select2-selection--single" role="combobox" aria-autocomplete="list" aria-haspopup="true" aria-expanded="false" tabindex="0" aria-labelledby="select2-cboTDI-container"><span class="select2-selection__rendered" id="select2-cboTDI-container" title="CC">CC</span><span class="select2-selection__arrow" role="presentation"><b role="presentation"></b></span></span></span><span class="dropdown-wrapper" aria-hidden="true"></span></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <br>
+
+                    <div class="row">
+                        <div class="col-md-2">
+                            <label for="txtNDI" class="control-label">Número:</label>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-addon">#&nbsp;</span>
+                                <input type="tel" class="form-control" id="txtNDI" name="txtNDI" placeholder="Número de Documento de Identidad" autofocus="autofocus" style="">
+                            </div>
+                        </div>
+                    </div>
+
+                    <br>
+
+                    <div class="row">
+                        <div class="col-md-2">
+                        </div>
+                        <div class="col-md-6 soloDesktop">
+                            <span id="btnConsultarMD" class="btn btn-lg btn-primary" title="Haga click aquí para Consultar Conductor" data-toggle="tooltip" onclick="ConsultarConductor()"><i class="glyphicon glyphicon-search"></i>&nbsp;Consultar</span>
+                        </div>
+                        <div class="col-xs-5 soloMobile">
+                            <span id="btnConsultarXS" class="btn btn-sm btn-primary soloMobile" title="Haga click aquí para Consultar Conductor" data-toggle="tooltip" onclick="ConsultarConductor()"><i class="glyphicon glyphicon-search"></i>&nbsp;Consultar</span>
+                        </div>
+                    </div>
+
+                    <br>
+
+                    <span id="errNoDI" style="color: red; font-weight: bold; display: none;">* Debe ingresar el Tipo y Número de Documento de Identidad del Ciduadano. *</span>
+                </div>
+            </fieldset>
+        </div>
+        <div class="col-md-4">
+            <div class="row enlaces">
+                <div class="soloDesktop">
+                    <br>
+                    <br>
+
+                    <a href="/SISCONMP2/InstitucionesEducativas/ConsultarAprobadas" title="Haga click aquí si desea ver un listado de las instituciones educativas aprobadas">Consulta de instituciones educativas aprobadas</a>
+
+                    <br>
+                    <br>
+
+                    <a href="https://www.mintransporte.gov.co/descargar.php?id=4742" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Requisito exigido por la resolución 1223 de 2014.</a>
+                    
+                    <br>
+                    
+                    <a href="https://www.mintransporte.gov.co/descargar.php?id=5132" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Resolución 2328 de 2016.</a>
+
+                    <br>
+
+                    <a href="https://www.mintransporte.gov.co/descargar.php?idFile=14947" target="_blank" title="Haga click aquí si desea ver la resolución" data-toggle="tooltip">Resolución 5747 de 2016.</a>
+
+                    <br>
+                    <br>
+                    
+                    <a href="https://www.mintransporte.gov.co/publicaciones.php?id=2518" target="_blank" title="Haga click aquí si desea acceder al portal de Mercancías Peligrosas" data-toggle="tooltip">Portal de Mercancías Peligrosas.</a>
+                    <br>
+                    
+                    <a href="/sisconmp/acceso.aspx" title="Haga click aquí para registrar información de conductores capacitados" data-toggle="tooltip">Registrar información de conductores capacitados.</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="divNoHayRegistros" style="display: none;">
+        <div style="color: red; font-weight: bold;">No se encontrarón registros sobre el ciudadano.</div>
+    </div>
+    <div id="divContenido" style="display: none;">
+        <hr>
+
+        <div id="divNombreCiudadano">
+        </div>
+
+        <hr>
+
+        <div id="divResultados">
+        </div>
+    </div>
+</form>
+        <hr>
+        <footer>
+            <p>© 2026 - Ministerio de Transporte</p>
+        </footer>
+    </div>
+
+    <br>
+
+    <script type="text/javascript">
+        $(document).ready(function () {
+            hideWait();
+        });
+    </script>
+
+<div class="modal fade in" data-backdrop="static" data-keyboard="false" tabindex="-1" role="dialog" aria-hidden="false" style="padding-top: 15%; overflow-y: visible; display: none;"><div class="modal-dialog modal-sm"><div class="modal-content"><div class="modal-header" style="display: block;"><h3 style="margin: 0px;">Cargando, por favor espere...</h3></div><div class="modal-body"><div class="progress progress-striped active" style="margin-bottom:0;"><div class="progress-bar progress-bar-info" style="width: 100%"></div></div></div></div></div></div><div><div class="grecaptcha-badge" data-style="bottomright" style="width: 256px; height: 60px; display: block; transition: right 0.3s; position: fixed; bottom: 14px; right: -186px; box-shadow: gray 0px 0px 5px; border-radius: 2px; overflow: hidden;"><div class="grecaptcha-logo"><iframe title="reCAPTCHA" width="256" height="60" role="presentation" name="a-3cr075gg9p4x" frameborder="0" scrolling="no" sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-top-navigation allow-modals allow-popups-to-escape-sandbox allow-storage-access-by-user-activation" src="https://www.google.com/recaptcha/api2/anchor?ar=1&amp;k=6Le9cpAsAAAAALcoFYDxQZ7CzxCJercReO-ORIq9&amp;co=aHR0cHM6Ly93ZWIubWludHJhbnNwb3J0ZS5nb3YuY286NDQz&amp;hl=es-419&amp;v=zqB-6Xpbd3lCIvi7Tr2D0pob&amp;size=invisible&amp;anchor-ms=20000&amp;execute-ms=30000&amp;cb=bpu8hb86yqfu"></iframe></div><div class="grecaptcha-error"></div><textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="width: 250px; height: 40px; border: 1px solid rgb(193, 193, 193); margin: 10px 25px; padding: 0px; resize: none; display: none;"></textarea></div><iframe style="display: none;"></iframe></div></body></html>

@@ -1551,7 +1551,7 @@ class TestFuentesHabilitadasEfectivas(unittest.TestCase):
         self.assertIn("policia", efectivas)  # estaba listada explícitamente
 
     def test_sin_config_todas_las_default(self):
-        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
+        esperadas = ["manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues"]
         self.assertEqual(orch.fuentes_habilitadas_efectivas({}), esperadas)
         self.assertEqual(orch.fuentes_habilitadas_efectivas(None), esperadas)
         self.assertEqual(
@@ -1715,6 +1715,215 @@ class TestFuenteSena(unittest.TestCase):
                     )
         self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
         self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
+class TestFuenteSisconmp(unittest.TestCase):
+    """Fuente "sisconmp" (capacitaciones de Mercancías Peligrosas por CÉDULA):
+    caché (tipo, cédula) — el default del módulo —, semáforo de VIGENCIA
+    (todas vencidas y ninguna vigente → ADVERTENCIA, análogo SOAT/RTM;
+    recalculado en cada hit de caché) y anti-envenenamiento doble barrera (el
+    DOM del portal miente: su handler error: muestra el mismo "no registra"
+    del vacío legítimo — el bot lee la RESPUESTA AJAX, no el DOM)."""
+
+    RESULTADO_CAPS = {
+        "cedula": "79882073",
+        "no_registra": False,
+        "mensaje": "",
+        "apellidos": "GOMEZ GOMEZ",
+        "nombres": "MARIO",
+        "total_capacitaciones": 2,
+        "capacitaciones": [
+            {
+                "tipo_capacitacion": "CURSO BASICO",
+                "nombre": "Curso Básico para el Transporte de Mercancías Peligrosas",
+                "entidad_certificadora": "MEN",
+                "institucion_educativa": "ACADEMIA X",
+                "fecha_expedicion": "2020-01-10",
+                "fecha_vencimiento": "2099-12-31",  # vigente (fecha lejana: el test nunca caduca)
+                "fecha_registro": "2020-01-12",
+                "clase": "", "descripcion_clase": "", "tipo_vehiculo": "",
+                "vigente": True,
+            },
+            {
+                "tipo_capacitacion": "TITULACION NCL",
+                "nombre": "Titulación NCL TMR",
+                "entidad_certificadora": "SENA",
+                "institucion_educativa": "SENA",
+                "fecha_expedicion": "2001-01-10",
+                "fecha_vencimiento": "2001-01-10",  # vencida hace décadas
+                "fecha_registro": "2001-01-12",
+                "clase": "3", "descripcion_clase": "Líquidos inflamables",
+                "tipo_vehiculo": "TRACTOCAMION",
+                "vigente": False,
+            },
+        ],
+        "pdf_bytes": None,
+    }
+
+    RESULTADO_VACIO = {
+        "cedula": "1010213062",
+        "no_registra": True,
+        "mensaje": "No se encontrarón registros sobre el ciudadano.",
+        "apellidos": "",
+        "nombres": "",
+        "total_capacitaciones": 0,
+        "capacitaciones": [],
+        "pdf_bytes": None,
+    }
+
+    def _correr(self, corutina):
+        return asyncio.run(corutina)
+
+    def test_exito_con_capacitacion_vigente_cachea_por_cedula(self):
+        with patch.object(orch, "_buscar_cache", return_value=None) as buscar:
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync",
+                              return_value=self.RESULTADO_CAPS) as bot:
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sisconmp", "79882073", actor_consultador(), False)
+                    )
+        # Caché por cédula (default del módulo: sisconmp no conoce placas).
+        buscar.assert_called_once_with("sisconmp", "79882073", False, placa=None)
+        bot.assert_called_once_with("79882073")
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertEqual(seccion["origen"], "portal")
+        self.assertEqual(seccion["total_capacitaciones"], 2)
+        doc_cache = col.insert_one.call_args[0][0]
+        self.assertEqual(doc_cache["tipo"], "sisconmp")
+        self.assertEqual(doc_cache["cedula"], "79882073")
+        self.assertEqual(doc_cache["nombres"], "MARIO")
+
+    def test_todas_vencidas_es_advertencia(self):
+        # Semáforo de vigencia (decisión 2026-09-25, análogo SOAT/RTM): registra
+        # capacitaciones pero NINGUNA vigente → ADVERTENCIA.
+        resultado = dict(self.RESULTADO_CAPS)
+        resultado["capacitaciones"] = [
+            {**self.RESULTADO_CAPS["capacitaciones"][1]}
+        ]
+        resultado["total_capacitaciones"] = 1
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sisconmp", "79882073", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+
+    def test_sin_capacitaciones_es_exito_determinante(self):
+        # El vacío es determinante del portal (registro sin capacitaciones MP):
+        # EXITO informativo, no ADVERTENCIA — se cachea como los demás.
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync",
+                              return_value=self.RESULTADO_VACIO):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sisconmp", "1010213062", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "EXITO")
+        self.assertTrue(seccion["no_registra"])
+        self.assertEqual(col.insert_one.call_args[0][0]["no_registra"], True)
+
+    def test_cache_hit_recalcula_vigencia(self):
+        # La caché guarda el veredicto del DÍA de la consulta: un hit posterior
+        # RECALCULA `vigente` contra hoy (una capacitación "vigente" cacheada
+        # con vencimiento 2001 está vencida HOY) — la caché no congela el
+        # semáforo (mismo criterio que SOAT/RTM).
+        cache = {
+            "_id": ObjectId(),
+            "tipo": "sisconmp", "cedula": "79882073",
+            "no_registra": False,
+            "mensaje": "",
+            "apellidos": "GOMEZ GOMEZ", "nombres": "MARIO",
+            "total_capacitaciones": 1,
+            "capacitaciones": [{
+                "tipo_capacitacion": "CURSO BASICO",
+                "nombre": "Curso Básico TMR",
+                "entidad_certificadora": "MEN",
+                "institucion_educativa": "ACADEMIA X",
+                "fecha_expedicion": "2001-01-10",
+                "fecha_vencimiento": "2001-01-10",
+                "clase": "", "descripcion_clase": "", "tipo_vehiculo": "",
+                "vigente": True,  # stale: quedó así cuando se consultó
+            }],
+        }
+        with patch.object(orch, "_buscar_cache", return_value=cache):
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync") as bot:
+                seccion = self._correr(
+                    orch._ejecutar_fuente("sisconmp", "79882073", actor_consultador(), False)
+                )
+        self.assertEqual(seccion["origen"], "cache")
+        self.assertFalse(seccion["capacitaciones"][0]["vigente"])
+        self.assertEqual(seccion["estado"], "ADVERTENCIA")
+        bot.assert_not_called()
+
+    def test_resultado_vacio_sin_determinante_es_no_disponible(self):
+        # Segunda barrera anti-envenenamiento (la primera es el bot, que lee
+        # la respuesta AJAX porque el DOM miente): dict vacío sin no_registra
+        # ni mensaje NO se cachea.
+        resultado = {
+            "cedula": "79882073", "no_registra": None, "mensaje": "",
+            "apellidos": "", "nombres": "",
+            "total_capacitaciones": None, "capacitaciones": [], "pdf_bytes": None,
+        }
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync", return_value=resultado):
+                with patch.object(orch, "col_consultas") as col:
+                    col.insert_one.return_value = None
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sisconmp", "79882073", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+        col.insert_one.assert_not_called()
+
+    def test_bot_sin_resultado_es_no_disponible(self):
+        from Funciones.bot_sisconmp import BotSisconmpSinResultado
+
+        with patch.object(orch, "_buscar_cache", return_value=None):
+            with patch.object(orch, "consultar_capacitaciones_sisconmp_sync") as bot:
+                bot.side_effect = BotSisconmpSinResultado("respuesta sin JSON")
+                with patch.object(orch, "BACKOFF_MS", 0):
+                    seccion = self._correr(
+                        orch._ejecutar_fuente("sisconmp", "79882073", actor_consultador(), False)
+                    )
+        self.assertEqual(seccion["estado"], "NO_DISPONIBLE")
+        self.assertEqual(seccion["error"]["tipo"], "portal_inconsistente")
+
+
+class TestFechasSisconmp(unittest.TestCase):
+    """Parser de fechas del bot SISCONMP: ASP.NET serializa /Date(ms)/ (UTC)
+    y el portal las muestra en hora LOCAL Colombia (UTC−5)."""
+
+    def test_fecha_ms_a_iso_colombia(self):
+        from datetime import datetime, timezone
+
+        from Funciones.bot_sisconmp import _fecha_iso
+
+        # Medianoche de Colombia del 2025-03-18 = 2025-03-18 05:00 UTC.
+        ms = int(datetime(2025, 3, 18, 5, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(_fecha_iso(f"/Date({ms})/"), "2025-03-18")
+        # 2025-03-18 04:59:59 UTC = 2025-03-17 23:59:59 Colombia → día anterior.
+        ms2 = int(datetime(2025, 3, 18, 4, 59, 59, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(_fecha_iso(f"/Date({ms2})/"), "2025-03-17")
+
+    def test_fecha_iso_y_basura(self):
+        from Funciones.bot_sisconmp import _fecha_iso
+
+        self.assertEqual(_fecha_iso("2026-03-12T00:00:00"), "2026-03-12")
+        self.assertIsNone(_fecha_iso(None))
+        self.assertIsNone(_fecha_iso(""))
+        self.assertIsNone(_fecha_iso("no es fecha"))
+
+    def test_vigencia_contra_hoy(self):
+        from Funciones.bot_sisconmp import _capacitacion_vigente
+
+        self.assertTrue(_capacitacion_vigente("2099-12-31"))
+        self.assertFalse(_capacitacion_vigente("2001-01-10"))
+        self.assertIsNone(_capacitacion_vigente(None))
+        self.assertIsNone(_capacitacion_vigente("basura"))
 
 
 class TestFuenteSimitSoloPlaca(unittest.TestCase):

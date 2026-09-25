@@ -442,6 +442,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     runt = fuentes.get("runt") or {}
     simit = fuentes.get("simit") or {}
     sena = fuentes.get("sena") or {}
+    sisconmp = fuentes.get("sisconmp") or {}
     ofac = fuentes.get("ofac") or {}
     ofac_nit = fuentes.get("ofac_nit") or {}
     onu_ue = fuentes.get("onu_ue") or {}
@@ -656,6 +657,14 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             _texto_veredicto_sena(sena),
             "sena",
         ])
+    if _corrio(sisconmp):
+        etiqueta_sis, _ = ESTADO_FUENTE_TEXTO.get(sisconmp.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
+        filas_resumen.append([
+            "SISCONMP — Capacitaciones Mercancías Peligrosas",
+            etiqueta_sis,
+            _texto_veredicto_sisconmp(sisconmp),
+            "sisconmp",
+        ])
     if _corrio(ofac):
         etiqueta_ofac, _ = ESTADO_FUENTE_TEXTO.get(ofac.get("estado", "ERROR"), ("—", COLOR_NEUTRO))
         filas_resumen.append([
@@ -712,7 +721,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ])
     estados_resumen = [
         (fuente or {}).get("estado")
-        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, proc)
+        for fuente in (rndc, cgr, delitos, pol, runt, simit, sena, sisconmp, ofac, ofac_nit, onu_ue, bdme, bdme_nit, rama_judicial, rues, proc)
         if _corrio(fuente)
     ]
     # Botón de navegación (pedido 2026-09-24): el nombre de la fuente en el
@@ -1317,6 +1326,99 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
     elif _corrio(sena):
         cuento.append(_parrafo_estado_fuente(sena, "el SENA"))
 
+    # ── 4d-bis. Detalle SISCONMP (capacitaciones Mercancías Peligrosas) ─────
+    if _corrio(sisconmp):
+        _antes_de_seccion(sisconmp)
+        cuento.append(Paragraph(
+            "Capacitaciones en Mercancías Peligrosas — SISCONMP (Ministerio de Transporte)", estilo_h2))
+    if sisconmp.get("estado") in {"EXITO", "ADVERTENCIA"}:
+        caps = sisconmp.get("capacitaciones") or []
+        total_caps = int(sisconmp.get("total_capacitaciones") or 0)
+        hay_vigente = any(c.get("vigente") is True for c in caps)
+        hay_vencida = any(c.get("vigente") is False for c in caps)
+        if total_caps == 0:
+            texto_sis, color_sis = "SIN CAPACITACIONES DE MERCANCÍAS PELIGROSAS REGISTRADAS", COLOR_EXITO
+        elif hay_vigente:
+            texto_sis, color_sis = f"REGISTRA {total_caps} CAPACITACIÓN(ES) — AL MENOS UNA VIGENTE", COLOR_EXITO
+        elif hay_vencida:
+            texto_sis, color_sis = f"REGISTRA {total_caps} CAPACITACIÓN(ES) — NINGUNA VIGENTE (VENCIDAS)", COLOR_ADVERTENCIA
+        else:
+            texto_sis, color_sis = f"REGISTRA {total_caps} CAPACITACIÓN(ES) — VIGENCIA NO REPORTADA", COLOR_PRIMARIO
+        tabla_veredicto_sis = Table(
+            [[Paragraph(f"<b>{texto_sis}</b>", ParagraphStyle("veredicto_sisconmp", fontName="Helvetica", fontSize=10.5, textColor=colors.white, alignment=1))]],
+            colWidths=[160 * mm],
+        )
+        tabla_veredicto_sis.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color_sis),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        cuento.append(tabla_veredicto_sis)
+        cuento.append(Spacer(0, 2 * mm))
+        ciudadano = " ".join(f"{sisconmp.get('nombres') or ''} {sisconmp.get('apellidos') or ''}".split())
+        detalle_sis = [
+            ["Capacitaciones registradas", total_caps],
+            ["Ciudadano según el portal", ciudadano or "—"],
+            ["Origen de datos", _texto_origen(sisconmp)],
+        ]
+        if (sisconmp.get("mensaje") or "").strip():
+            detalle_sis.insert(1, ["Mensaje del portal", sisconmp["mensaje"][:300]])
+        tabla_sis_resumen = Table(
+            [[celda(k, negrita=True), celda(v)] for k, v in detalle_sis],
+            colWidths=[45 * mm, 115 * mm],
+        )
+        tabla_sis_resumen.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), COLOR_FONDO_TABLA),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        cuento.append(tabla_sis_resumen)
+        if caps:
+            cuento.append(Spacer(0, 2 * mm))
+            estilo_celda_sis = ParagraphStyle("celda_sisconmp", parent=estilo_celda, fontSize=7.5, leading=9.5)
+            estilo_cab_sis = ParagraphStyle("cab_sisconmp", parent=estilo_celda_sis, fontName="Helvetica-Bold", textColor=colors.white)
+            filas_sis = [[
+                Paragraph("Capacitación", estilo_cab_sis), Paragraph("Entidad", estilo_cab_sis),
+                Paragraph("Institución educativa", estilo_cab_sis), Paragraph("Expedición", estilo_cab_sis),
+                Paragraph("Vencimiento", estilo_cab_sis), Paragraph("Vigente", estilo_cab_sis),
+            ]]
+            for c in caps[:10]:
+                if c.get("vigente") is True:
+                    vigencia_txt, color_vig = "SÍ", "#1A7F37"
+                elif c.get("vigente") is False:
+                    vigencia_txt, color_vig = "NO (VENCIDA)", "#B58900"
+                else:
+                    vigencia_txt, color_vig = "—", "#57606A"
+                nombre_cap = f"{c.get('tipo_capacitacion') or ''}: {c.get('nombre') or '—'}".strip(": ")
+                if c.get("clase"):
+                    nombre_cap += f" · Clase {c['clase']}"
+                if c.get("tipo_vehiculo"):
+                    nombre_cap += f" · Veh. {c['tipo_vehiculo']}"
+                filas_sis.append([
+                    Paragraph(escape(nombre_cap), estilo_celda_sis),
+                    Paragraph(escape(str(c.get("entidad_certificadora") or "—")), estilo_celda_sis),
+                    Paragraph(escape(str(c.get("institucion_educativa") or "—")), estilo_celda_sis),
+                    Paragraph(escape(_fecha_legible(c.get("fecha_expedicion"))), estilo_celda_sis),
+                    Paragraph(escape(_fecha_legible(c.get("fecha_vencimiento"))), estilo_celda_sis),
+                    Paragraph(f'<font color="{color_vig}">{vigencia_txt}</font>', estilo_celda_sis),
+                ])
+            tabla_caps = Table(filas_sis, colWidths=[52 * mm, 18 * mm, 38 * mm, 17 * mm, 17 * mm, 18 * mm])
+            tabla_caps.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARIO),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_FONDO_TABLA]),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D5DBE3")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            cuento.append(Paragraph(
+                f"Detalle de capacitaciones ({min(10, len(caps))} de {total_caps or len(caps)})",
+                ParagraphStyle("h_sisconmp", parent=estilo_normal, fontSize=8, textColor=COLOR_NEUTRO, spaceBefore=4),
+            ))
+            cuento.append(tabla_caps)
+    elif _corrio(sisconmp):
+        cuento.append(_parrafo_estado_fuente(sisconmp, "el SISCONMP"))
+
     # ── 4e. OFAC / Lista SDN ─────────────────────────────────────────────────
     if _corrio(ofac):
         _antes_de_seccion(ofac)
@@ -1661,7 +1763,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         ["Creado / finalizado", f"{_fecha_colombia(estudio.get('creado_en'))} → {_fecha_colombia(estudio.get('finalizado_en'))} · {estudio.get('duracion_s') or '—'} s"],
         ["Reintentos por fuente", " · ".join(
             f"{nombre}: {int((f or {}).get('intentos', 0))} intento(s)"
-            for nombre, f in (("RNDC", rndc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues), ("Procuraduría", proc))
+            for nombre, f in (("RNDC", rndc), ("Contraloría", cgr), ("Inhabilidades 1918", delitos), ("Policía", pol), ("RUNT", runt), ("SIMIT", simit), ("SENA", sena), ("SISCONMP", sisconmp), ("OFAC cédula", ofac), ("OFAC NIT", ofac_nit), ("ONU/UE", onu_ue), ("BDME cédula", bdme), ("BDME NIT", bdme_nit), ("Rama Judicial", rama_judicial), ("RUES", rues), ("Procuraduría", proc))
             if _corrio(f)
         ) or "—"],
         ["Informe PDF", (
@@ -1749,6 +1851,16 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "certificados de formación reportados como disponibles por el SENA en la fecha de consulta y NO "
             "constituye verificación de títulos ni credencial educacional de la persona evaluada."
         )
+    if _corrio(sisconmp):
+        bloques_legal.append(
+            "<b>Capacitaciones en Mercancías Peligrosas (SISCONMP):</b> la información se obtuvo del portal "
+            "público de consulta del Sistema de Información de Conductores que Transportan Mercancías Peligrosas "
+            "del Ministerio de Transporte, consulta abierta por documento de identidad, correspondiente al "
+            "registro de capacitaciones exigido por la Resolución 1223 de 2014. El listado y las vigencias "
+            "corresponden a lo reportado por el Ministerio en la fecha de consulta y son de carácter informativo; "
+            "la ausencia de capacitación vigente no constituye por sí sola inhabilidad para conducir, y su "
+            "interpretación corresponde al proceso de verificación de cada solicitante."
+        )
     if _corrio(ofac):
         bloques_legal.append(
             "<b>OFAC — Lista SDN:</b> la verificación se efectuó contra el dataset oficial de Specially "
@@ -1805,7 +1917,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
         # Mismo orden canónico del informe (Procuraduría siempre de última).
         orden_evidencias = (
             "manifiestos_rndc", "contraloria", "delitos_sexuales", "policia",
-            "runt", "simit", "sena", "bdme", "bdme_nit", "rama_judicial",
+            "runt", "simit", "sena", "sisconmp", "bdme", "bdme_nit", "rama_judicial",
             "procuraduria",
         )
         nombres_evidencia = {
@@ -1816,6 +1928,7 @@ def generar_pdf_estudio(estudio: dict, empresa: dict | None = None) -> bytes:
             "runt": f"RUNT — Vehículo {estudio.get('placa') or ''}".rstrip(),
             "simit": f"SIMIT — Comparendos placa {estudio.get('placa') or ''}".rstrip(),
             "sena": "SENA — Certificados de formación",
+            "sisconmp": "SISCONMP — Capacitaciones Mercancías Peligrosas",
             "bdme": "BDME — Persona por cédula",
             "bdme_nit": "BDME — Empresa por NIT",
             "rama_judicial": "Rama Judicial — Consulta Nacional de Procesos",
@@ -2050,6 +2163,23 @@ def _texto_veredicto_sena(sena: dict) -> str:
     if total > 0:
         return f"{total} certificado(s) de formación — ver detalle"
     return "Sin certificados de formación registrados"
+
+
+def _texto_veredicto_sisconmp(sisconmp: dict) -> str:
+    """Veredicto de la fuente sisconmp para la fila resumen: informativo del
+    registro de capacitaciones MP; la VIGENCIA es el semáforo (análogo SOAT/
+    RTM: vencidas sin ninguna vigente → ADVERTENCIA, decisión 2026-09-25)."""
+    if sisconmp.get("estado") not in {"EXITO", "ADVERTENCIA"}:
+        return _resumen_error(sisconmp)
+    caps = sisconmp.get("capacitaciones") or []
+    total = int(sisconmp.get("total_capacitaciones") or 0)
+    if total == 0:
+        return "Sin capacitaciones de Mercancías Peligrosas registradas"
+    if any(c.get("vigente") is True for c in caps):
+        return f"{total} capacitación(es) — al menos una vigente"
+    if any(c.get("vigente") is False for c in caps):
+        return f"{total} capacitación(es) — NINGUNA vigente (vencidas)"
+    return f"{total} capacitación(es) — vigencia no reportada"
 
 
 def _texto_veredicto_onu_ue(onu_ue: dict) -> str:

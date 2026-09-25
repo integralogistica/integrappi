@@ -74,6 +74,11 @@ from Funciones.bot_simit import (
     BotSimitSinResultado,
     consultar_comparendos_simit, consultar_comparendos_simit_sync,
 )
+from Funciones.bot_sisconmp import (
+    BotSisconmpSinResultado,
+    _capacitacion_vigente,
+    consultar_capacitaciones_sisconmp, consultar_capacitaciones_sisconmp_sync,
+)
 from Funciones.bot_bdme import (
     BotBdmeAutenticacionError, BotBdmeCaptchaFallido,
     BotBdmeConfiguracionError, BotBdmeSinResultado, consultar_bdme, consultar_bdme_sync,
@@ -116,10 +121,11 @@ RETENCION_DIAS = int(os.getenv("SEGURIDAD_RETENCION_DIAS", "730"))
 MAX_VIAJES_DOC = int(os.getenv("SEGURIDAD_MAX_VIAJES_DOC", "500"))
 MAX_COMPARENDOS_DOC = int(os.getenv("SEGURIDAD_MAX_COMPARENDOS_DOC", "20"))
 MAX_CERTIFICADOS_DOC = int(os.getenv("SEGURIDAD_MAX_CERTIFICADOS_DOC", "20"))
+MAX_CAPACITACIONES_DOC = int(os.getenv("SEGURIDAD_MAX_CAPACITACIONES_DOC", "20"))
 MAX_PROCESOS_DOC = int(os.getenv("SEGURIDAD_MAX_PROCESOS_DOC", "200"))
 MAX_MENSAJE = 300
 
-FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
+FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales", "policia", "runt", "simit", "sena", "sisconmp", "ofac", "ofac_nit", "onu_ue", "bdme", "bdme_nit", "rama_judicial", "rues")
 
 # Fuentes que consultan un PORTAL con navegador y por tanto pueden dejar una
 # CAPTURA DE EVIDENCIA (pantallazo del resultado, patrón TusDatos). Las demás
@@ -127,7 +133,7 @@ FUENTES = ("manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales"
 # fotografiar.
 FUENTES_NAVEGADOR = {
     "manifiestos_rndc", "procuraduria", "contraloria", "delitos_sexuales",
-    "policia", "runt", "simit", "sena", "bdme", "bdme_nit", "rama_judicial",
+    "policia", "runt", "simit", "sena", "sisconmp", "bdme", "bdme_nit", "rama_judicial",
 }
 
 
@@ -185,6 +191,7 @@ _SYNC_ORIGINALES = {
     "consultar_antecedentes_policia_sync": consultar_antecedentes_policia_sync,
     "consultar_vehiculo_runt_sync": consultar_vehiculo_runt_sync,
     "consultar_comparendos_simit_sync": consultar_comparendos_simit_sync,
+    "consultar_capacitaciones_sisconmp_sync": consultar_capacitaciones_sisconmp_sync,
     "consultar_sena_sync": consultar_sena_sync,
     "consultar_bdme_sync": consultar_bdme_sync,
     "consultar_procesos_sync": consultar_procesos_sync,
@@ -381,6 +388,8 @@ def _clasificar_error(exc: Exception, nombre: str = "") -> tuple[str, dict]:
         return "ERROR", {"tipo": "captcha", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotSimitSinResultado):
         return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
+    if isinstance(exc, BotSisconmpSinResultado):
+        return "NO_DISPONIBLE", {"tipo": "portal_inconsistente", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, (BotBdmeConfiguracionError, BotBdmeAutenticacionError)):
         return "NO_DISPONIBLE", {"tipo": "configuracion_bdme", "mensaje": str(exc)[:MAX_MENSAJE]}
     if isinstance(exc, BotBdmeSinResultado):
@@ -454,6 +463,29 @@ def _estado_sena(seccion: dict) -> str:
 def _estado_ofac(seccion: dict) -> str:
     """Una coincidencia exacta de identificación requiere revisión humana."""
     return "ADVERTENCIA" if seccion.get("aplica") else "EXITO"
+
+
+def _estado_sisconmp(seccion: dict) -> str:
+    """Estado de la fuente sisconmp (decisión de negocio 2026-09-25).
+
+    - Registra capacitaciones y NINGUNA vigente (≥1 legiblemente vencida y
+      ninguna vigente) → ADVERTENCIA: la capacitación en Mercancías
+      Peligrosas es requisito para transportarlas (Resolución 1223/2014) y
+      el conductor está con la vigencia vencida (análogo SOAT/RTM vencidos).
+    - Alguna capacitación vigente → EXITO.
+    - Sin capacitaciones registradas (no_registra) → EXITO determinante
+      informativo (análogo SENA/simit limpio: la ausencia es un hecho del
+      registro, no un hallazgo adverso — el cliente lo interpreta según el
+      cargo a evaluar).
+    - Fechas de vencimiento ilegibles (vigente None) → EXITO sin inventar
+      una advertencia que el portal no permitió derivar.
+    """
+    caps = seccion.get("capacitaciones") or []
+    hay_vigente = any(c.get("vigente") is True for c in caps)
+    hay_vencida = any(c.get("vigente") is False for c in caps)
+    if caps and hay_vencida and not hay_vigente:
+        return "ADVERTENCIA"
+    return "EXITO"
 
 
 def _estado_rues(seccion: dict) -> str:
@@ -581,6 +613,24 @@ async def _ejecutar_fuente(
                 "certificados": (cache.get("certificados") or [])[:MAX_CERTIFICADOS_DOC],
             })
             seccion["estado"] = _estado_sena(seccion)
+        elif nombre == "sisconmp":
+            # Capacitaciones de Mercancías Peligrosas (SISCONMP): `vigente` se
+            # RECALCULA en cada hit de caché contra la fecha de vencimiento
+            # (análogo SOAT/RTM: una capacitación vigente ayer puede estar
+            # vencida hoy — la caché no congela el semáforo).
+            capacitaciones = [
+                {**cap, "vigente": _capacitacion_vigente(cap.get("fecha_vencimiento"))}
+                for cap in (cache.get("capacitaciones") or [])[:MAX_CAPACITACIONES_DOC]
+            ]
+            seccion.update({
+                "no_registra": cache.get("no_registra"),
+                "mensaje": (cache.get("mensaje") or "")[:MAX_MENSAJE],
+                "apellidos": cache.get("apellidos", ""),
+                "nombres": cache.get("nombres", ""),
+                "total_capacitaciones": cache.get("total_capacitaciones"),
+                "capacitaciones": capacitaciones,
+            })
+            seccion["estado"] = _estado_sisconmp(seccion)
         elif nombre in {"ofac", "ofac_nit"}:
             seccion.update({
                 "aplica": bool(cache.get("aplica")),
@@ -721,6 +771,16 @@ async def _ejecutar_fuente(
             # imagen propio resuelto por 2Captcha dentro del bot).
             async with _SEMAFORO_NAVEGADORES:
                 return await _invocar_playwright(consultar_sena, "consultar_sena_sync", cedula)
+    elif nombre == "sisconmp":
+
+        async def invocar() -> dict:
+            # sisconmp consulta por cédula (portal público de Mintransporte;
+            # el reCAPTCHA v3 invisible lo ejecuta la PROPIA página: sin
+            # 2Captcha, costo $0 — el bot lee la respuesta AJAX, no el DOM).
+            async with _SEMAFORO_NAVEGADORES:
+                return await _invocar_playwright(
+                    consultar_capacitaciones_sisconmp, "consultar_capacitaciones_sisconmp_sync", cedula
+                )
     elif nombre == "ofac":
 
         async def invocar() -> dict:
@@ -1062,6 +1122,57 @@ async def _ejecutar_fuente(
         })
         # Formación = informativo, SIEMPRE EXITO (decisión de negocio 2026-09-01).
         seccion["estado"] = _estado_sena(seccion)
+    elif nombre == "sisconmp":
+        # Capacitaciones de Mercancías Peligrosas por cédula (portal público
+        # de Mintransporte, SIN captcha que pagar ni PDF: solo el listado).
+        # OJO: el DOM del portal miente (su handler error: muestra el mismo
+        # "no registra" del vacío legítimo) — el bot ya leyó la RESPUESTA
+        # AJAX (status 200 + JSON); esta barrera cubre dicts vacíos.
+        capacitaciones = (resultado.get("capacitaciones") or [])[:MAX_CAPACITACIONES_DOC]
+        no_registra = resultado.get("no_registra")
+        mensaje = (resultado.get("mensaje") or "").strip()
+        # Anti-envenenamiento (segunda barrera; el bot ya lanza
+        # BotSisconmpSinResultado): sin capacitaciones, sin no_registra
+        # determinante y sin mensaje NO es una consulta válida.
+        if not capacitaciones and no_registra is None and not mensaje:
+            seccion.update({
+                "estado": "NO_DISPONIBLE",
+                "error": {
+                    "tipo": "portal_inconsistente",
+                    "mensaje": "El portal SISCONMP no entregó el listado de capacitaciones. Intente de nuevo.",
+                },
+            })
+            logger.warning("SISCONMP sin resultado legible para %s (sin cachear)", enmascarar_cedula(cedula))
+            return seccion
+        doc_cache = {
+            "tipo": nombre, "cedula": cedula,
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "apellidos": (resultado.get("apellidos") or "")[:120],
+            "nombres": (resultado.get("nombres") or "")[:120],
+            "total_capacitaciones": resultado.get("total_capacitaciones", len(capacitaciones)),
+            "capacitaciones": capacitaciones,
+            "usuario": actor["usuario"], "perfil": actor.get("perfil", ""),
+            "empresa_id": actor.get("empresa_id"), "usuario_id": actor.get("usuario_id"),
+            "consultado_en": ahora, "expira_en": expira, "forzado": bool(forzar),
+        }
+        try:
+            col_consultas.insert_one(_con_captura(doc_cache, nombre, seccion.get("_captura")))
+            seccion["cache_id"] = str(doc_cache["_id"])
+        except Exception as exc:
+            logger.error("Caché sisconmp %s no se pudo auditar: %s", enmascarar_cedula(cedula), exc)
+        seccion.update({
+            "no_registra": no_registra,
+            "mensaje": mensaje[:MAX_MENSAJE],
+            "apellidos": doc_cache["apellidos"],
+            "nombres": doc_cache["nombres"],
+            "total_capacitaciones": doc_cache["total_capacitaciones"],
+            "capacitaciones": capacitaciones,
+        })
+        # Vigencia de la capacitación = semáforo (decisión de negocio
+        # 2026-09-25, análogo SOAT/RTM); `vigente` ya viene calculado contra
+        # hoy Colombia y se recalcula en cada hit de caché.
+        seccion["estado"] = _estado_sisconmp(seccion)
     elif nombre == "rama_judicial":
         procesos = (resultado.get("procesos") or [])[:MAX_PROCESOS_DOC]
         total = int(resultado.get("total_procesos") or len(procesos))
