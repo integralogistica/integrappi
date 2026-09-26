@@ -665,18 +665,13 @@ class CrearEstudio(BaseModel):
     fecha_expedicion: str | None = None
 
 
-@router.post("", status_code=201)
-async def crear_estudio(
-    datos: CrearEstudio,
-    request: Request,
-    actor: dict = Depends(actor_actual),
-):
-    """Cédula → RNDC + Procuraduría en paralelo → estado global honesto → PDF.
-
-    HTTP 201 significa que el estudio se creó y auditó; el resultado real de
-    las fuentes está en `estado` (COMPLETADA / COMPLETADA_CON_ADVERTENCIAS /
-    PARCIAL / ERROR). Nunca se reporta éxito si una fuente falló.
-    """
+async def _preparar_estudio(datos, actor, request) -> dict:
+    """FASE 1 del estudio (rápida): validaciones accionables, cascada de
+    nombres, reserva de cobro y doc EN_PROGRESO. Devuelve el contexto para
+    ejecutar. Compartida por el POST síncrono (integraciones API) y el
+    POST /iniciar (portal con barra de progreso)."""
+    _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "crear estudios de seguridad")
+    _verificar_rate_limit(actor)
     _requiere_rol(actor, {ROL_CONSULTADOR, ROL_ADMIN_EMPRESA, ROL_ADMIN_INTEGRA}, "crear estudios de seguridad")
     _verificar_rate_limit(actor)
 
@@ -897,22 +892,50 @@ async def crear_estudio(
         fecha_expedicion=fecha_expedicion or None,
     )
 
+    return {
+        "consulta_id": consulta_id, "cedula": cedula, "actor": actor,
+        "actor_doc": actor_doc, "empresa": empresa, "consumos": consumos,
+        "habilitadas": habilitadas, "placa": placa,
+        "cedula_propietario": cedula_propietario, "nombres": nombres,
+        "apellidos": apellidos, "nit": nit,
+        "fecha_expedicion": fecha_expedicion or None, "forzar": datos.forzar,
+        "auditoria": _auditoria_request(request), "request": request,
+    }
+
+
+async def _finalizar_estudio(ctx: dict) -> dict:
+    """FASE 2 del estudio (lenta): ejecuta fuentes, reembolso >51%, memoria de
+    personas y PDF. Idéntico al bloque post-doc del POST original; separado
+    para que /iniciar pueda correrlo en background."""
+    from Funciones import cobro_seguridad as cobro  # noqa: F811 (ya importado arriba)
+
+    consulta_id = ctx["consulta_id"]
+    cedula = ctx["cedula"]
+    actor = ctx["actor"]
+    actor_doc = ctx["actor_doc"]
+    empresa = ctx["empresa"]
+    consumos = ctx["consumos"]
+    nombres = ctx["nombres"]
+    apellidos = ctx["apellidos"]
+    fecha_expedicion = ctx["fecha_expedicion"]
+    request = ctx["request"]
+
     try:
         estudio = await ejecutar_estudio(
             consulta_id=consulta_id,
             cedula=cedula,
             actor=actor_doc,
             empresa=empresa,
-            forzar=datos.forzar,
-            auditoria=_auditoria_request(request),
+            forzar=ctx["forzar"],
+            auditoria=ctx["auditoria"],
             registrar_evento=lambda *a, **k: registrar_evento(*a, request=request, **k),
-            fuentes=habilitadas,
-            placa=placa,
-            cedula_propietario=cedula_propietario,
+            fuentes=ctx["habilitadas"],
+            placa=ctx["placa"],
+            cedula_propietario=ctx["cedula_propietario"],
             nombres=nombres,
             apellidos=apellidos,
-            nit=nit,
-            fecha_expedicion=fecha_expedicion or None,
+            nit=ctx["nit"],
+            fecha_expedicion=fecha_expedicion,
         )
     except Exception as exc:
         logger.exception("Estudio %s falló de forma inesperada", consulta_id)
@@ -1000,6 +1023,83 @@ async def crear_estudio(
     estudio = _respuesta_estudio(estudio)
     estudio["pdf_endpoint"] = f"/seguridad/estudios/{consulta_id}/pdf"
     return estudio
+
+
+@router.post("", status_code=201)
+async def crear_estudio(
+    datos: CrearEstudio,
+    request: Request,
+    actor: dict = Depends(actor_actual),
+):
+    """Cédula → fuentes en paralelo → estado global honesto → PDF (SÍNCRONO,
+    contrato de las integraciones API: timeout recomendado 120 s).
+
+    HTTP 201 significa que el estudio se creó y auditó; el resultado real de
+    las fuentes está en `estado` (COMPLETADA / COMPLETADA_CON_ADVERTENCIAS /
+    PARCIAL / ERROR). Nunca se reporta éxito si una fuente falló.
+    """
+    ctx = await _preparar_estudio(datos, actor, request)
+    return await _finalizar_estudio(ctx)
+
+
+@router.post("/iniciar", status_code=202)
+async def iniciar_estudio(
+    datos: CrearEstudio,
+    request: Request,
+    actor: dict = Depends(actor_actual),
+):
+    """Arranca el estudio y devuelve el consulta_id INMEDIATAMENTE (pedido
+    2026-09-25): la ejecución corre en background y el portal sigue el avance
+    con `GET /{consulta_id}/progreso` (barra de % y fuentes completadas).
+    Mismas validaciones/cobro que el POST síncrono; si el usuario cierra la
+    ventana el estudio IGUAL termina y queda en su historial."""
+    import asyncio as _asyncio
+
+    from Funciones import orquestador_estudios as orch
+
+    ctx = await _preparar_estudio(datos, actor, request)
+    consulta_id = ctx["consulta_id"]
+
+    async def _tarea():
+        try:
+            respuesta = await _finalizar_estudio(ctx)
+        except Exception as exc:
+            logger.exception("Estudio background %s falló de forma inesperada", consulta_id)
+            col_estudios.update_one(
+                {"consulta_id": consulta_id},
+                {"$set": {"estado": "ERROR", "finalizado_en": _utcnow(), "fuentes.error_global": str(exc)[:300]}},
+            )
+            doc = col_estudios.find_one({"consulta_id": consulta_id}) or {}
+            respuesta = _respuesta_estudio(doc) if doc.get("fuentes") else None
+        # Marca terminal para el polling (con o sin resultado legible).
+        orch.registrar_progreso_final(consulta_id, respuesta)
+
+    _asyncio.create_task(_tarea())
+    return {"consulta_id": consulta_id, "estado": "EN_PROGRESO", "progreso_endpoint": f"/seguridad/estudios/{consulta_id}/progreso"}
+
+
+@router.get("/{consulta_id}/progreso")
+def progreso_estudio(consulta_id: str, actor: dict = Depends(actor_actual)):
+    """Avance del estudio en ejecución (polling del portal): total/hechas,
+    estado por fuente y — al terminar TODO (incluido el PDF) — el estudio
+    completo en `estudio`. Aislado por empresa (mismo 404 del detalle)."""
+    from Funciones import orquestador_estudios as orch
+
+    p = orch.obtener_progreso(consulta_id)
+    if not p:
+        # Aún preparando (cascada de nombres) o no existe: el portal sigue
+        # sondeando; para consultas ajenas ni confirmamos existencia.
+        raise HTTPException(status_code=404, detail="Sin progreso disponible para esa consulta")
+    if actor["rol"] != ROL_ADMIN_INTEGRA and p.get("empresa_id") != (actor.get("empresa_id") or ""):
+        raise HTTPException(status_code=404, detail="Sin progreso disponible para esa consulta")
+    return {
+        "consulta_id": consulta_id,
+        "total": p["total"],
+        "hechas": p["hechas"],
+        "pct": round(p["hechas"] * 100 / p["total"]) if p["total"] else 0,
+        "fuentes": p["fuentes"],
+        "estudio": p.get("respuesta"),
+    }
 
 
 # === 4-5. Listado y detalle ====================================================

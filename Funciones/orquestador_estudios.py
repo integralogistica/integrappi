@@ -1619,6 +1619,58 @@ def mayoria_fuentes_fallidas(fuentes: dict) -> bool:
 
 # --- Estudio completo ------------------------------------------------------------
 
+# Progreso de estudios en ejecución (2026-09-25, pedido del usuario): registro
+# en memoria por consulta_id que el portal consulta por polling mientras el
+# POST /iniciar corre el estudio en background. Single-instance como el rate
+# limit; si la instancia muere a mitad, el polling del cliente degrada (404)
+# y el doc del estudio queda EN_PROGRESO visible en el historial.
+_PROGRESO: dict[str, dict] = {}
+_MAX_PROGRESO = 200
+
+
+def _registrar_progreso(consulta_id: str, empresa_id, nombres: list[str]) -> None:
+    if len(_PROGRESO) >= _MAX_PROGRESO:
+        # Poda: conservar los más recientes (dict preserva orden de inserción).
+        for clave in list(_PROGRESO)[: len(_PROGRESO) - _MAX_PROGRESO + 1]:
+            _PROGRESO.pop(clave, None)
+    _PROGRESO[consulta_id] = {
+        "empresa_id": str(empresa_id or ""),
+        "total": len(nombres),
+        "hechas": 0,
+        "fuentes": {nombre: None for nombre in nombres},  # None = corriendo
+        "respuesta": None,  # se setea al terminar TODO (incluido el PDF)
+    }
+
+
+def _avanzar_progreso(consulta_id: str, nombre: str, estado: str | None) -> None:
+    p = _PROGRESO.get(consulta_id)
+    if p is None or nombre not in p["fuentes"] or p["fuentes"][nombre] is not None:
+        return  # desconocida / ya contada (reintento interno de la fuente)
+    p["fuentes"][nombre] = estado
+    p["hechas"] = sum(1 for v in p["fuentes"].values() if v is not None)
+
+
+def registrar_progreso_final(consulta_id: str, respuesta) -> None:
+    """Marca la consulta TERMINADA para el polling del portal: la respuesta
+    completa (con PDF) queda lista para entregarse."""
+    p = _PROGRESO.get(consulta_id)
+    if p is not None:
+        p["respuesta"] = respuesta
+
+
+def obtener_progreso(consulta_id: str) -> dict | None:
+    return _PROGRESO.get(consulta_id)
+
+
+def _con_progreso(consulta_id: str, nombre: str, coro):
+    """Envuelve la corutina de una fuente: al terminar cuenta el avance."""
+    async def _envuelta():
+        resultado = await coro
+        _avanzar_progreso(consulta_id, nombre, (resultado or {}).get("estado"))
+        return resultado
+    return _envuelta()
+
+
 async def ejecutar_estudio(
     consulta_id: str,
     cedula: str,
@@ -1662,15 +1714,20 @@ async def ejecutar_estudio(
             "nombre": (empresa.get("nombre") or "").strip() or "INTEGRA LOGISTICA",
             "nit": (empresa.get("nit") or "").strip() or "901923029-2",
         }
+        # Progreso (2026-09-25): total = fuentes que van a correr de verdad.
+        _registrar_progreso(
+            consulta_id, actor.get("empresa_id"),
+            [nombre for nombre in habilitadas if nombre in FUENTES],
+        )
         resultados = await asyncio.gather(
             *[
-                _ejecutar_fuente(
+                _con_progreso(consulta_id, nombre, _ejecutar_fuente(
                     nombre, cedula, actor, forzar,
                     placa=placa, cedula_propietario=cedula_propietario,
                     nombres=nombres, apellidos=apellidos,
                     nit=nit, fecha_expedicion=fecha_expedicion,
                     empresa_consultante=empresa_consultante,
-                )
+                ))
                 if nombre in habilitadas
                 else _deshabilitada(nombre)
                 for nombre in FUENTES
@@ -1822,15 +1879,16 @@ async def reintentar_fuentes_estudio(
         "nombre": (empresa.get("nombre") or "").strip() or "INTEGRA LOGISTICA",
         "nit": (empresa.get("nit") or "").strip() or "901923029-2",
     }
+    _registrar_progreso(consulta_id, actor.get("empresa_id"), list(pendientes))
     async with _SEMAFORO_ESTUDIOS:
         resultados = await asyncio.gather(*[
-            _ejecutar_fuente(
+            _con_progreso(consulta_id, nombre, _ejecutar_fuente(
                 nombre, cedula, actor, False,
                 placa=placa, cedula_propietario=cedula_propietario,
                 nombres=nombres, apellidos=apellidos, nit=nit,
                 fecha_expedicion=fecha_expedicion,
                 empresa_consultante=empresa_consultante,
-            )
+            ))
             for nombre in pendientes
         ])
     nuevas = dict(zip(pendientes, resultados))
