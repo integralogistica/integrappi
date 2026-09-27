@@ -10,7 +10,7 @@ from io import BytesIO
 import os
 import asyncio
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from collections import defaultdict 
 from zoneinfo import ZoneInfo
@@ -1726,6 +1726,58 @@ async def cargar_numeros_pedido(
 
 # Exportar a excel COMPLETADOS por rango fechas
 
+def _filtro_fecha_colombia(fecha_inicial: str, fecha_final: str) -> Dict[str, str]:
+    """Rango de `fecha_creacion` (string UTC, tz del servidor Render) equivalente
+    al día COLOMBIA (UTC-5): 00:00 COT = 05:00 UTC del mismo día y el fin es
+    EXCLUSIVO al 05:00 UTC del día siguiente. Sin esto, lo tramitado después de
+    las 7 p.m. queda en el día siguiente del filtro (mismo fix que usa el
+    histórico con _OFFSET_COLOMBIA)."""
+    ini = datetime.strptime(fecha_inicial, "%Y-%m-%d")
+    fin = datetime.strptime(fecha_final, "%Y-%m-%d") + timedelta(days=1)
+    return {
+        "$gte": ini.strftime("%Y-%m-%d") + " 05:00:00",
+        "$lt": fin.strftime("%Y-%m-%d") + " 05:00:00",
+    }
+
+# Regionales de la operación: viven DENTRO del consecutivo del vehículo
+# ('CELTA-20260924-M-2026924-ANTIOQUIA-2' → 'ANTIOQUIA'). El campo `regional`
+# de los documentos es la BODEGA (CELTA, FUNZA…) — distinto. Espejo de
+# REGIONALES_OPERACION del frontend (src/Funciones/regionalVehiculo.ts).
+REGIONALES_OPERACION = [
+    "ANTIOQUIA", "BOGOTA CENTRO ALTO", "BOGOTA CENTRO BAJO", "BOGOTA NORTE ALTO",
+    "CENTRO 1", "CENTRO 2", "CENTRO 3", "CENTRO 4",
+    "COSTA NORTE 1", "COSTA NORTE 2", "COSTA NORTE 3",
+    "EJE CAFETERO", "OCCIDENTE", "SANTANDER", "SUR",
+]
+
+
+def _regional_de_vehiculo(consecutivo):
+    """Regional de la operación extraída del consecutivo del vehículo; '' si el
+    consecutivo no trae ninguna regional reconocida (se busca el segmento
+    separado por '-' cuyo nombre coincida, no por posición)."""
+    for seg in str(consecutivo or "").split("-"):
+        s = seg.strip().upper()
+        if s in REGIONALES_OPERACION:
+            return s
+    return ""
+
+
+def _uso_vehiculo_pct(kg, tipo_sicetac, tipo_sugerido):
+    """Uso del vehículo solicitado como DECIMAL (kg ÷ tope del tipo, ej. 0.794),
+    igual que la columna de la web: tipo = SICETAC con respaldo del sugerido;
+    None si el tipo no tiene tope conocido. En el Excel se pinta con formato
+    de porcentaje (0,0%) para que se lea 79,4% pero el valor siga siendo
+    decimal y opere bien en fórmulas."""
+    from rutas.indicadores_costo_operacion import TOPES_TIPO_VEH, _tipo_solicitado
+    tope = TOPES_TIPO_VEH.get(_tipo_solicitado(tipo_sicetac or tipo_sugerido))
+    if not tope:
+        return None
+    try:
+        return round(float(kg or 0) / tope, 3)
+    except (TypeError, ValueError):
+        return None
+
+
 @ruta_pedidos.get(
     "/exportar-completados",
     summary="Exportar a excel COMPLETADOS por rango fechas"
@@ -1752,10 +1804,7 @@ async def exportar_completados(
 
     # 3) armar filtro sólo por fecha_creacion y, si aplica, por regional
     filtro: Dict[str, any] = {
-        "fecha_creacion": {
-            "$gte": f"{fecha_inicial} 00:00:00",
-            "$lte": f"{fecha_final} 23:59:59"
-        }
+        "fecha_creacion": _filtro_fecha_colombia(fecha_inicial, fecha_final)
     }
 
     # Si es ADMIN/COORDINADOR/CONTROL/Analista/Visualizador y envió regionales, úsalas; de lo contrario, su regional por cookie
@@ -1792,9 +1841,11 @@ async def exportar_completados(
             return 0.0
 
     def _fecha_ddmmaaaa(s):
-        # Convierte "YYYY-MM-DD ..." a "DD/MM/YYYY"
+        # Convierte "YYYY-MM-DD HH:MM:SS" (UTC) a "DD/MM/YYYY" en hora Colombia:
+        # se restan 5 h para que lo tramitado en la noche no amanezca al día siguiente.
         try:
-            return datetime.strptime((s or "")[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+            dt = datetime.strptime((s or "")[:19], "%Y-%m-%d %H:%M:%S")
+            return (dt - timedelta(hours=5)).strftime("%d/%m/%Y")
         except Exception:
             return (s or "")[:10]
 
@@ -1807,6 +1858,7 @@ async def exportar_completados(
         filas.append({
             "Fecha": _fecha_ddmmaaaa(d.get("fecha_creacion")),
             "Vehículo": d.get("consecutivo_vehiculo") or "",
+            "Regional": _regional_de_vehiculo(d.get("consecutivo_vehiculo")) or (d.get("regional") or ""),
             "Planilla": d.get("planilla_siscore") or "",
             "Cliente": d.get("nombre_cliente") or "",
             "Destinatario (Ubicación Descargue)": d.get("ubicacion_descargue") or "",
@@ -1827,6 +1879,7 @@ async def exportar_completados(
             "Cargue/Descargue Teórico (vehículo)": _num(d.get("cargue_descargue_teorico")),
             "Punto Adicional Teórico (vehículo)": _num(d.get("punto_adicional_teorico")),
             "Total Teórico (vehículo)": _num(d.get("costo_teorico_vehiculo")),
+            "% Uso (vehículo)": _uso_vehiculo_pct(d.get("total_kilos_vehiculo"), d.get("tipo_vehiculo_sicetac"), d.get("tipo_vehiculo")),
             "Sobre costo (vehículo)": diferencia,
             "Causal del sobre costo": ("Sin causal" if diferencia > 0 and not causal else causal),
             "Ahorro (vehículo)": _num(d.get("ahorro")),
@@ -1839,6 +1892,10 @@ async def exportar_completados(
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Completados")
+        # % Uso: valor decimal con formato porcentaje (se lee 79,4%).
+        fmt_pct = writer.book.add_format({'num_format': '0.0%'})
+        col = df.columns.get_loc("% Uso (vehículo)")
+        writer.sheets["Completados"].set_column(col, col, 12, fmt_pct)
     out.seek(0)
 
     # 7) devolver descarga
@@ -1875,10 +1932,7 @@ async def exportar_completados_detallado(
         raise HTTPException(400, "Formato de fecha inválido. Use YYYY-MM-DD.")
 
     filtro: Dict[str, any] = {
-        "fecha_creacion": {
-            "$gte": f"{fecha_inicial} 00:00:00",
-            "$lte": f"{fecha_final} 23:59:59"
-        }
+        "fecha_creacion": _filtro_fecha_colombia(fecha_inicial, fecha_final)
     }
     if perfil in {"ADMIN", "COORDINADOR", "CONTROL", "ANALISTA", "VISUALIZADOR"}:
         if regionales:
@@ -1941,7 +1995,7 @@ async def exportar_completados_detallado(
         filas_vehiculos.append({
             "Fecha": _fecha_ddmmaaaa(first.get("fecha_creacion")),
             "Vehículo": veh,
-            "Regional": first.get("regional") or "",
+            "Regional": _regional_de_vehiculo(veh) or (first.get("regional") or ""),
             "Tipo Vehículo (sugerido)": first.get("tipo_vehiculo") or "",
             "Tipo Vehículo SICETAC": first.get("tipo_vehiculo_sicetac") or "",
             "Veh Solicitado (RUNT)": (first.get("tipo_vehiculo_sicetac") or "").split("_")[0],
@@ -1951,6 +2005,7 @@ async def exportar_completados_detallado(
             "Cajas": _num(first.get("total_cajas_vehiculo")),
             "Kg Reales": _num(first.get("total_kilos_vehiculo")),
             "Kg Sicetac": _num(first.get("total_kilos_vehiculo_sicetac")),
+            "% Uso": _uso_vehiculo_pct(first.get("total_kilos_vehiculo"), first.get("tipo_vehiculo_sicetac"), first.get("tipo_vehiculo")),
             "Flete Solicitado": flete_sol,
             "Cargue/Descargue Solicitado": cargue,
             "Punto Adicional Solicitado": punto,
@@ -1980,7 +2035,7 @@ async def exportar_completados_detallado(
             "Fecha": _fecha_ddmmaaaa(d.get("fecha_creacion")),
             "Vehículo": d.get("consecutivo_vehiculo") or "",
             "Planilla": d.get("planilla_siscore") or "",
-            "Regional": d.get("regional") or "",
+            "Regional": _regional_de_vehiculo(d.get("consecutivo_vehiculo")) or (d.get("regional") or ""),
             "NIT Cliente": d.get("nit_cliente") or "",
             "Cliente": d.get("nombre_cliente") or "",
             "Consecutivo Integrapp": d.get("consecutivo_integrapp") or "",
@@ -2017,6 +2072,7 @@ async def exportar_completados_detallado(
             "Cargue/Descargue Teórico (vehículo)": _num(d.get("cargue_descargue_teorico")),
             "Punto Adicional Teórico (vehículo)": _num(d.get("punto_adicional_teorico")),
             "Total Teórico (vehículo)": _num(d.get("costo_teorico_vehiculo")),
+            "% Uso (vehículo)": _uso_vehiculo_pct(d.get("total_kilos_vehiculo"), d.get("tipo_vehiculo_sicetac"), d.get("tipo_vehiculo")),
             "Sobre costo (vehículo)": diferencia,
             "Causal del sobre costo": ("Sin causal" if diferencia > 0 and not causal else causal),
             "Ahorro (vehículo)": _num(d.get("ahorro")),
@@ -2030,10 +2086,18 @@ async def exportar_completados_detallado(
         })
 
     # 7) Excel de 2 hojas
+    df_veh = pd.DataFrame(filas_vehiculos)
+    df_ped = pd.DataFrame(filas_pedidos)
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        pd.DataFrame(filas_vehiculos).to_excel(writer, index=False, sheet_name="Vehículos")
-        pd.DataFrame(filas_pedidos).to_excel(writer, index=False, sheet_name="Pedidos")
+        df_veh.to_excel(writer, index=False, sheet_name="Vehículos")
+        df_ped.to_excel(writer, index=False, sheet_name="Pedidos")
+        # % Uso: valor decimal con formato porcentaje (se lee 79,4%).
+        fmt_pct = writer.book.add_format({'num_format': '0.0%'})
+        col_v = df_veh.columns.get_loc("% Uso")
+        writer.sheets["Vehículos"].set_column(col_v, col_v, 10, fmt_pct)
+        col_p = df_ped.columns.get_loc("% Uso (vehículo)")
+        writer.sheets["Pedidos"].set_column(col_p, col_p, 12, fmt_pct)
     out.seek(0)
 
     fn = f"pedidos_completados_detallado_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
@@ -2163,10 +2227,7 @@ async def listar_vehiculos_completados(
 
     # 3) Construir filtro base (fecha + estado opcional)
     filtro: Dict[str, any] = {
-        "fecha_creacion": {
-            "$gte": f"{fecha_inicial} 00:00:00",
-            "$lte": f"{fecha_final} 23:59:59"
-        }
+        "fecha_creacion": _filtro_fecha_colombia(fecha_inicial, fecha_final)
     }
     if filtros.estados:
         filtro["estado"] = {"$in": [e.upper().strip() for e in filtros.estados]}

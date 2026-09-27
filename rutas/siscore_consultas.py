@@ -4843,6 +4843,23 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         import io
 
+        # % de uso del vehículo solicitado (mismos topes que la web).
+        from rutas.indicadores_costo_operacion import TOPES_TIPO_VEH, _tipo_solicitado
+
+        def _uso_vehiculo_pct(doc):
+            """Uso del vehículo como DECIMAL (peso_real ÷ tope, ej. 0.794);
+            None si el tipo no tiene tope conocido. Se pinta con formato
+            porcentaje (0,0%) en la hoja."""
+            tope = TOPES_TIPO_VEH.get(
+                _tipo_solicitado(doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo"))
+            )
+            if not tope:
+                return None
+            try:
+                return round(float(doc.get("peso_real") or 0) / tope, 3)
+            except (TypeError, ValueError):
+                return None
+
         logger.info(f"=== EXPORTAR HISTORICO EXCEL ===")
         logger.info(f"Filtros: {request.fecha_inicio} a {request.fecha_fin}, perfil={request.perfil}, centro={request.centro_distribucion}")
 
@@ -4899,7 +4916,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             "Consecutivo", "Planilla", "Pedido Vulcano", "Fecha Preaprobado", "Fecha Creación", "Estado",
             "Total Solicitado", "Diferencia", "Regional", "Placa", "Piezas",
             "Peso Real", "Peso SICETAC", "Cant. Pedidos", "Ruta", "Tipo Vehículo",
-            "Vehículo SICETAC", "Flete Teórico", "Flete Solicitado",
+            "Vehículo SICETAC", "% Uso", "Flete Teórico", "Flete Solicitado",
             "Descargue", "Punto Adic.", "Desvío", "Aforo",
             "Municipio Principal", "Cliente Origen", "Cant. Destinos",
             "Código Pedido", "Observaciones",
@@ -4924,7 +4941,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             "Estado": 18, "Total Solicitado": 16, "Diferencia": 16, "Regional": 16,
             "Placa": 12, "Piezas": 10, "Peso Real": 12, "Peso SICETAC": 14,
             "Cant. Pedidos": 12, "Ruta": 18, "Tipo Vehículo": 14,
-            "Vehículo SICETAC": 16, "Flete Teórico": 16, "Flete Solicitado": 16,
+            "Vehículo SICETAC": 16, "% Uso": 10, "Flete Teórico": 16, "Flete Solicitado": 16,
             "Descargue": 14, "Punto Adic.": 14, "Desvío": 14, "Aforo": 14,
             "Municipio Principal": 20, "Cliente Origen": 22,
             "Cant. Destinos": 13, "Código Pedido": 20, "Observaciones": 25,
@@ -5075,6 +5092,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                     doc.get("ruta", ""),
                     doc.get("tipo_vehiculo", ""),
                     doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo", ""),
+                    _uso_vehiculo_pct(doc),
                     flete_teorico,
                     doc.get("tarifa_base") or doc.get("tarifa_calculada", 0),
                     fmt_recargo(doc.get("requiere_descargue"), 50000),
@@ -5113,6 +5131,14 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                             "REQUIERE_APROBACION_CONTROL": "CONTROL",
                         }.get(estado, estado)
                         cell.value = estado_label
+
+                    # Columna % Uso: decimal con formato porcentaje y semáforo
+                    # de la web (rojo < 0,8; verde ≥ 0,8).
+                    elif col_name == "% Uso":
+                        cell.alignment = number_alignment
+                        cell.number_format = '0.0%'
+                        if valor is not None:
+                            cell.font = Font(bold=True, color="E34948" if valor < 0.8 else "1BAF7A", size=10)
 
                     # Columnas monetarias
                     elif col_name in ("Flete Teórico", "Flete Solicitado", "Descargue", "Punto Adic.", "Desvío", "Aforo", "Total Solicitado"):

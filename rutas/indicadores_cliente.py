@@ -22,12 +22,20 @@ import re
 # Reutiliza helpers/pipelines de Costo de Operación (misma BD, mismas reglas):
 # - _filtro_media_milla / _anios_media_milla → filtro y años de pedidos_completados
 # - _num, NIT_FRESENIUS                      → detección de cliente
+# - TOPES_TIPO_VEH/_tipo_solicitado/_categoria_por_kilos/_fecha_iso → uso de
+#   vehículos (viven en costo_operación desde que el tablero general copió el
+#   gráfico de kabi; una sola fuente de las reglas de tope/categoría)
 from rutas.indicadores_costo_operacion import (
     col_completados,
     _filtro_media_milla,
     _anios_media_milla,
     _num,
     NIT_FRESENIUS,
+    TOPES_TIPO_VEH,
+    MAX_VEHICULOS,
+    _tipo_solicitado,
+    _categoria_por_kilos,
+    _fecha_iso,
 )
 from rutas.fletes import coleccion_fletes
 from bd.bd_cliente import bd_cliente
@@ -136,7 +144,7 @@ def get_cajas_cliente(
 # VARIAS guías separadas por coma → se explota en una fila por guía.
 
 # Válvulas de seguridad del informe (un año completo son miles de guías).
-MAX_VEHICULOS = 8000
+# MAX_VEHICULOS viene de indicadores_costo_operacion (8000, compartido).
 # Un año completo de Kabi son ~12-15k guías desde el fix de planillas
 # acumuladas ($addToSet) — 20k cubre todo el histórico (2025-09 → hoy).
 MAX_FILAS = 20000
@@ -161,15 +169,7 @@ def _split_planillas(valor) -> List[str]:
     return [p.strip() for p in str(valor).split(",") if p.strip()]
 
 
-def _fecha_iso(valor, largo: int = 10) -> Optional[str]:
-    """Casteo defensivo a 'YYYY-MM-DD' (date/timestamp de PG, str o None)."""
-    if valor is None:
-        return None
-    if isinstance(valor, (datetime, date)):
-        return valor.isoformat()[:largo]
-    texto = str(valor).strip()
-    return texto[:largo] or None
-
+# (_fecha_iso viene importado de indicadores_costo_operacion.)
 
 # ── On Time (OT) ─────────────────────────────────────────────────────────────
 # Días hábiles entre fecha inicial y entrega (sin sáb/dom/festivos Colombia),
@@ -537,46 +537,8 @@ def get_guias_cliente(
 # ── Uso de vehículos por tipo solicitado ─────────────────────────────────────
 # % de uso de cada Veh Solicitado (tipo_vehiculo_sicetac) = kg REALES del
 # vehículo (total_kilos_vehiculo) / tope de kg de la categoría solicitada.
-# La tabla de categorías es la de la operación (CARRY ≤1.000 … TRACTOMULA
-# >17.000); TRACTOMULA no tiene tope natural → 34.000 kg (máxima capacidad
-# legal, configuración 6 ejes) como referencia. uso_pct puede superar 100:
-# viajaron más kg de los que el tipo solicitado admite.
-
-TOPES_TIPO_VEH = {
-    "CARRY": 1000,
-    "NHR": 2300,
-    "TURBO": 4500,
-    "NIES": 6100,
-    "SENCILLO": 9000,
-    "PATINETA": 17000,
-    "TRACTOMULA": 34000,
-}
-
-
-def _tipo_solicitado(valor) -> str:
-    """'SENCILLO_…' → 'SENCILLO' (split por '_', como en los Excel); vacío o
-    desconocido → 'SIN TIPO' (sin tope → uso None)."""
-    t = str(valor or "").strip().upper().split("_")[0]
-    return t if t in TOPES_TIPO_VEH else "SIN TIPO"
-
-
-def _categoria_por_kilos(kg) -> str:
-    """Categoría que corresponde a un peso REAL según la tabla de la operación."""
-    k = float(kg or 0)
-    if k <= 1000:
-        return "CARRY"
-    if k <= 2300:
-        return "NHR"
-    if k <= 4500:
-        return "TURBO"
-    if k <= 6100:
-        return "NIES"
-    if k <= 9000:
-        return "SENCILLO"
-    if k <= 17000:
-        return "PATINETA"
-    return "TRACTOMULA"
-
+# Reglas (topes, tipo y categoría) importadas de indicadores_costo_operacion,
+# donde vive la versión para TODAS las operaciones del tablero general.
 
 @router.get("/{cliente_id}/uso-vehiculos")
 def get_uso_vehiculos_cliente(
