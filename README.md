@@ -328,7 +328,7 @@ if bodega:
 ### Endpoints de Histórico
 
 - `GET /siscore/historico`: Obtiene planillas de `pedidos_medical_historico` (las originales fusionadas ya no existen porque fueron eliminadas)
-- `POST /siscore/historico/exportar-excel`: Exporta a Excel (consistente con la vista)
+- `POST /siscore/historico/exportar-excel`: Exporta a Excel (consistente con la vista). Incluye «% Uso» (decimal con formato `0,0%` y semáforo de fuente) tras «Vehículo SICETAC»
 
 ### Recálculo de Estado
 

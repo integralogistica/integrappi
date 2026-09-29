@@ -110,7 +110,10 @@ def _json_seguro(valor):
 CAMPOS_VOLATILES_FIRMA = {
     "_id", "firmaUrl", "firmaEvidencia", "lecturasIA", "historialCambios",
     "invitacionConductor", "estadoIntegra", "observaciones", "usuarioIntegra",
-    "estudioSeguridad", "fotoconductorseguridad",
+    "estudioSeguridad", "fotoconductorseguridad", "estudioSeguridadFecha",
+    # Estudios automáticos (TusDatos): resultado de un proceso en background,
+    # no un dato declarado por el conductor al firmar.
+    "estudiosSeguridadAuto", "historialEstudios", "documentosEstudioSeguridad",
 }
 
 def _hash_datos_firmados(vehiculo: dict) -> str:
@@ -879,6 +882,26 @@ def _registrar_cambio_aprobado(vehiculo: dict, editado_por: str, seccion: str, c
     except Exception as e:
         print(f"[seguridad] No se pudo notificar el cambio de {placa}: {e}")
 
+    # Re-revisión: los estudios de seguridad se re-disparan SOLO si las
+    # cédulas o la placa cambiaron (si no, se conservan los anteriores).
+    _disparar_estudios_seguridad(placa, re_revision=True)
+
+
+def _disparar_estudios_seguridad(placa: str, re_revision: bool = False) -> None:
+    """
+    Lanza en background los estudios de seguridad automáticos del
+    vehículo (cédulas de conductor/tenedor/propietario deduplicadas +
+    placa) contra el proveedor configurado (hoy TusDatos). Fire-and-forget:
+    un fallo JAMÁS tumba el endpoint que lo dispara.
+    Import local para evitar el ciclo vehiculos ↔ estudios_automaticos.
+    """
+    try:
+        from Funciones import estudios_automaticos
+        asyncio.create_task(
+            estudios_automaticos.disparar_estudios(placa, re_revision=re_revision))
+    except Exception as e:
+        print(f"[estudios-auto] No se pudieron disparar los estudios de {placa}: {e}")
+
 
 def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
     """
@@ -1150,6 +1173,9 @@ async def actualizar_estado(
 
     if nuevo_estado == "completado_revision":
         enviar_notificacion_seguridad(placa, nombre_conductor)
+        # Estudios de seguridad automáticos (TusDatos) para las cédulas de
+        # las 3 figuras (deduplicadas) + la placa, en background.
+        _disparar_estudios_seguridad(placa, re_revision=False)
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -1163,9 +1189,12 @@ async def actualizar_estado(
 CLAVES_PROTEGIDAS = {
     "_id", "placa", "idUsuario", "idConductor", "estadoIntegra",
     "invitacionConductor", "historialCambios", "usuarioIntegra",
-    "estudioSeguridad", "fotoconductorseguridad", "lecturasIA", "fotos",
+    "estudioSeguridad", "fotoconductorseguridad", "estudioSeguridadFecha", "lecturasIA", "fotos",
     # Sello de la firma electrónica: solo /vehiculos/firmar lo escribe.
     "firmaEvidencia",
+    # Estudios automáticos (TusDatos): los escribe el disparador en
+    # background, jamás el front.
+    "estudiosSeguridadAuto", "historialEstudios", "documentosEstudioSeguridad",
 }
 
 # URLs de documentos: sus dueños son subir-documento/eliminar-documento.
@@ -1305,13 +1334,38 @@ async def subir_estudio_seguridad(
 
     try:
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+        fecha_carga = datetime.utcnow()
+        # La carga ACUMULA en el historial del vehículo (nada se reemplaza):
+        # `documentosEstudioSeguridad` es la fuente de la tabla de /revision.
+        # `estudioSeguridad`/`estudioSeguridadFecha` se mantienen como espejo
+        # del ÚLTIMO cargado (compat: el flujo de aprobación los exige).
         coleccion_vehiculos.update_one(
             {"placa": placa_limpia},
-            {"$set": {"estudioSeguridad": url_archivo}}
+            {
+                "$set": {
+                    "estudioSeguridad": url_archivo,
+                    "estudioSeguridadFecha": fecha_carga,
+                },
+                "$push": {
+                    "documentosEstudioSeguridad": {
+                        "$each": [{
+                            "ruta": url_archivo,
+                            "fecha": fecha_carga,
+                            "nombre": archivo.filename or "",
+                        }],
+                        "$position": 0,
+                        "$slice": 20,
+                    }
+                },
+            }
         )
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"message": "Estudio de seguridad subido correctamente", "ruta": url_archivo, "url": _url_para_cliente(url_archivo)}
+            content={
+                "message": "Estudio de seguridad subido correctamente",
+                "ruta": url_archivo, "url": _url_para_cliente(url_archivo),
+                "fecha": fecha_carga.isoformat(),
+            }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
@@ -1998,6 +2052,75 @@ async def eliminar_foto(placa: str, url: str, editado_por: Optional[str] = None)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Foto eliminada correctamente"})
 
 
+@ruta_vehiculos.get("/estudios-seguridad/{placa}")
+def estudios_seguridad(placa: str):
+    """
+    Estudios de seguridad automáticos del vehículo (TusDatos): lo consume
+    /revision con polling mientras hay estudios pendiente/en_curso.
+    `estudios` = corrida vigente; `historico` = corridas anteriores
+    (aplanadas — cada estudio conserva fecha y reporte_id); `documentos` =
+    PDFs del estudio cargados manualmente por Seguridad (acumulativos).
+    Sin estudios (vehículos históricos o no disparados) → listas vacías.
+    """
+    doc = coleccion_vehiculos.find_one(
+        {"placa": placa},
+        {"estudiosSeguridadAuto": 1, "historialEstudios": 1,
+         "documentosEstudioSeguridad": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    historico = []
+    for corrida in doc.get("historialEstudios") or []:
+        for est in (corrida.get("estudios") or []):
+            if isinstance(est, dict):
+                historico.append(est)
+    documentos = []
+    for d in doc.get("documentosEstudioSeguridad") or []:
+        if isinstance(d, dict) and d.get("ruta"):
+            documentos.append({
+                "url": _url_para_cliente(d["ruta"]),
+                "fecha": d.get("fecha"),
+                "nombre": d.get("nombre") or "",
+            })
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "placa": placa,
+        "estudios": _json_seguro(doc.get("estudiosSeguridadAuto") or []),
+        "historico": _json_seguro(historico),
+        "documentos": _json_seguro(documentos),
+    })
+
+
+@ruta_vehiculos.post("/estudios-seguridad/{placa}/disparar")
+async def disparar_estudios_seguridad(placa: str):
+    """
+    Dispara MANUALMENTE los estudios de seguridad automáticos (botón de
+    /revision): re-consulta cédulas deduplicadas + placa sin importar la
+    corrida anterior (pisa el array). Consume consultas del proveedor.
+    """
+    placa_limpia = placa.strip().upper()
+    if not coleccion_vehiculos.find_one({"placa": placa_limpia}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _disparar_estudios_seguridad(placa_limpia, re_revision=False)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Estudios de seguridad disparados; consulte el avance en unos minutos.",
+    })
+
+
+@ruta_vehiculos.post("/estudios-seguridad/{placa}/reintentar-fuentes")
+async def reintentar_fuentes_estudio(placa: str, estudio_id: str = Form(...)):
+    """
+    Reintenta SOLO las fuentes que quedaron en «Error» de un estudio
+    finalizado (botón de la pestaña Estudios de /revision): el proveedor
+    relanza esas fuentes sobre el MISMO reporte. Espera el resultado
+    (≤180 s) y devuelve el estudio actualizado.
+    """
+    from Funciones import estudios_automaticos
+    cambios = await estudios_automaticos.reintentar_fuentes_estudio(placa, estudio_id)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": "Fuentes fallidas reintentadas.",
+        "estudio": _json_seguro(cambios),
+    })
+
+
 @ruta_vehiculos.get("/obtener-vehiculos-incompletos")
 def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
     filtro = {
@@ -2016,6 +2139,11 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
     vehiculos_final = []
     for veh in vehiculos_raw:
         veh["_id"] = str(veh["_id"])
+        # Los estudios automáticos son insumo de SEGURIDAD (/revision),
+        # no del conductor.
+        veh.pop("estudiosSeguridadAuto", None)
+        veh.pop("historialEstudios", None)
+        veh.pop("documentosEstudioSeguridad", None)
         documentos = {
             k: v for k, v in veh.items()
             # SE HA MODIFICADO AQUÍ PARA QUE NO DEVUELVA estudioSeguridad NI fotoconductorseguridad
@@ -2048,6 +2176,10 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
     
     for veh in vehiculos_cursor:
         veh["_id"] = str(veh["_id"])
+        # Los estudios automáticos son insumo de SEGURIDAD (/revision).
+        veh.pop("estudiosSeguridadAuto", None)
+        veh.pop("historialEstudios", None)
+        veh.pop("documentosEstudioSeguridad", None)
         documentos = {
             k: v for k, v in veh.items()
             if isinstance(v, str) and (
