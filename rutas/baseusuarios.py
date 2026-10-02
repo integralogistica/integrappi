@@ -13,6 +13,7 @@ import jwt
 from datetime import datetime, timedelta, timezone
 
 from Funciones.claves import crear_hash, verificar_clave, es_hash
+from Funciones.utilidades_texto import norm_cliente_oc
 
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
@@ -75,6 +76,11 @@ class BaseUsuario(BaseModel):
 class ActualizarClientesInput(BaseModel):
     clientes: List[str]
 
+class ActualizarClientesAprobacionInput(BaseModel):
+    """Alcance de aprobación por cliente en Otros Costos (perfil COORDINADOR/CONTROL).
+    Lista vacía = TODOS los clientes (valor canónico; "TODOS" también colapsa a [])."""
+    clientes_aprobacion: List[str] = []
+
 class ActualizarDatosInput(BaseModel):
     nombre: str
     correo: Optional[str] = None
@@ -126,6 +132,8 @@ def modelo_usuario(u) -> dict:
         "perfil": u["perfil"],
         "usuario": u["usuario"],
         "clientes": u["clientes"] if isinstance(u.get("clientes"), list) else ["KABI"],
+        # Alcance de aprobación por cliente en Otros Costos ([] = TODOS)
+        "clientes_aprobacion": u.get("clientes_aprobacion") if isinstance(u.get("clientes_aprobacion"), list) else [],
         "activo": u.get("activo", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
         # En BD puede ser ObjectId (scripts viejos) o string: normalizar.
@@ -238,6 +246,33 @@ def normalizar_clientes(clientes: Optional[List[str]]) -> List[str]:
     if not clientes_normalizados:
         raise HTTPException(status_code=400, detail="Debe seleccionar al menos un cliente")
     return clientes_normalizados
+
+
+def _normalizar_clientes_aprobacion(clientes: List[str]) -> List[str]:
+    """Alcance de aprobación por cliente (Otros Costos). NO es lo mismo que
+    `normalizar_clientes` (acceso a portales KABI/MEDICAL_CARE): aquí no hay
+    whitelist fija, se valida contra el catálogo `clientes_otros_costos`
+    (editable en Mongo). Canónico: [] = TODOS; "TODOS" en la lista colapsa a [].
+    Mismas reglas de normalización que usa otros_costos.py al leer (norm_cliente_oc)."""
+    norm: List[str] = []
+    for cliente in clientes:
+        c = norm_cliente_oc(cliente)
+        if c and c not in norm:
+            norm.append(c)
+    if not norm or "TODOS" in norm:
+        return []
+    catalogo = {
+        norm_cliente_oc(d.get("nombre", ""))
+        for d in base_datos["clientes_otros_costos"].find({}, {"nombre": 1})
+    }
+    catalogo.discard("")
+    faltantes = [c for c in norm if c not in catalogo]
+    if faltantes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Clientes no existentes en el catálogo de Otros Costos: {', '.join(faltantes)}",
+        )
+    return norm
 
 def enviar_correo_codigo(destinatario: str, codigo: str):
     """Envía el código de verificación usando Resend de forma silenciosa."""
@@ -634,6 +669,31 @@ async def actualizar_clientes_usuario(id: str, data: ActualizarClientesInput):
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     return {"mensaje": "Clientes actualizados", "clientes": clientes}
+
+
+@ruta_baseusuarios.patch("/{id}/clientes-aprobacion", response_model=dict)
+async def actualizar_clientes_aprobacion_usuario(id: str, data: ActualizarClientesAprobacionInput):
+    """Alcance de aprobación por cliente en Otros Costos (sólo tiene efecto en
+    perfiles COORDINADOR/CONTROL): [] = TODOS los clientes."""
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    clientes = _normalizar_clientes_aprobacion(data.clientes_aprobacion)
+
+    result = coleccion_usuarios.update_one(
+        {"_id": oid},
+        {"$set": {"clientes_aprobacion": clientes}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    return {
+        "mensaje": "Alcance de aprobación actualizado",
+        "clientes_aprobacion": clientes,
+        "todos": not clientes,
+    }
 
 
 class ActualizarPerfilInput(BaseModel):

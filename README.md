@@ -10,6 +10,7 @@ API REST para el sistema de gestión de pedidos y pacientes Medical Care.
 ## Endpoints Principales
 
 ### Base de Usuarios (`/baseusuarios`)
+- `PATCH /{id}/clientes-aprobacion` - Actualizar alcance de aprobación por cliente en Otros Costos (`[]` = TODOS; valida contra el catálogo `clientes_otros_costos`)
 - `POST /` - Crear usuario
 - `GET /` - Listar usuarios
 - `GET /{id}` - Obtener usuario por ID
@@ -780,6 +781,27 @@ Catálogo de datos bancarios/conductor por placa, **scoped por regional**, para 
   ```
 
   `{{1}}` nombre conductor · `{{2}}` consecutivo · `{{3}}` manifiesto · `{{4}}` valor total (`$385.000`, el `$` lo manda el backend) · `{{5}}` valor tras retenciones (`$372.450`) o `No registrado` · `{{6}}` observaciones o `Ninguna`. Requiere aprobación en Meta; sin teléfono del conductor solo queda en log y el pago se completa igual.
+
+## Actualizaciones Recientes (2026-10-02)
+
+### Otros Costos — Alcance de aprobación por cliente (COORDINADOR/CONTROL)
+
+Antes cualquier COORDINADOR/CONTROL aprobaba solicitudes de TODOS los clientes y el WhatsApp de aprobación les llegaba a todos. Ahora el campo **`clientes_aprobacion`** de `baseusuarios` limita a qué clientes puede **aprobar, devolver (desde pendiente), rechazar, ver y recibir notificaciones** un COORDINADOR o CONTROL:
+
+- **`[]`/ausente (o `["TODOS"]`) = TODOS los clientes** (canónico; comportamiento histórico, retrocompatible — los usuarios actuales no requieren migración).
+- **Lista de clientes** (ej: `["FRESENIUS KABI", "DAVITA"]`) = sólo esos. ADMIN y el resto de perfiles nunca se restringen.
+- ⚠️ NO es el campo `clientes` (acceso a portales KABI/MEDICAL_CARE): es un campo propio, validado contra el catálogo `clientes_otros_costos`.
+
+**Backend** (`rutas/otros_costos.py`):
+- `_resolver_usuario` ahora devuelve `clientes_aprobacion`. Helpers: `_alcance_aprobacion`, `_cliente_en_alcance`, `_denegar_fuera_de_alcance` (403 claro), `_filtro_clientes_alcance` (regex anclada insensible a acentos/mayúsculas sobre `datos_servicio.cliente`). Normalización compartida `Funciones/utilidades_texto.norm_cliente_oc` (NFKD → sin acentos → upper → espacios colapsados), usada también por `baseusuarios.py` al escribir.
+- **Lectura**: `_scope_lectura` inyecta el filtro por cliente para COORDINADOR/CONTROL en activos (`$and` con la bandeja) e histórico → `GET /`, `/historico`, `/pagables` y `/exportar-excel` heredan el alcance.
+- **Acciones**: checks en `_obtener_y_validar_aprobacion` (aprobar), `/devolver` (sólo desde `pendiente_aprobacion`) y `/rechazar` (mismas reglas que aprobar; ADMIN pasa siempre).
+- **Notificaciones**: `_enviar_a_perfil` acepta `cliente` opcional y filtra por alcance; si NADIE tiene ese cliente → fallback a los de alcance TODOS + `logger.warning` (ninguna solicitud queda huérfana). `_notificar_envio_aprobacion` pasa el cliente de la solicitud. Las notificaciones a ANALISTA/FINANCIERO no cambian.
+- **`GET /otros-costos/mi-alcance?usuario=`**: `{perfil, todos, clientes}` para el chip del frontend.
+
+**Backend** (`rutas/baseusuarios.py`): `modelo_usuario` expone `clientes_aprobacion`; `PATCH /{id}/clientes-aprobacion` normaliza (canónico `[]` = TODOS) y valida contra `clientes_otros_costos` (422 si un cliente no existe).
+
+**Frontend**: GestionUsuarios — columna "Alcance OC" (sólo filas COORDINADOR/CONTROL; ámbar cuando está restringido) con modal de checkboxes del catálogo + opción TODOS (`actualizarClientesAprobacion`). OtrosCostos — chip "Alcance: …" junto a Buscar para coordinadores/control restringidos; los botones no se ocultan (el listado ya filtra y el 403 se muestra legible vía `extraerErrorApi`). Requiere deploy de backend y frontend.
 
 ## Actualizaciones Recientes (2026-09-23)
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from bd.bd_cliente import bd_cliente
 from Funciones.claves import crear_hash, verificar_clave
+from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 # ==============================================================================
 # 🔗 CONFIGURACIÓN DE BASE DE DATOS
@@ -67,6 +68,23 @@ FRONTEND_URL_INVITACION = os.getenv(
     "FRONTEND_URL_INVITACION",
     "https://integralogistica.com/integrapp/AceptarInvitacion",
 )
+# Login del portal de conductores (para el correo de credenciales del alta).
+FRONTEND_URL_LOGIN = os.getenv(
+    "FRONTEND_URL_LOGIN",
+    "https://integralogistica.com/integrapp/LoginConductores",
+)
+# Plantillas WA del alta — DOBLE mensaje (2026-10-02, decisión del usuario):
+# ① UTILIDAD `enruta_clave_cuenta` (APROBADA): bienvenida + {{1}} = correo +
+#    botón «Abrir IntegrApp» — texto ultra-limpio, sin lenguaje de acceso
+#    (cualquier mención de usuario/clave/ingresar dispara el rechazo).
+# ② AUTENTICACIÓN `enruta_codigo_acceso`: cuerpo fijo de Meta con {{1}} = la
+#    clave como código de un solo uso + botón «Copiar código» (es la única
+#    categoría que acepta credenciales, y su cuerpo ya no es editable).
+# La clave JAMÁS va dentro de la plantilla de Utilidad (Meta la rechaza y
+# esconderla en una variable = variable-abuse que arriesga el WABA de las
+# notificaciones oc_*). Creadas por el usuario en WhatsApp Manager.
+PLANTILLA_ENRUTA_CUENTA = ("enruta_clave_cuenta", "es_CO")
+PLANTILLA_ENRUTA_CLAVE = ("enruta_codigo_acceso", "es_CO")
 EXPIRA_HORAS_VERIFICACION = int(os.getenv("VERIFICACION_EXPIRE_HORAS", "48"))
 
 
@@ -331,6 +349,109 @@ def enviar_correo_codigo(destinatario: str, codigo: str):
         print(f"❌ Error crítico enviando correo: {e}")
 
 
+def enviar_correo_credenciales(destinatario: str, clave: str, perfil: str, creado_por: str):
+    """
+    Correo con las CREDENCIALES de la cuenta creada por Seguridad (alta de
+    vehículo, 2026-10-02): el conductor recibe su usuario y su clave temporal
+    sin esperar a que alguien se los haga llegar. Fire-and-forget: si falla,
+    la clave ya quedó mostrada en pantalla UNA vez como respaldo.
+    """
+    if not resend.api_key or "TuApiKeyAqui" in resend.api_key:
+        print("⚠️ ERROR: Falta API KEY de Resend; no se envió el correo de credenciales.")
+        return
+    rol = "tenedor del vehículo" if perfil == "TENEDOR" else "conductor"
+    html = f"""
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto;">
+      <h2 style="color: #0f1928;">Tu cuenta de IntegrApp En Ruta</h2>
+      <p>Hola{f', {creado_por} de Seguridad creó' if creado_por else 'Crearon'} tu cuenta
+      como {rol}. Con ella ingresas al portal para completar el registro de tu
+      vehículo y ofrecer tu disponibilidad.</p>
+      <p>Tus datos de ingreso son:</p>
+      <div style="background: #f4f6f8; border-radius: 10px; padding: 16px 20px; margin: 16px 0;">
+        <p style="margin: 4px 0;"><strong>Usuario:</strong> {destinatario}</p>
+        <p style="margin: 4px 0;"><strong>Clave:</strong> {clave}</p>
+      </div>
+      <p style="text-align: center; margin: 28px 0;">
+        <a href="{FRONTEND_URL_LOGIN}"
+           style="background: #0f1928; color: #fff; padding: 12px 28px; border-radius: 10px;
+                  text-decoration: none; font-weight: bold;">
+          Ingresar al portal
+        </a>
+      </p>
+      <p>O copia y pega este enlace en tu navegador:</p>
+      <p><a href="{FRONTEND_URL_LOGIN}">{FRONTEND_URL_LOGIN}</a></p>
+      <p>En tu primer ingreso deberás leer y aceptar las declaraciones de
+      vinculación (Habeas Data); ese paso es personal y no puede hacerlo nadie
+      por ti. Guarda este correo: la clave no se vuelve a mostrar.</p>
+      <p><small>Si no reconoces esta cuenta, comunícate con Integra Logística.</small></p>
+    </div>
+    """
+    try:
+        resend.Emails.send({
+            "from": MAIL_FROM,
+            "to": [destinatario],
+            "subject": "Tu usuario y clave — IntegrApp En Ruta",
+            "html": html,
+        })
+        print(f"📧 Correo de credenciales enviado a {destinatario}")
+    except Exception as e:
+        print(f"❌ Error enviando correo de credenciales: {e}")
+
+
+def _celular_whatsapp(celular: str) -> Optional[str]:
+    """
+    Normaliza el celular del alta al formato de la API de WhatsApp (solo
+    dígitos con indicativo de país). El PhoneField del formulario guarda:
+    +57 → solo dígitos locales (10, empiezan por 3); otra región →
+    "+<código> <número>". Devuelve None si no alcanza para un número útil.
+    """
+    digitos = re.sub(r"\D", "", celular or "")
+    if len(digitos) == 10 and digitos.startswith("3"):
+        return f"57{digitos}"          # celular colombiano sin indicativo
+    if len(digitos) >= 11:             # ya trae indicativo (57 u otro país)
+        return digitos
+    return None
+
+
+def _enviar_wa_credenciales(celular: str, usuario: str, clave: str):
+    """
+    WhatsApp DOBLE de la cuenta nueva: ① Utilidad (aviso + usuario + botón al
+    portal) y ② Autenticación (la clave como código con «Copiar código»).
+    Cada envío es independiente (el fallo de uno no tapa el otro) y todo es
+    fire-and-forget: si una plantilla sigue pendiente en Meta o el número no
+    sirve, solo queda el log — jamás rompe el alta.
+    """
+    destino = _celular_whatsapp(celular)
+    if not destino:
+        print(f"[alta-seguridad] Sin celular útil ({celular!r}); no se envió WhatsApp.")
+        return
+    # Prints SIN emoji: en consolas sin UTF-8 (Windows/cp1252) un print con
+    # emoji lanza UnicodeEncodeError DENTRO del try y mataba el segundo envío.
+    # El helper devuelve None si Meta rechaza (no lanza): el log solo dice
+    # "enviado" cuando fue 200 de verdad.
+    try:
+        ok = enviar_template_sync(
+            destino, PLANTILLA_ENRUTA_CUENTA[0], PLANTILLA_ENRUTA_CUENTA[1],
+            [usuario])  # {{1}} = correo (el usuario de la cuenta)
+        if ok:
+            print(f"[alta-seguridad] WhatsApp de aviso de cuenta enviado a +{destino}")
+    except Exception as e:
+        print(f"[alta-seguridad] Error enviando WhatsApp de aviso: {e}")
+    try:
+        ok = enviar_template_sync(
+            destino, PLANTILLA_ENRUTA_CLAVE[0], PLANTILLA_ENRUTA_CLAVE[1],
+            [clave],  # {{1}} = clave (código de un solo uso)
+            # La plantilla de Autenticación con «Copiar código» EXIGE el código
+            # también como parámetro del botón, y el botón viaja por la API
+            # como sub_type "url" (no "copy_code": Meta responde
+            # "Button at index 0 must be of type Url").
+            botones=[{"sub_type": "url", "parameters": [clave]}])
+        if ok:
+            print(f"[alta-seguridad] WhatsApp de la clave enviado a +{destino}")
+    except Exception as e:
+        print(f"[alta-seguridad] Error enviando WhatsApp de la clave: {e}")
+
+
 def _existe_correo(correo: str) -> bool:
     if not correo:
         return False
@@ -506,7 +627,7 @@ def _generar_clave_legible() -> str:
 
 
 @ruta_conductores.post("/alta-seguridad", response_model=dict)
-async def alta_por_seguridad(data: AltaSeguridadInput):
+async def alta_por_seguridad(data: AltaSeguridadInput, background_tasks: BackgroundTasks):
     correo_norm = (data.correo or "").strip()
     if not correo_norm or "@" not in correo_norm:
         raise HTTPException(status_code=400, detail="El correo del conductor es obligatorio.")
@@ -552,9 +673,23 @@ async def alta_por_seguridad(data: AltaSeguridadInput):
     insertado = coleccion_conductores.insert_one(nuevo).inserted_id
     print(f"[alta-seguridad] Conductor {nuevo['correo']} creado por {nuevo['alta_por']}")
 
+    # Correo automático con las credenciales (2026-10-02): fire-and-forget —
+    # la clave igual se muestra UNA vez abajo como respaldo si el correo falla.
+    background_tasks.add_task(
+        enviar_correo_credenciales, correo_norm, clave_plana,
+        perfil_solicitado, nuevo["alta_por"])
+    # WhatsApp con las credenciales (plantilla enruta_cuenta_creada), solo si
+    # el alta trae celular útil — también fire-and-forget.
+    if _celular_whatsapp(data.celular):
+        background_tasks.add_task(
+            _enviar_wa_credenciales, data.celular, nuevo["correo"], clave_plana)
+
     return {
-        "mensaje": "Conductor creado. Envíale su usuario (correo) y la clave.",
+        "mensaje": ("Conductor creado. Le enviamos sus credenciales por correo"
+                    "%s; guárdate esta clave por si no llegan."
+                    % (" y WhatsApp" if _celular_whatsapp(data.celular) else "")),
         "clave": clave_plana,  # se muestra UNA sola vez
+        "credenciales_enviadas": True,
         "usuario": {"id": str(insertado), "correo": nuevo["correo"], "perfil": perfil_solicitado},
     }
 
@@ -1084,6 +1219,9 @@ class InvitarConductorInput(BaseModel):
     placa: str
     correo_conductor: str
     nombre_conductor: Optional[str] = None
+    # Celular (WhatsApp) del conductor invitado (2026-10-02): lo pide el popup
+    # de invitación en el paso 2; queda en la cuenta stub para notificaciones.
+    celular_conductor: Optional[str] = None
 
 
 def _correo_patron(correo: str) -> dict:
@@ -1175,13 +1313,14 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
     # Crear (o reusar) cuenta stub: sin clave usable hasta que el conductor
     # la elija en la página de aceptación.
     ahora = datetime.now(timezone.utc)
+    celular_invitado = (data.celular_conductor or "").strip() or None
     if not existente:
         doc_stub = {
             "nombre": (data.nombre_conductor or correo_invitado.split("@")[0]).upper(),
             "correo": correo_invitado.upper(),
             "cedula": None,
             "regional": "N/A",
-            "celular": None,
+            "celular": celular_invitado,
             "perfil": "CONDUCTOR",
             "clave": crear_hash(secrets.token_urlsafe(24)),  # aleatoria: nadie la conoce
             "clientes": [],
@@ -1192,9 +1331,12 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
         stub_id = coleccion_conductores.insert_one(doc_stub).inserted_id
     else:
         stub_id = existente["_id"]
+        cambios_stub = {"invitado_por": str(data.id_tenedor)}
+        if celular_invitado:  # actualiza el celular si la invitación lo trae
+            cambios_stub["celular"] = celular_invitado
         coleccion_conductores.update_one(
             {"_id": stub_id},
-            {"$set": {"invitado_por": str(data.id_tenedor)}},
+            {"$set": cambios_stub},
         )
 
     token = _generar_token_verificacion(stub_id)

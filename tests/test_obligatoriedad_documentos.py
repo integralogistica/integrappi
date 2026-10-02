@@ -243,22 +243,24 @@ class JsonSeguroTests(unittest.TestCase):
 
 
 class NombreDocBucketTests(unittest.TestCase):
-    """Nomenclatura de archivos en el bucket: {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}.{ext}
+    """Nomenclatura de archivos en el bucket: {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}_{placa}.{ext}
     (Desde 2026-08-31 SIN cédula en el nombre: minimización — las rutas llegan
-    a logs de GCS y proxies, mismo criterio que los estudios de seguridad.)"""
+    a logs de GCS y proxies, mismo criterio que los estudios de seguridad.
+    Desde 2026-10-02 CON la placa al FINAL del nombre, en minúscula: cada
+    archivo identifica su vehículo aunque se descargue o mueva de la carpeta.)"""
 
     def test_cedula_no_va_en_el_nombre(self):
         v = {"condCedulaCiudadania": "1.020.304.050"}
         nombre = vehiculos._nombre_doc_bucket("mx48e", "soat", "pdf", v)
-        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/soat\.pdf$")
+        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/soat_mx48e\.pdf$")
 
     def test_nombre_simple(self):
         nombre = vehiculos._nombre_doc_bucket("MX48E", "firma", "webp", {})
-        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/firma\.webp$")
+        self.assertRegex(nombre, r"^MX48E/\d{4}-\d{2}-\d{2}/firma_mx48e\.webp$")
 
     def test_sufijo_fotos(self):
         nombre = vehiculos._nombre_doc_bucket("ABC123", "foto", "webp", None, sufijo="_002")
-        self.assertRegex(nombre, r"^ABC123/\d{4}-\d{2}-\d{2}/foto_002\.webp$")
+        self.assertRegex(nombre, r"^ABC123/\d{4}-\d{2}-\d{2}/foto_002_abc123\.webp$")
 
 
 class CamposDocumentoProtegidosTests(unittest.TestCase):

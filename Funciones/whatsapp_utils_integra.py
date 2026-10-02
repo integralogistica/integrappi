@@ -77,12 +77,16 @@ def enviar_template_sync(
     template_name: str,
     language_code: str,
     body_params: list,
+    botones: list | None = None,
 ):
     """
     Versión síncrona de envío de template. Usa httpx.Client para llamarse
     desde contextos no-async (hilos del scheduler, funciones de sync).
     Lee los tokens en el momento de la llamada para evitar problemas de
     orden de inicialización del módulo.
+    `botones`: parámetros de botones del template — lista de
+    {sub_type, parameters: [texto...]} (las plantillas de AUTENTICACIÓN con
+    «Copiar código» exigen el código también como parámetro del botón).
     """
     token    = os.getenv("WHATSAPP_API_TOKEN") or WHATSAPP_API_TOKEN
     phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID") or PHONE_NUMBER_ID
@@ -91,6 +95,19 @@ def enviar_template_sync(
         return None
     graph_url = f"https://graph.facebook.com/v22.0/{phone_id}/messages"
     headers   = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    componentes = [
+        {
+            "type": "body",
+            "parameters": [{"type": "text", "text": p} for p in body_params],
+        }
+    ]
+    for indice, boton in enumerate(botones or []):
+        componentes.append({
+            "type": "button",
+            "sub_type": boton.get("sub_type", "copy_code"),
+            "index": indice,
+            "parameters": [{"type": "text", "text": p} for p in boton.get("parameters", [])],
+        })
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -98,12 +115,7 @@ def enviar_template_sync(
         "template": {
             "name": template_name,
             "language": {"code": language_code},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [{"type": "text", "text": p} for p in body_params],
-                }
-            ],
+            "components": componentes,
         },
     }
     try:

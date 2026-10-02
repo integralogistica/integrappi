@@ -230,11 +230,8 @@ class SujetosEstudioTests(unittest.TestCase):
             return {"estado": "finalizado", "hallazgo": False, "hallazgos": "",
                     "results": {"RUES": False}, "id": "rep-nit-1"}
 
-        class Resp:
-            content = b"%PDF-empresa"
-
         async def pdf_nit(_id):
-            return Resp()
+            return b"%PDF-empresa"
 
         subidas = []
         import asyncio
@@ -444,11 +441,8 @@ class DispararEstudiosTests(unittest.TestCase):
         (best-effort: si la subida falla, el estudio IGUAL finaliza)."""
         subidas = []
 
-        class Respuesta:
-            content = b"%PDF-1.4 contenido de prueba"
-
         async def pdf(_id):
-            return Respuesta()
+            return b"%PDF-1.4 contenido de prueba"
 
         def subir(ruta, contenido):
             subidas.append((ruta, contenido))
@@ -471,9 +465,10 @@ class DispararEstudiosTests(unittest.TestCase):
             self.assertEqual(e["estado"], "finalizado")
             self.assertIn("pdf_gcs", e)
             self.assertTrue(e["pdf_gcs"]["ruta"].startswith("Vehiculos/ABC123/"))
-            self.assertTrue(e["pdf_gcs"]["ruta"].endswith("_rep-123.pdf"))
+            # La placa va AL FINAL del nombre (2026-10-02)
+            self.assertTrue(e["pdf_gcs"]["ruta"].endswith("_rep-123_abc123.pdf"))
         # La ruta es determinística por reporte_id (persona por cédula)
-        self.assertIn("persona_1020304050_rep-123.pdf", subidas[0][0])
+        self.assertIn("persona_1020304050_rep-123", subidas[0][0])
 
     def test_fallo_del_archivo_no_tumba_el_estudio(self):
         def subir(_ruta, _contenido):
@@ -494,6 +489,28 @@ class DispararEstudiosTests(unittest.TestCase):
         for e in estudios:
             self.assertEqual(e["estado"], "finalizado")  # archivado falló y siguió
             self.assertNotIn("pdf_gcs", e)
+
+    def test_handlers_pdf_devuelven_bytes(self):
+        """Regresión (2026-10-02, WOO453): los handlers de PDF que consume el
+        módulo deben devolver los BYTES del reporte — antes se importaban los
+        handlers de RUTA de /tusdatos (Response de FastAPI, sin .content) y
+        tanto el archivado como el endpoint /pdf/ reventaban con
+        'Response' object has no attribute 'content'."""
+        from rutas import tusdatos
+
+        class RespuestaHttpx:
+            content = b"%PDF-real"
+
+        async def pedido(_metodo, ruta, **_kw):
+            assert "report_pdf" in ruta or "report_nit_pdf" in ruta
+            return RespuestaHttpx()
+
+        import asyncio
+        with patch.object(tusdatos, "_pedido", pedido):
+            persona = asyncio.run(estudios_automaticos._td_reporte_pdf("rep-1"))
+            nit = asyncio.run(estudios_automaticos._td_reporte_nit_pdf("rep-2"))
+        self.assertEqual(persona, b"%PDF-real")
+        self.assertEqual(nit, b"%PDF-real")
 
     def test_vigencia_se_sella_al_disparar(self):
         """La corrida lleva estudiosVigencia {desde, vence=+VIGENCIA_MESES}."""

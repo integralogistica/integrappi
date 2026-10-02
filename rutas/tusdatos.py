@@ -98,6 +98,18 @@ async def _pedido_json(metodo: str, ruta: str, **kw) -> dict:
     return (await _pedido(metodo, ruta, **kw)).json()
 
 
+async def _bajar_reporte_pdf(id_reporte: str) -> bytes:
+    """PDF del reporte de PERSONA, como BYTES (para uso interno: los handlers
+    HTTP y estudios_automaticos comparten esta lógica — devolver el Response
+    de FastAPI rompía a los consumidores que esperaban .content)."""
+    return (await _pedido("GET", f"/api/v2/report_pdf/{id_reporte}")).content
+
+
+async def _bajar_reporte_nit_pdf(id_reporte: str) -> bytes:
+    """PDF del reporte de EMPRESA (NIT), como BYTES (ver _bajar_reporte_pdf)."""
+    return (await _pedido("GET", f"/api/v2/report_nit_pdf/{id_reporte}")).content
+
+
 # --- Modelos ------------------------------------------------
 
 TIPOS_DOCUMENTO = ("CC", "CE", "INT", "NIT", "PP", "PPT", "NOMBRE")
@@ -263,16 +275,16 @@ async def reporte_html(id_reporte: str):
 @ruta_tusdatos.get("/reportes/{id_reporte}/pdf")
 async def reporte_pdf(id_reporte: str):
     """PDF del reporte de persona; para empresas usar /pdf-nit."""
-    respuesta = await _pedido("GET", f"/api/v2/report_pdf/{id_reporte}")
-    return Response(content=respuesta.content, media_type="application/pdf",
+    return Response(content=await _bajar_reporte_pdf(id_reporte),
+                    media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="reporte_{id_reporte}.pdf"'})
 
 
 @ruta_tusdatos.get("/reportes/{id_reporte}/pdf-nit")
 async def reporte_nit_pdf(id_reporte: str):
     """PDF del reporte de empresa (NIT)."""
-    respuesta = await _pedido("GET", f"/api/v2/report_nit_pdf/{id_reporte}")
-    return Response(content=respuesta.content, media_type="application/pdf",
+    return Response(content=await _bajar_reporte_nit_pdf(id_reporte),
+                    media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="reporte_nit_{id_reporte}.pdf"'})
 
 

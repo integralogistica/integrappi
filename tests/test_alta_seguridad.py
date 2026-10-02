@@ -131,6 +131,73 @@ class AltaSeguridadTests(unittest.TestCase):
         self.assertTrue(doc["pendiente_aceptacion_politica"])  # él acepta al entrar
         self.assertTrue(doc["alta_por_seguridad"])
 
+    def test_alta_envia_correo_con_credenciales(self):
+        """Al crear la cuenta se le envía AL CONDUCTOR un correo con su
+        usuario y clave (fire-and-forget; la clave igual se muestra una vez
+        en pantalla como respaldo)."""
+        fake = FakeColeccion()
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "enviar_correo_credenciales") as correo:
+            r = cliente.post("/conductores/alta-seguridad", json={
+                "correo": "nuevo@correo.com", "perfil": "TENEDOR",
+                "creado_por": "EDWIN"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["credenciales_enviadas"])
+        correo.assert_called_once()  # background task ejecutada por TestClient
+        destino, clave = correo.call_args[0][0], correo.call_args[0][1]
+        self.assertEqual(destino, "nuevo@correo.com")
+        self.assertEqual(clave, r.json()["clave"])  # la MISMA que se muestra
+        self.assertIn("TENEDOR", correo.call_args[0][2:])
+
+    def test_alta_envia_whatsapp_con_credenciales(self):
+        """Si el alta trae celular útil salen DOS plantillas: Utilidad
+        ({{1}} = correo, el usuario) y Autenticación ({{1}} = la clave como
+        código) — la clave nunca viaja dentro de la plantilla de Utilidad."""
+        fake = FakeColeccion()
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "enviar_correo_credenciales"), \
+             patch.object(conductores, "enviar_template_sync") as wa:
+            r = cliente.post("/conductores/alta-seguridad", json={
+                "correo": "nuevo@correo.com", "perfil": "CONDUCTOR",
+                "celular": "+57 310 456 7890"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("WhatsApp", r.json()["mensaje"])
+        self.assertEqual(wa.call_count, 2)
+        destino1, plantilla1, _, params1 = wa.call_args_list[0][0]
+        destino2, plantilla2, _, params2 = wa.call_args_list[1][0]
+        # ① Utilidad (bienvenida): aviso + usuario + botón al portal
+        self.assertEqual((destino1, plantilla1), ("573104567890", "enruta_clave_cuenta"))
+        self.assertEqual(params1, ["NUEVO@CORREO.COM"])
+        # ② Autenticación: la clave como código de un solo uso — el botón
+        # «Copiar código» viaja por la API como sub_type "url" con la clave
+        # como parámetro (copy_code → 400 "must be of type Url").
+        self.assertEqual((destino2, plantilla2), ("573104567890", "enruta_codigo_acceso"))
+        self.assertEqual(params2, [r.json()["clave"]])
+        botones = wa.call_args_list[1][1]["botones"]
+        self.assertEqual(botones, [{"sub_type": "url",
+                                    "parameters": [r.json()["clave"]]}])
+
+    def test_alta_sin_celular_no_envia_whatsapp(self):
+        fake = FakeColeccion()
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "enviar_correo_credenciales"), \
+             patch.object(conductores, "enviar_template_sync") as wa:
+            r = cliente.post("/conductores/alta-seguridad", json={
+                "correo": "nuevo@correo.com"})
+        self.assertEqual(r.status_code, 200)
+        wa.assert_not_called()
+
+    def test_normalizacion_celular_whatsapp(self):
+        n = conductores._celular_whatsapp
+        self.assertEqual(n("3104567890"), "573104567890")      # local CO
+        self.assertEqual(n("+57 310 456 7890"), "573104567890")
+        self.assertEqual(n("+1 555 123 4567"), "15551234567")  # otro país
+        self.assertIsNone(n("12345"))                          # muy corto
+        self.assertIsNone(None)                                # ausente
+
     def test_alta_registra_creador_y_se_lista(self):
         """El alta guarda quién creó la cuenta; el listado lo muestra (sin
         claves) con el estado de políticas."""

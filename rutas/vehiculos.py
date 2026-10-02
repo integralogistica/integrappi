@@ -198,17 +198,22 @@ def _nombre_doc_bucket(placa: str, tipo: str, extension: str, vehiculo: dict = N
     """
     Nomenclatura estándar de archivos en el bucket (2026-08-27; SIN cédula
     desde 2026-08-31 — minimización: las rutas llegan a logs de GCS y proxies,
-    mismo criterio que los estudios de seguridad):
-        {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}.{ext}
-    Ej: Vehiculos/MX48E/2026-08-27/soat.pdf
+    mismo criterio que los estudios de seguridad; CON placa al final del
+    nombre desde 2026-10-02, pedido del usuario: cada archivo identifica su
+    vehículo aunque se descargue o se mueva fuera de la carpeta):
+        {PLACA}/{AAAA-MM-DD}/{tipo}{sufijo}_{placa}.{ext}
+    Ej: Vehiculos/MX48E/2026-08-27/soat_mx48e.pdf
     — Agrupado por placa → fecha → documento. Re-subir el mismo doc el mismo
     día pisa el archivo (sin duplicados); otro día crea versión nueva y Mongo
-    queda con la ruta vigente (la anterior queda como histórico).
+    queda con la ruta vigente (la anterior queda como histórico). Los archivos
+    previos al cambio (sin el sufijo de placa) siguen sirviendo tal cual: Mongo
+    guarda la ruta completa y no se migra nada.
     (El parámetro `vehiculo` se mantiene por compatibilidad de firma y ya no
     aporta nada a la nomenclatura.)
     """
     fecha = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
-    return f"{placa.strip().upper()}/{fecha}/{tipo}{sufijo}.{extension}"
+    placa_limpia = placa.strip().upper()
+    return f"{placa_limpia}/{fecha}/{tipo}{sufijo}_{placa_limpia.lower()}.{extension}"
 
 
 _RE_URL_PUBLICA_GCS = re.compile(r"^https://storage\.googleapis\.com/[^/]+/")
@@ -2595,10 +2600,10 @@ async def pdf_estudio(placa: str, estudio_id: str):
                    "Usa «Volver a consultar» para regenerarlo.")
 
     try:
+        # Los handlers devuelven los BYTES del PDF (no un Response HTTP).
         handler_pdf = (ea._td_reporte_nit_pdf if estudio.get("tipo") == "empresa"
                        else ea._td_reporte_pdf)
-        respuesta = await handler_pdf(str(reporte_id))
-        contenido = respuesta.content
+        contenido = await handler_pdf(str(reporte_id))
     except HTTPException as e:
         raise HTTPException(
             status_code=410,

@@ -49,12 +49,12 @@ from rutas.tusdatos import (
     ConsultaCompletaIn,
     NitIn,
     VehiculoCompletaIn,
+    _bajar_reporte_nit_pdf as _td_reporte_nit_pdf,
+    _bajar_reporte_pdf as _td_reporte_pdf,
     _configurado,
     _esperar as _td_esperar,
     consulta_completa,
     consulta_vehiculo,
-    reporte_nit_pdf as _td_reporte_nit_pdf,
-    reporte_pdf as _td_reporte_pdf,
     reintentar_fuentes as _td_reintentar,
     verificar_nit as _td_verificar_nit,
 )
@@ -114,10 +114,10 @@ async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | 
     """
     try:
         # El reporte de empresa tiene su propio endpoint (pdf-nit).
+        # Los handlers devuelven los BYTES del PDF (no un Response HTTP).
         handler_pdf = (_td_reporte_nit_pdf if sujeto.get("tipo") == "empresa"
                        else _td_reporte_pdf)
-        respuesta = await handler_pdf(str(reporte_id))
-        contenido = respuesta.content
+        contenido = await handler_pdf(str(reporte_id))
         if not contenido:
             return None
         if sujeto.get("tipo") == "persona":
@@ -127,7 +127,11 @@ async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | 
         else:
             sufijo = f"vehiculo_{str(sujeto.get('placa') or '').upper()}"
         fecha = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
-        ruta_blob = f"{PDF_CARPETA}/{placa}/{fecha}/estudioAuto_{sufijo}_{reporte_id}.pdf"
+        # La placa va AL FINAL del nombre (2026-10-02, pedido del usuario):
+        # estudioAuto_persona_1003823519_{reporte_id}_{placa}.pdf — el archivo
+        # identifica su vehículo aunque se descargue o mueva de la carpeta.
+        ruta_blob = (f"{PDF_CARPETA}/{placa}/{fecha}/"
+                     f"estudioAuto_{sufijo}_{reporte_id}_{placa.lower()}.pdf")
         _subir_blob_pdf(ruta_blob, contenido)
         return {"ruta": ruta_blob, "tamano": len(contenido),
                 "archivado_en": datetime.utcnow()}
@@ -409,7 +413,7 @@ async def barrido_renovacion() -> int:
             placa = vehiculo.get("placa")
             if not placa:
                 continue
-            print(f"[estudios-auto] 🔄 Renovación por vigencia vencida: {placa}")
+            _log(f"[estudios-auto] 🔄 Renovación por vigencia vencida: {placa}")
             await disparar_estudios(placa, re_revision=False, forzar=True)
             renovados += 1
             if renovados >= max(1, RENOVACIONES_POR_CICLO):
@@ -545,6 +549,17 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
     return cambios
 
 
+def _log(mensaje: str) -> None:
+    """print SEGURO: en consolas sin UTF-8 (Windows/cp1252) el emoji del
+    mensaje de reúso reventaba con UnicodeEncodeError DENTRO del try y el
+    estudio quedaba marcado 'error' pese a haber salido bien. Un fallo de
+    stdout jamás es un fallo del estudio."""
+    try:
+        print(mensaje)
+    except UnicodeEncodeError:
+        print(mensaje.encode("ascii", "replace").decode("ascii"))
+
+
 def _buscar_estudio_reutilizable(sujeto: dict) -> tuple:
     """
     Reutilización ENTRE VEHÍCULOS (2026-09-28, pedido del usuario: no gastar
@@ -660,9 +675,9 @@ async def _ejecutar_uno(placa: str, sujeto: dict, estudio_id: str) -> None:
                     "finalizado_en": datetime.utcnow(),
                 })
                 _actualizar_estudio(placa, estudio_id, cambios)
-                print(f"[estudios-auto] ♻️ {placa}: estudio de "
-                      f"{sujeto.get('cedula') or sujeto.get('placa')} "
-                      f"reutilizado de {placa_origen} (sin gasto)")
+                _log(f"[estudios-auto] ♻️ {placa}: estudio de "
+                     f"{sujeto.get('cedula') or sujeto.get('placa')} "
+                     f"reutilizado de {placa_origen} (sin gasto)")
                 return
 
         respuesta = await _llamar_proveedor(sujeto)

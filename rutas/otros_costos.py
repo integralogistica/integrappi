@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from bd.bd_cliente import bd_cliente
+from Funciones.utilidades_texto import norm_cliente_oc
 from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,9 @@ def _resolver_usuario(usuario: str) -> dict:
         "regional": doc.get("regional", ""),
         "nombre": doc.get("nombre", ""),
         "id": str(doc["_id"]),
+        "clientes_aprobacion": [
+            c for c in (doc.get("clientes_aprobacion") or []) if isinstance(c, str)
+        ],
     }
 
 
@@ -293,6 +297,79 @@ def _requiere(info: dict, perfiles: set[str], accion: str):
             status_code=403,
             detail=f"Su perfil ({info['perfil']}) no tiene permiso para {accion}.",
         )
+
+
+# ── Alcance de aprobación por cliente (COORDINADOR/CONTROL) ───────────────────
+# El campo `clientes_aprobacion` de baseusuarios limita a qué clientes puede
+# aprobar/devolver/rechazar/ver/notificarse un COORDINADOR o CONTROL:
+#   [] o ausente (o contiene "TODOS") → SIN restricción (comportamiento histórico)
+#   ["FRESENIUS KABI", ...]            → sólo esos clientes (match normalizado)
+# ADMIN y el resto de perfiles nunca se restringen por esta vía.
+PERFILES_ALCANCE_CLIENTES = {"COORDINADOR", "CONTROL"}
+
+
+def _alcance_aprobacion(info: dict) -> Optional[List[str]]:
+    """None = sin restricción (TODOS); lista normalizada = alcance del usuario."""
+    crudo = info.get("clientes_aprobacion") or []
+    norm: List[str] = []
+    for c in crudo:
+        n = norm_cliente_oc(c)
+        if n and n not in norm:
+            norm.append(n)
+    if not norm or "TODOS" in norm:
+        return None
+    return norm
+
+
+def _cliente_en_alcance(info: dict, doc: dict) -> bool:
+    """True si el usuario puede actuar sobre la solicitud (por su cliente).
+    Sólo restringe a COORDINADOR/CONTROL; la restricción de perfil la pone _requiere."""
+    if info.get("perfil") not in PERFILES_ALCANCE_CLIENTES:
+        return True
+    alcance = _alcance_aprobacion(info)
+    if alcance is None:
+        return True
+    cliente = norm_cliente_oc((doc.get("datos_servicio") or {}).get("cliente", ""))
+    return cliente in alcance
+
+
+def _denegar_fuera_de_alcance(info: dict, doc: dict):
+    """403 claro cuando la solicitud es de un cliente fuera del alcance del aprobador."""
+    if not _cliente_en_alcance(info, doc):
+        cliente = (doc.get("datos_servicio") or {}).get("cliente") or "sin cliente"
+        raise HTTPException(
+            status_code=403,
+            detail=f"No tiene al cliente '{cliente}' en su alcance de aprobación de Otros Costos. "
+                   "Contacte al administrador si necesita aprobarlo.",
+        )
+
+
+# Clases de caracteres para matchear vocales con/sin acento en regex anclada:
+# `datos_servicio.cliente` es texto libre y los docs viejos pueden traer
+# minúsculas o acentos ("Ortopédicos Futuro" vs "ORTOPEDICOS FUTURO").
+_CLASES_LETRA_OC = {
+    "A": "AÁÀÂÄaáàâä", "E": "EÉÈÊËeéèêë", "I": "IÍÌÎÏiíìîï",
+    "O": "OÓÒÔÖoóòôö", "U": "UÚÙÛÜuúùûü", "N": "NÑnñ", " ": " ",
+}
+
+
+def _regex_cliente_exacto(cliente: str) -> dict:
+    """Filtro Mongo de igualdad insensible a mayúsculas/acentos sobre un cliente."""
+    patron = "".join(
+        f"[{_CLASES_LETRA_OC[ch]}]" if ch in _CLASES_LETRA_OC else re.escape(ch)
+        for ch in norm_cliente_oc(cliente)
+    )
+    return {"$regex": f"^{patron}$", "$options": "i"}
+
+
+def _filtro_clientes_alcance(info: dict) -> Optional[dict]:
+    """Filtro Mongo {$or: [...]} con los clientes del alcance, o None si no aplica."""
+    if info.get("perfil") not in PERFILES_ALCANCE_CLIENTES:
+        return None
+    alcance = _alcance_aprobacion(info)
+    if alcance is None:
+        return None
+    return {"$or": [_regex_cliente_exacto(c) for c in alcance]}
 
 
 # ── Normalización de pedidos Vulcano (spec §4) ────────────────────────────────
@@ -522,9 +599,24 @@ def _valor_cop(v) -> str:
         return "0"
 
 
-def _enviar_a_perfil(perfil: str, plantilla: tuple, body_params_fn, *, consecutivo: str) -> None:
+def _usuario_cubre_cliente(u: dict, cliente_norm: str) -> bool:
+    """True si el usuario (doc crudo de baseusuarios) debe recibir notificaciones
+    de `cliente_norm` (ya normalizado). Alcance vacío o con "TODOS" = cubre todo."""
+    crudo = u.get("clientes_aprobacion") or []
+    alcance = {norm_cliente_oc(c) for c in crudo if isinstance(c, str)}
+    alcance.discard("")
+    return (not alcance) or ("TODOS" in alcance) or (cliente_norm in alcance)
+
+
+def _enviar_a_perfil(perfil: str, plantilla: tuple, body_params_fn, *, consecutivo: str,
+                     cliente: Optional[str] = None) -> None:
     """Itera los usuarios activos de `perfil` y les envía la plantilla. `body_params_fn`
-    recibe (nombre) y devuelve la lista de parámetros del cuerpo ({{1}}, {{2}}, ...)."""
+    recibe (nombre) y devuelve la lista de parámetros del cuerpo ({{1}}, {{2}}, ...).
+
+    `cliente` (opcional): filtra por alcance de aprobación — sólo se notifica a los
+    usuarios cuyo `clientes_aprobacion` cubra ese cliente (vacío/"TODOS" = cubre).
+    Si nadie lo cubre, se reintenta con los de alcance TODOS del perfil (para que
+    ninguna solicitud quede huérfana) dejando warning en el log."""
     try:
         usuarios = list(col_usuarios.find({
             "perfil": perfil,
@@ -533,6 +625,16 @@ def _enviar_a_perfil(perfil: str, plantilla: tuple, body_params_fn, *, consecuti
         if not usuarios:
             logger.info(f"[NOTIF OC] No hay usuarios activos con perfil {perfil}; no se notifica ({consecutivo}).")
             return
+        if cliente:
+            cliente_norm = norm_cliente_oc(cliente)
+            filtrados = [u for u in usuarios if _usuario_cubre_cliente(u, cliente_norm)]
+            if not filtrados:
+                filtrados = [u for u in usuarios if _usuario_cubre_cliente(u, "")]
+                logger.warning(
+                    f"[NOTIF OC] {perfil}: ningún usuario tiene '{cliente}' en su alcance; "
+                    f"fallback a los de alcance TODOS ({consecutivo})."
+                )
+            usuarios = filtrados
         enviadas = 0
         for u in usuarios:
             celular = _normalizar_celular_co(u.get("celular"))
@@ -580,14 +682,16 @@ def _enviar_a_creador(doc: dict, plantilla: tuple, body_params_fn) -> None:
 
 def _notificar_envio_aprobacion(doc: dict) -> None:
     """→ pendiente_aprobacion: avisa a COORDINADOR/CONTROL. Si el valor supera el
-    límite del coordinador, el trámite es de Control; si no, lo ven ambos."""
+    límite del coordinador, el trámite es de Control; si no, lo ven ambos.
+    Sólo se notifica a quien tiene el cliente de la solicitud en su alcance."""
     consec = doc.get("consecutivo", "")
     valor = _valor_cop(doc.get("valor_total", 0))
+    cliente = (doc.get("datos_servicio") or {}).get("cliente", "")
     if _a_numero(doc.get("valor_total")) > LIMITE_COORDINADOR:
-        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
+        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec, cliente=cliente)
     else:
-        _enviar_a_perfil("COORDINADOR", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
-        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec)
+        _enviar_a_perfil("COORDINADOR", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec, cliente=cliente)
+        _enviar_a_perfil("CONTROL", PLANTILLA_OC_APROBACION, lambda n: [n, consec, valor], consecutivo=consec, cliente=cliente)
 
 
 def _notificar_aprobacion(doc: dict) -> None:
@@ -1025,7 +1129,8 @@ def _scope_lectura(info: dict, historico: bool = False) -> dict:
 
     if historico:
         # Histórico = solo lectura/auditoría. Sin restricción de bandeja, salvo
-        # el OPERATIVO/DESPACHADOR que ve las de su regional (comportamiento previo).
+        # el OPERATIVO/DESPACHADOR que ve las de su regional (comportamiento previo)
+        # y el COORDINADOR/CONTROL con alcance de clientes restringido.
         if perfil in ("OPERATIVO", "DESPACHADOR"):
             base_hist: dict = {}
             if _normalizar_regional(info.get("regional", "")):
@@ -1033,7 +1138,7 @@ def _scope_lectura(info: dict, historico: bool = False) -> dict:
             else:
                 base_hist = {"usuario_registro": usuario}
             return base_hist
-        return {}
+        return _filtro_clientes_alcance(info) or {}
 
     # Modo activos: la bandeja se deriva del estado.
     if perfil == "ADMIN":
@@ -1043,7 +1148,9 @@ def _scope_lectura(info: dict, historico: bool = False) -> dict:
     if perfil == "ANALISTA":
         return {"estado": "aprobado"}                            # bandeja: trámite
     if perfil in ("CONTROL", "COORDINADOR"):
-        return {"estado": "pendiente_aprobacion"}               # bandeja: aprobación
+        bandeja = {"estado": "pendiente_aprobacion"}             # bandeja: aprobación
+        alcance = _filtro_clientes_alcance(info)
+        return {"$and": [bandeja, alcance]} if alcance else bandeja
     if perfil in ("OPERATIVO", "DESPACHADOR"):
         # Bandeja (puede actuar): borrador/devuelto de su regional (o propias si
         # no tiene regional definida) + seguimiento en SOLO LECTURA de sus
@@ -1306,6 +1413,19 @@ async def clientes():
         )
     docs = list(col_clientes.find({}, {"_id": 0, "nombre": 1}))
     return [d.get("nombre", "") for d in docs if d.get("nombre")]
+
+
+@router.get("/mi-alcance")
+async def mi_alcance(usuario: str = Query(...)):
+    """Alcance de aprobación por cliente del usuario que consulta (para el chip
+    informativo del frontend). `todos: true` = sin restricción."""
+    info = _resolver_usuario(usuario)
+    alcance = _alcance_aprobacion(info)
+    return {
+        "perfil": info["perfil"],
+        "todos": alcance is None,
+        "clientes": alcance or [],
+    }
 
 
 @router.post("/buscar-pedidos")
@@ -1629,6 +1749,7 @@ def _obtener_y_validar_aprobacion(req, info) -> dict:
         )
     if info["perfil"] not in {"COORDINADOR", "CONTROL", "ADMIN"}:
         raise HTTPException(status_code=403, detail="Su perfil no puede aprobar solicitudes.")
+    _denegar_fuera_de_alcance(info, doc)
     return doc
 
 
@@ -1723,6 +1844,11 @@ async def devolver_solicitud(req: AccionConObservacionRequest, request: Request)
             status_code=403,
             detail="El trámite ya fue marcado OK y la solicitud pasó a Financiero; no se puede devolver desde aquí.",
         )
+    # Alcance de clientes: quien no puede aprobar un cliente tampoco lo devuelve
+    # (sólo aplica devolviendo desde 'pendiente'; desde 'aprobado' devuelven
+    # Analista/Financiero, a los que el alcance no restringe).
+    if estado_prev == "pendiente_aprobacion":
+        _denegar_fuera_de_alcance(info, doc)
 
     mov = _nuevo_movimiento("devolucion", estado_prev, "devuelto", info, req.observacion, _ip(request))
     set_fields = {"estado": "devuelto", "updated_at": _ahora_utc()}
@@ -1756,6 +1882,8 @@ async def rechazar_solicitud(req: AccionConObservacionRequest, request: Request)
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
     if doc.get("estado") in {"rechazado", "pagado", "anulado"}:
         raise HTTPException(status_code=422, detail="La solicitud no se puede rechazar en su estado actual.")
+    # Alcance de clientes: mismas reglas que aprobar (ADMIN pasa siempre).
+    _denegar_fuera_de_alcance(info, doc)
     estado_prev = doc.get("estado")
     mov = _nuevo_movimiento("rechazo", estado_prev, "rechazado", info, req.observacion, _ip(request))
     col_activos.update_one(

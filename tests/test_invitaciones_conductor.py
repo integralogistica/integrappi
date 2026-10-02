@@ -134,6 +134,35 @@ class InvitarConductorTests(unittest.TestCase):
         self.assertEqual(veh["invitacionConductor"]["estado"], "pendiente")
         self.assertIsNone(veh["idConductor"])
 
+    def test_invitar_guarda_celular_del_conductor(self):
+        """El popup de invitación pide el WhatsApp del conductor (2026-10-02):
+        viaja como celular_conductor y queda en la cuenta stub."""
+        from rutas.conductores import InvitarConductorInput
+        datos = InvitarConductorInput(
+            id_tenedor="ten-1", placa="ABC123",
+            correo_conductor="nuevo@correo.com",
+            celular_conductor="+57 310 456 7890",
+        )
+        import asyncio
+        with patch.object(conductores, "_generar_token_verificacion", return_value="token-falso"):
+            with ExitStackContext(self._patchear()):
+                resultado = asyncio.run(conductores.invitar_conductor(datos, BackgroundTasksFake()))
+
+        self.assertEqual(resultado["estado"], "invitado")
+        stub = self.conductores.find_one({"correo": {"$regex": "^nuevo@correo.com$", "$options": "i"}})
+        self.assertEqual(stub["celular"], "+57 310 456 7890")
+
+    def test_invitar_sin_celular_deja_null(self):
+        from rutas.conductores import InvitarConductorInput
+        datos = InvitarConductorInput(
+            id_tenedor="ten-1", placa="ABC123", correo_conductor="otro@correo.com")
+        import asyncio
+        with patch.object(conductores, "_generar_token_verificacion", return_value="token-falso"):
+            with ExitStackContext(self._patchear()):
+                asyncio.run(conductores.invitar_conductor(datos, BackgroundTasksFake()))
+        stub = self.conductores.find_one({"correo": {"$regex": "^otro@correo.com$", "$options": "i"}})
+        self.assertIsNone(stub["celular"])
+
     def test_invitar_cuenta_activa_vincula_directo(self):
         from rutas.conductores import InvitarConductorInput
         self.conductores.documents.append({
