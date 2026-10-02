@@ -27,6 +27,9 @@ coleccion_vehiculos = bd["vehiculos"]
 # (una sola activa) y evidencia append-only de aceptaciones en `aceptaciones_politica`.
 coleccion_politicas = bd["politicas_datos"]
 coleccion_aceptaciones = bd["aceptaciones_politica"]
+# Auditoría append-only de impersonaciones (Seguridad entra al panel de un
+# conductor existente SIN tocar su clave — módulo Alta de vehículo).
+coleccion_impersonaciones = bd["impersonaciones"]
 
 # Índice único (el correo se guarda en MAYÚSCULAS → unicidad case-insensitive).
 try:
@@ -475,6 +478,292 @@ async def registrar_conductor(data: RegistrarConductorInput, background_tasks: B
 
 
 # ==============================================================================
+# 🛡️ ALTA POR SEGURIDAD (2026-09-28)
+# Para las placas históricas que ya trabajan con Integra y entregaron la
+# hoja de vida FÍSICA firmada (autorización de datos): Seguridad crea la
+# cuenta del conductor con su correo, le entrega usuario+clave, y el
+# conductor acepta las políticas digitales en su primer ingreso.
+# ==============================================================================
+class AltaSeguridadInput(BaseModel):
+    correo: str
+    # El nombre YA NO se pide en el alta (2026-10-01): lo aporta la IA al
+    # leer cédula/RUT en el panel y se propaga a la cuenta desde
+    # /vehiculos/actualizar-informacion mientras esté vacío.
+    nombre: Optional[str] = None
+    perfil: Optional[str] = "CONDUCTOR"   # CONDUCTOR | TENEDOR
+    clave: Optional[str] = None           # generada si no viene
+    cedula: Optional[str] = None
+    celular: Optional[str] = None
+    creado_por: Optional[str] = None      # nombre del usuario de Seguridad
+
+
+def _generar_clave_legible() -> str:
+    """Clave temporal legible (el conductor la cambia después)."""
+    import secrets
+    import string
+    alfabeto = string.ascii_letters + string.digits
+    return "Integra" + "".join(secrets.choice(alfabeto) for _ in range(6))
+
+
+@ruta_conductores.post("/alta-seguridad", response_model=dict)
+async def alta_por_seguridad(data: AltaSeguridadInput):
+    correo_norm = (data.correo or "").strip()
+    if not correo_norm or "@" not in correo_norm:
+        raise HTTPException(status_code=400, detail="El correo del conductor es obligatorio.")
+
+    if _existe_correo(correo_norm):
+        raise HTTPException(status_code=400, detail="Ya existe una cuenta con ese correo.")
+
+    clave_plana = (data.clave or "").strip() or _generar_clave_legible()
+    if len(clave_plana) < 6:
+        raise HTTPException(status_code=400, detail="La clave debe tener al menos 6 caracteres.")
+
+    try:
+        clave_hash = crear_hash(clave_plana)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    perfil_solicitado = (data.perfil or "CONDUCTOR").strip().upper()
+    if perfil_solicitado not in ("CONDUCTOR", "TENEDOR"):
+        perfil_solicitado = "CONDUCTOR"
+
+    nuevo = {
+        # Vacío cuando el alta no lo trae: la IA lo llena al leer los
+        # documentos y actualizar-informacion lo propaga a la cuenta.
+        "nombre": (data.nombre or "").strip().upper(),
+        "correo": correo_norm.upper(),
+        "cedula": re.sub(r"\D", "", data.cedula or "") or None,
+        "celular": (data.celular or "").strip() or None,
+        "regional": "N/A",
+        "perfil": perfil_solicitado,
+        "clave": clave_hash,
+        "clientes": [],
+        "activo": True,
+        # Seguridad verificó la identidad EN PERSONE (hoja de vida física
+        # firmada = autorización de datos): el correo no requiere verificación.
+        "correo_verificado": True,
+        # La aceptación DIGITAL de políticas la hace el conductor en su
+        # primer ingreso (banner bloqueante del panel).
+        "pendiente_aceptacion_politica": True,
+        "alta_por_seguridad": True,
+        "alta_seguridad_en": datetime.now(timezone.utc),
+        "alta_por": (data.creado_por or "Seguridad").strip() or "Seguridad",
+    }
+    insertado = coleccion_conductores.insert_one(nuevo).inserted_id
+    print(f"[alta-seguridad] Conductor {nuevo['correo']} creado por {nuevo['alta_por']}")
+
+    return {
+        "mensaje": "Conductor creado. Envíale su usuario (correo) y la clave.",
+        "clave": clave_plana,  # se muestra UNA sola vez
+        "usuario": {"id": str(insertado), "correo": nuevo["correo"], "perfil": perfil_solicitado},
+    }
+
+
+@ruta_conductores.get("/alta-seguridad/listar", response_model=dict)
+async def listar_alta_seguridad():
+    """
+    Cuentas creadas por Seguridad (para el módulo Alta conductor): quién las
+    creó, cuándo y si el conductor ya aceptó políticas. Sin claves JAMÁS
+    (solo hasheadas en BD) — si se pierde, se regenera con nueva-clave.
+    """
+    cuentas = []
+    for doc in coleccion_conductores.find(
+            {"alta_por_seguridad": True},
+            {"clave": 0}).sort("alta_seguridad_en", -1).limit(200):
+        cuentas.append({
+            "id": str(doc.get("_id")),
+            "nombre": doc.get("nombre", ""),
+            "correo": doc.get("correo", ""),
+            "perfil": doc.get("perfil", ""),
+            "celular": doc.get("celular") or "",
+            "creado_por": doc.get("alta_por", "Seguridad"),
+            "creado_en": doc.get("alta_seguridad_en"),
+            "politicas_pendientes": bool(doc.get("pendiente_aceptacion_politica")),
+        })
+    return {"cuentas": cuentas}
+
+
+@ruta_conductores.post("/alta-seguridad/{conductor_id}/nueva-clave", response_model=dict)
+async def regenerar_clave_alta(conductor_id: str):
+    """
+    Regenera la clave de una cuenta creada por Seguridad (rescate cuando la
+    clave mostrada se pierde o el conductor la olvida): genera una nueva,
+    la hashea y la devuelve UNA sola vez para reenviársela.
+    """
+    from bson import ObjectId as _ObjectId
+    try:
+        oid = _ObjectId(conductor_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+
+    doc = coleccion_conductores.find_one({"_id": oid, "alta_por_seguridad": True})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada (o no fue creada por Seguridad).")
+
+    clave_plana = _generar_clave_legible()
+    coleccion_conductores.update_one(
+        {"_id": oid}, {"$set": {"clave": crear_hash(clave_plana)}})
+    print(f"[alta-seguridad] Clave regenerada para {doc.get('correo')}")
+    return {
+        "mensaje": "Nueva clave generada. Envíasela al conductor (invalida la anterior).",
+        "correo": doc.get("correo", ""),
+        "clave": clave_plana,  # se muestra UNA sola vez
+    }
+
+
+# ==============================================================================
+# 🚚 ALTA DE VEHÍCULO (2026-10-01)
+# El alta es del VEHÍCULO (la placa), no de la cuenta: Seguridad primero valida
+# la placa y luego la vincula a un dueño que ya tiene cuenta (búsqueda) o crea
+# una cuenta nueva. Para cuentas existentes, el panel se abre por
+# impersonación SIN tocar la clave del conductor.
+# ==============================================================================
+@ruta_conductores.get("/buscar", response_model=dict)
+async def buscar_conductores(q: str = ""):
+    """
+    Búsqueda de cuentas CONDUCTOR/TENEDOR para VINCULAR una placa nueva a un
+    dueño que ya tiene cuenta (módulo Alta de vehículo): por correo, cédula o
+    nombre. Nunca devuelve claves.
+    """
+    texto = (q or "").strip()
+    if len(texto) < 3:
+        return {"cuentas": []}
+
+    patron = re.escape(texto)
+    condiciones = [
+        {"correo": {"$regex": patron, "$options": "i"}},
+        {"nombre": {"$regex": patron, "$options": "i"}},
+    ]
+    cedula_digitos = re.sub(r"\D", "", texto)
+    if cedula_digitos:
+        condiciones.append({"cedula": {"$regex": cedula_digitos, "$options": "i"}})
+
+    cuentas = []
+    for doc in coleccion_conductores.find({"$or": condiciones}, {"clave": 0}).limit(20):
+        cid = str(doc.get("_id"))
+        cuentas.append({
+            "id": cid,
+            "nombre": doc.get("nombre", ""),
+            "correo": doc.get("correo", ""),
+            "perfil": (doc.get("perfil") or "CONDUCTOR").upper(),
+            "cedula": doc.get("cedula") or "",
+            "celular": doc.get("celular") or "",
+            "activo": bool(doc.get("activo", True)),
+            "correo_verificado": bool(doc.get("correo_verificado")),
+            "alta_por_seguridad": bool(doc.get("alta_por_seguridad")),
+            "politicas_pendientes": bool(
+                doc.get("pendiente_aceptacion_politica")
+                and not doc.get("aceptacion_politica")),
+            # Placas propias: un CONDUCTOR con 1 placa ya no puede recibir otra.
+            "placas_propias": coleccion_vehiculos.count_documents({"idUsuario": cid}),
+        })
+    return {"cuentas": cuentas}
+
+
+class LoginComoInput(BaseModel):
+    solicitante: Optional[str] = None   # nombre del usuario de Seguridad (cookie seguridadNombre)
+
+
+@ruta_conductores.post("/login-como/{conductor_id}", response_model=dict)
+async def login_como(conductor_id: str, data: Optional[LoginComoInput] = None, request: Request = None):
+    """
+    Impersonación de Seguridad (módulo Alta de vehículo): entra al panel de un
+    conductor con cuenta EXISTENTE sin conocer ni tocar su clave. Devuelve el
+    mismo shape que /login y deja auditoría append-only en `impersonaciones`.
+    """
+    from bson import ObjectId as _ObjectId
+    try:
+        oid = _ObjectId(conductor_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+
+    doc = coleccion_conductores.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+
+    perfil = (doc.get("perfil") or "CONDUCTOR").upper()
+    # Cuentas stub de invitación pendiente: no tienen panel que abrir.
+    if not doc.get("activo", True):
+        raise HTTPException(
+            status_code=403,
+            detail="La cuenta está pendiente de activación (invitación de tenedor sin aceptar).",
+        )
+
+    solicitante = ((data.solicitante if data else None) or "Seguridad").strip() or "Seguridad"
+    coleccion_impersonaciones.insert_one({
+        "conductor_id": str(oid),
+        "correo": doc.get("correo", ""),
+        "perfil": perfil,
+        "solicitante": solicitante,
+        "fecha": datetime.now(timezone.utc),
+        "ip": (request.client.host if request and request.client else ""),
+        "user_agent": (request.headers.get("user-agent", "") if request else ""),
+    })
+    print(f"[login-como] {solicitante} entró al panel de {doc.get('correo')}")
+
+    return {
+        "mensaje": "Login como conductor exitoso",
+        # Nombre de Seguridad que entró: el front lo usa para marcar la sesión
+        # como impersonada (banner + editado_por en TODAS las mutaciones).
+        "impersonado_por": solicitante,
+        "politicas_pendientes": bool(
+            doc.get("pendiente_aceptacion_politica")
+            and not doc.get("aceptacion_politica")),
+        "usuario": {
+            "id": str(doc["_id"]),
+            "correo": doc.get("correo", ""),
+            "perfil": perfil,
+            "primerNombre": (doc.get("nombre", "").strip() or "Conductor").split(" ")[0],
+        },
+    }
+
+
+@ruta_conductores.get("/politica-actual", response_model=dict)
+async def politica_actual():
+    """Política vigente (pública) para el banner de aceptación del panel."""
+    politica = _politica_vigente()
+    if not politica:
+        raise HTTPException(status_code=503, detail="No hay política vigente configurada.")
+    return _politica_publica(politica)
+
+
+class AceptarPoliticaSesionInput(BaseModel):
+    conductor_id: str
+    declaraciones_aceptadas: Optional[list] = None
+
+
+@ruta_conductores.post("/aceptar-politica-sesion", response_model=dict)
+async def aceptar_politica_sesion(data: AceptarPoliticaSesionInput, request: Request):
+    """Aceptación de políticas DENTRO de la sesión (primer ingreso de una
+    cuenta creada por Seguridad): misma evidencia trazable que la
+    verificación por correo, canal 'alta_seguridad'."""
+    from bson import ObjectId as _ObjectId
+    try:
+        oid = _ObjectId(data.conductor_id)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Sesión inválida.")
+
+    doc = coleccion_conductores.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=401, detail="Sesión inválida.")
+    if not doc.get("pendiente_aceptacion_politica"):
+        return {"estado": "ya_aceptada", "mensaje": "Las políticas ya fueron aceptadas."}
+
+    politica = _politica_vigente()
+    if not politica:
+        raise HTTPException(status_code=503, detail="No hay política vigente configurada.")
+
+    ids_declaraciones = _validar_declaraciones_completas(politica, data.declaraciones_aceptadas)
+    _registrar_aceptacion(
+        doc, politica, request, datetime.now(timezone.utc),
+        canal="alta_seguridad", declaraciones_aceptadas=ids_declaraciones,
+    )
+    coleccion_conductores.update_one(
+        {"_id": oid}, {"$set": {"pendiente_aceptacion_politica": False}})
+    return {"estado": "aceptada", "mensaje": "Políticas aceptadas."}
+
+
+# ==============================================================================
 # 🔓 LOGIN
 # ==============================================================================
 @ruta_conductores.post("/login", response_model=dict)
@@ -518,8 +807,17 @@ async def login_conductor(usuario: str = Body(..., embed=True), clave: str = Bod
     nombre_completo = encontrado.get("nombre", "").strip()
     primer_nombre = nombre_completo.split(" ")[0]
 
+    # Cuentas creadas por Seguridad: el conductor debe aceptar las políticas
+    # digitales en su primer ingreso (banner bloqueante del panel).
+    politicas_pendientes = bool(
+        perfil in ("CONDUCTOR", "TENEDOR")
+        and encontrado.get("pendiente_aceptacion_politica")
+        and not encontrado.get("aceptacion_politica")
+    )
+
     return {
         "mensaje": "Login Conductor exitoso",
+        "politicas_pendientes": politicas_pendientes,
         "usuario": {
             "id": str(encontrado["_id"]),
             "correo": encontrado.get("correo", ""),

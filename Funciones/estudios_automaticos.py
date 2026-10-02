@@ -30,9 +30,13 @@
 #     `configuracion_faltante` (nunca tumba el endpoint).
 # ============================================================
 import asyncio
+import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import pytz
+from google.cloud import storage
 
 from bd.bd_cliente import bd_cliente
 from pydantic import ValidationError
@@ -43,13 +47,94 @@ from fastapi import HTTPException
 # por nombre en este namespace.
 from rutas.tusdatos import (
     ConsultaCompletaIn,
+    NitIn,
     VehiculoCompletaIn,
     _configurado,
     _esperar as _td_esperar,
     consulta_completa,
     consulta_vehiculo,
+    reporte_nit_pdf as _td_reporte_nit_pdf,
+    reporte_pdf as _td_reporte_pdf,
     reintentar_fuentes as _td_reintentar,
+    verificar_nit as _td_verificar_nit,
 )
+
+# Archivo de los PDFs de reporte en el bucket PRIVADO (2026-09-28, pedido del
+# usuario: las descargas deben quedar garantizadas aunque la cuenta del
+# proveedor se cancele). Misma carpeta Vehiculos/ del módulo → las URLs
+# firmadas y exclusiones existentes aplican igual.
+PDF_BUCKET = os.getenv("VEHICULOS_BUCKET", "integrapp-privado")
+PDF_CARPETA = "Vehiculos"
+_TZ_BOGOTA = pytz.timezone("America/Bogota")
+
+# ── RENOVACIÓN AUTOMÁTICA POR VIGENCIA (2026-09-28, pedido del usuario) ──
+# La corrida de estudios vence a los N meses y un barrido interno la renueva
+# SOLO (solo vehículos APROBADOS, con tope por ciclo para controlar el gasto).
+# Kill-switch: arranca APAGADO; activar en Render sin redeploy.
+VIGENCIA_MESES = int(os.getenv("ESTUDIOS_VIGENCIA_MESES", "12"))
+AUTO_RENOVAR = os.getenv("ESTUDIOS_AUTO_RENOVAR", "false").strip().lower() in ("1", "true", "si", "yes", "on")
+RENOVACIONES_POR_CICLO = int(os.getenv("ESTUDIOS_RENOVACIONES_POR_CICLO", "3"))
+RENUEVA_CADA_HORAS = 6  # frecuencia del barrido
+
+
+def _fecha_vencimiento(desde: datetime) -> datetime:
+    """Vence a los VIGENCIA_MESES de la corrida (aprox mes calendario)."""
+    meses = max(1, VIGENCIA_MESES)
+    anio = desde.year + (desde.month - 1 + meses) // 12
+    mes = (desde.month - 1 + meses) % 12 + 1
+    try:
+        return desde.replace(year=anio, month=mes)
+    except ValueError:  # 31 de un mes corto → día 28
+        return desde.replace(year=anio, month=mes, day=28)
+
+_cliente_storage = None
+
+
+def _obtener_cliente_storage():
+    """Cliente GCS perezoso y compartido (patrón de vehiculos.py)."""
+    global _cliente_storage
+    if _cliente_storage is None:
+        _cliente_storage = storage.Client()
+    return _cliente_storage
+
+
+def _subir_blob_pdf(ruta_blob: str, contenido: bytes) -> None:
+    bucket = _obtener_cliente_storage().bucket(PDF_BUCKET)
+    bucket.blob(ruta_blob).upload_from_string(contenido, content_type="application/pdf")
+
+
+async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | None:
+    """
+    Descarga el PDF del reporte del proveedor y lo archiva EN el bucket
+    privado: `Vehiculos/{PLACA}/{AAAA-MM-DD}/estudioAuto_{sujeto}_{reporte_id}.pdf`
+    (misma nomenclatura/fechas del módulo, zona Bogotá). BEST-EFFORT: un fallo
+    JAMÁS tumba el estudio (el reporte sigue servible en vivo por reporte_id).
+    La ruta es determinística por reporte_id → el reintento de fuentes
+    SOBREESCRIBE el blob con la versión regenerada.
+    """
+    try:
+        # El reporte de empresa tiene su propio endpoint (pdf-nit).
+        handler_pdf = (_td_reporte_nit_pdf if sujeto.get("tipo") == "empresa"
+                       else _td_reporte_pdf)
+        respuesta = await handler_pdf(str(reporte_id))
+        contenido = respuesta.content
+        if not contenido:
+            return None
+        if sujeto.get("tipo") == "persona":
+            sufijo = f"persona_{_digitos(sujeto.get('cedula'))}"
+        elif sujeto.get("tipo") == "empresa":
+            sufijo = f"empresa_{_digitos(sujeto.get('nit'))}"
+        else:
+            sufijo = f"vehiculo_{str(sujeto.get('placa') or '').upper()}"
+        fecha = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+        ruta_blob = f"{PDF_CARPETA}/{placa}/{fecha}/estudioAuto_{sufijo}_{reporte_id}.pdf"
+        _subir_blob_pdf(ruta_blob, contenido)
+        return {"ruta": ruta_blob, "tamano": len(contenido),
+                "archivado_en": datetime.utcnow()}
+    except Exception as e:
+        print(f"[estudios-auto] No se pudo archivar el PDF de {placa} "
+              f"(reporte {reporte_id}): {e}")
+        return None
 
 bd = bd_cliente['integra']
 coleccion_vehiculos = bd['vehiculos']
@@ -93,12 +178,19 @@ def _digitos(valor) -> str:
     return re.sub(r"\D", "", str(valor or ""))
 
 
-# Roles en orden de presentación. El tercer elemento es el campo de la
-# fecha de expedición del documento (TusDatos la acepta opcional para CC
-# y afina el match en cédulas comunes); hoy solo el conductor la tiene.
-_ROLES = (("conductor", "condCedulaCiudadania", "condFechaExpedicion"),
-          ("propietario", "propDocumento", None),
-          ("tenedor", "tenedDocumento", None))
+# Roles en orden de presentación. Tercer elemento: campo de la fecha de
+# expedición del documento (opcional para CC, afina el match); cuarto: campo
+# del TIPO de documento — propietario/tenedor pueden ser EMPRESA (NIT) y van
+# por el flujo de validación de empresa del proveedor (2026-09-28).
+_ROLES = (("conductor", "condCedulaCiudadania", "condFechaExpedicion", None),
+          ("propietario", "propDocumento", None, "propTipoDocumento"),
+          ("tenedor", "tenedDocumento", None, "tenedTipoDocumento"))
+
+
+def _es_nit(vehiculo: dict, campo_tipo: str) -> bool:
+    """La figura es una EMPRESA: su tipo de documento (leído del RUT por la
+    IA o elegido en el form) es NIT."""
+    return "NIT" in str(vehiculo.get(campo_tipo) or "").upper()
 
 
 def _fecha_exp_tusdatos(valor) -> str:
@@ -129,27 +221,35 @@ def _tdoc_tusdatos(vehiculo: dict) -> str:
 
 def sujetos_estudio(vehiculo: dict) -> list:
     """
-    Sujetos a consultar con deduplicación de personas: cédula
-    normalizada → roles combinados. Además del sujeto vehículo
-    (placa + cédula del propietario que exige el portal, con el tipo de
-    documento derivado del RUT).
+    Sujetos a consultar: personas por cédula (deduplicadas, roles
+    combinados) + EMPRESAS por NIT (propietario/tenedor con tipo NIT — van
+    por el flujo de validación de empresa) + el sujeto vehículo (placa con
+    el documento del propietario y tdoc derivado del RUT).
     """
-    por_cedula = {}
-    for rol, campo, campo_fecha in _ROLES:
-        cedula = _digitos(vehiculo.get(campo))
-        if not cedula:
+    personas, empresas = {}, {}
+    for rol, campo, campo_fecha, campo_tipo in _ROLES:
+        numero = _digitos(vehiculo.get(campo))
+        if not numero:
             continue
-        por_cedula.setdefault(cedula, {"roles": [], "fecha": ""})
-        if rol not in por_cedula[cedula]["roles"]:
-            por_cedula[cedula]["roles"].append(rol)
-        if campo_fecha and not por_cedula[cedula]["fecha"]:
-            por_cedula[cedula]["fecha"] = _fecha_exp_tusdatos(vehiculo.get(campo_fecha))
+        if campo_tipo and _es_nit(vehiculo, campo_tipo):
+            if rol not in empresas.setdefault(numero, []):
+                empresas[numero].append(rol)
+            continue
+        datos = personas.setdefault(numero, {"roles": [], "fecha": ""})
+        if rol not in datos["roles"]:
+            datos["roles"].append(rol)
+        if campo_fecha and not datos["fecha"]:
+            datos["fecha"] = _fecha_exp_tusdatos(vehiculo.get(campo_fecha))
 
     sujetos = [
         {"tipo": "persona", "cedula": cedula,
          "roles": datos["roles"], "fecha_expedicion": datos["fecha"],
          "clave": f"persona:{cedula}"}
-        for cedula, datos in sorted(por_cedula.items())
+        for cedula, datos in sorted(personas.items())
+    ] + [
+        {"tipo": "empresa", "nit": nit, "roles": roles,
+         "clave": f"empresa:{nit}"}
+        for nit, roles in sorted(empresas.items())
     ]
 
     placa = str(vehiculo.get("placa") or "").strip().upper()
@@ -179,6 +279,8 @@ def _huella_estudios_previos(estudios: list) -> str:
             continue
         if e.get("tipo") == "vehiculo":
             claves.append(f"vehiculo:{e.get('placa')}")
+        elif e.get("tipo") == "empresa" and e.get("nit"):
+            claves.append(f"empresa:{e.get('nit')}")
         elif e.get("cedula"):
             claves.append(f"persona:{e.get('cedula')}")
     return "|".join(sorted(claves))
@@ -194,6 +296,9 @@ def _estudio_base(sujeto: dict, estado: str, error: str = None) -> dict:
     }
     if sujeto["tipo"] == "persona":
         estudio["cedula"] = sujeto["cedula"]
+        estudio["roles"] = sujeto["roles"]
+    elif sujeto["tipo"] == "empresa":
+        estudio["nit"] = sujeto["nit"]
         estudio["roles"] = sujeto["roles"]
     else:
         estudio["placa"] = sujeto["placa"]
@@ -216,11 +321,16 @@ def _actualizar_estudio(placa: str, estudio_id: str, cambios: dict) -> None:
     )
 
 
-async def disparar_estudios(placa: str, re_revision: bool = False) -> None:
+async def disparar_estudios(placa: str, re_revision: bool = False,
+                            forzar: bool = False) -> None:
     """
     Escribe el array de estudios (pendiente) en el doc del vehículo y
     lanza la ejecución en background. Fire-and-forget: JAMÁS lanza
     (el llamador la envuelve en try/except de todos modos).
+    `forzar=True` → force del proveedor (re-consulta REAL, no su caché por
+    cédula: lo usan la renovación por vigencia y el botón Volver a consultar).
+    Además sella `estudiosVigencia {desde, vence}` (la corrida vence a los
+    ESTUDIOS_VIGENCIA_MESES — la renueva el barrido automático).
     """
     placa = str(placa or "").strip().upper()
     if not placa or placa in _EN_CURSO:
@@ -245,6 +355,9 @@ async def disparar_estudios(placa: str, re_revision: bool = False) -> None:
         # La corrida anterior (si la hay) pasa al historial ANTES de pisar.
         _archivar_corrida_anterior(placa, vehiculo)
 
+        ahora = datetime.utcnow()
+        vigencia = {"desde": ahora, "vence": _fecha_vencimiento(ahora)}
+
         if not _configurado():
             # Sin credenciales: estudios marcados en error accionable
             # (visible en /revision; no toca los portales ni gasta nada).
@@ -253,19 +366,72 @@ async def disparar_estudios(placa: str, re_revision: bool = False) -> None:
             for e in estudios:
                 e["finalizado_en"] = e["iniciado_en"]
             coleccion_vehiculos.update_one(
-                {"placa": placa}, {"$set": {"estudiosSeguridadAuto": estudios}})
+                {"placa": placa},
+                {"$set": {"estudiosSeguridadAuto": estudios,
+                          "estudiosVigencia": vigencia}})
             return
+
+        if forzar:
+            for s in sujetos:
+                if s["tipo"] == "persona":
+                    s["force"] = True
 
         coleccion_vehiculos.update_one(
             {"placa": placa},
             {"$set": {"estudiosSeguridadAuto": [
-                _estudio_base(s, "pendiente") for s in sujetos]}})
+                _estudio_base(s, "pendiente") for s in sujetos],
+                "estudiosVigencia": vigencia}})
 
         await _ejecutar_estudios(placa, sujetos)
     except Exception as e:  # best-effort total: jamás tumba el endpoint
         print(f"[estudios-auto] Error disparando estudios de {placa}: {e}")
     finally:
         _EN_CURSO.discard(placa)
+
+
+# ── RENOVACIÓN AUTOMÁTICA POR VIGENCIA ────────────────────────────────────
+
+async def barrido_renovacion() -> int:
+    """
+    Renueva SOLO los estudios vencidos de vehículos APROBADOS (tope por
+    ciclo para controlar el gasto). Devuelve cuántos renovó. No-op si el
+    kill-switch ESTUDIOS_AUTO_RENOVAR está apagado.
+    """
+    if not AUTO_RENOVAR:
+        return 0
+    renovados = 0
+    try:
+        candidatos = coleccion_vehiculos.find({
+            "estadoIntegra": "aprobado",
+            "estudiosVigencia.vence": {"$lt": datetime.utcnow()},
+        })
+        for vehiculo in candidatos:
+            placa = vehiculo.get("placa")
+            if not placa:
+                continue
+            print(f"[estudios-auto] 🔄 Renovación por vigencia vencida: {placa}")
+            await disparar_estudios(placa, re_revision=False, forzar=True)
+            renovados += 1
+            if renovados >= max(1, RENOVACIONES_POR_CICLO):
+                break
+    except Exception as e:
+        print(f"[estudios-auto] Error en el barrido de renovación: {e}")
+    return renovados
+
+
+async def _loop_renovacion():
+    """Barrido periódico (lifespan de main.py): cada RENUEVA_CADA_HORAS."""
+    print(f"[estudios-auto] Renovador por vigencia iniciado "
+          f"(cada {RENUEVA_CADA_HORAS} h · ESTUDIOS_AUTO_RENOVAR={AUTO_RENOVAR} · "
+          f"vigencia {VIGENCIA_MESES} meses · tope {RENOVACIONES_POR_CICLO}/ciclo)")
+    while True:
+        try:
+            n = await barrido_renovacion()
+            if n:
+                print(f"[estudios-auto] Barrido renovó {n} vehículo(s)")
+        except Exception as e:
+            print(f"[estudios-auto] Error del loop de renovación: {e}")
+        await asyncio.sleep(RENUEVA_CADA_HORAS * 3600)
 
 
 async def _ejecutar_estudios(placa: str, sujetos: list) -> None:
@@ -280,8 +446,15 @@ async def _ejecutar_estudios(placa: str, sujetos: list) -> None:
     vehiculo = coleccion_vehiculos.find_one(
         {"placa": placa}, {"estudiosSeguridadAuto": 1})
     persistidos = (vehiculo or {}).get("estudiosSeguridadAuto") or []
-    por_clave = {f"persona:{e.get('cedula')}" if e.get("tipo") == "persona"
-                 else f"vehiculo:{e.get('placa')}": e.get("id")
+
+    def _clave_de_estudio(e: dict) -> str:
+        if e.get("tipo") == "vehiculo":
+            return f"vehiculo:{e.get('placa')}"
+        if e.get("tipo") == "empresa":
+            return f"empresa:{e.get('nit')}"
+        return f"persona:{e.get('cedula')}"
+
+    por_clave = {_clave_de_estudio(e): e.get("id")
                  for e in persistidos if isinstance(e, dict)}
 
     tareas = []
@@ -342,7 +515,12 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
         raise HTTPException(
             status_code=422,
             detail="Solo se pueden reintentar las fuentes de un estudio finalizado con reporte.")
-    if not any(v == "Error" for v in (estudio.get("fuentes") or {}).values()):
+    # Fallida = valor no booleano con texto ('Error', 'Página no disponible'…);
+    # la cadena vacía significa que la fuente NO APLICÓ a la consulta.
+    def _es_fallida(v):
+        return v is not True and v is not False and bool(str(v if v is not None else "").strip())
+
+    if not any(_es_fallida(v) for v in (estudio.get("fuentes") or {}).values()):
         raise HTTPException(status_code=422, detail="El estudio no tiene fuentes fallidas.")
 
     respuesta = await _td_reintentar(estudio["reporte_id"], typedoc="CC")
@@ -356,8 +534,52 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e)[:300])
     cambios["reporte_id"] = resultado.get("id") or estudio["reporte_id"]
+    # El reporte se regeneró: re-archivar el PDF (la ruta determinística por
+    # reporte_id SOBREESCRIBE el blob con la versión nueva).
+    sujeto = {"tipo": estudio.get("tipo"), "cedula": estudio.get("cedula"),
+              "placa": estudio.get("placa")}
+    pdf_gcs = await _archivar_pdf_reporte(placa, sujeto, cambios["reporte_id"])
+    if pdf_gcs:
+        cambios["pdf_gcs"] = pdf_gcs
     _actualizar_estudio(placa, estudio_id, cambios)
     return cambios
+
+
+def _buscar_estudio_reutilizable(sujeto: dict) -> tuple:
+    """
+    Reutilización ENTRE VEHÍCULOS (2026-09-28, pedido del usuario: no gastar
+    consultas de una cédula ya estudiada): busca en TODAS las placas el
+    estudio FINALIZADO más reciente de este sujeto (cédula, NIT o placa)
+    cuya antigüedad no supere la vigencia configurada. Devuelve
+    (placa_origen, estudio) o (None, None).
+    """
+    if sujeto["tipo"] == "vehiculo":
+        campo, valor = "placa", sujeto.get("placa")
+    elif sujeto["tipo"] == "empresa":
+        campo, valor = "nit", sujeto.get("nit")
+    else:
+        campo, valor = "cedula", sujeto["cedula"]
+    cond = {campo: valor, "estado": "finalizado"}
+    try:
+        limite = datetime.utcnow() - timedelta(days=int(VIGENCIA_MESES * 30.44))
+        mejor, placa_mejor = None, None
+        for doc in coleccion_vehiculos.find(
+                {"estudiosSeguridadAuto": {"$elemMatch": cond}},
+                {"placa": 1, "estudiosSeguridadAuto": 1}):
+            for e in doc.get("estudiosSeguridadAuto") or []:
+                if not isinstance(e, dict) or e.get("estado") != "finalizado":
+                    continue
+                if e.get(campo) != valor:
+                    continue
+                fecha = e.get("finalizado_en") or e.get("iniciado_en")
+                if not isinstance(fecha, datetime) or fecha < limite:
+                    continue
+                if mejor is None or fecha > (mejor.get("finalizado_en") or datetime.min):
+                    mejor, placa_mejor = e, doc.get("placa")
+        return placa_mejor, mejor
+    except Exception as e:
+        print(f"[estudios-auto] Buscando estudio reutilizable: {e}")
+        return None, None
 
 
 def _es_fallo_lanzamiento(exc: HTTPException) -> bool:
@@ -387,11 +609,23 @@ async def _llamar_proveedor(sujeto: dict) -> dict:
 
 async def _invocar_handler(sujeto: dict) -> dict:
     """Una llamada (sin reintentos) al handler del wrapper correspondiente."""
+    if sujeto["tipo"] == "empresa":
+        # Validación de EMPRESA por NIT (flujos propios del proveedor):
+        # launch/verify/nit → jobid → sondeo hasta el resultado.
+        lanzamiento = await _td_verificar_nit(NitIn(nit=int(sujeto["nit"])))
+        jobid = lanzamiento.get("jobid") if isinstance(lanzamiento, dict) else None
+        resultado = ((await _td_esperar(jobid, 300, 5)) if jobid
+                     else (lanzamiento if isinstance(lanzamiento, dict) else {}))
+        return {"lanzamiento": lanzamiento, "resultado": resultado}
     if sujeto["tipo"] == "persona":
         kwargs = {"typedoc": "CC", "doc": sujeto["cedula"]}
         # fechaE opcional para CC: afina el match (cédulas comunes).
         if sujeto.get("fecha_expedicion"):
             kwargs["fechaE"] = sujeto["fecha_expedicion"]
+        # force=True (renovación/Volver a consultar): re-consulta REAL,
+        # no la caché por cédula del proveedor.
+        if sujeto.get("force"):
+            kwargs["force"] = True
         return await consulta_completa(ConsultaCompletaIn(**kwargs))
     # El estudio de vehículo exige placa de EXACTAMENTE 6 caracteres y el
     # documento del propietario: pre-validar para no construir un modelo que
@@ -412,8 +646,34 @@ async def _ejecutar_uno(placa: str, sujeto: dict, estudio_id: str) -> None:
     """Ejecuta UN estudio y persiste su resultado (o su error)."""
     _actualizar_estudio(placa, estudio_id, {"estado": "en_curso"})
     try:
+        # Reutilización (sin force): si OTRA placa ya estudió este sujeto
+        # dentro de la vigencia, se copia el resultado — cero gasto.
+        if not sujeto.get("force"):
+            placa_origen, previo = _buscar_estudio_reutilizable(sujeto)
+            if previo:
+                cambios = {k: previo[k] for k in
+                           ("hallazgo", "categoria", "fuentes", "reporte_id", "pdf_gcs")
+                           if previo.get(k) is not None}
+                cambios.update({
+                    "estado": "finalizado",
+                    "reutilizado_de": placa_origen,
+                    "finalizado_en": datetime.utcnow(),
+                })
+                _actualizar_estudio(placa, estudio_id, cambios)
+                print(f"[estudios-auto] ♻️ {placa}: estudio de "
+                      f"{sujeto.get('cedula') or sujeto.get('placa')} "
+                      f"reutilizado de {placa_origen} (sin gasto)")
+                return
+
         respuesta = await _llamar_proveedor(sujeto)
-        _actualizar_estudio(placa, estudio_id, _extraer_resultado(respuesta))
+        cambios = _extraer_resultado(respuesta)
+        # Archivo del PDF en el bucket privado (best-effort: sin él el
+        # estudio sigue sirviendo el reporte en vivo por reporte_id).
+        if cambios.get("reporte_id"):
+            pdf_gcs = await _archivar_pdf_reporte(placa, sujeto, cambios["reporte_id"])
+            if pdf_gcs:
+                cambios["pdf_gcs"] = pdf_gcs
+        _actualizar_estudio(placa, estudio_id, cambios)
     except (HTTPException, ValidationError, ValueError) as e:
         detalle = e.detail if isinstance(e, HTTPException) else str(e)
         if isinstance(detalle, dict):

@@ -78,6 +78,7 @@ TODOS_DOCS = {
     "tenedCertificacionBancaria": "https://x/14", "documentoAcreditacionTenedor": "https://x/15",
     "rutTenedor": "https://x/16", "rutPropietario": "https://x/17",
     "fotos": ["https://x/f1"],
+    "hojaVidaFisica": "https://x/18",
 }
 
 
@@ -675,9 +676,105 @@ class ReutilizarCedulaTests(unittest.TestCase):
         with patch.object(vehiculos, "coleccion_vehiculos", fake):
             resp = self.client.put(
                 "/vehiculos/reutilizar-cedula",
-                data={"placa": "TEST01", "figura": "conductor"},
+                data={"placa": "TEST01", "figura": "nadie"},
             )
         self.assertEqual(resp.status_code, 400)
+
+    def test_bancario_del_tenedor_al_conductor(self):
+        """Cert. bancario en orden inverso (2026-10-01): se cargó primero el
+        del tenedor y el del conductor se copia de ese (una cara)."""
+        v = self._vehiculo()
+        v["condCertificacionBancaria"] = None
+        v["tenedCertificacionBancaria"] = "Vehiculos/TEST01/2026-10-01/tenedCertificacionBancaria.pdf"
+        v["lecturasIA"]["tenedCertificacionBancaria"] = {
+            "datos": {"banco": "DAVIVIENDA", "numero_cuenta": "987654321"},
+            "avisos": [],
+        }
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"Vehiculos/{n}") as mock_copiar:
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "conductor", "origen": "tenedor",
+                      "documento": "certificado_bancario"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertIn("condCertificacionBancaria", body["ruta"].rsplit("/", 1)[-1])
+        self.assertIsNone(body["url_reverso"])
+        # UNA copia, desde el blob del tenedor.
+        self.assertEqual(len(mock_copiar.call_args_list), 1)
+        self.assertTrue(mock_copiar.call_args_list[0][0][0].endswith("tenedCertificacionBancaria.pdf"))
+        doc = fake.documents[0]
+        self.assertTrue(doc["condCertificacionBancaria"].startswith("Vehiculos/"))
+        self.assertEqual(
+            doc["lecturasIA"]["condCertificacionBancaria"]["reutilizada_de"],
+            "tenedCertificacionBancaria",
+        )
+
+    def test_origen_igual_figura_da_400(self):
+        fake = FakeColeccionVehiculos([self._vehiculo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "tenedor", "origen": "tenedor"},
+            )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cedula_del_propietario_al_conductor(self):
+        """Orden INVERSO de subida (2026-10-01): se cargó primero la cédula
+        del propietario y la del conductor se copia de esa (origen=propietario)."""
+        v = self._vehiculo()
+        # Solo la del propietario está cargada (con reverso y lectura IA).
+        v["documentoIdentidadConductor"] = None
+        v.pop("documentoIdentidadConductorReverso")
+        v.pop("lecturasIA")
+        v["documentoIdentidadPropietario"] = "Vehiculos/TEST01/2026-10-01/documentoIdentidadPropietario.webp"
+        v["documentoIdentidadPropietarioReverso"] = "Vehiculos/TEST01/2026-10-01/documentoIdentidadPropietarioReverso.webp"
+        v["lecturasIA"] = {
+            "documentoIdentidadPropietario": {
+                "datos": {"numero": "987654321", "nombres": "PEDRO", "apellidos": "GOMEZ"},
+                "avisos": [],
+            },
+        }
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket", side_effect=lambda u, n: f"Vehiculos/{n}") as mock_copiar:
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "conductor", "origen": "propietario"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertIn("documentoIdentidadConductor", body["ruta"].rsplit("/", 1)[-1])
+        self.assertIsNotNone(body["url_reverso"])
+        # Frente y reverso se copian DESDE los blobs del propietario.
+        origenes = [c[0][0] for c in mock_copiar.call_args_list]
+        self.assertTrue(all(o.endswith("documentoIdentidadPropietario.webp")
+                            or o.endswith("documentoIdentidadPropietarioReverso.webp") for o in origenes))
+        self.assertEqual(len(origenes), 2)
+        # Mongo: campo del conductor poblado + lectura replicada al tipo conductor.
+        doc = fake.documents[0]
+        self.assertTrue(doc["documentoIdentidadConductor"].startswith("Vehiculos/"))
+        self.assertEqual(
+            doc["lecturasIA"]["documentoIdentidadConductor"]["reutilizada_de"],
+            "documentoIdentidadPropietario",
+        )
+
+    def test_origen_sin_documento_da_409(self):
+        v = self._vehiculo()
+        # Ni propietario ni tenedor tienen cédula → copiar al conductor 409.
+        v["documentoIdentidadConductor"] = None
+        v.pop("documentoIdentidadConductorReverso")
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket") as mock_copiar:
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "conductor", "origen": "tenedor"},
+            )
+        self.assertEqual(resp.status_code, 409)
+        mock_copiar.assert_not_called()
 
     def test_tenedor_sin_reverso_del_conductor(self):
         v = self._vehiculo()
@@ -808,10 +905,13 @@ class ReferenciasAdicionalesTests(unittest.TestCase):
         self.assertEqual(doc["referenciasAdicionales"][0]["empresa"], "NUEVA SAS")
         self.assertEqual(doc["estadoIntegra"], "completado_revision")
         # El diff viaja en el $push de historialCambios (el Fake no aplica
-        # $push: se verifica sobre los updates registrados).
+        # $push: se verifica sobre los updates registrados). El $push de
+        # auditoriaVehiculo (bitácora nueva) también viaja: filtrarlo.
         pushes = [c["$push"] for _, c in fake.updates if "$push" in c]
-        self.assertTrue(any("historialCambios" in p for p in pushes))
-        campos_diff = [c["campo"] for p in pushes for c in p["historialCambios"]["campos"]]
+        pushes_cambios = [p["historialCambios"] for p in pushes if "historialCambios" in p]
+        self.assertTrue(pushes_cambios)
+        self.assertTrue(any("auditoriaVehiculo" in p for p in pushes))
+        campos_diff = [c["campo"] for p in pushes_cambios for c in p["campos"]]
         self.assertIn("referenciasAdicionales", campos_diff)
 
 

@@ -12,7 +12,7 @@ Cubre:
 import sys
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 # Atlas es inalcanzable intermitentemente desde la red local (SRV/DNS) y
@@ -58,12 +58,34 @@ class FakeColeccion:
         return None
 
     def find(self, filtro=None, *args, **kwargs):
+        def _get_punteado(doc, clave):
+            actual = doc
+            for parte in clave.split("."):
+                if not isinstance(actual, dict):
+                    return None
+                actual = actual.get(parte)
+            return actual
+
         def match(d):
             for k, v in (filtro or {}).items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
+                valor = _get_punteado(d, k)
+                if isinstance(v, dict):
+                    if "$in" in v and valor not in v["$in"]:
                         return False
-                elif d.get(k) != v:
+                    if "$lt" in v and not (valor is not None and valor < v["$lt"]):
+                        return False
+                    if "$exists" in v and (valor is not None) != bool(v["$exists"]):
+                        return False
+                    if "$elemMatch" in v:
+                        arr = valor if isinstance(valor, list) else []
+                        cond = v["$elemMatch"]
+                        if not any(
+                            isinstance(e, dict) and
+                            all(_get_punteado(e, k2) == v2 for k2, v2 in cond.items())
+                            for e in arr
+                        ):
+                            return False
+                elif valor != v:
                     return False
             return True
         return [d for d in self.documents if match(d)]
@@ -123,6 +145,7 @@ TODOS_DOCS = {
     "tenedCertificacionBancaria": "https://x/14",
     "documentoAcreditacionTenedor": "https://x/15",
     "rutTenedor": "https://x/16", "fotos": ["https://x/f1"],
+    "hojaVidaFisica": "https://x/17",
 }
 
 
@@ -176,6 +199,73 @@ class SujetosEstudioTests(unittest.TestCase):
         personas = [s for s in sujetos if s["tipo"] == "persona"]
         self.assertEqual(len(personas), 1)
         self.assertEqual(personas[0]["roles"], ["conductor", "propietario", "tenedor"])
+
+    def test_propietario_nit_genera_sujeto_empresa(self):
+        sujetos = estudios_automaticos.sujetos_estudio({
+            "condCedulaCiudadania": "1020304050",
+            "propDocumento": "901923029", "propTipoDocumento": "NIT",
+            "tenedDocumento": "987654321",
+            "placa": "ABC123",
+        })
+        tipos = [(s["tipo"], s.get("cedula") or s.get("nit") or s.get("placa")) for s in sujetos]
+        self.assertIn(("empresa", "901923029"), tipos)
+        self.assertNotIn(("persona", "901923029"), tipos)  # NO como cédula
+        empresa = [s for s in sujetos if s["tipo"] == "empresa"][0]
+        self.assertEqual(empresa["roles"], ["propietario"])
+
+    def test_estudio_de_empresa_usa_el_flujo_nit(self):
+        """El sujeto empresa consulta por launch/verify/nit + sondeo, y su
+        PDF se archiva con el endpoint pdf-nit."""
+        veh = vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            propDocumento="901923029", propTipoDocumento="NIT")
+        fake = FakeColeccion([veh])
+
+        async def lanzar_nit(nit):
+            assert int(nit.nit) == 901923029
+            return {"jobid": "job-nit"}
+
+        async def esperar(jobid, maximo, intervalo):
+            assert jobid == "job-nit"
+            return {"estado": "finalizado", "hallazgo": False, "hallazgos": "",
+                    "results": {"RUES": False}, "id": "rep-nit-1"}
+
+        class Resp:
+            content = b"%PDF-empresa"
+
+        async def pdf_nit(_id):
+            return Resp()
+
+        subidas = []
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "_td_verificar_nit", lanzar_nit), \
+             patch.object(estudios_automaticos, "_td_esperar", esperar), \
+             patch.object(estudios_automaticos, "_td_reporte_nit_pdf", pdf_nit), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf",
+                          lambda ruta, c: subidas.append(ruta)):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        empresa = [e for e in fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
+                   if e["tipo"] == "empresa"][0]
+        self.assertEqual(empresa["estado"], "finalizado")
+        self.assertEqual(empresa["reporte_id"], "rep-nit-1")
+        self.assertTrue(any("empresa_901923029" in r for r in subidas))
+
+    def test_documentos_propietario_empresa(self):
+        """Con propietario NIT: la cédula del propietario NO se exige y el
+        RUT de la empresa SÍ (espejo del conductor en el front)."""
+        # Propietario empresa SIN cédula y SIN RUT → falta rutPropietario.
+        veh = vehiculo_completo(propDocumento="901923029",
+                                propTipoDocumento="NIT")
+        faltan = vehiculos._documentos_faltantes(veh)
+        self.assertNotIn("documentoIdentidadPropietario", faltan)
+        self.assertNotIn("documentoIdentidadPropietarioReverso", faltan)
+        self.assertIn("rutPropietario", faltan)
+        # Con el RUT subido → completo.
+        veh["rutPropietario"] = "Vehiculos/ABC123/rut.pdf"
+        self.assertEqual(vehiculos._documentos_faltantes(veh), [])
 
     def test_cedula_vacia_no_genera_sujeto(self):
         sujetos = estudios_automaticos.sujetos_estudio({
@@ -349,6 +439,148 @@ class DispararEstudiosTests(unittest.TestCase):
         actualizado = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"][0]
         self.assertEqual(actualizado["fuentes"]["SIMIT"], False)  # ya sin Error
 
+    def test_pdf_del_reporte_se_archiva_en_el_bucket(self):
+        """Al finalizar, el estudio persiste pdf_gcs con la ruta del blob
+        (best-effort: si la subida falla, el estudio IGUAL finaliza)."""
+        subidas = []
+
+        class Respuesta:
+            content = b"%PDF-1.4 contenido de prueba"
+
+        async def pdf(_id):
+            return Respuesta()
+
+        def subir(ruta, contenido):
+            subidas.append((ruta, contenido))
+
+        veh = vehiculo_completo(
+            condCedulaCiudadaria="1020304050", propDocumento="1020304050",
+            tenedDocumento="987654321")
+        fake = FakeColeccion([veh])
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
+             patch.object(estudios_automaticos, "_td_reporte_pdf", pdf), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf", subir):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        estudios = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
+        self.assertEqual(len(subidas), 3)  # un PDF por estudio finalizado
+        for e in estudios:
+            self.assertEqual(e["estado"], "finalizado")
+            self.assertIn("pdf_gcs", e)
+            self.assertTrue(e["pdf_gcs"]["ruta"].startswith("Vehiculos/ABC123/"))
+            self.assertTrue(e["pdf_gcs"]["ruta"].endswith("_rep-123.pdf"))
+        # La ruta es determinística por reporte_id (persona por cédula)
+        self.assertIn("persona_1020304050_rep-123.pdf", subidas[0][0])
+
+    def test_fallo_del_archivo_no_tumba_el_estudio(self):
+        def subir(_ruta, _contenido):
+            raise RuntimeError("GCS caído")
+
+        veh = vehiculo_completo(
+            condCedulaCiudadaria="1020304050", propDocumento="1020304050",
+            tenedDocumento="987654321")
+        fake = FakeColeccion([veh])
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf", subir):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        estudios = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
+        for e in estudios:
+            self.assertEqual(e["estado"], "finalizado")  # archivado falló y siguió
+            self.assertNotIn("pdf_gcs", e)
+
+    def test_vigencia_se_sella_al_disparar(self):
+        """La corrida lleva estudiosVigencia {desde, vence=+VIGENCIA_MESES}."""
+        veh = vehiculo_completo(
+            condCedulaCiudadania="1020304050", propDocumento="1020304050",
+            tenedDocumento="987654321")
+        fake = FakeColeccion([veh])
+        doc = self._correr(fake, veh)
+        vig = doc.get("estudiosVigencia")
+        self.assertIsNotNone(vig)
+        delta_meses = ((vig["vence"].year - vig["desde"].year) * 12
+                       + vig["vence"].month - vig["desde"].month)
+        self.assertEqual(delta_meses, estudios_automaticos.VIGENCIA_MESES)
+
+    def test_barrido_apagado_no_renueva(self):
+        veh = vehiculo_completo(
+            estadoIntegra="aprobado",
+            estudiosVigencia={"desde": datetime(2025, 1, 1),
+                              "vence": datetime(2025, 1, 1)})
+        fake = FakeColeccion([veh])
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "AUTO_RENOVAR", False):
+            n = asyncio.run(estudios_automaticos.barrido_renovacion())
+        self.assertEqual(n, 0)
+        self.assertEqual(fake.updates, [])  # nada tocó
+
+    def test_barrido_renueva_solo_aprobados_vencidos(self):
+        vencida = {"desde": datetime(2025, 1, 1), "vence": datetime(2025, 1, 1)}
+        vigente = {"desde": datetime(2026, 9, 28), "vence": datetime(2027, 9, 28)}
+        docs = [
+            vehiculo_completo(placa="VENC1", estadoIntegra="aprobado",
+                               condCedulaCiudadaria="1020304050",
+                               estudiosVigencia=vencida),
+            vehiculo_completo(placa="VIGEN", estadoIntegra="aprobado",
+                               condCedulaCiudadaria="1020304050",
+                               estudiosVigencia=vigente),
+            vehiculo_completo(placa="INACT", estadoIntegra="inactivo",
+                               condCedulaCiudadaria="1020304050",
+                               estudiosVigencia=vencida),
+            vehiculo_completo(placa="REVIS", estadoIntegra="registro_incompleto",
+                               condCedulaCiudadaria="1020304050",
+                               estudiosVigencia=vencida),
+        ]
+        fake = FakeColeccion(docs)
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "AUTO_RENOVAR", True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok):
+            n = asyncio.run(estudios_automaticos.barrido_renovacion())
+        self.assertEqual(n, 1)  # solo el aprobado vencido
+        por_placa = {d["placa"]: d for d in fake.documents}
+        # VENC1 renovó: corrida nueva + vigencia a +12 meses.
+        self.assertGreater(por_placa["VENC1"]["estudiosVigencia"]["vence"],
+                           datetime(2026, 9, 28))
+        # Los demás quedaron exactamente como estaban.
+        self.assertEqual(por_placa["VIGEN"]["estudiosVigencia"]["vence"], vigente["vence"])
+        self.assertEqual(por_placa["INACT"]["estudiosVigencia"]["vence"], vencida["vence"])
+        self.assertEqual(por_placa["REVIS"]["estudiosVigencia"]["vence"], vencida["vence"])
+
+    def test_barrido_respeta_el_tope_por_ciclo(self):
+        vencida = {"desde": datetime(2025, 1, 1), "vence": datetime(2025, 1, 1)}
+        docs = [vehiculo_completo(placa=f"V{ i }", estadoIntegra="aprobado",
+                                  condCedulaCiudadania="1020304050",
+                                  estudiosVigencia=vencida)
+                for i in range(5)]
+        fake = FakeColeccion(docs)
+        import asyncio
+        renovados_vistos = []
+        original = estudios_automaticos.disparar_estudios
+
+        async def espia(placa, **kw):
+            renovados_vistos.append((placa, kw.get("forzar")))
+            return None  # no ejecutar de verdad
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "AUTO_RENOVAR", True), \
+             patch.object(estudios_automaticos, "RENOVACIONES_POR_CICLO", 3), \
+             patch.object(estudios_automaticos, "disparar_estudios", espia):
+            n = asyncio.run(estudios_automaticos.barrido_renovacion())
+        self.assertEqual(n, 3)  # tope del ciclo
+        self.assertEqual(len(renovados_vistos), 3)
+        for _placa, forzar in renovados_vistos:
+            self.assertTrue(forzar)  # renovación = re-consulta real (force)
+
     def test_reintentar_sin_fuentes_fallidas_422(self):
         veh = vehiculo_completo(estudiosSeguridadAuto=[{
             "id": "e1", "tipo": "persona", "cedula": "1020304050",
@@ -360,6 +592,84 @@ class DispararEstudiosTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(estudios_automaticos.reintentar_fuentes_estudio("ABC123", "e1"))
         self.assertEqual(ctx.exception.status_code, 422)
+
+    def _correr_vehiculo(self, fake, vehiculo, forzar=False):
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
+             patch.object(estudios_automaticos, "VIGENCIA_MESES", 6):
+            asyncio.run(estudios_automaticos.disparar_estudios(
+                vehiculo["placa"], forzar=forzar))
+        return fake.find_one({"placa": vehiculo["placa"]})
+
+    def test_reutiliza_estudio_de_otra_placa_sin_gastar(self):
+        """La misma cédula estudiada hace poco en OTRA placa → se copia el
+        resultado (reutilizado_de) sin llamar al proveedor."""
+        hace_1_mes = datetime.utcnow() - timedelta(days=30)
+        otra = vehiculo_completo(
+            placa="OTRA1", condCedulaCiudadania="1020304050",
+            estudiosSeguridadAuto=[
+                {"id": "x1", "tipo": "persona", "cedula": "1020304050",
+                 "estado": "finalizado", "hallazgo": False, "categoria": "",
+                 "fuentes": {"SIMIT": False}, "reporte_id": "rep-viejo",
+                 "finalizado_en": hace_1_mes},
+            ])
+        nueva = vehiculo_completo(
+            placa="NUEV01", condCedulaCiudadania="1020304050",
+            propDocumento="1020304050", tenedDocumento="987654321")
+        fake = FakeColeccion([otra, nueva])
+
+        llamadas = {"n": 0}
+        async def contar(*a, **kw):
+            llamadas["n"] += 1
+            return await _respuesta_ok()
+
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "VIGENCIA_MESES", 6), \
+             patch.object(estudios_automaticos, "consulta_completa", contar), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", contar):
+            asyncio.run(estudios_automaticos.disparar_estudios("NUEV01"))
+
+        estudios = {e.get("cedula") or e.get("placa"): e
+                    for e in fake.find_one({"placa": "NUEV01"})["estudiosSeguridadAuto"]}
+        reusado = estudios["1020304050"]
+        self.assertEqual(reusado["estado"], "finalizado")
+        self.assertEqual(reusado["reutilizado_de"], "OTRA1")
+        self.assertEqual(reusado["reporte_id"], "rep-viejo")
+        # Solo consultaron los sujetos SIN estudio previo (tenedor + vehículo).
+        self.assertEqual(llamadas["n"], 2)
+
+    def test_no_reutiliza_estudios_viejos_ni_con_force(self):
+        hace_8_meses = datetime.utcnow() - timedelta(days=245)
+        otra = vehiculo_completo(
+            placa="OTRA1", condCedulaCiudadania="1020304050",
+            estudiosSeguridadAuto=[
+                {"id": "x1", "tipo": "persona", "cedula": "1020304050",
+                 "estado": "finalizado", "reporte_id": "rep-viejo",
+                 "finalizado_en": hace_8_meses},
+            ])
+
+        # Viejo (8 meses > vigencia 6): consulta normal.
+        nueva = vehiculo_completo(placa="NUEV01", condCedulaCiudadania="1020304050")
+        fake = FakeColeccion([otra, nueva])
+        doc = self._correr_vehiculo(fake, nueva)
+        estudio = [e for e in doc["estudiosSeguridadAuto"]
+                   if e["tipo"] == "persona"][0]
+        self.assertEqual(estudio["estado"], "finalizado")
+        self.assertNotIn("reutilizado_de", estudio)
+
+        # Fresco pero force=True (renovación manual): re-consulta real.
+        hace_1_mes = datetime.utcnow() - timedelta(days=30)
+        otra["estudiosSeguridadAuto"][0]["finalizado_en"] = hace_1_mes
+        fake2 = FakeColeccion([otra, nueva])
+        doc2 = self._correr_vehiculo(fake2, nueva, forzar=True)
+        estudio2 = [e for e in doc2["estudiosSeguridadAuto"]
+                    if e["tipo"] == "persona"][0]
+        self.assertNotIn("reutilizado_de", estudio2)
 
     def test_segunda_corrida_archiva_historial(self):
         """Cada corrida nueva archiva la anterior en `historialEstudios`
@@ -460,6 +770,43 @@ class HookActualizarEstadoTests(unittest.TestCase):
         notif.assert_called_once()
         disparo.assert_called_once_with("ABC123", re_revision=False)
 
+    def test_enviar_a_actualizacion(self):
+        """aprobado → en_actualizacion exige observación; finalizar vuelve
+        a revisión (y dispara estudios); Seguridad puede cancelar a aprobado."""
+        cliente = cliente_de_prueba()
+
+        def llamar(estado_actual, nuevo, extra=None):
+            fake = FakeColeccion([vehiculo_completo(estadoIntegra=estado_actual)])
+            with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                 patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+                 patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:
+                data = {"placa": "ABC123", "nuevo_estado": nuevo, "usuario_id": "u1"}
+                data.update(extra or {})
+                r = cliente.put("/vehiculos/actualizar-estado", data=data)
+            return r, fake, disparo
+
+        # Sin observación → 400 accionable.
+        r, _, _ = llamar("aprobado", "en_actualizacion")
+        self.assertEqual(r.status_code, 400)
+
+        # Con observación → 200.
+        r, fake, _ = llamar("aprobado", "en_actualizacion",
+                            {"observaciones": "Actualizar SOAT"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "en_actualizacion")
+
+        # Conductor finaliza → completado_revision + estudios re-disparados.
+        r, fake, disparo = llamar("en_actualizacion", "completado_revision")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "completado_revision")
+        disparo.assert_called_once_with("ABC123", re_revision=False)
+
+        # Seguridad cancela → vuelve a aprobado.
+        r, fake, _ = llamar("en_actualizacion", "aprobado",
+                            {"motivo": "cancelada"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "aprobado")
+
     def test_aprobar_no_dispara_estudios(self):
         fake = FakeColeccion([vehiculo_completo(estadoIntegra="completado_revision")])
         cliente = cliente_de_prueba()
@@ -470,6 +817,23 @@ class HookActualizarEstadoTests(unittest.TestCase):
             })
         self.assertEqual(r.status_code, 200)
         disparo.assert_not_called()
+
+    def test_finalizado_por_seguridad_NO_dispara_estudios(self):
+        """El alta la finaliza Seguridad (impersonando o directa): los estudios
+        los dispara ella con «Volver a consultar» al evaluar la placa — el
+        auto-disparo es SOLO del registro hecho por el propio conductor."""
+        cliente = cliente_de_prueba()
+        for via in ("impersonacion", "seguridad"):
+            fake = FakeColeccion([vehiculo_completo(estadoIntegra="registro_incompleto")])
+            with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                 patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+                 patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:
+                r = cliente.put("/vehiculos/actualizar-estado", data={
+                    "placa": "ABC123", "nuevo_estado": "completado_revision",
+                    "usuario_id": "u1", "via": via, "editado_por": "SEGURIDAD X",
+                })
+            self.assertEqual(r.status_code, 200)
+            disparo.assert_not_called()
 
 
 class EndpointEstudiosTests(unittest.TestCase):
@@ -516,15 +880,45 @@ class EndpointEstudiosTests(unittest.TestCase):
             r = cliente.get("/vehiculos/estudios-seguridad/NADA")
         self.assertEqual(r.status_code, 404)
 
+    def test_exportar_excel(self):
+        """GET /exportar-excel: todas las placas, columnas clave presentes."""
+        fake = FakeColeccion([
+            vehiculo_completo(placa="AAA111", estadoIntegra="aprobado",
+                               condCedulaCiudadaria="1020304050",
+                               condNombres="JUAN", estudiosVigencia={
+                                   "desde": datetime(2026, 9, 28),
+                                   "vence": datetime(2027, 9, 28)}),
+            vehiculo_completo(placa="ZZZ999", estadoIntegra="registro_incompleto"),
+        ])
+        cliente = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            r = cliente.get("/vehiculos/exportar-excel")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("spreadsheetml", r.headers["content-type"])
+        self.assertIn("attachment", r.headers.get("content-disposition", ""))
+        # Verificar contenido del xlsx (openpyxl en memoria).
+        import io
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(r.content))
+        ws = wb.active
+        cabeceras = [c.value for c in ws[1]]
+        self.assertIn("Placa", cabeceras)
+        self.assertIn("Cond. Cédula", cabeceras)
+        self.assertIn("Estudios vigencia vence", cabeceras)
+        self.assertEqual(ws.max_row, 3)  # cabecera + 2 vehículos
+        placas = [ws.cell(row=i, column=1).value for i in (2, 3)]
+        self.assertEqual(placas, ["AAA111", "ZZZ999"])  # ordenadas
+
     def test_disparar_manual(self):
-        """POST .../disparar: botón de /revision — re-dispara SIEMPRE."""
+        """POST .../disparar: botón de /revision — re-dispara SIEMPRE con
+        force (re-consulta real, no la caché del proveedor)."""
         fake = FakeColeccion([vehiculo_completo()])
         cliente = cliente_de_prueba()
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:
             r = cliente.post("/vehiculos/estudios-seguridad/ABC123/disparar")
         self.assertEqual(r.status_code, 200)
-        disparo.assert_called_once_with("ABC123", re_revision=False)
+        disparo.assert_called_once_with("ABC123", re_revision=False, forzar=True)
 
     def test_disparar_vehiculo_inexistente_404(self):
         cliente = cliente_de_prueba()
