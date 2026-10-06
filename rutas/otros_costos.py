@@ -813,10 +813,46 @@ def _enmascarar(valor: str) -> str:
     return "*" * (len(s) - 4) + s[-4:]
 
 
+# Los docs anteriores a 2026-10-01 guardan solo `usuario` (sin `nombre`) en
+# creado_por/aprobacion/pago. El nombre real se resuelve desde baseusuarios una
+# sola vez por proceso y se inyecta en la respuesta (no se persiste nada).
+_cache_nombres: dict = {}
+
+
+def _nombre_de_usuario(usuario: str) -> str:
+    u = str(usuario or "").strip().upper()
+    if not u:
+        return ""
+    if u not in _cache_nombres:
+        doc = col_usuarios.find_one({"usuario": u}, {"nombre": 1})
+        _cache_nombres[u] = str((doc or {}).get("nombre") or "")
+    return _cache_nombres[u]
+
+
+def _completar_identidades(doc: dict) -> dict:
+    """Completa el `nombre` de quien creó/aprobó/pagó docs viejos para que el
+    front muestre la persona y no el usuario."""
+    creado = doc.get("creado_por")
+    creado = creado if isinstance(creado, dict) else {}
+    usr_creacion = creado.get("usuario") or doc.get("usuario_registro") or ""
+    if usr_creacion and not creado.get("nombre"):
+        nombre = _nombre_de_usuario(usr_creacion)
+        if nombre:
+            doc["creado_por"] = {**creado, "usuario": usr_creacion, "nombre": nombre}
+    for campo in ("aprobacion", "pago", "tramite_vulcano_info"):
+        sub = doc.get(campo)
+        if isinstance(sub, dict) and sub.get("usuario") and not sub.get("nombre"):
+            nombre = _nombre_de_usuario(sub["usuario"])
+            if nombre:
+                sub["nombre"] = nombre
+    return doc
+
+
 def _serializar(doc: Optional[dict], perfil: str, usuario: Optional[str] = None) -> Optional[dict]:
     if doc is None:
         return None
     doc = _aplicar_visibilidad(_jsonable(doc), perfil, usuario)
+    _completar_identidades(doc)
     # Los adjuntos viven en el bucket PRIVADO: Mongo guarda la ruta plana y aquí
     # se entrega como URL firmada temporal (el front consume `url` sin cambios).
     adjuntos = doc.get("adjuntos")

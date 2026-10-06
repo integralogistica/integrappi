@@ -673,6 +673,9 @@ TIPOS_SUBIDA_LEIBLES = {
     # VEZ de los RUT (los RUT se cargan en el paso 3 de documentación).
     "documentoIdentidadPropietario": "cedula",
     "documentoIdentidadTenedor": "cedula",
+    # Cédula del dueño del remolque (2026-10-05): misma lectura que las demás
+    # figuras — llena los campos RemolDueno* del paso 2 y entra al estudio.
+    "documentoIdentidadRemolque": "cedula",
     "rutTenedor": "rut",
     "rutPropietario": "rut",
     "condCertificacionBancaria": "certificado_bancario",
@@ -754,6 +757,8 @@ ETIQUETAS_DOCUMENTO = {
     "documentoIdentidadPropietarioReverso": "Documento de Identidad del Propietario (Reverso)",
     "documentoIdentidadTenedor": "Documento de Identidad del Tenedor",
     "documentoIdentidadTenedorReverso": "Documento de Identidad del Tenedor (Reverso)",
+    "documentoIdentidadRemolque": "Cédula del Dueño del Remolque",
+    "documentoIdentidadRemolqueReverso": "Cédula del Dueño del Remolque (Reverso)",
     "licencia": "Licencia de Conducción Vigente",
     "licenciaReverso": "Licencia de Conducción (Reverso)",
     "planillaEpsArl": "Planilla de Seguridad Social",
@@ -964,9 +969,17 @@ def _disparar_estudios_seguridad(placa: str, re_revision: bool = False,
     un fallo JAMÁS tumba el endpoint que lo dispara.
     `forzar=True` → force del proveedor (re-consulta real, no su caché).
     Import local para evitar el ciclo vehiculos ↔ estudios_automaticos.
+    SWITCH (2026-10-05): si el disparo automático está APAGADO (switch en
+    config_estudios / env ESTUDIOS_AUTO_DISPARAR=false), no se lanza nada —
+    Seguridad consulta manualmente desde /revision. El endpoint manual
+    POST /estudios-seguridad/{placa}/disparar NO pasa por aquí (siempre
+    funciona, es acción explícita del usuario).
     """
     try:
         from Funciones import estudios_automaticos
+        if not estudios_automaticos.auto_disparo_habilitado():
+            print(f"[estudios-auto] Disparo automático de {placa} OMITIDO (switch apagado)")
+            return
         asyncio.create_task(
             estudios_automaticos.disparar_estudios(
                 placa, re_revision=re_revision, forzar=forzar))
@@ -1258,15 +1271,20 @@ async def obtener_vehiculo(placa: str):
 # actualizar-estado, que antes aceptaba cualquier string. `inactivo` es un
 # aprobado pausado por Seguridad (motivo obligatorio); reactivar vuelve a
 # `aprobado` SIN re-revisión.
+# `rechazado` (2026-10-05, pedido del usuario): NO se puede corregir — es un
+# rechazo DEFINITIVO con motivo; el vehículo queda CANDADO (nadie lo edita:
+# ni el conductor/tenedor ni Seguridad) y no tiene transiciones de salida.
 TRANSICIONES_VALIDAS = {
-    "registro_incompleto": {"completado_revision"},
-    "completado_revision": {"aprobado", "registro_incompleto"},
+    "registro_incompleto": {"completado_revision", "rechazado"},
+    "completado_revision": {"aprobado", "registro_incompleto", "rechazado"},
     "aprobado": {"inactivo", "registro_incompleto", "en_actualizacion"},
     "inactivo": {"aprobado"},
     # Vehículo enviado a actualizar datos (2026-09-28): el conductor corrige
     # y «Finaliza» → revisión (con estudios re-disparados); Seguridad también
     # puede cancelar la actualización y devolverlo a aprobado.
     "en_actualizacion": {"completado_revision", "aprobado"},
+    # Sin salidas: rechazado es final.
+    "rechazado": set(),
 }
 
 @ruta_vehiculos.put("/actualizar-estado")
@@ -1325,6 +1343,14 @@ async def actualizar_estado(
             detail="El motivo de inactivación es obligatorio.",
         )
 
+    # Rechazar es DEFINITIVO (2026-10-05): exige motivo y el vehículo queda
+    # candado para todos (sin transiciones de salida ni ediciones).
+    if nuevo_estado == "rechazado" and not ((motivo or "").strip() or (observaciones or "").strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="El motivo del rechazo es obligatorio.",
+        )
+
     # Enviar a actualización de datos exige la observación de QUÉ actualizar
     # (es lo que ve el conductor en su panel).
     if nuevo_estado == "en_actualizacion" and not ((observaciones or "").strip() or (motivo or "").strip()):
@@ -1343,6 +1369,10 @@ async def actualizar_estado(
 
     if observaciones:
         datos_actualizar["observaciones"] = observaciones
+    elif nuevo_estado == "rechazado" and (motivo or "").strip():
+        # El motivo del rechazo queda visible para el conductor como
+        # observación (no hay camino de corrección — es informativo).
+        datos_actualizar["observaciones"] = motivo.strip()
 
     operacion = {"$set": datos_actualizar}
 
@@ -1351,6 +1381,15 @@ async def actualizar_estado(
         operacion["$push"] = {"historialInactivacion": {
             "fecha": ahora, "usuario": usuario_id,
             "motivo": motivo.strip(), "accion": "inactivo",
+        }}
+    elif nuevo_estado == "rechazado":
+        # El rechazo viaja en el MISMO histórico (timeline de PestanaCambios)
+        # con su acción propia; el motivo también queda en `observaciones`
+        # para que el conductor lo vea.
+        operacion["$push"] = {"historialInactivacion": {
+            "fecha": ahora, "usuario": usuario_id,
+            "motivo": ((motivo or "").strip() or (observaciones or "").strip()),
+            "accion": "rechazado",
         }}
     elif nuevo_estado == "aprobado" and estado_actual == "inactivo":
         operacion["$push"] = {"historialInactivacion": {
@@ -1389,6 +1428,17 @@ async def actualizar_estado(
         # Seguridad con «Volver a consultar» cuando evalue la placa.
         if (via or "conductor") not in ("seguridad", "impersonacion"):
             _disparar_estudios_seguridad(placa, re_revision=False)
+        # Correos de AUTORIZACIÓN DE DATOS (2026-10-05) a los actores del
+        # estudio sin evidencia (propietario/tenedor/dueño remolque sin
+        # cuenta): link público + declaraciones. Va SIEMPRE (es un correo, no
+        # gasto de TusDatos — independiente del switch de estudios) y es
+        # idempotente por persona.
+        try:
+            from rutas import conductores as _conductores
+            asyncio.create_task(asyncio.to_thread(
+                _conductores.enviar_autorizaciones_pendientes, vehiculo))
+        except Exception as e:
+            print(f"[autorizacion] No se pudieron enviar los correos de {placa}: {e}")
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -1429,6 +1479,8 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     # Reversos de documentos de dos caras (mismo blindaje que sus frentes).
     "documentoIdentidadConductorReverso", "documentoIdentidadPropietarioReverso",
     "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
+    # Cédula del dueño del remolque (2026-10-05): figura opcional aparte.
+    "documentoIdentidadRemolque", "documentoIdentidadRemolqueReverso",
 }
 
 # Referencias laborales adicionales (2026-08-31): la #1 son los campos planos
@@ -1460,11 +1512,24 @@ def _sanear_refs_adicionales(valor):
     return saneadas
 
 
+def _asegurar_editable(vehiculo: dict):
+    """Un vehículo RECHAZADO es de SOLO LECTURA para todos (2026-10-05, orden
+    del usuario): ni el conductor/tenedor ni Seguridad pueden modificar su
+    contenido (datos, documentos, fotos, firma). El estado no tiene
+    transiciones de salida — el rechazo es definitivo."""
+    if (vehiculo or {}).get("estadoIntegra") == "rechazado":
+        raise HTTPException(
+            status_code=403,
+            detail="El vehículo está RECHAZADO y no puede editarse (rechazo definitivo de Seguridad).",
+        )
+
+
 @ruta_vehiculos.put("/actualizar-informacion/{placa}")
 async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: Optional[str] = None):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     # Defensa: el endpoint acepta cualquier clave, pero las internas se ignoran
     # y los campos de documentos también (sus dueños son los endpoints de subida).
@@ -1579,6 +1644,7 @@ async def subir_estudio_seguridad(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa_limpia})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     if archivo.content_type == "application/pdf":
         extension = "pdf"
@@ -1643,6 +1709,7 @@ async def subir_foto_seguridad(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa_limpia})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     if not archivo.content_type.startswith("image/"):
          raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen para la foto del conductor.")
@@ -1684,7 +1751,8 @@ async def subir_documento(
     # su reverso opcional (cédula amarilla), como la del conductor.
     TIPOS_DOS_CARAS = {
         "documentoIdentidadConductor", "documentoIdentidadPropietario",
-        "documentoIdentidadTenedor", "licencia", "tarjetaPropiedad",
+        "documentoIdentidadTenedor", "documentoIdentidadRemolque",
+        "licencia", "tarjetaPropiedad",
     }
     if reverso and tipo not in TIPOS_DOS_CARAS:
         raise HTTPException(status_code=400, detail="Ese tipo de documento no admite reverso.")
@@ -1694,6 +1762,9 @@ async def subir_documento(
         "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
         "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
         "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario",
+        # Cédula del dueño del remolque (2026-10-05): figura opcional, sube
+        # frente (+reverso vía `reverso`) igual que las demás cédulas.
+        "documentoIdentidadRemolque",
         # Reversos como tipo directo: el paso 3 los sube como ítem propio.
         "licenciaReverso", "tarjetaPropiedadReverso",
         # (2026-09-28) Hoja de vida física firmada (alta por Seguridad).
@@ -1705,6 +1776,7 @@ async def subir_documento(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     if archivo.content_type.startswith("image/"):
         extension = "webp"
@@ -1855,6 +1927,9 @@ DOCUMENTOS_REUTILIZABLES = {
             "conductor": "documentoIdentidadConductor",
             "propietario": "documentoIdentidadPropietario",
             "tenedor": "documentoIdentidadTenedor",
+            # Dueño del remolque (2026-10-05): figura opcional — puede copiarse
+            # la cédula de cualquiera de las otras tres figuras.
+            "remolque": "documentoIdentidadRemolque",
         },
         "dos_caras": True,
         "nombre": "Cédula",
@@ -1874,6 +1949,7 @@ _ETIQUETA_FIGURA = {
     "conductor": "el conductor",
     "propietario": "el propietario",
     "tenedor": "el tenedor",
+    "remolque": "el dueño del remolque",
 }
 
 
@@ -1914,13 +1990,13 @@ async def reutilizar_documento(
     if not tipo_destino:
         raise HTTPException(
             status_code=400,
-            detail="Figura no válida: use conductor, propietario o tenedor.",
+            detail="Figura no válida: use conductor, propietario, tenedor o remolque.",
         )
     tipo_origen = campos.get(origen)
     if not tipo_origen:
         raise HTTPException(
             status_code=400,
-            detail="Origen no válido: use conductor, propietario o tenedor.",
+            detail="Origen no válido: use conductor, propietario, tenedor o remolque.",
         )
     if origen == figura:
         raise HTTPException(
@@ -1944,6 +2020,7 @@ async def reutilizar_documento(
     if not vehiculo:
         print(f"[reutilizar-cedula] 404: placa recibida={placa!r} (normalizada={placa_norm!r})")
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     url_cond = vehiculo.get(tipo_origen)
     if not url_cond or not (_es_ruta_documento(url_cond) or str(url_cond).startswith("https://")):
@@ -2028,6 +2105,7 @@ async def subir_fotos(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     # Tope de fotos por vehículo: máximo 10 en total (las ya subidas + estas).
     # Se deduplican primero (sanear docs contaminados por el bug de numeración:
@@ -2120,6 +2198,7 @@ async def subir_firma(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     try:
         # Nomenclatura estándar del bucket (placa/fecha/firma_cedula.webp).
@@ -2170,6 +2249,7 @@ async def firmar(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
 
     contenido = await archivo.read()
     if not contenido:
@@ -2322,6 +2402,7 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or not vehiculo.get(tipo):
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    _asegurar_editable(vehiculo)
 
     url_previa = vehiculo[tipo]
     eliminar_de_google_storage(url_previa)
@@ -2366,6 +2447,7 @@ async def eliminar_foto(placa: str, url: str, editado_por: Optional[str] = None)
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or url not in vehiculo["fotos"]:
         raise HTTPException(status_code=404, detail="Foto no encontrada.")
+    _asegurar_editable(vehiculo)
 
     eliminar_de_google_storage(url)
     coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"fotos": url}})
@@ -2637,6 +2719,34 @@ async def pdf_estudio(placa: str, estudio_id: str):
     return Response(content=contenido, media_type="application/pdf")
 
 
+@ruta_vehiculos.get("/estudios-config")
+def obtener_config_estudios():
+    """
+    Estado del SWITCH de disparo automático de estudios (2026-10-05):
+    `auto_disparo=true` (default) → cuando el conductor envía a revisión se
+    consultan los estudios solos; `false` → el vehículo llega a revisión SIN
+    estudios y Seguridad los corre manualmente («Volver a consultar» o el
+    módulo «Estudios por antigüedad»). Pensado para pausas TEMPORALES.
+    """
+    from Funciones import estudios_automaticos
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "auto_disparo": estudios_automaticos.auto_disparo_habilitado(),
+    })
+
+
+@ruta_vehiculos.put("/estudios-config")
+def actualizar_config_estudios(auto_disparo: str = Form(...)):
+    """Cambia el switch de disparo automático (botón de /revision)."""
+    from Funciones import estudios_automaticos
+    valor = str(auto_disparo).strip().lower() in ("1", "true", "si", "sí", "on")
+    efectivo = estudios_automaticos.fijar_auto_disparo(valor)
+    _log_switch = "encendido" if efectivo else "apagado"
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "auto_disparo": efectivo,
+        "message": f"Disparo automático de estudios {_log_switch}.",
+    })
+
+
 @ruta_vehiculos.post("/estudios-seguridad/{placa}/disparar")
 async def disparar_estudios_seguridad(placa: str):
     """
@@ -2668,6 +2778,99 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str = Form(...)):
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "message": "Fuentes fallidas reintentadas.",
         "estudio": _json_seguro(cambios),
+    })
+
+
+@ruta_vehiculos.get("/estudios-antiguedad")
+def estudios_por_antiguedad():
+    """
+    Módulo «Estudios por antigüedad» de /revision (2026-10-05, reemplaza la
+    renovación automática eliminada): TODAS las placas con estudios (corrida
+    vigente, histórico, PDFs manuales o estudio legacy), ORDENADAS por la
+    fecha del último estudio (más antiguo primero) para que el usuario decida
+    MANUALMENTE cuál actualizar (botón → /estudios-seguridad/{placa}/disparar).
+    """
+    from Funciones import estudios_automaticos as ea
+
+    ahora = datetime.utcnow()
+    filas = []
+    proyeccion = {
+        "placa": 1, "estadoIntegra": 1,
+        "condCedulaCiudadania": 1, "condNombres": 1, "condApellidos": 1,
+        "propDocumento": 1, "propTipoDocumento": 1, "propNombre": 1,
+        "tenedDocumento": 1, "tenedTipoDocumento": 1, "tenedNombre": 1,
+        "RemolDuenoDocumento": 1, "RemolDuenoTipoDocumento": 1, "RemolDuenoNombre": 1,
+        "estudiosSeguridadAuto": 1, "historialEstudios": 1,
+        "documentosEstudioSeguridad": 1, "estudiosVigencia": 1,
+        "estudioSeguridadFecha": 1,
+    }
+    for doc in coleccion_vehiculos.find(
+        {"$or": [
+            {"estudiosSeguridadAuto.0": {"$exists": True}},
+            {"historialEstudios.0": {"$exists": True}},
+            {"documentosEstudioSeguridad.0": {"$exists": True}},
+            {"estudioSeguridadFecha": {"$ne": None}},
+        ]}, proyeccion):
+        # Última fecha de estudio: corrida vigente → vigencia → PDF manual.
+        fechas = [e.get("finalizado_en") for e in (doc.get("estudiosSeguridadAuto") or [])
+                  if isinstance(e, dict) and e.get("finalizado_en")]
+        vigencia = doc.get("estudiosVigencia") or {}
+        if not fechas and vigencia.get("desde"):
+            fechas = [vigencia["desde"]]
+        if not fechas and doc.get("estudioSeguridadFecha"):
+            fechas = [doc["estudioSeguridadFecha"]]
+        if not fechas:
+            for d in (doc.get("documentosEstudioSeguridad") or []):
+                if isinstance(d, dict) and d.get("fecha"):
+                    fechas.append(d["fecha"])
+        if not fechas:
+            continue  # sin ninguna fecha de estudio → no hay nada que listar
+        ultimo = max(fechas)
+
+        sujetos = []
+        # Correo de contacto por cédula (para el botón «✉️ Enviar autorización»
+        # del módulo, prellenado desde el formulario del vehículo).
+        correos_por_ced = {}
+        for campo_doc, campo_correo in (
+            ("condCedulaCiudadania", "condCorreo"),
+            ("propDocumento", "propCorreo"),
+            ("tenedDocumento", "tenedCorreo"),
+            ("RemolDuenoDocumento", "RemolDuenoCorreo"),
+        ):
+            ced = re.sub(r"\D", "", str(doc.get(campo_doc) or ""))
+            correo = str(doc.get(campo_correo) or "").strip()
+            if ced and correo and ced not in correos_por_ced:
+                correos_por_ced[ced] = correo
+        for s in ea.sujetos_estudio(doc):
+            if s["tipo"] == "persona":
+                sujetos.append({"tipo": "persona", "documento": s["cedula"],
+                                "roles": s["roles"],
+                                "correo": correos_por_ced.get(s["cedula"], "")})
+            elif s["tipo"] == "empresa":
+                sujetos.append({"tipo": "empresa", "documento": s["nit"],
+                                "roles": s["roles"]})
+            else:
+                sujetos.append({"tipo": "vehiculo", "documento": s["placa"],
+                                "roles": ["vehículo"]})
+
+        vence = vigencia.get("vence")
+        filas.append({
+            "placa": doc.get("placa", ""),
+            "estadoIntegra": doc.get("estadoIntegra", ""),
+            "sujetos": sujetos,
+            "ultimo_estudio": ultimo,
+            "antiguedad_dias": max(0, (ahora - ultimo).days),
+            "vigencia_desde": vigencia.get("desde"),
+            "vigencia_vence": vence,
+            "vencida": bool(vence and vence < ahora),
+            "tiene_corrida_vigente": bool(doc.get("estudiosSeguridadAuto")),
+            "total_estudios": len(doc.get("estudiosSeguridadAuto") or []),
+        })
+
+    filas.sort(key=lambda f: f["ultimo_estudio"])
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "vehiculos": _json_seguro(filas),
+        "vencidas": sum(1 for f in filas if f["vencida"]),
     })
 
 

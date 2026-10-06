@@ -148,10 +148,9 @@ async def lifespan(app: FastAPI):
     print(f"[LIFESPAN] Tarea de sync creada: {task}")
     logger.info(f"[LIFESPAN] Tarea de sync creada: {task}")
 
-    # Renovación automática de estudios de seguridad por vigencia (barrido
-    # cada 6 h; kill-switch ESTUDIOS_AUTO_RENOVAR, apagado por defecto).
-    from Funciones import estudios_automaticos as _estudios_auto
-    task_renovacion = asyncio.create_task(_estudios_auto._loop_renovacion())
+    # (2026-10-05) La renovación automática de estudios fue ELIMINADA (orden
+    # del usuario): la actualización es manual desde el módulo «Estudios por
+    # antigüedad» de /revision. No hay tarea de renovación aquí.
 
     try:
         yield
@@ -159,13 +158,11 @@ async def lifespan(app: FastAPI):
         print("[LIFESPAN] Apagando servidor, cancelando tarea de sync...")
         logger.info("[LIFESPAN] Apagando servidor, cancelando tarea de sync...")
         task.cancel()
-        task_renovacion.cancel()
-        for t in (task, task_renovacion):
-            try:
-                await t
-            except asyncio.CancelledError:
-                print("[LIFESPAN] Tarea cancelada exitosamente")
-                pass
+        try:
+            await task
+        except asyncio.CancelledError:
+            print("[LIFESPAN] Tarea cancelada exitosamente")
+            pass
 
 
 app = FastAPI(lifespan=lifespan)

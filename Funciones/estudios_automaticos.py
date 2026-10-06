@@ -67,14 +67,11 @@ PDF_BUCKET = os.getenv("VEHICULOS_BUCKET", "integrapp-privado")
 PDF_CARPETA = "Vehiculos"
 _TZ_BOGOTA = pytz.timezone("America/Bogota")
 
-# ── RENOVACIÓN AUTOMÁTICA POR VIGENCIA (2026-09-28, pedido del usuario) ──
-# La corrida de estudios vence a los N meses y un barrido interno la renueva
-# SOLO (solo vehículos APROBADOS, con tope por ciclo para controlar el gasto).
-# Kill-switch: arranca APAGADO; activar en Render sin redeploy.
+# ── VIGENCIA DE LA CORRIDA (2026-09-28) ──
+# La corrida de estudios vence a los N meses. La renovación AUTOMÁTICA fue
+# eliminada (2026-10-05, orden del usuario): la actualización es manual desde
+# el módulo «Estudios por antigüedad» de /revision.
 VIGENCIA_MESES = int(os.getenv("ESTUDIOS_VIGENCIA_MESES", "12"))
-AUTO_RENOVAR = os.getenv("ESTUDIOS_AUTO_RENOVAR", "false").strip().lower() in ("1", "true", "si", "yes", "on")
-RENOVACIONES_POR_CICLO = int(os.getenv("ESTUDIOS_RENOVACIONES_POR_CICLO", "3"))
-RENUEVA_CADA_HORAS = 6  # frecuencia del barrido
 
 
 def _fecha_vencimiento(desde: datetime) -> datetime:
@@ -143,6 +140,41 @@ async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | 
 bd = bd_cliente['integra']
 coleccion_vehiculos = bd['vehiculos']
 
+# ── SWITCH DEL DISPARO AUTOMÁTICO (2026-10-05, pedido del usuario) ──
+# Permite pausar TEMPORALMENTE el disparo automático de estudios cuando el
+# conductor envía el vehículo a revisión (caso de uso: ingreso masivo de ~300
+# conductores históricos que se registran solos — el estudio lo corre
+# Seguridad manualmente desde /revision con «Volver a consultar» o el módulo
+# «Estudios por antigüedad»). El switch vive en la colección
+# `config_estudios` (doc `_id: "global"`, campo `auto_disparo`), se cambia
+# con un BOTÓN en /revision y aplica al instante sin redeploy. Kill-switch
+# adicional por env: ESTUDIOS_AUTO_DISPARAR=false lo apaga SIEMPRE.
+coleccion_config = bd['config_estudios']
+
+
+def auto_disparo_habilitado() -> bool:
+    """True si el disparo automático está activo. Prioridad:
+    env ESTUDIOS_AUTO_DISPARAR=false (off duro) > switch en BD > default ON."""
+    env = os.getenv("ESTUDIOS_AUTO_DISPARAR", "true").strip().lower()
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        doc = coleccion_config.find_one({"_id": "global"})
+        return bool(doc.get("auto_disparo", True)) if doc else True
+    except Exception as e:
+        print(f"[estudios-auto] No se pudo leer config_estudios ({e}); disparo ON")
+        return True
+
+
+def fijar_auto_disparo(habilitado: bool) -> bool:
+    """Escribe el switch y devuelve el estado efectivo resultante."""
+    coleccion_config.update_one(
+        {"_id": "global"},
+        {"$set": {"auto_disparo": bool(habilitado), "actualizado_en": datetime.utcnow()}},
+        upsert=True,
+    )
+    return auto_disparo_habilitado()
+
 # Placas que el wrapper de vehículo acepta (VehiculoCompletaIn exige
 # exactamente 6 caracteres; el registro de vehículos acepta 4-7).
 _PLACA_VEHICULO_RE = re.compile(r"^[A-Z0-9]{6}$")
@@ -186,9 +218,13 @@ def _digitos(valor) -> str:
 # expedición del documento (opcional para CC, afina el match); cuarto: campo
 # del TIPO de documento — propietario/tenedor pueden ser EMPRESA (NIT) y van
 # por el flujo de validación de empresa del proveedor (2026-09-28).
+# (2026-10-05) Dueño del remolque: figura OPCIONAL — solo entra como sujeto
+# si `RemolDuenoDocumento` viene diligenciado (dedup por dígitos igual que
+# las demás: si es la misma persona, combina roles en un solo estudio).
 _ROLES = (("conductor", "condCedulaCiudadania", "condFechaExpedicion", None),
           ("propietario", "propDocumento", None, "propTipoDocumento"),
-          ("tenedor", "tenedDocumento", None, "tenedTipoDocumento"))
+          ("tenedor", "tenedDocumento", None, "tenedTipoDocumento"),
+          ("dueño_remolque", "RemolDuenoDocumento", None, "RemolDuenoTipoDocumento"))
 
 
 def _es_nit(vehiculo: dict, campo_tipo: str) -> bool:
@@ -393,49 +429,13 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
         _EN_CURSO.discard(placa)
 
 
-# ── RENOVACIÓN AUTOMÁTICA POR VIGENCIA ────────────────────────────────────
-
-async def barrido_renovacion() -> int:
-    """
-    Renueva SOLO los estudios vencidos de vehículos APROBADOS (tope por
-    ciclo para controlar el gasto). Devuelve cuántos renovó. No-op si el
-    kill-switch ESTUDIOS_AUTO_RENOVAR está apagado.
-    """
-    if not AUTO_RENOVAR:
-        return 0
-    renovados = 0
-    try:
-        candidatos = coleccion_vehiculos.find({
-            "estadoIntegra": "aprobado",
-            "estudiosVigencia.vence": {"$lt": datetime.utcnow()},
-        })
-        for vehiculo in candidatos:
-            placa = vehiculo.get("placa")
-            if not placa:
-                continue
-            _log(f"[estudios-auto] 🔄 Renovación por vigencia vencida: {placa}")
-            await disparar_estudios(placa, re_revision=False, forzar=True)
-            renovados += 1
-            if renovados >= max(1, RENOVACIONES_POR_CICLO):
-                break
-    except Exception as e:
-        print(f"[estudios-auto] Error en el barrido de renovación: {e}")
-    return renovados
-
-
-async def _loop_renovacion():
-    """Barrido periódico (lifespan de main.py): cada RENUEVA_CADA_HORAS."""
-    print(f"[estudios-auto] Renovador por vigencia iniciado "
-          f"(cada {RENUEVA_CADA_HORAS} h · ESTUDIOS_AUTO_RENOVAR={AUTO_RENOVAR} · "
-          f"vigencia {VIGENCIA_MESES} meses · tope {RENOVACIONES_POR_CICLO}/ciclo)")
-    while True:
-        try:
-            n = await barrido_renovacion()
-            if n:
-                print(f"[estudios-auto] Barrido renovó {n} vehículo(s)")
-        except Exception as e:
-            print(f"[estudios-auto] Error del loop de renovación: {e}")
-        await asyncio.sleep(RENUEVA_CADA_HORAS * 3600)
+# ── RENOVACIÓN POR VIGENCIA ────────────────────────────────────────────────
+# (2026-10-05, orden del usuario) La renovación AUTOMÁTICA fue ELIMINADA: los
+# estudios se actualizan MANUALMENTE desde el módulo «Estudios por antigüedad»
+# de /revision (botón por placa → POST /vehiculos/estudios-seguridad/{placa}/
+# disparar, force=true). El sello `estudiosVigencia` se sigue escribiendo en
+# cada corrida: alimenta el chip de vigencia, el Excel y la reutilización
+# entre vehículos.
 
 
 async def _ejecutar_estudios(placa: str, sujetos: list) -> None:

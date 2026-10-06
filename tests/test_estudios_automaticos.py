@@ -525,78 +525,10 @@ class DispararEstudiosTests(unittest.TestCase):
                        + vig["vence"].month - vig["desde"].month)
         self.assertEqual(delta_meses, estudios_automaticos.VIGENCIA_MESES)
 
-    def test_barrido_apagado_no_renueva(self):
-        veh = vehiculo_completo(
-            estadoIntegra="aprobado",
-            estudiosVigencia={"desde": datetime(2025, 1, 1),
-                              "vence": datetime(2025, 1, 1)})
-        fake = FakeColeccion([veh])
-        import asyncio
-        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
-             patch.object(estudios_automaticos, "AUTO_RENOVAR", False):
-            n = asyncio.run(estudios_automaticos.barrido_renovacion())
-        self.assertEqual(n, 0)
-        self.assertEqual(fake.updates, [])  # nada tocó
-
-    def test_barrido_renueva_solo_aprobados_vencidos(self):
-        vencida = {"desde": datetime(2025, 1, 1), "vence": datetime(2025, 1, 1)}
-        vigente = {"desde": datetime(2026, 9, 28), "vence": datetime(2027, 9, 28)}
-        docs = [
-            vehiculo_completo(placa="VENC1", estadoIntegra="aprobado",
-                               condCedulaCiudadaria="1020304050",
-                               estudiosVigencia=vencida),
-            vehiculo_completo(placa="VIGEN", estadoIntegra="aprobado",
-                               condCedulaCiudadaria="1020304050",
-                               estudiosVigencia=vigente),
-            vehiculo_completo(placa="INACT", estadoIntegra="inactivo",
-                               condCedulaCiudadaria="1020304050",
-                               estudiosVigencia=vencida),
-            vehiculo_completo(placa="REVIS", estadoIntegra="registro_incompleto",
-                               condCedulaCiudadaria="1020304050",
-                               estudiosVigencia=vencida),
-        ]
-        fake = FakeColeccion(docs)
-        import asyncio
-        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
-             patch.object(estudios_automaticos, "_configurado", lambda: True), \
-             patch.object(estudios_automaticos, "AUTO_RENOVAR", True), \
-             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
-             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok):
-            n = asyncio.run(estudios_automaticos.barrido_renovacion())
-        self.assertEqual(n, 1)  # solo el aprobado vencido
-        por_placa = {d["placa"]: d for d in fake.documents}
-        # VENC1 renovó: corrida nueva + vigencia a +12 meses.
-        self.assertGreater(por_placa["VENC1"]["estudiosVigencia"]["vence"],
-                           datetime(2026, 9, 28))
-        # Los demás quedaron exactamente como estaban.
-        self.assertEqual(por_placa["VIGEN"]["estudiosVigencia"]["vence"], vigente["vence"])
-        self.assertEqual(por_placa["INACT"]["estudiosVigencia"]["vence"], vencida["vence"])
-        self.assertEqual(por_placa["REVIS"]["estudiosVigencia"]["vence"], vencida["vence"])
-
-    def test_barrido_respeta_el_tope_por_ciclo(self):
-        vencida = {"desde": datetime(2025, 1, 1), "vence": datetime(2025, 1, 1)}
-        docs = [vehiculo_completo(placa=f"V{ i }", estadoIntegra="aprobado",
-                                  condCedulaCiudadania="1020304050",
-                                  estudiosVigencia=vencida)
-                for i in range(5)]
-        fake = FakeColeccion(docs)
-        import asyncio
-        renovados_vistos = []
-        original = estudios_automaticos.disparar_estudios
-
-        async def espia(placa, **kw):
-            renovados_vistos.append((placa, kw.get("forzar")))
-            return None  # no ejecutar de verdad
-
-        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
-             patch.object(estudios_automaticos, "AUTO_RENOVAR", True), \
-             patch.object(estudios_automaticos, "RENOVACIONES_POR_CICLO", 3), \
-             patch.object(estudios_automaticos, "disparar_estudios", espia):
-            n = asyncio.run(estudios_automaticos.barrido_renovacion())
-        self.assertEqual(n, 3)  # tope del ciclo
-        self.assertEqual(len(renovados_vistos), 3)
-        for _placa, forzar in renovados_vistos:
-            self.assertTrue(forzar)  # renovación = re-consulta real (force)
+    # (2026-10-05) Los tests del BARRIDO DE RENOVACIÓN AUTOMÁTICA fueron
+    # eliminados junto con la funcionalidad (orden del usuario: la
+    # actualización de estudios es MANUAL desde /revision → módulo «Estudios
+    # por antigüedad»). El sello de vigencia sigue probándose arriba.
 
     def test_reintentar_sin_fuentes_fallidas_422(self):
         veh = vehiculo_completo(estudiosSeguridadAuto=[{

@@ -6,8 +6,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import resend
-from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel
+import pytz
 
 from bd.bd_cliente import bd_cliente
 from Funciones.claves import crear_hash, verificar_clave
@@ -28,6 +29,12 @@ coleccion_vehiculos = bd["vehiculos"]
 # (una sola activa) y evidencia append-only de aceptaciones en `aceptaciones_politica`.
 coleccion_politicas = bd["politicas_datos"]
 coleccion_aceptaciones = bd["aceptaciones_politica"]
+# Autorización de SUJETOS sin cuenta (2026-10-05, plan aprobado): tokens de los
+# links enviados por correo a propietario/tenedor/dueño de remolque sin cuenta
+# en el portal. En aceptaciones_politica, esas personas quedan con
+# conductor_id=null + sujeto_cedula (una entrada por declaración, canales
+# "vinculo_correo" y "papel").
+coleccion_tokens_aut = bd["tokens_autorizacion"]
 # Auditoría append-only de impersonaciones (Seguridad entra al panel de un
 # conductor existente SIN tocar su clave — módulo Alta de vehículo).
 coleccion_impersonaciones = bd["impersonaciones"]
@@ -40,6 +47,9 @@ try:
     # Cédula: sparse (cuentas legacy no la tienen); NO unique hasta sanear datos.
     coleccion_conductores.create_index("cedula", sparse=True)
     coleccion_vehiculos.create_index("idConductor")
+    # Sujetos SIN cuenta: evidencia de autorización por cédula (sparse).
+    coleccion_aceptaciones.create_index("sujeto_cedula", sparse=True)
+    coleccion_tokens_aut.create_index("cedula")
 except Exception:
     pass
 
@@ -793,6 +803,419 @@ async def buscar_conductores(q: str = ""):
             "placas_propias": coleccion_vehiculos.count_documents({"idUsuario": cid}),
         })
     return {"cuentas": cuentas}
+
+
+# ==============================================================================
+# ⚖️ HABEAS DATA — EVIDENCIA DE AUTORIZACIÓN POR CÉDULA (2026-10-05)
+# Consulta de SOLO LECTURA para auditorías: dadas las cédulas de los sujetos de
+# un estudio de seguridad, resuelve la cuenta del portal y TODO su historial de
+# aceptaciones de políticas (fecha, canal, versión, declaración, IP,
+# user-agent). La evidencia vive en `aceptaciones_politica` (append-only) y
+# sobrevive a ediciones del doc del conductor.
+# ==============================================================================
+@ruta_conductores.get("/habeas-data", response_model=dict)
+async def consultar_habeas_data(cedulas: str = ""):
+    """
+    Evidencia de autorización de tratamiento de datos por cédula (consumido por
+    las tarjetas de estudio de /revision y el módulo «Estudios por antigüedad»).
+    `cedulas` = lista separada por comas. Nunca devuelve claves.
+    """
+    lista = [re.sub(r"\D", "", c) for c in (cedulas or "").split(",")]
+    lista = [c for c in lista if len(c) >= 4][:15]
+    if not lista:
+        return {"personas": []}
+
+    personas = []
+    for cedula in lista:
+        # La cédula puede venir guardada con puntos/espacios en cuentas viejas:
+        # se busca por dígitos anclados (mismo criterio del /buscar).
+        cuenta = coleccion_conductores.find_one(
+            {"cedula": {"$regex": f"^{re.escape(cedula)}$", "$options": "i"}},
+            {"clave": 0, "verificacion_token_hash": 0},
+        )
+
+        entrada = {
+            "cedula": cedula,
+            "tiene_cuenta": bool(cuenta),
+            "nombre": (cuenta or {}).get("nombre", ""),
+            "correo": (cuenta or {}).get("correo", ""),
+            "perfil": ((cuenta or {}).get("perfil") or "CONDUCTOR").upper() if cuenta else "",
+            "aceptacion_politica": (cuenta or {}).get("aceptacion_politica"),
+            "declaraciones_aceptadas": (cuenta or {}).get("declaraciones_aceptadas", []),
+            "politicas_pendientes": bool(
+                cuenta and cuenta.get("pendiente_aceptacion_politica")
+                and not cuenta.get("aceptacion_politica")),
+            "aceptaciones": [],
+        }
+
+        if cuenta:
+            # Historial completo (append-only): una entrada POR declaración.
+            for acep in coleccion_aceptaciones.find(
+                {"conductor_id": cuenta["_id"]}
+            ).sort("aceptado_en", -1).limit(50):
+                entrada["aceptaciones"].append({
+                    "version": acep.get("version"),
+                    "declaracion_id": acep.get("declaracion_id", ""),
+                    "declaracion_titulo": acep.get("declaracion_titulo", ""),
+                    "aceptado_en": acep.get("aceptado_en"),
+                    "canal": acep.get("canal", ""),
+                    "ip": acep.get("ip", ""),
+                    "user_agent": (acep.get("user_agent") or "")[:120],
+                })
+
+        # Sujetos SIN cuenta (2026-10-05): evidencia por cédula — link por
+        # correo o firma en papel (con el documento de respaldo).
+        for acep in coleccion_aceptaciones.find(
+            {"sujeto_cedula": cedula}
+        ).sort("aceptado_en", -1).limit(50):
+            entrada["aceptaciones"].append({
+                "version": acep.get("version"),
+                "declaracion_id": acep.get("declaracion_id", ""),
+                "declaracion_titulo": acep.get("declaracion_titulo", ""),
+                "aceptado_en": acep.get("aceptado_en"),
+                "canal": acep.get("canal", ""),
+                "ip": acep.get("ip", ""),
+                "user_agent": (acep.get("user_agent") or "")[:120],
+                "documento_ruta": acep.get("documento_ruta"),
+                "registrado_por": acep.get("registrado_por", ""),
+            })
+        # Link vigente sin usar → el front muestra «pendiente (enviado el …)».
+        try:
+            pendiente = coleccion_tokens_aut.find_one({
+                "cedula": cedula, "usado_en": None,
+                "expira": {"$gt": datetime.utcnow()}})
+            if pendiente:
+                entrada["token_pendiente"] = pendiente.get("creado_en")
+        except Exception:
+            pass
+
+        personas.append(entrada)
+
+    return {"personas": personas}
+
+
+# ==============================================================================
+# ⚖️ AUTORIZACIÓN DE SUJETOS SIN CUENTA (2026-10-05, plan aprobado)
+# La autorización es por PERSONA (cédula): cubre TODOS sus roles (conductor,
+# propietario, tenedor, dueño de remolque) en todos los vehículos. Los actores
+# SIN cuenta en el portal autorizan por:
+#   - LINK POR CORREO: token 48 h → página pública /AutorizacionDatos →
+#     acepta las declaraciones → evidencia canal "vinculo_correo".
+#   - PAPEL: Seguridad sube la firma física → evidencia canal "papel" con el
+#     documento en el bucket privado.
+# Las empresas (NIT) quedan exentas (autorización vía contrato/tenedor).
+# ==============================================================================
+FRONTEND_URL_AUTORIZACION = os.getenv(
+    "FRONTEND_URL_AUTORIZACION",
+    "https://integralogistica.com/integrapp/AutorizacionDatos")
+EXPIRA_HORAS_AUTORIZACION = int(os.getenv("AUTORIZACION_EXPIRE_HORAS", "48"))
+_TZ_BOGOTA_AUT = pytz.timezone("America/Bogota")
+
+
+def _digitos_aut(valor) -> str:
+    return re.sub(r"\D", "", str(valor or ""))
+
+
+def _sujeto_ya_autorizado(cedula: str) -> bool:
+    """La cédula ya tiene evidencia de autorización: cuenta con aceptación
+    registrada o entradas de sujeto (link por correo / papel)."""
+    cuenta = coleccion_conductores.find_one(
+        {"cedula": {"$regex": f"^{re.escape(cedula)}$", "$options": "i"}})
+    if cuenta and cuenta.get("aceptacion_politica"):
+        return True
+    return coleccion_aceptaciones.find_one({"sujeto_cedula": cedula}) is not None
+
+
+def _buscar_token_aut(token_plano: str) -> Optional[dict]:
+    """Token de autorización VÁLIDO (hash correcto + sin usar + no expirado).
+    Igual que el token de verificación: solo el hash vive en BD (bcrypt), así
+    que se recorren los candidatos y se verifica (tope 200)."""
+    if not token_plano:
+        return None
+    ahora = datetime.utcnow()
+    for doc in coleccion_tokens_aut.find({"usado_en": None}).limit(200):
+        expira = doc.get("expira")
+        token_hash = doc.get("token_hash")
+        if not expira or not token_hash:
+            continue
+        if expira.tzinfo is not None:  # fechas Mongo naive = UTC (convención)
+            expira = expira.replace(tzinfo=None)
+        if ahora > expira:
+            continue
+        if verificar_clave(token_plano, doc.get("token_hash", "")):
+            return doc
+    return None
+
+
+def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, placa: str):
+    """Correo con el link público de autorización de tratamiento de datos."""
+    if not resend.api_key or "TuApiKeyAqui" in resend.api_key:
+        print("⚠️ Falta API KEY de Resend; no se envió el correo de autorización "
+              f"(destinatario {destinatario}).")
+        return
+    html = f"""
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto;">
+      <h2 style="color: #0f1928;">Autorización de tratamiento de datos</h2>
+      <p>Hola {nombre or 'usuario'}:</p>
+      <p>Estás siendo vinculado(a) como actor del vehículo <b>{placa}</b> en la
+      plataforma <b>IntegrApp</b> de ORION TRANSPORTADORA DE CARGA S.A.S.
+      Para consultar tu información en fuentes públicas (estudio de seguridad)
+      necesitamos tu autorización expresa de tratamiento de datos personales
+      (Ley 1581 de 2012).</p>
+      <p style="text-align: center; margin: 28px 0;">
+        <a href="{enlace}"
+           style="background: #0f1928; color: #fff; padding: 12px 28px; border-radius: 10px;
+                  text-decoration: none; font-weight: bold;">
+          Revisar y autorizar
+        </a>
+      </p>
+      <p>O copia y pega este enlace en tu navegador:</p>
+      <p><a href="{enlace}">{enlace}</a></p>
+      <p><small>El enlace vence en {EXPIRA_HORAS_AUTORIZACION} horas. Si no esperabas
+      este mensaje, ignóralo.</small></p>
+    </div>
+    """
+    try:
+        resend.Emails.send({
+            "from": MAIL_FROM,
+            "to": [destinatario],
+            "subject": "Autorización de tratamiento de datos — IntegrApp",
+            "html": html,
+        })
+        print(f"📧 Correo de autorización enviado a {destinatario} ({placa})")
+    except Exception as e:
+        print(f"❌ Error enviando correo de autorización a {destinatario}: {e}")
+
+
+def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
+                            nombre: str = "", solicitado_por: str = "") -> dict:
+    """Crea/regenera el token y envía el correo. Compartido por el endpoint
+    manual (botón de /revision) y el envío automático al pasar a revisión.
+    Idempotente: si ya hay link vigente no se re-envía; si la persona ya
+    autorizó, no se envía nada."""
+    correo = (correo or "").strip()
+    if not correo or "@" not in correo:
+        raise HTTPException(status_code=400,
+                            detail="El correo es obligatorio para enviar la autorización.")
+    if _sujeto_ya_autorizado(cedula):
+        return {"estado": "ya_autorizado"}
+    ahora = datetime.utcnow()
+    pendiente = coleccion_tokens_aut.find_one({
+        "cedula": cedula, "usado_en": None, "expira": {"$gt": ahora}})
+    if pendiente:
+        return {"estado": "pendiente", "enviado_en": pendiente.get("creado_en"),
+                "expira": pendiente.get("expira")}
+    # Invalidar tokens previos sin usar y crear el nuevo (hash en BD).
+    token_plano = secrets.token_urlsafe(32)
+    try:
+        coleccion_tokens_aut.update_many(
+            {"cedula": cedula, "usado_en": None},
+            {"$set": {"usado_en": ahora, "resultado": "reemplazado"}})
+    except Exception:
+        pass
+    coleccion_tokens_aut.insert_one({
+        "cedula": cedula, "correo": correo.upper(),
+        "placa": (placa or "").strip().upper(), "nombre": (nombre or "").strip(),
+        "token_hash": crear_hash(token_plano),
+        "creado_en": ahora,
+        "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION),
+        "solicitado_por": (solicitado_por or "").strip() or "seguridad",
+    })
+    enviar_correo_autorizacion(correo, f"{FRONTEND_URL_AUTORIZACION}?token={token_plano}",
+                               (nombre or "").strip(), (placa or "").strip().upper())
+    return {"estado": "enviado", "enviado_en": ahora,
+            "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION)}
+
+
+class SolicitarAutorizacionInput(BaseModel):
+    placa: str
+    cedula: str
+    correo: str
+    nombre: Optional[str] = None
+    solicitado_por: Optional[str] = None
+
+
+class AceptarAutorizacionInput(BaseModel):
+    token: str
+    # ids de las declaraciones marcadas (deben ser TODAS las exigidas).
+    declaraciones_aceptadas: Optional[list] = None
+
+
+@ruta_conductores.post("/autorizacion/solicitar", response_model=dict)
+async def solicitar_autorizacion(data: SolicitarAutorizacionInput):
+    """Botón «✉️ Enviar autorización» de /revision: link por correo a un actor
+    del estudio sin cuenta. Idempotente (link vigente → no duplica correo)."""
+    cedula = _digitos_aut(data.cedula)
+    if len(cedula) < 4:
+        raise HTTPException(status_code=400, detail="Cédula no válida.")
+    return _solicitar_autorizacion(data.placa, cedula, data.correo,
+                                   data.nombre or "", data.solicitado_por or "")
+
+
+@ruta_conductores.get("/autorizacion/verificar", response_model=dict)
+def verificar_token_autorizacion(token: str = ""):
+    """Valida el link (sin consumirlo) y entrega la política a mostrar en la
+    página pública /AutorizacionDatos (mismo shape que verificar-correo)."""
+    doc = _buscar_token_aut(token)
+    if not doc:
+        raise HTTPException(
+            status_code=400,
+            detail="El enlace no es válido o ya fue usado/expiró. Pide uno nuevo a Seguridad.")
+    politica = _politica_vigente()
+    return {
+        "estado": "pendiente",
+        "nombre": doc.get("nombre", ""),
+        "correo": doc.get("correo", ""),
+        "placa": doc.get("placa", ""),
+        "politica": _politica_publica(politica),
+    }
+
+
+@ruta_conductores.post("/autorizacion/aceptar", response_model=dict)
+async def aceptar_autorizacion(data: AceptarAutorizacionInput, request: Request):
+    """Aceptación desde la página pública: una entrada append-only POR
+    declaración en aceptaciones_politica (canal vinculo_correo, campos
+    sujeto_*) y el token queda usado."""
+    doc = _buscar_token_aut(data.token)
+    if not doc:
+        raise HTTPException(
+            status_code=400,
+            detail="El enlace no es válido o ya fue usado/expiró. Pide uno nuevo a Seguridad.")
+    politica = _politica_vigente()
+    marcadas = _validar_declaraciones_completas(politica, data.declaraciones_aceptadas)
+
+    ahora = datetime.utcnow()
+    ip = request.client.host if request.client else ""
+    user_agent = (request.headers.get("user-agent") or "")[:300]
+    declaraciones = politica.get("declaraciones") or []
+    base = {
+        "conductor_id": None,
+        "sujeto_cedula": doc["cedula"],
+        "sujeto_nombre": doc.get("nombre", ""),
+        "sujeto_correo": doc.get("correo", ""),
+        "politica_id": politica["_id"],
+        "version": politica.get("version"),
+        "aceptado_en": ahora,
+        "canal": "vinculo_correo",
+        "ip": ip,
+        "user_agent": user_agent,
+    }
+    if declaraciones:
+        for decl in declaraciones:
+            if marcadas is not None and decl["id"] not in marcadas:
+                continue
+            entrada = dict(base)
+            entrada.update({
+                "declaracion_id": decl["id"],
+                "declaracion_titulo": decl.get("titulo", ""),
+            })
+            coleccion_aceptaciones.insert_one(entrada)
+    else:  # política v1 (sin declaraciones)
+        coleccion_aceptaciones.insert_one(dict(base))
+
+    coleccion_tokens_aut.update_one(
+        {"_id": doc["_id"]}, {"$set": {"usado_en": ahora, "resultado": "aceptado"}})
+    return {"estado": "aceptado", "declaraciones_aceptadas": marcadas or []}
+
+
+@ruta_conductores.post("/autorizacion/papel")
+async def registrar_autorizacion_papel(
+    archivo: UploadFile = File(...),
+    placa: str = Form(...),
+    cedula: str = Form(...),
+    registrado_por: Optional[str] = Form(None),
+):
+    """Fallback en PAPEL: Seguridad sube la autorización firmada a mano; queda
+    en el bucket privado y genera las entradas de evidencia canal «papel»."""
+    import asyncio
+    from rutas.vehiculos import subir_a_google_storage, _url_para_cliente
+
+    cedula = _digitos_aut(cedula)
+    if len(cedula) < 4:
+        raise HTTPException(status_code=400, detail="Cédula no válida.")
+    tipo = archivo.content_type or ""
+    if not (tipo.startswith("image/") or tipo == "application/pdf"):
+        raise HTTPException(status_code=400, detail="Sube una imagen o un PDF de la autorización firmada.")
+    placa_limpia = placa.strip().upper()
+    ext = "pdf" if tipo == "application/pdf" else "webp"
+    fecha = datetime.now(_TZ_BOGOTA_AUT).strftime("%Y-%m-%d")
+    # Nomenclatura del módulo: {PLACA}/{fecha}/autorizacionFisica_{cedula}_{placa}.{ext}
+    nombre_blob = f"{placa_limpia}/{fecha}/autorizacionFisica_{cedula}_{placa_limpia.lower()}.{ext}"
+    ruta = await asyncio.to_thread(subir_a_google_storage, archivo, nombre_blob)
+
+    politica = _politica_vigente()
+    ahora = datetime.utcnow()
+    base = {
+        "conductor_id": None,
+        "sujeto_cedula": cedula,
+        "sujeto_nombre": "",
+        "sujeto_correo": "",
+        "politica_id": politica["_id"],
+        "version": politica.get("version"),
+        "aceptado_en": ahora,
+        "canal": "papel",
+        "ip": "",
+        "user_agent": "",
+        "documento_ruta": ruta,
+        "registrado_por": (registrado_por or "").strip(),
+    }
+    declaraciones = politica.get("declaraciones") or []
+    if declaraciones:
+        # El papel firma la política COMPLETA: una entrada por declaración con
+        # el mismo documento de respaldo.
+        for decl in declaraciones:
+            entrada = dict(base)
+            entrada.update({
+                "declaracion_id": decl["id"],
+                "declaracion_titulo": decl.get("titulo", ""),
+            })
+            coleccion_aceptaciones.insert_one(entrada)
+    else:
+        coleccion_aceptaciones.insert_one(dict(base))
+
+    return {"estado": "registrado", "documento_ruta": ruta,
+            "documento_url": _url_para_cliente(ruta)}
+
+
+def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sistema") -> dict:
+    """Envío AUTOMÁTICO al pasar el vehículo a revisión (2026-10-05): por cada
+    PERSONA del estudio SIN autorización y CON correo en el formulario, un
+    link (idempotente — no duplica correos en re-revisiones). Las empresas
+    (NIT) no aplican; la dedup de personas ya la hace sujetos_estudio."""
+    from Funciones import estudios_automaticos as ea
+
+    correos: dict = {}
+    for campo_doc, campo_correo in (
+        ("condCedulaCiudadania", "condCorreo"),
+        ("propDocumento", "propCorreo"),
+        ("tenedDocumento", "tenedCorreo"),
+        ("RemolDuenoDocumento", "RemolDuenoCorreo"),
+    ):
+        ced = _digitos_aut(vehiculo.get(campo_doc))
+        correo = str(vehiculo.get(campo_correo) or "").strip()
+        if ced and correo and ced not in correos:
+            correos[ced] = correo
+
+    resumen: dict = {"enviado": 0, "pendiente": 0, "ya_autorizado": 0, "sin_correo": []}
+    for sujeto in ea.sujetos_estudio(vehiculo):
+        if sujeto.get("tipo") != "persona":
+            continue
+        cedula = sujeto["cedula"]
+        try:
+            if _sujeto_ya_autorizado(cedula):
+                resumen["ya_autorizado"] += 1
+                continue
+            correo = correos.get(cedula)
+            if not correo:
+                resumen["sin_correo"].append(cedula)
+                continue
+            r = _solicitar_autorizacion(vehiculo.get("placa", ""), cedula, correo,
+                                        "", solicitado_por)
+            estado = r.get("estado", "enviado")
+            resumen[estado] = resumen.get(estado, 0) + 1
+        except Exception as e:
+            print(f"[autorizacion] No se pudo enviar a {cedula}: {e}")
+    return resumen
 
 
 class LoginComoInput(BaseModel):
