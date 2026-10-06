@@ -369,7 +369,9 @@ def _filtro_clientes_alcance(info: dict) -> Optional[dict]:
     alcance = _alcance_aprobacion(info)
     if alcance is None:
         return None
-    return {"$or": [_regex_cliente_exacto(c) for c in alcance]}
+    # Cada cláusula del $or debe ser {campo: condición}; _regex_cliente_exacto
+    # devuelve solo la condición ($regex/$options), no la cláusula completa.
+    return {"$or": [{"datos_servicio.cliente": _regex_cliente_exacto(c)} for c in alcance]}
 
 
 # ── Normalización de pedidos Vulcano (spec §4) ────────────────────────────────
