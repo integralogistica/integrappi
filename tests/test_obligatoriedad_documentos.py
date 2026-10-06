@@ -176,6 +176,21 @@ class DocumentosFaltantesTests(unittest.TestCase):
         v = vehiculo_completo(tarjetaRemolque=None)
         self.assertEqual(vehiculos._documentos_faltantes(v), [])
 
+    def test_tarjeta_remolque_obligatoria_con_remolque(self):
+        """Con remolque declarado (algún dato de la sección), la Tarjeta de
+        Remolque pasa a ser OBLIGATORIA (2026-10-06, pedido del usuario)."""
+        v = vehiculo_completo(tarjetaRemolque=None, RemolPlaca="RMT123")
+        self.assertIn("tarjetaRemolque", vehiculos._documentos_faltantes(v))
+        # Con la tarjeta cargada, no hay faltante.
+        v2 = vehiculo_completo(RemolPlaca="RMT123", RemolAlto="4")
+        self.assertEqual(vehiculos._documentos_faltantes(v2), [])
+        # Cualquier dato del remolque dispara la exigencia (no solo la placa).
+        v3 = vehiculo_completo(tarjetaRemolque=None, RemolDuenoDocumento="55444333")
+        self.assertIn("tarjetaRemolque", vehiculos._documentos_faltantes(v3))
+        # Basura no cuenta como remolque declarado.
+        v4 = vehiculo_completo(tarjetaRemolque=None, RemolPlaca="null")
+        self.assertEqual(vehiculos._documentos_faltantes(v4), [])
+
     def test_poliza_rc_y_cert_bancaria_propietario_opcionales(self):
         # 2026-08-31: dejan de exigirse; siguen cargables pero no bloquean.
         v = vehiculo_completo(polizaResponsabilidad=None, propCertificacionBancaria=None)

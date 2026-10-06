@@ -201,6 +201,42 @@ class AltaSinNombreTests(unittest.TestCase):
         self.assertEqual(cuentas_fake.documents[1]["nombre"], "YA TENGO NOMBRE")
 
 
+class RegistroMinimoTests(unittest.TestCase):
+    """El registro del conductor pide SOLO correo + clave (+ perfil): el
+    nombre y el celular los aporta la IA en el paso 2 y se propagan a la
+    cuenta desde actualizar-informacion mientras estén vacíos (2026-10-06)."""
+
+    def test_registrar_sin_nombre_ni_celular(self):
+        fake = FakeColeccion()
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake):
+            r = cliente.post("/conductores/registrar", json={
+                "correo": "nuevo@x.com", "clave": "clave123",
+                "perfil": "CONDUCTOR"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(fake.documents[0]["nombre"], "")  # vacío, no error
+        self.assertIsNone(fake.documents[0]["celular"])
+
+    def test_propagar_celular_a_cuenta_vacia(self):
+        """El celular del formulario del paso 2 llega a las cuentas vinculadas
+        que no lo tengan (la cuenta CONDUCTOR ya tiene → no se pisa)."""
+        oid = "507f1f77bcf86cd799439012"
+        cuentas_fake = FakeColeccion([
+            {"_id": oid, "correo": "TEN@X.COM", "perfil": "TENEDOR", "celular": None},
+            {"_id": "507f1f77bcf86cd799439013", "correo": "COND@X.COM",
+             "perfil": "CONDUCTOR", "celular": "3101112223"},
+        ])
+        veh_fake = FakeColeccion([_veh(idConductor="507f1f77bcf86cd799439013")])
+        cliente = cliente_de_prueba(vehiculos.ruta_vehiculos)
+        with patch.object(vehiculos, "coleccion_vehiculos", veh_fake), \
+             patch.object(vehiculos, "coleccion_conductores_cuenta", cuentas_fake):
+            r = cliente.put("/vehiculos/actualizar-informacion/ABC123", json={
+                "condCelular": "3001234567"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(cuentas_fake.documents[0]["celular"], "3001234567")
+        self.assertEqual(cuentas_fake.documents[1]["celular"], "3101112223")
+
+
 class LoginComoTests(unittest.TestCase):
 
     def test_login_como_devuelve_impersonado_por(self):

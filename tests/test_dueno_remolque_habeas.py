@@ -217,6 +217,33 @@ class CedulaDuenoRemolqueTests(unittest.TestCase):
             doc["lecturasIA"]["documentoIdentidadRemolque"]["reutilizada_de"],
             "documentoIdentidadConductor")
 
+    def test_reutilizar_DESDE_el_remolque(self):
+        """2026-10-06: la cédula del dueño del remolque también sirve de
+        ORIGEN (si se subió primero, las demás figuras pueden copiarla)."""
+        v = vehiculo_completo(
+            documentoIdentidadRemolque="Vehiculos/TEST01/2026-10-06/documentoIdentidadRemolque.webp",
+            documentoIdentidadRemolqueReverso="Vehiculos/TEST01/2026-10-06/documentoIdentidadRemolqueReverso.webp",
+            lecturasIA={"documentoIdentidadRemolque": {
+                "datos": {"numero": "55444333", "nombres": "PEDRO"},
+                "avisos": [], "fecha": datetime(2026, 10, 6, 12, 0, 0)}},
+        )
+        fake = FakeColeccionVehiculos([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_copiar_blob_bucket",
+                          side_effect=lambda u, n: f"Vehiculos/{n}"):
+            resp = self.client.put(
+                "/vehiculos/reutilizar-documento",
+                data={"placa": "TEST01", "figura": "conductor",
+                      "documento": "cedula", "origen": "remolque"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        self.assertIn("documentoIdentidadConductor_", doc["documentoIdentidadConductor"])
+        self.assertIn("documentoIdentidadConductorReverso", doc["documentoIdentidadConductorReverso"])
+        self.assertEqual(
+            doc["lecturasIA"]["documentoIdentidadConductor"]["reutilizada_de"],
+            "documentoIdentidadRemolque")
+
 
 # ── 1b. ROL «dueño_remolque» EN LOS ESTUDIOS AUTOMÁTICOS ──────────────────
 
@@ -467,6 +494,59 @@ class EstudiosAntiguedadTests(unittest.TestCase):
         documentos = [s["documento"] for s in vieja["sujetos"]]
         self.assertIn("2", documentos)      # cédula del conductor
         self.assertIn("VIEJA", documentos)  # sujeto vehículo
+
+    # ── 2026-10-06: pendientes de AUTORIZACIÓN + filtros del backend ──
+
+    def _dos_placas(self):
+        return [
+            vehiculo_completo(placa="PEND", estadoIntegra="aprobado",
+                              condCedulaCiudadania="111",
+                              estudiosSeguridadAuto=[{"estado": "finalizado",
+                                                      "finalizado_en": datetime(2026, 9, 1)}]),
+            vehiculo_completo(placa="OK", estadoIntegra="aprobado",
+                              condCedulaCiudadania="222",
+                              estudiosSeguridadAuto=[{"estado": "finalizado",
+                                                      "finalizado_en": datetime(2026, 9, 2)}]),
+        ]
+
+    def test_pendientes_autorizacion_por_fila(self):
+        fake = FakeColeccionVehiculos(self._dos_placas())
+        # 111 SIN autorización (ninguna cuenta ni aceptación); 222 autorizada
+        # (aceptación canal vinculo_correo).
+        aceptaciones = FakeColeccionVehiculos(
+            [{"sujeto_cedula": "222", "canal": "vinculo_correo"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(conductores, "coleccion_conductores", FakeColeccionVehiculos()), \
+             patch.object(conductores, "coleccion_aceptaciones", aceptaciones):
+            resp = self.client.get("/vehiculos/estudios-antiguedad")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        cuerpo = resp.json()
+        por_placa = {f["placa"]: f for f in cuerpo["vehiculos"]}
+        self.assertEqual(por_placa["PEND"]["pendientes_autorizacion"], 1)
+        self.assertEqual(por_placa["PEND"]["personas"], 1)
+        self.assertFalse(por_placa["PEND"]["sujetos"][0]["autorizado"])
+        self.assertEqual(por_placa["OK"]["pendientes_autorizacion"], 0)
+        self.assertTrue(por_placa["OK"]["sujetos"][0]["autorizado"])
+        self.assertEqual(cuerpo["con_pendientes"], 1)
+
+    def test_filtro_solo_pendientes(self):
+        fake = FakeColeccionVehiculos(self._dos_placas())
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(conductores, "coleccion_conductores", FakeColeccionVehiculos()), \
+             patch.object(conductores, "coleccion_aceptaciones",
+                          FakeColeccionVehiculos([{"sujeto_cedula": "222"}])):
+            resp = self.client.get("/vehiculos/estudios-antiguedad?solo_pendientes=true")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        placas = [f["placa"] for f in resp.json()["vehiculos"]]
+        self.assertEqual(placas, ["PEND"])  # solo la que tiene pendientes
+
+    def test_filtro_placa_en_el_backend(self):
+        fake = FakeColeccionVehiculos(self._dos_placas())
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = self.client.get("/vehiculos/estudios-antiguedad?placa=pen")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        placas = [f["placa"] for f in resp.json()["vehiculos"]]
+        self.assertEqual(placas, ["PEND"])  # filtro por placa (contiene, i)
 
 
 if __name__ == "__main__":

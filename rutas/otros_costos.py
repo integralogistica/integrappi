@@ -766,6 +766,23 @@ def _fecha_a_str(v) -> Optional[str]:
     return v if v is not None else None
 
 
+def _fecha_ddmmyyyy(v) -> Optional[str]:
+    """Fecha en zona Colombia como dd/mm/aaaa (sin hora), para exportar a Excel."""
+    if v is None:
+        return None
+    dt = v
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return dt
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    if isinstance(dt, datetime):
+        return (dt - _OFFSET_COLOMBIA).strftime("%d/%m/%Y")
+    return None
+
+
 def _a_numero(v) -> float:
     try:
         if v is None or v == "":
@@ -2269,9 +2286,9 @@ async def exportar_excel(req: ExportarExcelRequest):
             aprob.get("rol", ""),
             pago.get("usuario", ""),
             d.get("estado", ""),
-            _fecha_a_str(d.get("created_at")),
-            _fecha_a_str(aprob.get("fecha")),
-            _fecha_a_str(pago.get("fecha_pago")),
+            _fecha_ddmmyyyy(d.get("created_at")),
+            _fecha_ddmmyyyy(aprob.get("fecha")),
+            _fecha_ddmmyyyy(pago.get("fecha_pago")),
         ]
         for i, v in enumerate(fila, 1):
             ws.cell(row=r, column=i, value=v).border = thin

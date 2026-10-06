@@ -844,6 +844,24 @@ def _es_empresa_figura(vehiculo: dict, campo_tipo: str) -> bool:
     return "NIT" in str(vehiculo.get(campo_tipo) or "").upper()
 
 
+# Datos del remolque guardados en la ficha (los que dispara el checkbox
+# «mi vehículo tiene remolque» del paso 2).
+CAMPOS_REMOLQUE = (
+    "RemolPlaca", "RemolModelo", "RemolClase", "RemolTipoCarroceria",
+    "RemolAlto", "RemolLargo", "RemolAncho",
+    "RemolDuenoNombre", "RemolDuenoDocumento", "RemolDuenoCorreo",
+)
+
+
+def _tiene_remolque(vehiculo: dict) -> bool:
+    """El vehículo tiene remolque declarado (algún dato de la sección)."""
+    for campo in CAMPOS_REMOLQUE:
+        valor = str(vehiculo.get(campo) or "").strip()
+        if valor and valor not in ("null", "undefined"):
+            return True
+    return False
+
+
 def _documentos_faltantes(vehiculo: dict) -> list:
     """
     Documentos obligatorios que faltan para pasar a completado_revision.
@@ -876,6 +894,11 @@ def _documentos_faltantes(vehiculo: dict) -> list:
     # Propietario empresa: en lugar de la cédula, el RUT de la empresa.
     if prop_empresa and not _doc_lleno(vehiculo, "rutPropietario"):
         faltantes.append("rutPropietario")
+    # Tarjeta de Remolque (2026-10-06, pedido del usuario): con remolque
+    # declarado es OBLIGATORIA (sin remolque sigue siendo opcional y ni se
+    # pide).
+    if _tiene_remolque(vehiculo) and not _doc_lleno(vehiculo, "tarjetaRemolque"):
+        faltantes.append("tarjetaRemolque")
     return faltantes
 
 
@@ -1621,6 +1644,21 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
                 )
             except Exception as e:
                 print(f"[nombre] No se pudo propagar el nombre a la cuenta {id_cuenta}: {e}")
+
+    # El CELULAR del conductor llega igual a las cuentas que no lo tengan
+    # (el registro ya no lo pide — 2026-10-06, mismo criterio del nombre).
+    celular_cond = str(datos_limpios.get("condCelular") or "").strip()
+    if celular_cond:
+        for id_cuenta in {vehiculo.get("idUsuario"), vehiculo.get("idConductor")}:
+            if not id_cuenta:
+                continue
+            try:
+                coleccion_conductores_cuenta.update_one(
+                    {"_id": _a_objectid(id_cuenta), "celular": {"$in": [None, ""]}},
+                    {"$set": {"celular": celular_cond}},
+                )
+            except Exception as e:
+                print(f"[celular] No se pudo propagar el celular a la cuenta {id_cuenta}: {e}")
 
     return JSONResponse(status_code=200, content={"message": "Información actualizada"})
 
@@ -2533,7 +2571,11 @@ def exportar_excel_vehiculos():
         ("Veh. Vence SOAT", lambda d: _fecha(d.get("vehVencimientoSoat"))),
         ("Remolque", lambda d: _v(d, "remolqueMarca") or _v(d, "remMarca")),
         # Documentos y tracking
-        ("Docs. cargados", lambda d: f"{len(DOCUMENTOS_REQUERIDOS) - len(_documentos_faltantes(d))}/{len(DOCUMENTOS_REQUERIDOS)}"),
+        # El total sube a +1 cuando el vehículo tiene remolque (la tarjeta de
+        # remolque es obligatoria adicional, fuera de DOCUMENTOS_REQUERIDOS).
+        ("Docs. cargados", lambda d: (
+            lambda total: f"{total - len(_documentos_faltantes(d))}/{total}"
+        )(len(DOCUMENTOS_REQUERIDOS) + (1 if _tiene_remolque(d) else 0))),
         ("Fotos", lambda d: len(d.get("fotos") or [])),
         ("Estudios vigencia vence", lambda d: _fecha((d.get("estudiosVigencia") or {}).get("vence"))),
         ("Última corrida", lambda d: _resumen_ultima_corrida(d)),
@@ -2781,19 +2823,42 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str = Form(...)):
     })
 
 
+def _autorizado_seguro(cedula: str) -> bool:
+    """Best-effort: ¿la cédula ya tiene evidencia de autorización de datos?
+    Si la consulta falla (caída de la colección), reporta autorizado para no
+    llenar el módulo de falsos «pendientes»."""
+    from rutas.conductores import _sujeto_ya_autorizado
+    try:
+        return bool(_sujeto_ya_autorizado(cedula))
+    except Exception as e:
+        print(f"[estudios-antiguedad] No se pudo verificar autorización de {cedula}: {e}")
+        return True
+
+
 @ruta_vehiculos.get("/estudios-antiguedad")
-def estudios_por_antiguedad():
+def estudios_por_antiguedad(
+    placa: Optional[str] = None,
+    solo_vencidas: bool = False,
+    solo_pendientes: bool = False,
+):
     """
     Módulo «Estudios por antigüedad» de /revision (2026-10-05, reemplaza la
     renovación automática eliminada): TODAS las placas con estudios (corrida
     vigente, histórico, PDFs manuales o estudio legacy), ORDENADAS por la
     fecha del último estudio (más antiguo primero) para que el usuario decida
     MANUALMENTE cuál actualizar (botón → /estudios-seguridad/{placa}/disparar).
+
+    Los FILTROS los procesa el BACKEND (2026-10-06, pedido del usuario — el
+    front solo pasa los criterios): `placa` (contiene, i), `solo_vencidas`
+    y `solo_pendientes` (solo placas con actores persona SIN autorización de
+    tratamiento de datos). Cada fila reporta además cuántos actores persona
+    faltan por autorizar (`pendientes_autorizacion`).
     """
     from Funciones import estudios_automaticos as ea
 
     ahora = datetime.utcnow()
     filas = []
+    placa_filtro = (placa or "").strip().upper()
     proyeccion = {
         "placa": 1, "estadoIntegra": 1,
         "condCedulaCiudadania": 1, "condNombres": 1, "condApellidos": 1,
@@ -2804,13 +2869,16 @@ def estudios_por_antiguedad():
         "documentosEstudioSeguridad": 1, "estudiosVigencia": 1,
         "estudioSeguridadFecha": 1,
     }
-    for doc in coleccion_vehiculos.find(
-        {"$or": [
-            {"estudiosSeguridadAuto.0": {"$exists": True}},
-            {"historialEstudios.0": {"$exists": True}},
-            {"documentosEstudioSeguridad.0": {"$exists": True}},
-            {"estudioSeguridadFecha": {"$ne": None}},
-        ]}, proyeccion):
+    consulta: dict = {"$or": [
+        {"estudiosSeguridadAuto.0": {"$exists": True}},
+        {"historialEstudios.0": {"$exists": True}},
+        {"documentosEstudioSeguridad.0": {"$exists": True}},
+        {"estudioSeguridadFecha": {"$ne": None}},
+    ]}
+    if placa_filtro:
+        consulta["placa"] = {"$regex": re.escape(placa_filtro), "$options": "i"}
+
+    for doc in coleccion_vehiculos.find(consulta, proyeccion):
         # Última fecha de estudio: corrida vigente → vigencia → PDF manual.
         fechas = [e.get("finalizado_en") for e in (doc.get("estudiosSeguridadAuto") or [])
                   if isinstance(e, dict) and e.get("finalizado_en")]
@@ -2845,7 +2913,12 @@ def estudios_por_antiguedad():
             if s["tipo"] == "persona":
                 sujetos.append({"tipo": "persona", "documento": s["cedula"],
                                 "roles": s["roles"],
-                                "correo": correos_por_ced.get(s["cedula"], "")})
+                                "correo": correos_por_ced.get(s["cedula"], ""),
+                                # Autorización de tratamiento de datos (2026-10-06):
+                                # la persona ya tiene evidencia (cuenta o canal
+                                # vinculo_correo/papel) — best-effort por si la
+                                # colección de aceptaciones falla.
+                                "autorizado": _autorizado_seguro(s["cedula"])})
             elif s["tipo"] == "empresa":
                 sujetos.append({"tipo": "empresa", "documento": s["nit"],
                                 "roles": s["roles"]})
@@ -2853,8 +2926,10 @@ def estudios_por_antiguedad():
                 sujetos.append({"tipo": "vehiculo", "documento": s["placa"],
                                 "roles": ["vehículo"]})
 
+        personas = [s for s in sujetos if s["tipo"] == "persona"]
+        pendientes_aut = sum(1 for s in personas if not s["autorizado"])
         vence = vigencia.get("vence")
-        filas.append({
+        fila = {
             "placa": doc.get("placa", ""),
             "estadoIntegra": doc.get("estadoIntegra", ""),
             "sujetos": sujetos,
@@ -2865,12 +2940,22 @@ def estudios_por_antiguedad():
             "vencida": bool(vence and vence < ahora),
             "tiene_corrida_vigente": bool(doc.get("estudiosSeguridadAuto")),
             "total_estudios": len(doc.get("estudiosSeguridadAuto") or []),
-        })
+            "personas": len(personas),
+            "pendientes_autorizacion": pendientes_aut,
+        }
+        if solo_vencidas and not fila["vencida"]:
+            continue
+        if solo_pendientes and pendientes_aut == 0:
+            continue
+        filas.append(fila)
 
     filas.sort(key=lambda f: f["ultimo_estudio"])
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "vehiculos": _json_seguro(filas),
         "vencidas": sum(1 for f in filas if f["vencida"]),
+        # Placas con al menos un actor persona sin autorización (2026-10-06):
+        # alimenta el contador del filtro «solo pendientes» del front.
+        "con_pendientes": sum(1 for f in filas if f["pendientes_autorizacion"] > 0),
     })
 
 

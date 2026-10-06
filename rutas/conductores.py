@@ -7,6 +7,7 @@ from typing import Optional
 
 import resend
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import pytz
 
@@ -306,7 +307,10 @@ def _politica_publica(doc: dict) -> dict:
 class RegistrarConductorInput(BaseModel):
     # `usuario` se conserva por compatibilidad con el front desplegado; el
     # identificador real del conductor es `correo` (login solo por correo).
-    nombre: str
+    # El nombre YA NO se pide en el registro (2026-10-06, mismo criterio del
+    # alta de Seguridad): lo aporta la IA al leer cédula/RUT en el paso 2 y
+    # se propaga a la cuenta desde /vehiculos/actualizar-informacion.
+    nombre: Optional[str] = None
     usuario: Optional[str] = None  # ignorado; se usa `correo`
     correo: str
     clave: str
@@ -523,9 +527,12 @@ def enviar_correo_verificacion(destinatario: str, enlace: str, nombre: str):
     if not resend.api_key or "TuApiKeyAqui" in resend.api_key:
         print("⚠️ ERROR: Falta API KEY de Resend; no se envió el correo de verificación.")
         return
+    # El registro ya no pide nombre (lo llena la IA en el paso 2): sin nombre
+    # el saludo no deja una coma colgando.
+    saludo = f"¡Bienvenido a IntegrApp, {nombre}!" if (nombre or "").strip() else "¡Bienvenido a IntegrApp!"
     html = f"""
     <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto;">
-      <h2 style="color: #0f1928;">¡Bienvenido a IntegrApp, {nombre}!</h2>
+      <h2 style="color: #0f1928;">{saludo}</h2>
       <p>Para activar tu cuenta de conductor y continuar con el registro de tu vehículo,
       confirma tu correo electrónico con el siguiente enlace:</p>
       <p>Al verificar tu correo deberás leer y aceptar nuestras Políticas de
@@ -884,14 +891,22 @@ async def consultar_habeas_data(cedulas: str = ""):
             pendiente = coleccion_tokens_aut.find_one({
                 "cedula": cedula, "usado_en": None,
                 "expira": {"$gt": datetime.utcnow()}})
-            if pendiente:
-                entrada["token_pendiente"] = pendiente.get("creado_en")
+            creado = pendiente.get("creado_en") if pendiente else None
+            # Solo si es un datetime real (defensa: un mock/valor raro del
+            # almacenamiento no debe romper la serialización del response).
+            if isinstance(creado, datetime):
+                entrada["token_pendiente"] = creado
         except Exception:
             pass
 
         personas.append(entrada)
 
-    return {"personas": personas}
+    # El doc embebido `aceptacion_politica` guarda ObjectIds (politica_id,
+    # aceptacion_id) y fechas datetime: sin sanitizar, la serialización de
+    # FastAPI revienta con 500 (bug encontrado en runtime 2026-10-06 — la
+    # pestaña «Cambios» de /revision no mostraba NADA en autorizaciones).
+    from rutas.vehiculos import _json_seguro
+    return JSONResponse(content={"personas": _json_seguro(personas)})
 
 
 # ==============================================================================
@@ -908,7 +923,10 @@ async def consultar_habeas_data(cedulas: str = ""):
 FRONTEND_URL_AUTORIZACION = os.getenv(
     "FRONTEND_URL_AUTORIZACION",
     "https://integralogistica.com/integrapp/AutorizacionDatos")
-EXPIRA_HORAS_AUTORIZACION = int(os.getenv("AUTORIZACION_EXPIRE_HORAS", "48"))
+# Vencimiento del link de autorización (2026-10-06: 48 h → 30 días — pedido
+# del usuario: los actores suelen tardar CASI UN MES o más en abrir el correo;
+# el link muerto obligaba a reenviar a mano). Ajustable por env sin deploy.
+EXPIRA_HORAS_AUTORIZACION = int(os.getenv("AUTORIZACION_EXPIRE_HORAS", "720"))
 _TZ_BOGOTA_AUT = pytz.timezone("America/Bogota")
 
 
@@ -947,6 +965,13 @@ def _buscar_token_aut(token_plano: str) -> Optional[dict]:
     return None
 
 
+def _vencimiento_legible() -> str:
+    """Vencimiento del link en texto humano (días si ≥72 h, horas si no)."""
+    if EXPIRA_HORAS_AUTORIZACION >= 72:
+        return f"{EXPIRA_HORAS_AUTORIZACION // 24} días"
+    return f"{EXPIRA_HORAS_AUTORIZACION} horas"
+
+
 def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, placa: str):
     """Correo con el link público de autorización de tratamiento de datos."""
     if not resend.api_key or "TuApiKeyAqui" in resend.api_key:
@@ -971,7 +996,7 @@ def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, plac
       </p>
       <p>O copia y pega este enlace en tu navegador:</p>
       <p><a href="{enlace}">{enlace}</a></p>
-      <p><small>El enlace vence en {EXPIRA_HORAS_AUTORIZACION} horas. Si no esperabas
+      <p><small>El enlace vence en {_vencimiento_legible()}. Si no esperabas
       este mensaje, ignóralo.</small></p>
     </div>
     """
