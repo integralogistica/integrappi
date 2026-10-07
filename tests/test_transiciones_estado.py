@@ -45,7 +45,14 @@ class FakeColeccionVehiculos:
                         d[k] = v
                 if "$push" in cambio:
                     for k, v in cambio["$push"].items():
-                        d.setdefault(k, []).append(v)
+                        lista = d.setdefault(k, [])
+                        # $push con $each/$slice (patrón de _registrar_auditoria)
+                        if isinstance(v, dict) and "$each" in v:
+                            lista.extend(v["$each"])
+                            if "$slice" in v and v["$slice"] < 0:
+                                del lista[:v["$slice"]]
+                        else:
+                            lista.append(v)
 
 
 class FakeColeccionDisponibilidades:
@@ -250,6 +257,137 @@ class AprobarExigeEstudioTests(unittest.TestCase):
         fake = FakeColeccionVehiculos([vehiculo(estado="en_actualizacion")])
         resp = self._aprobar(fake)
         self.assertEqual(resp.status_code, 200, resp.text)
+
+
+class ObservacionesAlCambiarEstadoTests(unittest.TestCase):
+    """El comentario de aprobar/devolver debe quedar visible para quien
+    consulta el estado (2026-10-07): se guarda en `observaciones` y viaja en
+    la auditoría; aprobar/re-enviar SIN comentario limpia el anterior."""
+
+    def _aprobar(self, fake, **extra):
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            return client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "aprobado", "usuario_id": "seg1", **extra,
+            })
+
+    def test_aprobar_con_comentario_lo_guarda_y_audita(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision",
+            documentosEstudioSeguridad=[{"ruta": "Vehiculos/TEST01/estudioSeguridad_test.pdf"}],
+        )])
+        resp = self._aprobar(fake, observaciones="Todo en orden, bienvenido")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        self.assertEqual(doc["observaciones"], "Todo en orden, bienvenido")
+        entrada = doc["auditoriaVehiculo"][-1]
+        self.assertEqual(entrada["accion"], "estado_aprobado")
+        self.assertIn("comentario: Todo en orden, bienvenido", entrada["detalle"])
+
+    def test_aprobar_sin_comentario_limpia_el_anterior(self):
+        # El motivo de una devolución vieja no debe quedar pegado en un aprobado.
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision", observaciones="Falta la licencia legible",
+            documentosEstudioSeguridad=[{"ruta": "Vehiculos/TEST01/estudioSeguridad_test.pdf"}],
+        )])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["observaciones"], "")
+
+    def test_reenviar_del_conductor_limpia_el_motivo_de_devolucion(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="registro_incompleto", observaciones="Falta la licencia legible",
+            vehCapacidadCarga="34000",
+        )])
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+             patch.object(vehiculos, "_disparar_estudios_seguridad"):
+            resp = client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "completado_revision", "usuario_id": "u1",
+            })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["observaciones"], "")
+
+    def test_devolver_con_comentario_viaja_en_auditoria(self):
+        fake = FakeColeccionVehiculos([vehiculo(estado="completado_revision")])
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            resp = client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "registro_incompleto",
+                "usuario_id": "seg1", "observaciones": "La licencia está ilegible",
+            })
+        self.assertEqual(resp.status_code, 200)
+        doc = fake.documents[0]
+        self.assertEqual(doc["observaciones"], "La licencia está ilegible")
+        entrada = doc["auditoriaVehiculo"][-1]
+        self.assertEqual(entrada["accion"], "estado_registro_incompleto")
+        self.assertIn("comentario: La licencia está ilegible", entrada["detalle"])
+
+
+class WhatsAppDevolucionTests(unittest.TestCase):
+    """WhatsApp al conductor cuando Seguridad devuelve el vehículo (2026-10-07,
+    pedido del usuario): plantilla `enruta_vehiculo_devuelto`, fire-and-forget."""
+
+    def test_devolver_dispara_el_whatsapp(self):
+        fake = FakeColeccionVehiculos([vehiculo(estado="completado_revision")])
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_enviar_wa_devolucion") as wa:
+            resp = client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "registro_incompleto",
+                "usuario_id": "seg1", "observaciones": "La licencia está ilegible",
+            })
+        self.assertEqual(resp.status_code, 200)
+        wa.assert_called_once()
+        self.assertEqual(wa.call_args[0][0], "TEST01")
+        self.assertEqual(wa.call_args[0][2], "La licencia está ilegible")
+
+    def test_actualizar_datos_NO_es_devolucion_no_dispara(self):
+        # aprobado → registro_incompleto («Actualizar datos») es otro flujo.
+        fake = FakeColeccionVehiculos([vehiculo(estado="aprobado")])
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "_enviar_wa_devolucion") as wa:
+            resp = client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "registro_incompleto",
+                "usuario_id": "seg1",
+                "observaciones": "Actualización de datos solicitada por Seguridad: SOAT",
+            })
+        self.assertEqual(resp.status_code, 200)
+        wa.assert_not_called()
+
+    def test_helper_envia_con_el_celular_de_la_ficha(self):
+        doc = {"placa": "TEST01", "condCelular": "3001234567", "condNombres": "PEDRO"}
+        with patch.object(vehiculos, "coleccion_conductores_cuenta", FakeColeccionCuentas()), \
+             patch("Funciones.whatsapp_utils_integra.enviar_template_sync",
+                   return_value={"MessagingService": "ok"}) as envio:
+            vehiculos._enviar_wa_devolucion("TEST01", doc, "La licencia está ilegible")
+        envio.assert_called_once()
+        self.assertEqual(envio.call_args.kwargs["to"], "573001234567")
+        self.assertEqual(envio.call_args.kwargs["template_name"], "enruta_vehiculo_devuelto")
+        self.assertEqual(envio.call_args.kwargs["body_params"],
+                         ["PEDRO", "TEST01", "La licencia está ilegible"])
+
+    def test_helper_sin_celular_no_envia(self):
+        with patch.object(vehiculos, "coleccion_conductores_cuenta", FakeColeccionCuentas()), \
+             patch("Funciones.whatsapp_utils_integra.enviar_template_sync") as envio:
+            vehiculos._enviar_wa_devolucion("TEST01", {"placa": "TEST01"}, "obs")
+        envio.assert_not_called()
+
+    def test_helper_trunca_observaciones_largas(self):
+        doc = {"placa": "TEST01", "condCelular": "3001234567", "condNombres": "PEDRO"}
+        with patch.object(vehiculos, "coleccion_conductores_cuenta", FakeColeccionCuentas()), \
+             patch("Funciones.whatsapp_utils_integra.enviar_template_sync",
+                   return_value={"ok": True}) as envio:
+            vehiculos._enviar_wa_devolucion("TEST01", doc, "x" * 400)
+        self.assertEqual(len(envio.call_args.kwargs["body_params"][2]), 251)  # 250 + ellipsis
+
+
+class FakeColeccionCuentas:
+    """Stub de `conductores` para el lookup de celular por cuenta."""
+    def find_one(self, query, *args, **kwargs):
+        return None
 
 
 class InactivosEnListasTests(unittest.TestCase):

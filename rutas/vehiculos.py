@@ -1104,6 +1104,14 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
 # Los celulares viven en `baseusuarios.celular` (mismo patrón de Otros Costos).
 PLANTILLA_WA_REVISION = ("enruta_revision_pendiente", "es")
 
+# WhatsApp al CONDUCTOR/TENEDOR cuando Seguridad devuelve el vehículo con
+# observaciones (2026-10-07, pedido del usuario): plantilla Meta
+# `enruta_vehiculo_devuelto` (Utilidad, es) con {{1}}=nombre del conductor,
+# {{2}}=placa, {{3}}=observaciones y botón URL «Abrir IntegrApp».
+# ⚠️ REQUIERE crear y aprobar la plantilla en Meta Business Manager; sin
+# aprobar, el envío falla en silencio (fire-and-forget, queda en el log).
+PLANTILLA_WA_DEVOLUCION = ("enruta_vehiculo_devuelto", "es")
+
 
 def _normalizar_celular_co(celular) -> Optional[str]:
     """Celular a formato internacional Colombia: solo dígitos con 57."""
@@ -1150,6 +1158,63 @@ def _enviar_wa_seguridad(placa: str, nombre_conductor: str = "") -> None:
         print(f"[WA-Seguridad] {PLANTILLA_WA_REVISION[0]} {placa}: {enviados}/{len(usuarios)} notificados.")
     except Exception as e:
         print(f"[WA-Seguridad] Error: {e}")
+
+
+def _celular_conductor_vehiculo(vehiculo: dict) -> Optional[str]:
+    """Celular del responsable de la ficha: primero el campo de la ficha
+    (`condCelular`, llenado por la IA o a mano) y si no, la cuenta vinculada
+    (`conductores`, por idUsuario o idConductor — el alta propaga el celular
+    de la ficha a la cuenta). Devuelve el celular normalizado 57… o None."""
+    celular = _normalizar_celular_co(vehiculo.get("condCelular"))
+    if celular:
+        return celular
+    for campo in ("idUsuario", "idConductor"):
+        valor = vehiculo.get(campo)
+        if not valor:
+            continue
+        try:
+            cuenta_id = ObjectId(valor) if not isinstance(valor, ObjectId) else valor
+        except Exception:
+            continue  # id no válido (p. ej. cuentas de prueba) — siguiente fuente
+        try:
+            cuenta = coleccion_conductores_cuenta.find_one({"_id": cuenta_id}) or {}
+        except Exception:
+            cuenta = {}
+        celular = _normalizar_celular_co(cuenta.get("celular") or cuenta.get("condCelular"))
+        if celular:
+            return celular
+    return None
+
+
+def _enviar_wa_devolucion(placa: str, vehiculo: dict, observaciones: str = "") -> None:
+    """WhatsApp al conductor/tenedor cuando Seguridad DEVUELVE el vehículo con
+    observaciones. Fire-and-forget: un fallo (sin celular, plantilla sin
+    aprobar, red) JAMÁS tumba la devolución — queda en el log."""
+    try:
+        celular = _celular_conductor_vehiculo(vehiculo)
+        if not celular:
+            print(f"[WA-Devolucion] {placa}: sin celular del conductor; no se notifica.")
+            return
+        nombre = ((vehiculo.get("condNombres") or "").strip()) or "Conductor"
+        texto_obs = (observaciones or "").strip()
+        if not texto_obs:
+            texto_obs = "Sin observaciones específicas"
+        elif len(texto_obs) > 250:
+            texto_obs = texto_obs[:250].rstrip() + "…"
+        from Funciones.whatsapp_utils_integra import enviar_template_sync
+        res = enviar_template_sync(
+            to=celular,
+            template_name=PLANTILLA_WA_DEVOLUCION[0],
+            language_code=PLANTILLA_WA_DEVOLUCION[1],
+            body_params=[nombre, placa, texto_obs],
+        )
+        if res:
+            print(f"[WA-Devolucion] OK -> {celular} | {placa}")
+        else:
+            print(f"[WA-Devolucion] NO enviado a {celular} | {placa} — revisar plantilla "
+                  f"'{PLANTILLA_WA_DEVOLUCION[0]}' y aprobacion en Meta.")
+    except Exception as e:
+        print(f"[WA-Devolucion] Error: {e}")
 
 # ==========================================
 # 3. ENDPOINTS
@@ -1503,6 +1568,11 @@ async def actualizar_estado(
         # El motivo del rechazo queda visible para el conductor como
         # observación (no hay camino de corrección — es informativo).
         datos_actualizar["observaciones"] = motivo.strip()
+    elif nuevo_estado in ("aprobado", "completado_revision"):
+        # Aprobar o re-enviar SIN comentario nuevo limpia la observación
+        # anterior (p. ej. el motivo de una devolución): dejarla pegada
+        # confundiría a quien consulte el estado del vehículo.
+        datos_actualizar["observaciones"] = ""
 
     operacion = {"$set": datos_actualizar}
 
@@ -1532,8 +1602,20 @@ async def actualizar_estado(
     _registrar_auditoria(
         placa, f"estado_{nuevo_estado}", actor=editado_por, via=via,
         detalle=f"{estado_actual} → {nuevo_estado}"
-        + (f" · motivo: {motivo.strip()}" if (motivo or "").strip() else ""),
+        + (f" · motivo: {motivo.strip()}" if (motivo or "").strip() else "")
+        # El comentario de aprobar/devolver también viaja en la auditoría para
+        # que la timeline lo muestre. Se excluye rechazo/actualización porque
+        # ahí el comentario YA es el motivo (vendría duplicado).
+        + (f" · comentario: {observaciones.strip()}" if (observaciones or "").strip()
+           and nuevo_estado not in ("rechazado", "en_actualizacion") else ""),
     )
+
+    # WhatsApp al conductor/tenedor cuando Seguridad DEVUELVE el vehículo con
+    # observaciones (2026-10-07): solo la devolución real de revisión
+    # (completado_revision → registro_incompleto) — «Actualizar datos» desde
+    # aprobado es otro flujo con su propia observación.
+    if nuevo_estado == "registro_incompleto" and estado_actual == "completado_revision":
+        _enviar_wa_devolucion(placa, vehiculo, observaciones or motivo or "")
 
     # Al inactivar, el carro sale de la bolsa del día aunque tuviera check-in
     # activo (mismo patrón de _registrar_cambio_aprobado; la /bolsa además
@@ -3230,4 +3312,277 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"vehiculos": _json_seguro(_firmar_documentos(vehiculos_final))}
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Estado de la flota — vista de SOLO LECTURA para el portal Medical Care
+# (2026-10-07). Muestra en qué estadoIntegra está cada vehículo con un buscador
+# por placa procesado EN EL BACKEND. Perfiles: OPERATIVO, CONTROL, COORDINADOR
+# y ADMIN (derivados de baseusuarios; el perfil que envía el front NO se
+# confía). No expone documentos ni PII pesada: solo lo necesario para
+# visualizar el estado.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERFILES_ESTADO_FLOTA = {"OPERATIVO", "CONTROL", "COORDINADOR", "ADMIN"}
+
+ESTADOS_FLOTA_LEGIBLES = {
+    "registro_incompleto": "Pendiente conductor",
+    "completado_revision": "En revisión",
+    "aprobado": "Aprobado",
+    "devuelto": "Devuelto",
+    "inactivo": "Inactivo",
+    "rechazado": "Rechazado",
+    "en_actualizacion": "En actualización",
+}
+
+
+def _resolver_usuario_flota(usuario: str) -> dict:
+    """Perfil REAL del usuario desde baseusuarios (patrón _resolver_usuario de
+    otros_costos.py: el backend no confía en lo que envía el front)."""
+    if not usuario or not str(usuario).strip():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    u = str(usuario).strip().upper()
+    doc = coleccion_baseusuarios.find_one({"usuario": u})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no válido")
+    if not doc.get("activo", True):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+    return {"usuario": doc["usuario"], "perfil": (doc.get("perfil") or "").strip().upper()}
+
+
+@ruta_vehiculos.get("/estado-flota")
+def obtener_estado_flota(
+    usuario: str = "",
+    placa: Optional[str] = None,
+    estado: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+):
+    user = _resolver_usuario_flota(usuario)
+    if user["perfil"] not in PERFILES_ESTADO_FLOTA:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para ver el estado de la flota",
+        )
+
+    if limit < 1 or limit > 200:
+        limit = 50
+    if skip < 0:
+        skip = 0
+
+    filtro: dict = {
+        # Borradores del alta (sin responsable vinculado) no son flota visible.
+        "responsable_pendiente": {"$ne": True},
+    }
+    if placa and placa.strip():
+        filtro["placa"] = {"$regex": re.sub(r"[^A-Za-z0-9]", "", placa.strip()), "$options": "i"}
+    if estado and estado.strip():
+        estado_limpio = estado.strip()
+        if estado_limpio not in ESTADOS_FLOTA_LEGIBLES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Estado no válido: {estado_limpio}",
+            )
+        filtro["estadoIntegra"] = estado_limpio
+
+    # Conteos por estado sobre el MISMO filtro de búsqueda (sin el de estado,
+    # para que los chips sigan mostrando el panorama completo de lo buscado).
+    filtro_conteo = {k: v for k, v in filtro.items() if k != "estadoIntegra"}
+    conteos: dict = {}
+    for doc in coleccion_vehiculos.aggregate([
+        {"$match": filtro_conteo},
+        {"$group": {"_id": "$estadoIntegra", "n": {"$sum": 1}}},
+    ]):
+        clave = doc["_id"] or "sin_estado"
+        conteos[clave] = doc["n"]
+
+    cursor = (
+        coleccion_vehiculos.find(filtro, {
+            "placa": 1, "estadoIntegra": 1, "fechaEstado": 1,
+            "condNombres": 1, "condApellidos": 1, "condCedulaCiudadania": 1,
+            "condCelular": 1, "vehMarca": 1, "vehLinea": 1, "vehModelo": 1,
+            "observaciones": 1, "_id": 1,
+        })
+        .sort("placa", 1)
+        .skip(skip)
+        .limit(limit)
+    )
+
+    filas = []
+    for veh in cursor:
+        est = veh.get("estadoIntegra") or "sin_estado"
+        filas.append({
+            "id": str(veh["_id"]),
+            "placa": veh.get("placa", ""),
+            "estado": est,
+            "estado_legible": ESTADOS_FLOTA_LEGIBLES.get(est, est),
+            "fecha_estado": veh.get("fechaEstado"),
+            "conductor": " ".join(x for x in [veh.get("condNombres", ""), veh.get("condApellidos", "")] if x).strip(),
+            "cedula": veh.get("condCedulaCiudadania", ""),
+            "celular": veh.get("condCelular", ""),
+            "marca": veh.get("vehMarca", ""),
+            "linea": veh.get("vehLinea", ""),
+            "modelo": veh.get("vehModelo", ""),
+            "observaciones": veh.get("observaciones", ""),
+        })
+
+    total = sum(conteos.values()) if not (estado and estado.strip()) else coleccion_vehiculos.count_documents(filtro)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=_json_seguro({
+            "vehiculos": filas,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "conteos": conteos,
+        })
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Estado de la flota — DETALLE por placa (2026-10-07): al hacer clic en una
+# placa se abre la historia del vehículo (qué ha pasado, por qué está devuelto,
+# si ya está activo para operar). Timeline unificada construida EN EL BACKEND
+# a partir de auditoriaVehiculo + historialInactivacion + historialCambios.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Qué SIGNIFICA cada estado para quien consulta (no solo la etiqueta).
+EXPLICACION_ESTADO_FLOTA = {
+    "registro_incompleto": "El conductor aún está registrando su información y documentos. Todavía no está disponible para operar.",
+    "completado_revision": "El conductor terminó la carga y está en espera de revisión de Seguridad.",
+    "aprobado": "Aprobado por Seguridad: activo para operar y habilitado para la bolsa de flota.",
+    "devuelto": "Devuelto por Seguridad con observaciones: el conductor debe corregir lo indicado y volver a enviarlo.",
+    "rechazado": "Rechazado definitivamente por Seguridad: no puede volver al flujo.",
+    "inactivo": "Inactivado por Seguridad: sale de la bolsa de flota hasta que se reactive.",
+    "en_actualizacion": "Aprobado, pero en proceso de actualización de datos solicitado por Seguridad.",
+}
+
+ACCIONES_AUDITORIA_LEGIBLES = {
+    "vehiculo_creado": "Vehículo creado",
+    "responsable_asignado": "Responsable asignado",
+    "datos_actualizados": "Datos actualizados",
+    "documento_subido": "Documento subido",
+    "documento_reutilizado": "Documento reutilizado",
+    "documento_eliminado": "Documento eliminado",
+    "fotos_subidas": "Fotos del vehículo subidas",
+    "foto_eliminada": "Foto eliminada",
+    "firma_subida": "Firma subida",
+    "firma_sellada": "Firma electrónica sellada",
+    "estudio_seguridad_cargado": "Estudio de seguridad cargado",
+    "foto_seguridad_cargada": "Foto del conductor cargada",
+}
+
+# Cambios de estado (accion=estado_X de la auditoría) con etiqueta legible.
+ACCIONES_AUDITORIA_LEGIBLES.update({
+    "estado_registro_incompleto": "Enviado a registro del conductor",
+    "estado_completado_revision": "Enviado a revisión de Seguridad",
+    "estado_aprobado": "Aprobado por Seguridad",
+    "estado_devuelto": "Devuelto por Seguridad",
+    "estado_rechazado": "Rechazado por Seguridad",
+    "estado_inactivo": "Inactivado por Seguridad",
+    "estado_en_actualizacion": "Enviado a actualización de datos",
+})
+
+VIAS_AUDITORIA_LEGIBLES = {
+    "conductor": "Conductor",
+    "impersonacion": "Seguridad (como conductor)",
+    "seguridad": "Seguridad",
+}
+
+
+def _entrada_timeline(fecha, tipo: str, accion: str, actor, via=None, detalle=None, extra=None) -> dict:
+    return {
+        "fecha": fecha,
+        "tipo": tipo,           # auditoria | estado | edicion
+        "accion": accion,
+        "accion_legible": ACCIONES_AUDITORIA_LEGIBLES.get(accion, accion),
+        "actor": actor or "",
+        "via": via or "",
+        "via_legible": VIAS_AUDITORIA_LEGIBLES.get(via or "", via or ""),
+        "detalle": detalle or "",
+        "extra": extra or "",
+    }
+
+
+@ruta_vehiculos.get("/estado-flota/{placa}")
+def obtener_detalle_estado_flota(placa: str, usuario: str = ""):
+    user = _resolver_usuario_flota(usuario)
+    if user["perfil"] not in PERFILES_ESTADO_FLOTA:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para ver el estado de la flota",
+        )
+
+    placa_limpia = placa.strip().upper()
+    veh = coleccion_vehiculos.find_one({"placa": placa_limpia})
+    if not veh:
+        # Fallback tolerante a mayúsculas (mismo patrón de reutilizar-documento).
+        veh = coleccion_vehiculos.find_one({"placa": {"$regex": f"^{re.escape(placa_limpia)}$", "$options": "i"}})
+    if not veh:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehículo no encontrado")
+
+    est = veh.get("estadoIntegra") or "sin_estado"
+
+    # ¿Está disponible HOY en la bolsa de flota? (check-in activo del día, zona Bogotá)
+    hoy = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+    checkin = coleccion_disponibilidades.find_one(
+        {"placa": veh.get("placa", placa_limpia), "fecha": hoy, "estado": "activa"},
+        {"_id": 1, "origen": 1, "departamentos_destino": 1},
+    )
+
+    # Timeline unificada (más reciente primero) desde las 3 fuentes del doc.
+    timeline = []
+    for entrada in veh.get("auditoriaVehiculo") or []:
+        timeline.append(_entrada_timeline(
+            entrada.get("fecha"), "auditoria",
+            entrada.get("accion", ""), entrada.get("actor"), entrada.get("via"),
+            entrada.get("detalle"),
+        ))
+    for entrada in veh.get("historialInactivacion") or []:
+        timeline.append(_entrada_timeline(
+            entrada.get("fecha"), "estado",
+            entrada.get("accion", "inactivado"), entrada.get("usuario"),
+            "seguridad", entrada.get("motivo"),
+        ))
+    for corrida in veh.get("historialCambios") or []:
+        campos = corrida.get("campos") or []
+        detalle_cambios = "; ".join(
+            f"{c.get('campo', '')}: {c.get('antes', '')} → {c.get('despues', '')}" for c in campos[:6]
+        ) + ("…" if len(campos) > 6 else "")
+        timeline.append(_entrada_timeline(
+            corrida.get("fecha"), "edicion",
+            "datos_actualizados", corrida.get("usuario"), None, detalle_cambios,
+            extra=f"{len(campos)} campo(s) · {corrida.get('seccion', '')}",
+        ))
+
+    def _clave_orden(e):
+        f = e.get("fecha")
+        return f if isinstance(f, datetime) else datetime.min.replace(tzinfo=None)
+
+    timeline.sort(key=_clave_orden, reverse=True)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=_json_seguro({
+            "placa": veh.get("placa", placa_limpia),
+            "estado": est,
+            "estado_legible": ESTADOS_FLOTA_LEGIBLES.get(est, est),
+            "explicacion": EXPLICACION_ESTADO_FLOTA.get(est, ""),
+            "fecha_estado": veh.get("fechaEstado"),
+            "observaciones": veh.get("observaciones", ""),
+            "conductor": " ".join(x for x in [veh.get("condNombres", ""), veh.get("condApellidos", "")] if x).strip(),
+            "cedula": veh.get("condCedulaCiudadania", ""),
+            "celular": veh.get("condCelular", ""),
+            "correo": veh.get("condCorreo", ""),
+            "marca": veh.get("vehMarca", ""),
+            "linea": veh.get("vehLinea", ""),
+            "modelo": veh.get("vehModelo", ""),
+            "tenedor": veh.get("tenedNombre", ""),
+            "disponible_hoy": bool(checkin),
+            "disponibilidad_origen": (checkin or {}).get("origen", ""),
+            "disponibilidad_destinos": (checkin or {}).get("departamentos_destino", []),
+            "timeline": timeline[:200],
+        })
     )
