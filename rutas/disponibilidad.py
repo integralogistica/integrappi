@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 import pytz
@@ -48,6 +48,23 @@ def _ahora_bogota() -> datetime:
 def _fecha_hoy_str() -> str:
     """Día actual en zona Colombia (YYYY-MM-DD). Clave de la disponibilidad diaria."""
     return _ahora_bogota().strftime("%Y-%m-%d")
+
+
+def _planilla_vencida(vehiculo: dict) -> bool:
+    """
+    La Planilla de Seguridad Social del vehículo está VENCIDA (2026-10-07,
+    pedido del usuario): el vehículo queda INHABILITADO para la bolsa y para
+    ser usado hasta que suban una planilla nueva (con su fecha de vencimiento).
+    Los vehículos SIN fecha (históricos previos al campo `planillaVencimiento`)
+    NO se bloquean — solo aplica a planillas subidas con la regla nueva.
+    """
+    vence = str((vehiculo or {}).get("planillaVencimiento") or "").strip()[:10]
+    if not vence:
+        return False
+    try:
+        return date.fromisoformat(vence) < _ahora_bogota().date()
+    except ValueError:
+        return False
 
 
 def _serializar(doc: dict) -> dict:
@@ -115,6 +132,15 @@ async def checkin(
             status_code=400,
             detail="El vehículo no está aprobado, no puede ofrecerse como disponible."
         )
+    # Planilla de seguridad social VENCIDA: el vehículo no se puede ofrecer
+    # (2026-10-07) — inhabilitado hasta subir una planilla nueva.
+    if _planilla_vencida(vehiculo):
+        vence = str(vehiculo.get("planillaVencimiento"))[:10]
+        raise HTTPException(
+            status_code=400,
+            detail=f"La planilla de seguridad social está VENCIDA (venció el {vence}): "
+                   "sube una planilla vigente para volver a ofrecer el vehículo."
+        )
 
     # 3. Validar destinos
     try:
@@ -177,14 +203,18 @@ def mia(id_usuario: str):
     hoy = _fecha_hoy_str()
 
     # Placas aprobadas del usuario: propias (idUsuario) o como conductor
-    # invitado (idConductor).
+    # invitado (idConductor). `planillaVencida` avisa al conductor ANTES de
+    # intentar el check-in (2026-10-07).
     aprobados = list(coleccion_vehiculos.find(
         {"$or": [{"idUsuario": id_usuario}, {"idConductor": id_usuario}], "estadoIntegra": "aprobado"},
         {
             "_id": 0, "placa": 1, "vehMarca": 1, "vehLinea": 1,
-            "vehClase": 1, "vehTipoCarroceria": 1, "tipo_veh_sicetac": 1
+            "vehClase": 1, "vehTipoCarroceria": 1, "tipo_veh_sicetac": 1,
+            "planillaVencimiento": 1
         }
     ))
+    for v in aprobados:
+        v["planillaVencida"] = _planilla_vencida(v)
 
     # Se incluyen las ASIGNADAS (tomadas por la operación): siguen siendo
     # check-ins de hoy, pero fuera de la bolsa hasta que las devuelvan.
@@ -233,6 +263,10 @@ def bolsa(
         # Segunda barrera: un vehículo inactivado con check-in activo (si la
         # cancelación falló) NO aparece en la bolsa — solo los aprobados operan.
         if veh.get("estadoIntegra") != "aprobado":
+            continue
+        # Tercera barrera (2026-10-07): planilla de seguridad social VENCIDA —
+        # el vehículo queda inhabilitado hasta subir una planilla nueva.
+        if _planilla_vencida(veh):
             continue
         tipo_veh = (veh.get("tipo_veh_sicetac") or "")
         if tipo_buscar and tipo_veh.strip().upper() != tipo_buscar:
@@ -327,6 +361,16 @@ async def asignar(
         raise HTTPException(
             status_code=400,
             detail="Este vehículo ya está asignado hoy (mira la lista de vehículos en uso)."
+        )
+
+    # Planilla de seguridad social VENCIDA (2026-10-07): puede haberse vencido
+    # DESPUÉS del check-in — el vehículo no se puede USAR hasta planilla nueva.
+    veh_doc = coleccion_vehiculos.find_one({"placa": placa_limpia}) or {}
+    if _planilla_vencida(veh_doc):
+        raise HTTPException(
+            status_code=400,
+            detail="La planilla de seguridad social de este vehículo está VENCIDA: "
+                   "no se puede usar hasta que suban una planilla nueva."
         )
 
     disp = coleccion_disponibilidades.find_one_and_update(

@@ -11,7 +11,9 @@ from rutas import vehiculos
 class EsquemasExtraccionTests(unittest.TestCase):
     """Los esquemas nuevos existen con sus claves y el prompt los incluye."""
 
-    TIPOS_ESPERADOS = {"cedula", "rut", "certificado_bancario", "licencia", "tarjeta_propiedad", "soat"}
+    # (2026-10-07) + planilla_seguridad_social: la IA lee la fecha de
+    # VENCIMIENTO de la planilla de seguridad social.
+    TIPOS_ESPERADOS = {"cedula", "rut", "certificado_bancario", "licencia", "tarjeta_propiedad", "soat", "planilla_seguridad_social"}
 
     def test_tipos_definidos(self):
         self.assertEqual(set(vehiculos.ESQUEMAS_EXTRACCION.keys()), self.TIPOS_ESPERADOS)

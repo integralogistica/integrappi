@@ -422,6 +422,20 @@ ESQUEMAS_EXTRACCION = {
         },
         "descripcion": "SOAT (Seguro Obligatorio de Accidentes de Tránsito) colombiano. PDF o foto.",
     },
+    # Planilla de Seguridad Social (2026-10-07, pedido del usuario): la IA lee
+    # la fecha de VENCIMIENTO — con ella (o con la que digite quien sube) el
+    # vehículo queda INHABILITADO de la bolsa al vencerse, hasta que suban una
+    # planilla nueva.
+    "planilla_seguridad_social": {
+        "campos": {
+            "fecha_vencimiento": "Fecha de VENCIMIENTO de la planilla en formato YYYY-MM-DD (el día hasta el cual la afiliación a EPS/ARL está vigente; si el documento muestra un periodo mensual, es el ÚLTIMO día del periodo)",
+            "eps": "Nombre de la EPS si aparece",
+            "arl": "Nombre de la ARL si aparece",
+            "nombre_titular": "Nombre del conductor/titular de la afiliación",
+            "documento_titular": "Número de documento del titular, solo dígitos",
+        },
+        "descripcion": "Planilla o certificado de afiliación/pago de Seguridad Social (EPS y ARL) de un conductor colombiano. PDF o foto.",
+    },
 }
 
 
@@ -690,6 +704,8 @@ TIPOS_SUBIDA_LEIBLES = {
     "licencia": "licencia",
     "tarjetaPropiedad": "tarjeta_propiedad",
     "soat": "soat",
+    # Planilla de Seguridad Social: la IA lee la fecha de VENCIMIENTO (2026-10-07).
+    "planillaEpsArl": "planilla_seguridad_social",
 }
 
 
@@ -778,6 +794,42 @@ ETIQUETAS_DOCUMENTO = {
     "fotos": "Fotos del vehículo",
     "hojaVidaFisica": "Hoja de Vida Física (autorización firmada)",
 }
+
+# Documentos de DOS CARAS aceptados por subir-documento (referencia
+# compartida; antes vivía adentro del endpoint).
+TIPOS_DOS_CARAS_SUBIDA = {
+    "documentoIdentidadConductor", "documentoIdentidadPropietario",
+    "documentoIdentidadTenedor", "documentoIdentidadRemolque",
+    "licencia", "tarjetaPropiedad",
+}
+
+# Tipos aceptados por subir-documento (referencia compartida).
+TIPOS_SUBIDA_VALIDOS = [
+    "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
+    "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
+    "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
+    "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
+    "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario",
+    # Cédula del dueño del remolque (2026-10-05): figura opcional, sube
+    # frente (+reverso vía `reverso`) igual que las demás cédulas.
+    "documentoIdentidadRemolque",
+    # Reversos como tipo directo: el paso 3 los sube como ítem propio.
+    "licenciaReverso", "tarjetaPropiedadReverso",
+    # (2026-09-28) Hoja de vida física firmada (alta por Seguridad).
+    "hojaVidaFisica",
+]
+
+# Campos que SEGURIDAD puede RECORTAR en /revision (2026-10-07, pedido del
+# usuario: fotos tomadas muy lejos que muestran cosas de sobra): documentos
+# de UNA imagen, frente o reverso. FUERA: `firmaUrl` (el hash de la firma
+# electrónica se calcula sobre la ruta), `fotos` (array) y `planillaEpsArl`
+# (espejo del historial `documentosPlanillaSegSocial` — recortarla los
+# desincronizaría).
+CAMPOS_RECORTABLES = (
+    set(TIPOS_SUBIDA_VALIDOS)
+    | {f"{t}Reverso" for t in TIPOS_DOS_CARAS_SUBIDA}
+    | {"fotoconductorseguridad"}
+) - {"planillaEpsArl"}
 
 
 def _solo_digitos(valor) -> str:
@@ -868,6 +920,20 @@ def _tiene_remolque(vehiculo: dict) -> bool:
     return False
 
 
+def _exento_tecnomecanica(vehiculo: dict) -> bool:
+    """Vehículo de modelo con MENOS de 2 años (incluye modelos del año
+    siguiente que ya vende el comercio): los vehículos nuevos NO requieren
+    revisión tecnomecánica (pedido del usuario 2026-10-07)."""
+    modelo = re.sub(r"\D", "", str(vehiculo.get("vehModelo") or ""))[:4]
+    if len(modelo) != 4:
+        return False
+    try:
+        anio = int(modelo)
+    except ValueError:
+        return False
+    return anio >= datetime.now().year - 1
+
+
 def _documentos_faltantes(vehiculo: dict) -> list:
     """
     Documentos obligatorios que faltan para pasar a completado_revision.
@@ -890,6 +956,9 @@ def _documentos_faltantes(vehiculo: dict) -> list:
         if prop_empresa and campo.startswith("documentoIdentidadPropietario"):
             continue
         if tened_empresa and campo.startswith("documentoIdentidadTenedor"):
+            continue
+        # Vehículo nuevo (modelo < 2 años): la tecnomecánica no se exige.
+        if campo == "revisionTecnomecanica" and _exento_tecnomecanica(vehiculo):
             continue
         if _doc_lleno(vehiculo, campo):
             continue
@@ -1694,6 +1763,9 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "firmaUrl",
     "hojaVidaFisica",
+    # Vencimiento de la planilla (2026-10-07): lo valida y escribe SOLO
+    # subir-documento (tope 31 días, nunca vencida al subir).
+    "planillaVencimiento",
     # Historial de planillas (2026-10-07): acumulación mensual server-side.
     "documentosPlanillaSegSocial",
     # Historial universal de documentos (2026-10-07): server-side.
@@ -1971,6 +2043,60 @@ async def subir_foto_seguridad(
         raise HTTPException(status_code=500, detail=f"Error al procesar la foto de seguridad: {str(e)}")
 
 
+# Tope de la fecha de vencimiento de la planilla de seguridad social contado
+# desde HOY (pedido del usuario 2026-10-07: la planilla se renueva cada mes).
+PLANILLA_MAX_DIAS = 31
+
+
+def _fecha_vencimiento_planilla(manual, leida_ia) -> tuple[str, str]:
+    """
+    Resuelve y valida la fecha de VENCIMIENTO de la planilla de seguridad
+    social (2026-10-07, pedido del usuario). Gana la que DIGITA quien sube
+    (por si la IA no leyó); si no viene, la leída por la IA; si ninguna → 400.
+    Reglas: fecha válida (YYYY-MM-DD o dd/mm/yyyy), NO vencida y con tope de
+    31 días desde hoy (zona Bogotá). Devuelve (YYYY-MM-DD, origen).
+    """
+    hoy = datetime.now(_TZ_BOGOTA).date()
+    tope = hoy + timedelta(days=PLANILLA_MAX_DIAS)
+
+    valor = str(manual or "").strip()
+    origen = "indicada"
+    if not valor:
+        valor = str(leida_ia or "").strip()
+        origen = "leída por la IA"
+    if not valor:
+        raise HTTPException(
+            status_code=400,
+            detail="Indica la fecha de VENCIMIENTO de la planilla: la IA no la "
+                   "pudo leer y es obligatoria.",
+        )
+    # La IA a veces devuelve dd/mm/yyyy — se normaliza.
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", valor)
+    if m:
+        valor = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    try:
+        fecha = date.fromisoformat(valor[:10])
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La fecha de vencimiento '{valor}' no es válida (usa una fecha real).",
+        )
+    if fecha < hoy:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La fecha de vencimiento ({fecha.isoformat()}) ya pasó: sube "
+                   "una planilla VIGENTE.",
+        )
+    if fecha > tope:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La fecha de vencimiento ({fecha.isoformat()}) no puede ser "
+                   f"superior a {PLANILLA_MAX_DIAS} días desde hoy (tope: "
+                   f"{tope.isoformat()}).",
+        )
+    return fecha.isoformat(), origen
+
+
 @ruta_vehiculos.put("/subir-documento")
 async def subir_documento(
     archivo: UploadFile,
@@ -1981,32 +2107,15 @@ async def subir_documento(
     replicar_en: Optional[str] = Form(None),
     lectura_datos: Optional[str] = Form(None),
     lectura_avisos: Optional[str] = Form(None),
+    fecha_vencimiento: Optional[str] = Form(None),
     reverso: Optional[UploadFile] = File(None),
 ):
     # Documentos de dos caras: el reverso se guarda junto al frente.
     # Cédulas de propietario/tenedor (2026-08-27): la tarjeta IA también pide
     # su reverso opcional (cédula amarilla), como la del conductor.
-    TIPOS_DOS_CARAS = {
-        "documentoIdentidadConductor", "documentoIdentidadPropietario",
-        "documentoIdentidadTenedor", "documentoIdentidadRemolque",
-        "licencia", "tarjetaPropiedad",
-    }
-    if reverso and tipo not in TIPOS_DOS_CARAS:
+    if reverso and tipo not in TIPOS_DOS_CARAS_SUBIDA:
         raise HTTPException(status_code=400, detail="Ese tipo de documento no admite reverso.")
-    tipos_validos = [
-        "tarjetaPropiedad", "soat", "revisionTecnomecanica", "tarjetaRemolque",
-        "polizaResponsabilidad", "documentoIdentidadConductor", "documentoIdentidadPropietario",
-        "documentoIdentidadTenedor", "licencia", "planillaEpsArl", "condFoto",
-        "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
-        "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario",
-        # Cédula del dueño del remolque (2026-10-05): figura opcional, sube
-        # frente (+reverso vía `reverso`) igual que las demás cédulas.
-        "documentoIdentidadRemolque",
-        # Reversos como tipo directo: el paso 3 los sube como ítem propio.
-        "licenciaReverso", "tarjetaPropiedadReverso",
-        # (2026-09-28) Hoja de vida física firmada (alta por Seguridad).
-        "hojaVidaFisica",
-    ]
+    tipos_validos = TIPOS_SUBIDA_VALIDOS
     if tipo not in tipos_validos:
         raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
 
@@ -2014,6 +2123,19 @@ async def subir_documento(
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     _asegurar_editable(vehiculo)
+
+    # Vehículo nuevo (modelo < 2 años): la tecnomecánica NO se requiere y NO
+    # se deja subir (2026-10-07, pedido del usuario — coherente con
+    # _documentos_faltantes, que tampoco la exige).
+    if tipo == "revisionTecnomecanica" and _exento_tecnomecanica(vehiculo):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Este vehículo es nuevo (modelo "
+                f"{str(vehiculo.get('vehModelo') or '').strip()}) y NO requiere "
+                "Revisión Tecnomecánica — no la subas."
+            ),
+        )
 
     if archivo.content_type.startswith("image/"):
         extension = "webp"
@@ -2088,11 +2210,23 @@ async def subir_documento(
             if h.get("tipo") == tipo_doc and bool(h.get("reverso")) == es_reverso)
         return f"_v{previas + 1}" if previas else ""
 
+    # Planilla de Seguridad Social: la fecha de VENCIMIENTO es OBLIGATORIA
+    # (2026-10-07) — gana la digitada, cae a la leída por la IA, sin ninguna no
+    # se sube NADA (ni bucket ni Mongo). Con ella el vehículo queda
+    # inhabilitado de la bolsa al vencer.
+    fecha_planilla = None
+    if tipo == "planillaEpsArl":
+        fecha_planilla, _origen_fecha = _fecha_vencimiento_planilla(
+            fecha_vencimiento,
+            (lectura_ia or {}).get("datos", {}).get("fecha_vencimiento"))
+
     nombre_archivo = _nombre_doc_bucket(
         placa, tipo, extension, vehiculo, sufijo=_sufijo_version(tipo))
     url_archivo = subir_a_google_storage(archivo, nombre_archivo)
 
     set_inicial = {tipo: url_archivo}
+    if fecha_planilla:
+        set_inicial["planillaVencimiento"] = fecha_planilla
     set_inicial.update({g: url_archivo for g in gemelos})
 
     # Reverso (solo docs de dos caras): se guarda con su propio campo y URL.
@@ -2149,6 +2283,7 @@ async def subir_documento(
                 "ruta": url_archivo,
                 "fecha": fecha_carga,
                 "nombre": archivo.filename or "",
+                "vence": fecha_planilla,
             }],
             "$position": 0,
             "$slice": 24,
@@ -2200,6 +2335,130 @@ async def subir_documento(
             "ruta_reverso": url_reverso,
             "url_reverso": _url_para_cliente(url_reverso) if url_reverso else None,
         }
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RECORTE de documentos por SEGURIDAD (2026-10-07, pedido del usuario: hay
+# fotos tomadas muy lejos que muestran cosas de sobra y no quieren que las
+# imágenes queden así). Seguridad dibuja un recuadro sobre la imagen en
+# /revision y guarda la copia recortada como versión NUEVA del documento:
+# el ORIGINAL jamás se pierde (queda en `historialDocumentos`), no se
+# re-lee con IA (el contenido no cambió, solo el encuadre) y NO baja un
+# aprobado a re-revisión (es una edición cosmética de Seguridad, no un
+# cambio de datos del conductor).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MEDIA_TYPES_BLOB = {
+    "webp": "image/webp", "png": "image/png", "jpg": "image/jpeg",
+    "jpeg": "image/jpeg", "pdf": "application/pdf",
+}
+
+
+@ruta_vehiculos.get("/documento-bruto/{placa}")
+def documento_bruto(placa: str, campo: str):
+    """
+    Bytes del documento ACTUAL de la placa, descargados SERVER-SIDE. Lo usa el
+    recorte de /revision para pintar la imagen en un canvas SIN problema de
+    CORS (las URLs firmadas de GCS no cargan en canvas desde otro origen si el
+    bucket no tiene CORS configurado; por acá viaja same-origin).
+    """
+    if campo not in CAMPOS_RECORTABLES:
+        raise HTTPException(status_code=400, detail="Campo de documento no válido.")
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    ruta = vehiculo.get(campo)
+    if not isinstance(ruta, str) or not ruta.strip():
+        raise HTTPException(status_code=404, detail="El vehículo no tiene ese documento cargado.")
+    try:
+        datos = _descargar_blob(ruta)
+    except Exception as e:
+        print(f"[recorte] No se pudo descargar {campo} de {placa}: {e}")
+        raise HTTPException(status_code=502, detail="No se pudo descargar el documento del almacenamiento.")
+    extension = str(ruta).rsplit(".", 1)[-1].lower()
+    return Response(content=datos, media_type=_MEDIA_TYPES_BLOB.get(extension, "application/octet-stream"))
+
+
+@ruta_vehiculos.put("/recortar-documento")
+async def recortar_documento(
+    archivo: UploadFile,
+    placa: str = Form(...),
+    campo: str = Form(...),
+    editado_por: Optional[str] = Form(None),
+):
+    """
+    Guarda la imagen RECORTADA por Seguridad como versión nueva del documento
+    (`_v{N}` en el bucket + entrada en `historialDocumentos` con marca
+    `recorte`). Los campos gemelos que compartían la ruta anterior también se
+    actualizan (la réplica por figura es la misma imagen).
+    """
+    if campo not in CAMPOS_RECORTABLES:
+        raise HTTPException(status_code=400, detail="Campo de documento no válido.")
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
+    if not archivo.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="El recorte debe ser una imagen.")
+    anterior = vehiculo.get(campo)
+    if not isinstance(anterior, str) or not anterior.strip():
+        raise HTTPException(status_code=404, detail="El vehículo no tiene ese documento cargado.")
+
+    # Versión del blob: mismas reglas del historial universal (cuenta las
+    # subidas previas del documento, sea como tipo directo o como reverso de
+    # su base — la 1ª vez mantiene el nombre base).
+    previas = 0
+    for h in (vehiculo.get("historialDocumentos") or []):
+        if h.get("tipo") == campo and not h.get("reverso"):
+            previas += 1
+        elif campo.endswith("Reverso") and h.get("tipo") == campo[: -len("Reverso")] and h.get("reverso"):
+            previas += 1
+    sufijo = f"_v{previas + 1}" if previas else ""
+
+    nombre = _nombre_doc_bucket(placa, campo, "webp", vehiculo, sufijo=sufijo)
+    ruta_nueva = subir_a_google_storage(archivo, nombre)
+
+    # El campo apunta a la nueva versión; los gemelos que compartían la ruta
+    # anterior también (misma imagen replicada por figura).
+    set_campos = {campo: ruta_nueva}
+    for g in CAMPOS_RECORTABLES:
+        if g != campo and vehiculo.get(g) == anterior:
+            set_campos[g] = ruta_nueva
+
+    fecha = datetime.utcnow()
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {
+            "$set": set_campos,
+            "$push": {
+                "historialDocumentos": {
+                    "$each": [{
+                        "tipo": campo,
+                        "etiqueta": ETIQUETAS_DOCUMENTO.get(campo, campo) + " (recorte)",
+                        "recorte": True,
+                        "ruta": ruta_nueva,
+                        "fecha": fecha,
+                        "nombre": archivo.filename or "recorte.webp",
+                        "actor": editado_por or "",
+                    }],
+                    "$position": 0,
+                    "$slice": -200,
+                }
+            },
+        },
+    )
+    _registrar_auditoria(
+        placa, "documento_recortado", actor=editado_por, via="seguridad",
+        detalle=ETIQUETAS_DOCUMENTO.get(campo, campo),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": "Documento recortado",
+            "ruta": ruta_nueva,
+            "url": _url_para_cliente(ruta_nueva),
+        },
     )
 
 
@@ -2998,8 +3257,14 @@ async def pdf_estudio(placa: str, estudio_id: str):
 
     try:
         # Los handlers devuelven los BYTES del PDF (no un Response HTTP).
-        handler_pdf = (ea._td_reporte_nit_pdf if estudio.get("tipo") == "empresa"
-                       else ea._td_reporte_pdf)
+        # Cada tipo tiene SU endpoint en el proveedor: empresa → nit,
+        # vehículo (launch/car) → car, persona → normal.
+        if estudio.get("tipo") == "empresa":
+            handler_pdf = ea._td_reporte_nit_pdf
+        elif estudio.get("tipo") == "vehiculo":
+            handler_pdf = ea._td_reporte_car_pdf
+        else:
+            handler_pdf = ea._td_reporte_pdf
         contenido = await handler_pdf(str(reporte_id))
     except HTTPException as e:
         raise HTTPException(

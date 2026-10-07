@@ -49,6 +49,7 @@ from rutas.tusdatos import (
     ConsultaCompletaIn,
     NitIn,
     VehiculoCompletaIn,
+    _bajar_reporte_car_pdf as _td_reporte_car_pdf,
     _bajar_reporte_nit_pdf as _td_reporte_nit_pdf,
     _bajar_reporte_pdf as _td_reporte_pdf,
     _configurado,
@@ -110,10 +111,16 @@ async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | 
     SOBREESCRIBE el blob con la versión regenerada.
     """
     try:
-        # El reporte de empresa tiene su propio endpoint (pdf-nit).
-        # Los handlers devuelven los BYTES del PDF (no un Response HTTP).
-        handler_pdf = (_td_reporte_nit_pdf if sujeto.get("tipo") == "empresa"
-                       else _td_reporte_pdf)
+        # Cada tipo de reporte tiene SU endpoint de PDF en el proveedor:
+        # empresa → report_nit_pdf, vehículo (launch/car) → report_car_pdf,
+        # persona → report_pdf. Los handlers devuelven BYTES.
+        tipo_sujeto = sujeto.get("tipo")
+        if tipo_sujeto == "empresa":
+            handler_pdf = _td_reporte_nit_pdf
+        elif tipo_sujeto == "vehiculo":
+            handler_pdf = _td_reporte_car_pdf
+        else:
+            handler_pdf = _td_reporte_pdf
         contenido = await handler_pdf(str(reporte_id))
         if not contenido:
             return None
@@ -527,11 +534,29 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
     if not any(_es_fallida(v) for v in (estudio.get("fuentes") or {}).values()):
         raise HTTPException(status_code=422, detail="El estudio no tiene fuentes fallidas.")
 
-    respuesta = await _td_reintentar(estudio["reporte_id"], typedoc="CC")
+    # El proveedor NO soporta reintentar fuentes de reportes de VEHÍCULO
+    # (launch/car): /api/retry/{id} responde {} para sus ids (probado en vivo
+    # 2026-10-07 — antes eso caía al 502 engañoso "estado=desconocido").
+    if estudio.get("tipo") == "vehiculo":
+        raise HTTPException(
+            status_code=422,
+            detail="El proveedor no soporta reintentar fuentes de estudios de "
+                   "VEHÍCULO. Usa «Volver a consultar» para regenerarlo "
+                   "(consume una consulta).",
+        )
+    # typedoc por tipo: empresa relanza con NIT (retry persona con CC).
+    typedoc = "NIT" if estudio.get("tipo") == "empresa" else "CC"
+    respuesta = await _td_reintentar(estudio["reporte_id"], typedoc=typedoc)
     # El retry puede devolver un jobid nuevo (sondear) o el resultado directo.
     jobid = respuesta.get("jobid") if isinstance(respuesta, dict) else None
-    resultado = (await _td_esperar(jobid, 180, 5)) if jobid else (
-        respuesta if isinstance(respuesta, dict) else {})
+    if not jobid and not (isinstance(respuesta, dict) and respuesta.get("estado")):
+        # Respuesta vacía (el proveedor rechazó el retry en silencio).
+        raise HTTPException(
+            status_code=422,
+            detail="El proveedor no aceptó el reintento (respondió vacío). "
+                   "Usa «Volver a consultar» para regenerar el estudio.",
+        )
+    resultado = (await _td_esperar(jobid, 180, 5)) if jobid else respuesta
 
     try:
         cambios = _extraer_resultado({"lanzamiento": respuesta, "resultado": resultado})

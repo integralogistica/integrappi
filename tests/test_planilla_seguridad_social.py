@@ -67,10 +67,16 @@ class FakeColeccion:
             self.documents.append(dict(filtro))
 
 
-def _subir(client, nombre="planilla.pdf", contenido=b"pdf"):
+def _subir(client, nombre="planilla.pdf", contenido=b"pdf", fecha="__default__"):
+    from datetime import date, timedelta
+    if fecha == "__default__":
+        fecha = (date.today() + timedelta(days=10)).isoformat()
+    data = {"placa": "TEST01", "tipo": "planillaEpsArl", "extraer": "false"}
+    if fecha is not None:
+        data["fecha_vencimiento"] = fecha
     return client.put(
         "/vehiculos/subir-documento",
-        data={"placa": "TEST01", "tipo": "planillaEpsArl", "extraer": "false"},
+        data=data,
         files={"archivo": (nombre, contenido, "application/pdf")},
     )
 
@@ -135,6 +141,99 @@ class PlanillaSeguridadSocialTests(unittest.TestCase):
         self.assertIn("documentosPlanillaSegSocial", vehiculos.CLAVES_PROTEGIDAS)
         self.assertIn("documentosPlanillaSegSocial", vehiculos.CAMPOS_DOCUMENTO_PROTEGIDOS)
         self.assertIn("documentosPlanillaSegSocial", vehiculos.CAMPOS_VOLATILES_FIRMA)
+
+
+class FechaVencimientoPlanillaTests(unittest.TestCase):
+    """Fecha de VENCIMIENTO de la planilla (2026-10-07, pedido del usuario):
+    obligatoria (la digita quien sube O la lee la IA), vigente, tope 31 días
+    desde hoy — con ella el vehículo queda INHABILITADO de la bolsa al vencer."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def test_sin_fecha_y_sin_lectura_IA_es_400(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "completado_revision"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = _subir(self.client, fecha=None)
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("VENCIMIENTO", resp.json()["detail"])
+        mock_storage.assert_not_called()  # nada se sube sin la fecha
+
+    def test_fecha_mayor_a_31_dias_es_400(self):
+        from datetime import date, timedelta
+        muy_lejos = (date.today() + timedelta(days=32)).isoformat()
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "completado_revision"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = _subir(self.client, fecha=muy_lejos)
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("31", resp.json()["detail"])
+        mock_storage.assert_not_called()
+
+    def test_fecha_vencida_es_400(self):
+        from datetime import date, timedelta
+        ayer = (date.today() - timedelta(days=1)).isoformat()
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "completado_revision"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = _subir(self.client, fecha=ayer)
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("VIGENTE", resp.json()["detail"])
+        mock_storage.assert_not_called()
+
+    def test_fecha_manual_queda_persistida(self):
+        from datetime import date, timedelta
+        vence = (date.today() + timedelta(days=20)).isoformat()
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"):
+            resp = _subir(self.client, fecha=vence)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        self.assertEqual(doc["planillaVencimiento"], vence)
+        # Cada entrada del historial lleva su propio vence.
+        self.assertEqual(doc["documentosPlanillaSegSocial"][0]["vence"], vence)
+
+    def test_fecha_de_la_IA_cuando_no_se_digita(self):
+        """La IA lee el vencimiento del documento (esquema
+        planilla_seguridad_social): sin fecha manual, la leída se usa."""
+        from datetime import date, timedelta
+        leida = (date.today() + timedelta(days=15)).isoformat()
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "completado_revision"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"), \
+             patch.object(vehiculos, "extraer_datos_con_llm",
+                          return_value={"fecha_vencimiento": leida, "eps": "Sanitas"}):
+            # SIN fecha_vencimiento y CON extracción (extraer default true).
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "planillaEpsArl"},
+                files={"archivo": ("planilla.pdf", b"pdf", "application/pdf")},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["planillaVencimiento"], leida)
+        # La lectura viaja en el response (persistida en lecturasIA con la
+        # clave punteada que la colección fake de este archivo no expande).
+        self.assertEqual(resp.json()["lectura_ia"]["datos"]["eps"], "Sanitas")
+
+    def test_fecha_dd_mm_aaaa_se_normaliza(self):
+        from datetime import date, timedelta
+        d = date.today() + timedelta(days=12)
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "completado_revision"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"):
+            resp = _subir(self.client, fecha=f"{d.day:02d}/{d.month:02d}/{d.year}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["planillaVencimiento"], d.isoformat())
+
+    def test_campo_blindado(self):
+        """planillaVencimiento solo lo escribe subir-documento (con validación);
+        actualizar-informacion jamás lo toca."""
+        self.assertIn("planillaVencimiento", vehiculos.CAMPOS_DOCUMENTO_PROTEGIDOS)
 
 
 class HistorialDocumentosTests(unittest.TestCase):

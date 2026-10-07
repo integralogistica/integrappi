@@ -110,6 +110,14 @@ async def _bajar_reporte_nit_pdf(id_reporte: str) -> bytes:
     return (await _pedido("GET", f"/api/v2/report_nit_pdf/{id_reporte}")).content
 
 
+async def _bajar_reporte_car_pdf(id_reporte: str) -> bytes:
+    """PDF del reporte de VEHÍCULO (launch/car), como BYTES (ver
+    _bajar_reporte_pdf). Los ids de vehículo NO existen en /report_pdf — el
+    proveedor responde 410 «identificador inválido» (bug real: los PDFs de
+    los estudios de placa nunca se pudieron abrir ni archivar)."""
+    return (await _pedido("GET", f"/api/v2/report_car_pdf/{id_reporte}")).content
+
+
 # --- Modelos ------------------------------------------------
 
 TIPOS_DOCUMENTO = ("CC", "CE", "INT", "NIT", "PP", "PPT", "NOMBRE")

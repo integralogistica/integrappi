@@ -436,6 +436,77 @@ class DispararEstudiosTests(unittest.TestCase):
         actualizado = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"][0]
         self.assertEqual(actualizado["fuentes"]["SIMIT"], False)  # ya sin Error
 
+    def test_reintentar_fuentes_de_VEHICULO_no_soportado(self):
+        """Regresión (2026-10-07, QYO235): /api/retry/{id} responde {} para los
+        ids de reportes de vehículo (probado en vivo) — antes eso caía al 502
+        engañoso "estado=desconocido". Ahora: 422 claro SIN llamar al
+        proveedor; la salida es «Volver a consultar»."""
+        from fastapi import HTTPException
+        estudio = {
+            "id": "e1", "tipo": "vehiculo", "placa": "ABC123",
+            "estado": "finalizado", "fuentes": {"Omisiones Vehículos": "Error"},
+            "reporte_id": "rep-car",
+        }
+        veh = vehiculo_completo(estudiosSeguridadAuto=[estudio])
+        fake = FakeColeccion([veh])
+
+        async def retry(*a, **k):
+            raise AssertionError("No debe llamarse al proveedor para vehículos")
+
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_td_reintentar", retry):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(estudios_automaticos.reintentar_fuentes_estudio("ABC123", "e1"))
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("VEHÍCULO", ctx.exception.detail)
+
+    def test_reintentar_respuesta_vacia_del_proveedor_es_422_claro(self):
+        """El proveedor puede rechazar el retry en silencio ({}): antes se
+        transformaba en 502 "estado=desconocido" — ahora 422 accionable."""
+        from fastapi import HTTPException
+        estudio = {
+            "id": "e1", "tipo": "persona", "cedula": "1020304050",
+            "estado": "finalizado", "fuentes": {"SIMIT": "Error"}, "reporte_id": "rep-1",
+        }
+        veh = vehiculo_completo(estudiosSeguridadAuto=[estudio])
+        fake = FakeColeccion([veh])
+
+        async def retry(*a, **k):
+            return {}
+
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_td_reintentar", retry):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(estudios_automaticos.reintentar_fuentes_estudio("ABC123", "e1"))
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("vacío", ctx.exception.detail)
+
+    def test_reintentar_empresa_usa_typedoc_nit(self):
+        estudio = {
+            "id": "e1", "tipo": "empresa", "nit": "900123456",
+            "estado": "finalizado", "fuentes": {"RUES": "Error"}, "reporte_id": "rep-nit",
+        }
+        veh = vehiculo_completo(estudiosSeguridadAuto=[estudio])
+        fake = FakeColeccion([veh])
+        llamadas = {}
+
+        async def retry(id_reporte, typedoc="CC"):
+            llamadas["typedoc"] = typedoc
+            return {"jobid": "job-nit"}
+
+        async def esperar(jobid, maximo, intervalo):
+            return {"estado": "finalizado", "hallazgo": False, "hallazgos": "",
+                    "results": {"RUES": False}, "id": "rep-nit"}
+
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_td_reintentar", retry), \
+             patch.object(estudios_automaticos, "_td_esperar", esperar):
+            asyncio.run(estudios_automaticos.reintentar_fuentes_estudio("ABC123", "e1"))
+        self.assertEqual(llamadas["typedoc"], "NIT")
+
     def test_pdf_del_reporte_se_archiva_en_el_bucket(self):
         """Al finalizar, el estudio persiste pdf_gcs con la ruta del blob
         (best-effort: si la subida falla, el estudio IGUAL finaliza)."""
@@ -457,6 +528,7 @@ class DispararEstudiosTests(unittest.TestCase):
              patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
              patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
              patch.object(estudios_automaticos, "_td_reporte_pdf", pdf), \
+             patch.object(estudios_automaticos, "_td_reporte_car_pdf", pdf), \
              patch.object(estudios_automaticos, "_subir_blob_pdf", subir):
             asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
         estudios = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
@@ -501,16 +573,56 @@ class DispararEstudiosTests(unittest.TestCase):
         class RespuestaHttpx:
             content = b"%PDF-real"
 
+        rutas_llamadas = []
+
         async def pedido(_metodo, ruta, **_kw):
-            assert "report_pdf" in ruta or "report_nit_pdf" in ruta
+            rutas_llamadas.append(ruta)
             return RespuestaHttpx()
 
         import asyncio
         with patch.object(tusdatos, "_pedido", pedido):
             persona = asyncio.run(estudios_automaticos._td_reporte_pdf("rep-1"))
             nit = asyncio.run(estudios_automaticos._td_reporte_nit_pdf("rep-2"))
+            car = asyncio.run(estudios_automaticos._td_reporte_car_pdf("rep-3"))
         self.assertEqual(persona, b"%PDF-real")
         self.assertEqual(nit, b"%PDF-real")
+        self.assertEqual(car, b"%PDF-real")
+        # Cada tipo de reporte va a SU endpoint del proveedor.
+        self.assertIn("/api/v2/report_pdf/rep-1", rutas_llamadas)
+        self.assertIn("/api/v2/report_nit_pdf/rep-2", rutas_llamadas)
+        self.assertIn("/api/v2/report_car_pdf/rep-3", rutas_llamadas)
+
+    def test_pdf_de_vehiculo_usa_el_endpoint_car(self):
+        """Regresión (2026-10-07, QYO235): los estudios de VEHÍCULO
+        (launch/car) se archivan y abren con /report_car_pdf — antes iban por
+        /report_pdf (persona) y el proveedor respondía 410 «identificador
+        inválido», disfrazado de «expiró». El archivado fallaba EN SILENCIO
+        desde siempre (best-effort)."""
+        import asyncio
+        llamados = {"persona": 0, "car": 0}
+
+        async def pdf_persona(_id):
+            llamados["persona"] += 1
+            return b"%PDF-persona"
+
+        async def pdf_car(_id):
+            llamados["car"] += 1
+            return b"%PDF-car"
+
+        subidas = []
+
+        def subir(ruta, contenido):
+            subidas.append((ruta, contenido))
+
+        with patch.object(estudios_automaticos, "_td_reporte_pdf", pdf_persona), \
+             patch.object(estudios_automaticos, "_td_reporte_car_pdf", pdf_car), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf", subir):
+            resultado = asyncio.run(estudios_automaticos._archivar_pdf_reporte(
+                "QYO235", {"tipo": "vehiculo", "placa": "QYO235"}, "rep-car-9"))
+        self.assertIsNotNone(resultado)
+        self.assertEqual(llamados, {"persona": 0, "car": 1})
+        self.assertIn("vehiculo_QYO235_rep-car-9", subidas[0][0])
+        self.assertEqual(subidas[0][1], b"%PDF-car")
 
     def test_vigencia_se_sella_al_disparar(self):
         """La corrida lleva estudiosVigencia {desde, vence=+VIGENCIA_MESES}."""

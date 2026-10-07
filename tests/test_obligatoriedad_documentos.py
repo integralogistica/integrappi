@@ -138,6 +138,58 @@ class DocumentosFaltantesTests(unittest.TestCase):
     def test_vehiculo_completo_no_falta_nada(self):
         self.assertEqual(vehiculos._documentos_faltantes(vehiculo_completo()), [])
 
+    def test_tecnomecanica_exenta_modelo_menor_2_anios(self):
+        # Vehículo nuevo (modelo del año en curso, del siguiente o del
+        # anterior): la tecnomecánica NO se exige (pedido del usuario
+        # 2026-10-07) — el resto de documentos sí.
+        from datetime import datetime
+        anio = datetime.now().year
+        for modelo in (anio, anio + 1, anio - 1):
+            v = vehiculo_completo(revisionTecnomecanica=None, vehModelo=str(modelo))
+            self.assertEqual(vehiculos._documentos_faltantes(v), [], f"modelo {modelo}")
+
+    def test_tecnomecanica_exigida_modelo_2_anios_o_mas(self):
+        # Modelo con 2 años o más (o sin modelo): la tecnomecánica SÍ falta.
+        from datetime import datetime
+        anio = datetime.now().year
+        for modelo in (str(anio - 2), "2015", None):
+            v = vehiculo_completo(revisionTecnomecanica=None, vehModelo=modelo)
+            self.assertIn("revisionTecnomecanica", vehiculos._documentos_faltantes(v))
+
+    def test_subir_tecnomecanica_RECHAZADA_en_vehiculo_nuevo(self):
+        """La exención es completa: un vehículo nuevo ni la requiere NI puede
+        subirla (400, nada guardado — pedido del usuario 2026-10-07)."""
+        from datetime import datetime
+        cliente = cliente_de_prueba()
+        for modelo in (str(datetime.now().year), str(datetime.now().year + 1)):
+            fake = FakeColeccionVehiculos(
+                [vehiculo_completo(revisionTecnomecanica=None, vehModelo=modelo)])
+            with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                 patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+                resp = cliente.put(
+                    "/vehiculos/subir-documento",
+                    data={"placa": "TEST01", "tipo": "revisionTecnomecanica", "extraer": "false"},
+                    files={"archivo": ("tecno.webp", b"img", "image/webp")},
+                )
+            self.assertEqual(resp.status_code, 400, f"modelo {modelo}: {resp.text}")
+            self.assertIn("nuevo", resp.json()["detail"])
+            mock_storage.assert_not_called()
+
+    def test_subir_tecnomecanica_PERMITIDA_en_vehiculo_viejo(self):
+        from datetime import datetime
+        cliente = cliente_de_prueba()
+        fake = FakeColeccionVehiculos(
+            [vehiculo_completo(vehModelo=str(datetime.now().year - 2))])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          return_value="Vehiculos/TEST01/hoy/revisionTecnomecanica_test01.webp"):
+            resp = cliente.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "revisionTecnomecanica", "extraer": "false"},
+                files={"archivo": ("tecno.webp", b"img", "image/webp")},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+
     def test_falta_rut_tenedor_cubierto_por_figura_igual(self):
         v = vehiculo_completo(rutTenedor=None, tenedorIgualPropietario=True)
         # tened==prop y rutPropietario lleno → rutTenedor cubierto.
