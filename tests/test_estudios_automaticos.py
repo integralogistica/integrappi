@@ -863,14 +863,17 @@ class EndpointEstudiosTests(unittest.TestCase):
 
     def test_disparar_manual(self):
         """POST .../disparar: botón de /revision — re-dispara SIEMPRE con
-        force (re-consulta real, no la caché del proveedor)."""
+        force (re-consulta real, no la caché del proveedor) y manual=True
+        (2026-10-07: el disparo MANUAL ignora el switch de disparo
+        automático — antes respondía 200 en silencio con el switch apagado)."""
         fake = FakeColeccion([vehiculo_completo()])
         cliente = cliente_de_prueba()
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:
             r = cliente.post("/vehiculos/estudios-seguridad/ABC123/disparar")
         self.assertEqual(r.status_code, 200)
-        disparo.assert_called_once_with("ABC123", re_revision=False, forzar=True)
+        disparo.assert_called_once_with("ABC123", re_revision=False, forzar=True,
+                                        manual=True)
 
     def test_disparar_vehiculo_inexistente_404(self):
         cliente = cliente_de_prueba()

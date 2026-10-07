@@ -115,6 +115,12 @@ CAMPOS_VOLATILES_FIRMA = {
     # no un dato declarado por el conductor al firmar.
     "estudiosSeguridadAuto", "historialEstudios", "documentosEstudioSeguridad",
     "estudiosVigencia",
+    # Historial de planillas de seguridad social (2026-10-07): se acumula
+    # mensualmente DESPUÉS de firmado — no debe romper la verificación.
+    "documentosPlanillaSegSocial",
+    # Historial universal de documentos (2026-10-07): cada subida de
+    # cualquier documento se registra DESPUÉS de firmado.
+    "historialDocumentos",
     # Bitácora de auditoría: se escribe DESPUÉS de cada mutación; jamás debe
     # romper la verificación del hash de datos firmados.
     "auditoriaVehiculo", "historialInactivacion",
@@ -984,23 +990,26 @@ def _registrar_auditoria(placa: str, accion: str, actor: Optional[str] = None,
 
 
 def _disparar_estudios_seguridad(placa: str, re_revision: bool = False,
-                                 forzar: bool = False) -> None:
+                                 forzar: bool = False,
+                                 manual: bool = False) -> None:
     """
     Lanza en background los estudios de seguridad automáticos del
     vehículo (cédulas de conductor/tenedor/propietario deduplicadas +
     placa) contra el proveedor configurado (hoy TusDatos). Fire-and-forget:
     un fallo JAMÁS tumba el endpoint que lo dispara.
     `forzar=True` → force del proveedor (re-consulta real, no su caché).
+    `manual=True` → ignora el switch (acción EXPLÍCITA del usuario: botón
+    «Volver a consultar» de /revision y módulo de antigüedad).
     Import local para evitar el ciclo vehiculos ↔ estudios_automaticos.
     SWITCH (2026-10-05): si el disparo automático está APAGADO (switch en
-    config_estudios / env ESTUDIOS_AUTO_DISPARAR=false), no se lanza nada —
-    Seguridad consulta manualmente desde /revision. El endpoint manual
-    POST /estudios-seguridad/{placa}/disparar NO pasa por aquí (siempre
-    funciona, es acción explícita del usuario).
+    config_estudios / env ESTUDIOS_AUTO_DISPARAR=false), no se lanza nada
+    por los hooks automáticos. BUG corregido 2026-10-07: el endpoint manual
+    `/disparar` también pasaba por el switch (lo llamó "no me hizo nada"
+    con el switch apagado) — ahora marca manual=True.
     """
     try:
         from Funciones import estudios_automaticos
-        if not estudios_automaticos.auto_disparo_habilitado():
+        if not manual and not estudios_automaticos.auto_disparo_habilitado():
             print(f"[estudios-auto] Disparo automático de {placa} OMITIDO (switch apagado)")
             return
         asyncio.create_task(
@@ -1014,7 +1023,13 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
     """
     1. Busca usuarios con perfil 'SEGURIDAD' para enviar el correo.
     2. Busca al conductor por su NOMBRE (no por ID).
+    (2026-10-07) Además envía WHATSAPP a los SEGURIDAD con celular —
+    fire-and-forget e independiente del correo (plantilla
+    `enruta_revision_pendiente`, ver _enviar_wa_seguridad).
     """
+    # WhatsApp primero: no depende de la config de Resend.
+    _enviar_wa_seguridad(placa, nombre_conductor_busqueda)
+
     if not RESEND_API_KEY:
         print("[RESEND] ⚠️ No hay API Key. No se enviará correo.")
         return
@@ -1073,10 +1088,68 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
         }
 
         email = resend.Emails.send(params)
-        print(f"[RESEND] ✅ Correo enviado a {destinatarios}. ID: {email}")
+        print(f"[RESEND] Correo enviado a {destinatarios}. ID: {email}")
 
     except Exception as e:
-        print(f"[RESEND] ❌ Error enviando correo: {str(e)}")
+        print(f"[RESEND] [ERROR] Error enviando correo: {str(e)}")
+
+
+# ── WHATSAPP A SEGURIDAD (2026-10-07, pedido del usuario) ────────────────────
+# Misma notificación del correo pero por el canal que el equipo sí mira:
+# el conductor dejó un vehículo pendiente de revisión. Plantilla Meta
+# `enruta_revision_pendiente` (Utilidad, es) con {{1}}=nombre de Seguridad,
+# {{2}}=conductor, {{3}}=placa y botón URL «Abrir IntegrApp».
+# ⚠️ REQUIERE crear y aprobar la plantilla en Meta Business Manager; sin
+# aprobar, el envío falla en silencio (fire-and-forget, queda en el log).
+# Los celulares viven en `baseusuarios.celular` (mismo patrón de Otros Costos).
+PLANTILLA_WA_REVISION = ("enruta_revision_pendiente", "es")
+
+
+def _normalizar_celular_co(celular) -> Optional[str]:
+    """Celular a formato internacional Colombia: solo dígitos con 57."""
+    if not celular:
+        return None
+    limpio = "".join(c for c in str(celular) if c.isdigit())
+    if not limpio:
+        return None
+    if not limpio.startswith("57"):
+        limpio = "57" + limpio
+    return limpio
+
+
+def _enviar_wa_seguridad(placa: str, nombre_conductor: str = "") -> None:
+    """WhatsApp a los usuarios SEGURIDAD activos con celular. Fire-and-forget:
+    un fallo (sin celular, plantilla sin aprobar, red) JAMÁS tumba el flujo."""
+    try:
+        from Funciones.whatsapp_utils_integra import enviar_template_sync
+        usuarios = list(coleccion_baseusuarios.find({
+            "perfil": "SEGURIDAD",
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        }))
+        if not usuarios:
+            print("[WA-Seguridad] No hay usuarios SEGURIDAD activos; no se notifica.")
+            return
+        enviados = 0
+        for u in usuarios:
+            celular = _normalizar_celular_co(u.get("celular"))
+            if not celular:
+                print(f"[WA-Seguridad] {u.get('usuario') or u.get('correo') or '?'} sin celular valido; se saltea.")
+                continue
+            nombre = (u.get("nombre") or "Equipo").strip()
+            res = enviar_template_sync(
+                to=celular,
+                template_name=PLANTILLA_WA_REVISION[0],
+                language_code=PLANTILLA_WA_REVISION[1],
+                body_params=[nombre, nombre_conductor or "Conductor", placa],
+            )
+            if res:
+                enviados += 1
+                print(f"[WA-Seguridad] OK -> {celular} ({nombre}) | {placa}")
+            else:
+                print(f"[WA-Seguridad] NO enviado a {celular} ({nombre}) — revisar plantilla '{PLANTILLA_WA_REVISION[0]}' y aprobacion en Meta.")
+        print(f"[WA-Seguridad] {PLANTILLA_WA_REVISION[0]} {placa}: {enviados}/{len(usuarios)} notificados.")
+    except Exception as e:
+        print(f"[WA-Seguridad] Error: {e}")
 
 # ==========================================
 # 3. ENDPOINTS
@@ -1518,6 +1591,12 @@ CLAVES_PROTEGIDAS = {
     # background, jamás el front.
     "estudiosSeguridadAuto", "historialEstudios", "documentosEstudioSeguridad",
     "estudiosVigencia",
+    # Historial de planillas de seguridad social (2026-10-07): lo escribe
+    # subir-documento (acumulación mensual), jamás el front.
+    "documentosPlanillaSegSocial",
+    # Historial universal de documentos (2026-10-07): lo escriben
+    # subir-documento/reutilizar-documento, jamás el front.
+    "historialDocumentos",
     # Bitácora de auditoría (quién creó/modificó cada cosa): la escriben los
     # endpoints del backend, jamás el front.
     "auditoriaVehiculo", "historialInactivacion",
@@ -1533,6 +1612,10 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "condCertificacionBancaria", "propCertificacionBancaria", "tenedCertificacionBancaria",
     "documentoAcreditacionTenedor", "rutTenedor", "rutPropietario", "firmaUrl",
     "hojaVidaFisica",
+    # Historial de planillas (2026-10-07): acumulación mensual server-side.
+    "documentosPlanillaSegSocial",
+    # Historial universal de documentos (2026-10-07): server-side.
+    "historialDocumentos",
     # Reversos de documentos de dos caras (mismo blindaje que sus frentes).
     "documentoIdentidadConductorReverso", "documentoIdentidadPropietarioReverso",
     "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
@@ -1911,7 +1994,20 @@ async def subir_documento(
             lectura_ia = None
             archivo.file.seek(0)
 
-    nombre_archivo = _nombre_doc_bucket(placa, tipo, extension, vehiculo)
+    # Historial universal de documentos (2026-10-07, pedido del usuario:
+    # "todos los documentos son sujetos a actualización, nada se pierde"):
+    # cada subida de CUALQUIER documento queda en `historialDocumentos` con su
+    # ruta, y el blob lleva sufijo de versión `_v{N}` para que re-subir NUNCA
+    # pise el archivo anterior (antes re-subir el mismo día lo sobrescribía).
+    # La 1ª subida mantiene el nombre base (compat con lo existente).
+    def _sufijo_version(tipo_doc: str, es_reverso: bool = False) -> str:
+        previas = sum(
+            1 for h in (vehiculo.get("historialDocumentos") or [])
+            if h.get("tipo") == tipo_doc and bool(h.get("reverso")) == es_reverso)
+        return f"_v{previas + 1}" if previas else ""
+
+    nombre_archivo = _nombre_doc_bucket(
+        placa, tipo, extension, vehiculo, sufijo=_sufijo_version(tipo))
     url_archivo = subir_a_google_storage(archivo, nombre_archivo)
 
     set_inicial = {tipo: url_archivo}
@@ -1928,22 +2024,68 @@ async def subir_documento(
             extension_rev = "pdf"
         else:
             raise HTTPException(status_code=400, detail="El reverso solo puede ser imagen o PDF.")
-        nombre_reverso = _nombre_doc_bucket(placa, f"{tipo}Reverso", extension_rev, vehiculo)
+        nombre_reverso = _nombre_doc_bucket(
+            placa, f"{tipo}Reverso", extension_rev, vehiculo,
+            sufijo=_sufijo_version(tipo, es_reverso=True))
         url_reverso = subir_a_google_storage(reverso, nombre_reverso)
         set_inicial[f"{tipo}Reverso"] = url_reverso
         set_inicial.update({f"{g}Reverso": url_reverso for g in gemelos})
 
-    coleccion_vehiculos.update_one({"placa": placa}, {"$set": set_inicial})
+    # Planilla de Seguridad Social (2026-10-07): se ACTUALIZA MENSUALMENTE →
+    # cada carga ACUMULA en `documentosPlanillaSegSocial` (nada se reemplaza,
+    # mismo patrón de los PDFs de estudio) y `planillaEpsArl` queda como
+    # espejo de la ÚLTIMA (compat: gate de documentos, paso 3 del conductor
+    # e históricos). Además, TODA subida de CUALQUIER documento entra al
+    # `historialDocumentos` universal (ver _sufijo_version arriba).
+    fecha_carga = datetime.utcnow()
+    entradas_historial = [{
+        "tipo": tipo,
+        "etiqueta": ETIQUETAS_DOCUMENTO.get(tipo, tipo),
+        "ruta": url_archivo,
+        "fecha": fecha_carga,
+        "nombre": archivo.filename or "",
+        "actor": editado_por or "",
+    }]
+    if url_reverso:
+        entradas_historial.append({
+            "tipo": tipo,
+            "etiqueta": ETIQUETAS_DOCUMENTO.get(tipo, tipo) + " (reverso)",
+            "reverso": True,
+            "ruta": url_reverso,
+            "fecha": fecha_carga,
+            "nombre": reverso.filename or "",
+            "actor": editado_por or "",
+        })
+    pushes = {
+        "historialDocumentos": {
+            "$each": entradas_historial, "$position": 0, "$slice": -200,
+        }
+    }
+    if tipo == "planillaEpsArl":
+        pushes["documentosPlanillaSegSocial"] = {
+            "$each": [{
+                "ruta": url_archivo,
+                "fecha": fecha_carga,
+                "nombre": archivo.filename or "",
+            }],
+            "$position": 0,
+            "$slice": 24,
+        }
+    update_doc: dict = {"$set": set_inicial, "$push": pushes}
+    coleccion_vehiculos.update_one({"placa": placa}, update_doc)
     _registrar_auditoria(
         placa, "documento_subido", actor=editado_por,
         detalle=ETIQUETAS_DOCUMENTO.get(tipo, tipo) + (" (+ reverso)" if url_reverso else ""),
     )
 
     # Edición de un aprobado por el conductor/tenedor → baja a re-revisión.
-    # EXCEPCIÓN (2026-10-01): la Hoja de Vida FÍSICA la sube Seguridad como
-    # adjunto de archivo (casos históricos con autorización en papel) — NO es
-    # un dato del conductor y no debe sacar un aprobado de la bolsa.
-    if tipo != "hojaVidaFisica":
+    # EXCEPCIONES: documentos que son ADJUNTOS de actualización periódica, no
+    # datos del conductor — NO sacan un aprobado de la bolsa:
+    #  - Hoja de Vida FÍSICA (2026-10-01): la sube Seguridad (casos históricos).
+    #  - Planilla de Seguridad Social (2026-10-07): se renueva CADA MES —
+    #    bajar el vehículo a re-revisión por subirla lo inhabilitaba sin razón.
+    TIPOS_SIN_REVISION = {"hojaVidaFisica", "planillaEpsArl"}
+    if tipo not in TIPOS_SIN_REVISION:
         campos_diff = [{"campo": tipo, "antes": vehiculo.get(tipo) or "(ninguno)", "despues": url_archivo}]
         campos_diff += [
             {"campo": g, "antes": vehiculo.get(g) or "(ninguno)", "despues": url_archivo}
@@ -2122,7 +2264,22 @@ async def reutilizar_documento(
         set_doc = {tipo_destino: ruta_destino}
         if ruta_reverso_destino:
             set_doc[f"{tipo_destino}Reverso"] = ruta_reverso_destino
-        coleccion_vehiculos.update_one({"placa": placa_doc}, {"$set": set_doc})
+        # Historial universal (2026-10-07): la reutilización también es una
+        # carga de documento (copia server-side) y queda registrada.
+        entrada_hist = {
+            "tipo": tipo_destino,
+            "etiqueta": f"{spec['nombre']} de {origen} (♻️ reutilizado)",
+            "ruta": ruta_destino,
+            "fecha": datetime.utcnow(),
+            "nombre": f"reutilizado de {tipo_origen}",
+            "actor": editado_por or "",
+        }
+        coleccion_vehiculos.update_one(
+            {"placa": placa_doc},
+            {"$set": set_doc,
+             "$push": {"historialDocumentos": {
+                 "$each": [entrada_hist], "$position": 0, "$slice": -200}}},
+        )
 
         # La lectura IA de la figura ORIGEN queda disponible también para la
         # destino (autollenado de identidad/bancario en el próximo montaje).
@@ -2834,8 +2991,11 @@ async def disparar_estudios_seguridad(placa: str):
     if not coleccion_vehiculos.find_one({"placa": placa_limpia}, {"_id": 1}):
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     # force=True: el botón es "volver a consultar" de verdad (re-consulta
-    # real, no la caché por cédula del proveedor).
-    _disparar_estudios_seguridad(placa_limpia, re_revision=False, forzar=True)
+    # real, no la caché por cédula del proveedor). manual=True: el switch de
+    # disparo automático NO aplica a una acción explícita del usuario (bug
+    # 2026-10-07: con el switch apagado el botón respondía 200 en silencio).
+    _disparar_estudios_seguridad(placa_limpia, re_revision=False, forzar=True,
+                                 manual=True)
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "message": "Estudios de seguridad disparados; consulte el avance en unos minutos.",
     })

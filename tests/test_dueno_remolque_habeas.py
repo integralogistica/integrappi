@@ -99,6 +99,10 @@ class FakeColeccionVehiculos:
             elif isinstance(esperado, dict) and "$ne" in esperado:
                 if _get_punteado(doc, campo) == esperado["$ne"]:
                     return False
+            elif isinstance(esperado, dict) and "$gt" in esperado:
+                valor = _get_punteado(doc, campo)
+                if valor is None or valor <= esperado["$gt"]:
+                    return False
             elif isinstance(esperado, dict) and "$regex" in esperado:
                 opciones = _re.IGNORECASE if "i" in esperado.get("$options", "") else 0
                 if not _re.search(esperado["$regex"], str(_get_punteado(doc, campo) or ""), opciones):
@@ -336,6 +340,41 @@ class HabeasDataTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["personas"], [])
 
+    def test_token_pendiente_trae_el_correo(self):
+        """2026-10-07: el link vigente sin usar debe reportar a QUÉ correo se
+        envió (la tarjeta lo muestra: «Enlace enviado a … el …»)."""
+        fake_cuentas, fake_acept = self._fakes()
+        token = {
+            "cedula": "1020304050", "correo": "PEDRO@X.COM", "usado_en": None,
+            "creado_en": datetime(2026, 10, 6, 16, 29, 0),
+            "expira": datetime(2027, 1, 1),
+        }
+        with patch.object(conductores, "coleccion_conductores", fake_cuentas), \
+             patch.object(conductores, "coleccion_aceptaciones", fake_acept), \
+             patch.object(conductores, "coleccion_tokens_aut",
+                          FakeColeccionVehiculos([token])):
+            resp = self.client.get("/conductores/habeas-data?cedulas=1020304050")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        p = resp.json()["personas"][0]
+        self.assertIn("token_pendiente", p)
+        self.assertEqual(p["token_pendiente_correo"], "PEDRO@X.COM")
+
+    def test_devuelve_declaraciones_de_la_politica(self):
+        """2026-10-07: el response trae las declaraciones de la política vigente
+        (con la marca de la opcional) para que el front pinte en ROJO las que
+        falten — en la práctica solo puede faltar «tratamiento_datos»."""
+        politica = {"version": 2, "declaraciones": conductores.DECLARACIONES_V2}
+        with patch.object(conductores, "coleccion_conductores", FakeColeccionVehiculos()), \
+             patch.object(conductores, "coleccion_aceptaciones", FakeColeccionVehiculos()), \
+             patch.object(conductores, "_politica_vigente", return_value=politica):
+            resp = self.client.get("/conductores/habeas-data?cedulas=99999")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        decls = resp.json()["declaraciones_politica"]
+        self.assertEqual(len(decls), 7)
+        td = next(d for d in decls if d["id"] == "tratamiento_datos")
+        self.assertTrue(td["opcional"])
+        self.assertFalse(decls[0]["opcional"])
+
 
 # ── 3. RECHAZO DEFINITIVO (2026-10-05) ─────────────────────────────────────
 
@@ -440,6 +479,18 @@ class SwitchAutoDisparoTests(unittest.TestCase):
              patch.object(estudios_automaticos, "disparar_estudios") as espia:
             vehiculos._disparar_estudios_seguridad("TEST01")
         espia.assert_not_called()
+
+    def test_disparo_MANUAL_ignora_switch_apagado(self):
+        """BUG 2026-10-07: el botón «Volver a consultar» (endpoint manual
+        /disparar) pasaba por el switch → con el switch APAGADO respondía 200
+        en silencio y no lanzaba nada (reporte del usuario en MVX48E)."""
+        fake = FakeColeccionVehiculos([vehiculo_completo(placa="MVX48E")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "auto_disparo_habilitado", return_value=False), \
+             patch.object(estudios_automaticos, "disparar_estudios") as espia:
+            resp = self.client.post("/vehiculos/estudios-seguridad/MVX48E/disparar")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        espia.assert_called()
 
     def test_endpoints_del_switch(self):
         fake = FakeColeccionVehiculos()

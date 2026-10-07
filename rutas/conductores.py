@@ -360,7 +360,7 @@ def enviar_correo_codigo(destinatario: str, codigo: str):
             "html": html_simple,
         })
     except Exception as e:
-        print(f"❌ Error crítico enviando correo: {e}")
+        print(f"[ERROR] Error crítico enviando correo: {e}")
 
 
 def enviar_correo_credenciales(destinatario: str, clave: str, perfil: str, creado_por: str):
@@ -407,9 +407,9 @@ def enviar_correo_credenciales(destinatario: str, clave: str, perfil: str, cread
             "subject": "Tu usuario y clave — IntegrApp En Ruta",
             "html": html,
         })
-        print(f"📧 Correo de credenciales enviado a {destinatario}")
+        print(f"[OK] Correo de credenciales enviado a {destinatario}")
     except Exception as e:
-        print(f"❌ Error enviando correo de credenciales: {e}")
+        print(f"[ERROR] Error enviando correo de credenciales: {e}")
 
 
 def _celular_whatsapp(celular: str) -> Optional[str]:
@@ -557,9 +557,9 @@ def enviar_correo_verificacion(destinatario: str, enlace: str, nombre: str):
             "subject": "Verifica tu correo — IntegrApp Conductores",
             "html": html,
         })
-        print(f"📧 Correo de verificación enviado a {destinatario}")
+        print(f"[OK] Correo de verificación enviado a {destinatario}")
     except Exception as e:
-        print(f"❌ Error enviando correo de verificación: {e}")
+        print(f"[ERROR] Error enviando correo de verificación: {e}")
 
 
 # ==============================================================================
@@ -886,7 +886,7 @@ async def consultar_habeas_data(cedulas: str = ""):
                 "documento_ruta": acep.get("documento_ruta"),
                 "registrado_por": acep.get("registrado_por", ""),
             })
-        # Link vigente sin usar → el front muestra «pendiente (enviado el …)».
+        # Link vigente sin usar → el front muestra «pendiente (enviado a … el …)».
         try:
             pendiente = coleccion_tokens_aut.find_one({
                 "cedula": cedula, "usado_en": None,
@@ -896,17 +896,37 @@ async def consultar_habeas_data(cedulas: str = ""):
             # almacenamiento no debe romper la serialización del response).
             if isinstance(creado, datetime):
                 entrada["token_pendiente"] = creado
+                # Correo al que se envió el link (pedido 2026-10-07: la tarjeta
+                # debe mostrarlo para que Seguridad sepa a dónde llegó).
+                entrada["token_pendiente_correo"] = pendiente.get("correo", "")
         except Exception:
             pass
 
         personas.append(entrada)
+
+    # Declaraciones de la política VIGENTE (2026-10-07): el front las usa para
+    # pintar en ROJO las declaraciones que a cada persona le faltan — en la
+    # práctica solo puede faltar la opcional («Tratamiento de Datos Personales»,
+    # DECLARACIONES_NO_EXIGIDAS), porque las demás son exigidas por el backend.
+    declaraciones_politica = []
+    try:
+        politica = _politica_vigente() or {}
+        declaraciones_politica = [
+            {"id": d.get("id", ""), "titulo": d.get("titulo", ""),
+             "version": politica.get("version"),
+             "opcional": d.get("id") in DECLARACIONES_NO_EXIGIDAS}
+            for d in (politica.get("declaraciones") or [])
+        ]
+    except Exception:
+        pass
 
     # El doc embebido `aceptacion_politica` guarda ObjectIds (politica_id,
     # aceptacion_id) y fechas datetime: sin sanitizar, la serialización de
     # FastAPI revienta con 500 (bug encontrado en runtime 2026-10-06 — la
     # pestaña «Cambios» de /revision no mostraba NADA en autorizaciones).
     from rutas.vehiculos import _json_seguro
-    return JSONResponse(content={"personas": _json_seguro(personas)})
+    return JSONResponse(content={"personas": _json_seguro(personas),
+                                 "declaraciones_politica": declaraciones_politica})
 
 
 # ==============================================================================
@@ -1007,9 +1027,9 @@ def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, plac
             "subject": "Autorización de tratamiento de datos — IntegrApp",
             "html": html,
         })
-        print(f"📧 Correo de autorización enviado a {destinatario} ({placa})")
+        print(f"[OK] Correo de autorización enviado a {destinatario} ({placa})")
     except Exception as e:
-        print(f"❌ Error enviando correo de autorización a {destinatario}: {e}")
+        print(f"[ERROR] Error enviando correo de autorización a {destinatario}: {e}")
 
 
 def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
@@ -1709,9 +1729,9 @@ def enviar_correo_invitacion(destinatario: str, enlace: str, nombre: str, placa:
             "subject": f"Te invitaron a conducir el vehículo {placa} — IntegrApp",
             "html": html,
         })
-        print(f"📧 Correo de invitación enviado a {destinatario}")
+        print(f"[OK] Correo de invitación enviado a {destinatario}")
     except Exception as e:
-        print(f"❌ Error enviando invitación: {e}")
+        print(f"[ERROR] Error enviando invitación: {e}")
 
 
 @ruta_conductores.post("/invitar-conductor", response_model=dict)
