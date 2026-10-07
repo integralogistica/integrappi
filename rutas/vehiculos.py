@@ -1290,6 +1290,27 @@ async def obtener_vehiculo(placa: str):
     vehiculo.pop("auditoriaVehiculo", None)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Vehículo encontrado", "data": _json_seguro(_firmar_documentos(vehiculo))})
 
+def _tiene_estudio_seguridad(vehiculo: dict) -> bool:
+    """True si el vehículo tiene AL MENOS un estudio de seguridad en PDF
+    (pedido del usuario 2026-10-06: requisito para aprobar): un adjunto
+    cargado por Seguridad (`documentosEstudioSeguridad`, o el espejo legacy
+    `estudioSeguridad`) o un estudio automático finalizado con reporte del
+    proveedor (corrida vigente o histórica — ambos dejan PDF abrible)."""
+    if vehiculo.get("documentosEstudioSeguridad"):
+        return True
+    if (vehiculo.get("estudioSeguridad") or "").strip():
+        return True
+    corridas = [(vehiculo.get("estudiosSeguridadAuto") or [])] + [
+        (c.get("estudios") or []) for c in (vehiculo.get("historialEstudios") or [])
+    ]
+    for corrida in corridas:
+        for est in corrida:
+            if isinstance(est, dict) and est.get("estado") == "finalizado" \
+                    and est.get("reporte_id"):
+                return True
+    return False
+
+
 # Transiciones permitidas de estadoIntegra (2026-08-27): todo pasa por
 # actualizar-estado, que antes aceptaba cualquier string. `inactivo` es un
 # aprobado pausado por Seguridad (motivo obligatorio); reactivar vuelve a
@@ -1381,6 +1402,19 @@ async def actualizar_estado(
             status_code=400,
             detail="La observación de qué debe actualizar el conductor es obligatoria.",
         )
+
+    # Aprobar exige AL MENOS un estudio de seguridad en PDF (2026-10-06,
+    # pedido del usuario): adjunto cargado por Seguridad o automático con
+    # reporte. Solo aplica a completado_revision→aprobado (la acción real de
+    # «Aprobar»): reactivar un inactivo y cancelar una actualización NO
+    # re-evalúan (el vehículo ya fue aprobado una vez).
+    if nuevo_estado == "aprobado" and estado_actual == "completado_revision":
+        if not _tiene_estudio_seguridad(vehiculo):
+            raise HTTPException(
+                status_code=400,
+                detail="Para aprobar debe existir al menos un archivo PDF de estudio de "
+                       "seguridad. Cárgalo o consúltalo desde la pestaña «Estudios».",
+            )
 
     ahora = datetime.utcnow()
     datos_actualizar = {

@@ -757,7 +757,10 @@ class HookActualizarEstadoTests(unittest.TestCase):
         self.assertEqual(fake.documents[0]["estadoIntegra"], "aprobado")
 
     def test_aprobar_no_dispara_estudios(self):
-        fake = FakeColeccion([vehiculo_completo(estadoIntegra="completado_revision")])
+        # documentosEstudioSeguridad: aprobar exige estudio en PDF (2026-10-06).
+        fake = FakeColeccion([vehiculo_completo(
+            estadoIntegra="completado_revision",
+            documentosEstudioSeguridad=[{"ruta": "Vehiculos/ABC123/estudioSeguridad_test.pdf"}])])
         cliente = cliente_de_prueba()
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:

@@ -327,7 +327,10 @@ class ActualizarEstadoValidacionTests(unittest.TestCase):
         # Seguridad aprueba con el mismo endpoint: no debe exigir documentos.
         # (Desde completado_revision — la transición real del flujo; desde
         # registro_incompleto directo ya no se permite, ver test_transiciones.)
-        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="completado_revision", soat=None)])
+        # documentosEstudioSeguridad: aprobar exige estudio en PDF (2026-10-06).
+        fake = FakeColeccionVehiculos([vehiculo_completo(
+            estadoIntegra="completado_revision", soat=None,
+            documentosEstudioSeguridad=[{"ruta": "Vehiculos/TEST01/estudioSeguridad_test.pdf"}])])
         with patch.object(vehiculos, "coleccion_vehiculos", fake):
             resp = self.client.put(
                 "/vehiculos/actualizar-estado",

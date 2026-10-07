@@ -6,6 +6,7 @@ Cubre:
 - aprobado→inactivo: exige motivo, sella historialInactivacion y cancela
   disponibilidades activas; escribe fechaEstado.
 - inactivo→aprobado: reactivación sin re-revisión + entrada 'reactivado'.
+- Aprobar exige al menos un estudio de seguridad en PDF (2026-10-06).
 - obtener-vehiculos-incompletos incluye los inactivos en el $in.
 - Devolver (completado_revision→registro_incompleto) sigue funcionando.
 """
@@ -182,6 +183,73 @@ class InactivacionTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             self.assertEqual(fake.documents[0]["estadoIntegra"], "registro_incompleto")
             self.assertEqual(fake.documents[0]["observaciones"], "Falta la licencia legible")
+
+
+class AprobarExigeEstudioTests(unittest.TestCase):
+    """Aprobar (completado_revision→aprobado) exige AL MENOS un estudio de
+    seguridad en PDF (2026-10-06, pedido del usuario): adjunto de Seguridad
+    o automático finalizado con reporte. Reactivar/cancelar actualización NO
+    re-evalúan (el vehículo ya fue aprobado una vez)."""
+
+    def _aprobar(self, fake):
+        client = cliente_de_prueba()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake):
+            return client.put("/vehiculos/actualizar-estado", data={
+                "placa": "TEST01", "nuevo_estado": "aprobado", "usuario_id": "seg1",
+            })
+
+    def test_sin_estudio_rechazado(self):
+        fake = FakeColeccionVehiculos([vehiculo(estado="completado_revision")])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("estudio", resp.json()["detail"].lower())
+        self.assertEqual(fake.updates, [])  # No tocó el documento.
+
+    def test_pdf_adjunto_aprueba(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision",
+            documentosEstudioSeguridad=[{"ruta": "Vehiculos/TEST01/estudioSeguridad_test.pdf"}],
+        )])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_espejo_legacy_estudioSeguridad_aprueba(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision",
+            estudioSeguridad="Vehiculos/TEST01/estudioSeguridad_legacy.pdf",
+        )])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_estudio_automatico_finalizado_con_reporte_aprueba(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision",
+            estudiosSeguridadAuto=[
+                {"id": "e1", "estado": "finalizado", "reporte_id": "rep-123"},
+            ],
+        )])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_estudio_automatico_en_curso_NO_cuenta(self):
+        fake = FakeColeccionVehiculos([vehiculo(
+            estado="completado_revision",
+            estudiosSeguridadAuto=[
+                {"id": "e1", "estado": "en_curso", "reporte_id": None},
+            ],
+        )])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reactivacion_sin_estudio_pasa(self):
+        fake = FakeColeccionVehiculos([vehiculo(estado="inactivo")])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_cancelar_actualizacion_sin_estudio_pasa(self):
+        fake = FakeColeccionVehiculos([vehiculo(estado="en_actualizacion")])
+        resp = self._aprobar(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
 
 
 class InactivosEnListasTests(unittest.TestCase):

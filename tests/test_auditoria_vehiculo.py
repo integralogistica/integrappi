@@ -120,7 +120,9 @@ class MutacionesTests(unittest.TestCase):
         veh_fake = FakeColeccion([_veh(estado="completado_revision", hojaVidaFisica="u",
                                        vehCapacidadCarga="10000", fotos=["f1"])])
         # Vehículo con TODOS los documentos para pasar la validación.
+        # estudioSeguridad: aprobar exige estudio en PDF (2026-10-06).
         completo = {
+            "estudioSeguridad": "Vehiculos/ABC123/2026-10-01/estudioSeguridad_abc123.pdf",
             "tarjetaPropiedad": "u1", "tarjetaPropiedadReverso": "u1r", "soat": "u2",
             "revisionTecnomecanica": "u3",
             "documentoIdentidadConductor": "u6", "documentoIdentidadConductorReverso": "u6r",
