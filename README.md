@@ -137,6 +137,7 @@ if bodega:
 - **`historico_otros_costos`** - Solicitudes de otros costos pagadas
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
 - **`clientes_otros_costos`** - Catálogo de clientes sugeridos en el formulario de Otros Costos (`GET /otros-costos/clientes`; auto-siembra 9 clientes por defecto la primera vez)
+- **`proveedores_otros_costos`** - Catálogo de proveedores por concepto de costo del formulario de Otros Costos (`GET /otros-costos/proveedores`; auto-siembra `PROVEEDORES_OTROS_COSTOS_DEFAULT`: OTROS, ALL CARGO, OPERATIVO la primera vez; editable directo en Mongo con documentos `{ "nombre": "..." }`)
 - **`causales_otros_costos`** - Catálogo de causales/tipos de costo del formulario de Otros Costos (`GET /otros-costos/tipos-costo`; auto-siembra 14 causales por defecto la primera vez, editable en Mongo)
 - **`bancos_otros_costos`** - Catálogo de bancos del formulario de Otros Costos y de Cuentas por Placa (`GET /otros-costos/bancos`; auto-siembra `BANCOS_OTROS_COSTOS_DEFAULT`, 30 bancos con código)
 - **`cuentas_por_placa`** - Catálogo «Cuentas por Placa»: datos bancarios/conductor por placa scoped por regional (`rutas/cuentas_placa.py`). Índice unique `(placa, regional)` — una placa puede repetirse entre regionales, no dentro de la misma. `regional` guarda el código CO + `regional_info {co, regional, bodega}`
@@ -826,3 +827,13 @@ Los usuarios no quieren ver usernames sino **nombres de personas**. Aunque `/his
 
 - Nuevo endpoint que devuelve `{USUARIO_UPPER: nombre}` de `baseusuarios` (projection sólo `usuario`+`nombre`; no expone correo/celular como sí hace `GET /baseusuarios/`).
 - Los frontends de SolicitudVehiculos e HistóricoPedidos lo consultan **una vez al montar** y resuelven con el helper `nombrePersona(valor)`: prioriza el `*_nombre` del backend, luego el mapa local, y como último recurso deja el valor tal cual. Aplica a la trazabilidad del modal, al historial de cambios y al aviso «Devuelta por» de las filas.
+
+## Actualizaciones Recientes (2026-10-07)
+
+### Otros Costos — campo «Proveedor» por concepto de costo
+
+Campo **`proveedor`** en **cada concepto de costo** del formulario «Nueva solicitud» (dropdown), para identificar quién presta el servicio (p. ej. ALL CARGO, operativo propio, etc.). **Opcional en general, pero OBLIGATORIO cuando el tipo de costo es `CARGUE` o `DESCARGUE`** (cargues y descargues: siempre debe ir una opción; `TIPOS_COSTO_REQUIEREN_PROVEEDOR`).
+
+- **Catálogo**: colección **`proveedores_otros_costos`**, mismo patrón que `clientes_otros_costos`/`causales_otros_costos`. `GET /otros-costos/proveedores` **auto-siembra** `PROVEEDORES_OTROS_COSTOS_DEFAULT = [OTROS, ALL CARGO, OPERATIVO]` la primera vez; desde entonces es **editable directamente en Mongo** (documentos `{ "nombre": "..." }`) — así se agregan más proveedores sin tocar código ni re-desplegar.
+- **Modelo**: `CostoConcepto.proveedor: str = ""` (normalizado a MAYÚSCULAS con `_norm_upper`). Viaja dentro del array `costos` → al histórico con el doc completo (`_mover_documento`). La exigencia CARGUE/DESCARGUE se valida en `_validar_solicitud` (422) para crear y editar.
+- **Frontend** (`OtrosCostosP`): dropdown «Proveedor» en cada fila de concepto (columna nueva en `OC-costRow`, grilla a 5 columnas), con asterisco y borde rojo cuando el tipo lo exige y está vacío; validación espejo en `validarForm`; columna «Proveedor» en la tabla de conceptos del modal de detalle. Nuevo `getProveedores` en `otrosCostos.tsx`. Requiere deploy de backend y frontend.

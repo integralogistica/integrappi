@@ -130,6 +130,16 @@ CLIENTES_OTROS_COSTOS_DEFAULT = [
     "HUNTER DOUGLAS DE COLOMBIA SAS",
     
 ]
+# Catálogo por defecto de proveedores para el formulario (se siembra en
+# `proveedores_otros_costos`). Mismo patrón que clientes/causales: editable
+# directamente en Mongo (documentos `{ "nombre": "..." }`) sin tocar código.
+PROVEEDORES_OTROS_COSTOS_DEFAULT = [
+    "OTROS",
+    "ALL CARGO",
+    "OPERATIVO",
+]
+# Tipos de costo que EXIGEN proveedor (cargues y descargues: siempre debe ir una opción).
+TIPOS_COSTO_REQUIEREN_PROVEEDOR = {"CARGUE", "DESCARGUE"}
 ESTADOS_VALIDOS = [
     "borrador", "pendiente_aprobacion", "devuelto", "rechazado",
     "aprobado", "pagado", "anulado",
@@ -145,6 +155,7 @@ col_historico_pedidos = db["pedidos_medical_historico"]   # solo lectura (lookup
 col_usuarios = db["baseusuarios"]                          # resolución de identidad
 col_clientes = db["clientes_otros_costos"]                 # catálogo de clientes (formulario)
 col_causales = db["causales_otros_costos"]                 # catálogo de tipos de costo (formulario)
+col_proveedores = db["proveedores_otros_costos"]           # catálogo de proveedores (formulario)
 col_bancos = db["bancos_otros_costos"]                     # catálogo de bancos: nombre + código
 
 # Índices (idempotentes al importar, igual patrón que siscore_consultas.py).
@@ -1065,6 +1076,12 @@ def _validar_solicitud(
             raise HTTPException(status_code=422, detail="La descripción del costo es obligatoria.")
         if _a_numero(c.valor) <= 0:
             raise HTTPException(status_code=422, detail="El valor de cada costo debe ser mayor que cero.")
+        # Cargues y descargues: el proveedor NO es opcional, siempre debe ir una opción.
+        if (c.tipo_costo or "").strip().upper() in TIPOS_COSTO_REQUIEREN_PROVEEDOR and not (c.proveedor or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="El proveedor es obligatorio en los conceptos de CARGUE y DESCARGUE.",
+            )
         valor_total += _a_numero(c.valor)
 
     if valor_total <= 0:
@@ -1253,8 +1270,9 @@ class CostoConcepto(BaseModel):
     tipo_costo: str = ""
     descripcion: str = ""
     valor: float = 0
+    proveedor: str = ""  # opcional por concepto; OBLIGATORIO en CARGUE/DESCARGUE (catálogo `proveedores_otros_costos`)
 
-    @field_validator("descripcion", mode="before")
+    @field_validator("descripcion", "proveedor", mode="before")
     @classmethod
     def _upper(cls, v):
         return _norm_upper(v)
@@ -1467,6 +1485,22 @@ async def clientes():
             len(CLIENTES_OTROS_COSTOS_DEFAULT),
         )
     docs = list(col_clientes.find({}, {"_id": 0, "nombre": 1}))
+    return [d.get("nombre", "") for d in docs if d.get("nombre")]
+
+
+@router.get("/proveedores")
+async def proveedores():
+    """Proveedores para el campo opcional del formulario de Otros Costos.
+    Auto-siembra la colección `proveedores_otros_costos` con el listado por
+    defecto la primera vez (si está vacía); desde entonces es editable
+    directamente en Mongo (agregar/ quitar documentos `{ "nombre": "..." }`)."""
+    if col_proveedores.count_documents({}) == 0:
+        col_proveedores.insert_many([{"nombre": p} for p in PROVEEDORES_OTROS_COSTOS_DEFAULT])
+        logger.info(
+            "[PROVEEDORES OTROS COSTOS] Colección sembrada con %d proveedores por defecto.",
+            len(PROVEEDORES_OTROS_COSTOS_DEFAULT),
+        )
+    docs = list(col_proveedores.find({}, {"_id": 0, "nombre": 1}))
     return [d.get("nombre", "") for d in docs if d.get("nombre")]
 
 
