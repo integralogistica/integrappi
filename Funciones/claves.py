@@ -14,6 +14,7 @@
 # mayúsculas aunque estuviera guardada en otro case.
 # ------------------------------------------------------------
 
+import hashlib
 import hmac
 
 from passlib.context import CryptContext
@@ -80,3 +81,32 @@ def verificar_clave(ingresada: str, almacenada: str) -> bool:
         if hmac.compare_digest(variante, guardada):
             return True
     return False
+
+
+def hash_token(token: str) -> str:
+    """
+    SHA-256 hex de un TOKEN de alta entropía (secrets.token_urlsafe(32)).
+
+    Determinístico → el hash vive indexado en BD y el lookup es O(1). Con 256
+    bits de entropía la igualdad del SHA-256 ES la prueba de posesión: bcrypt
+    (pensado para claves humanas débiles y por eso deliberadamente lento) no
+    aporta seguridad extra aquí y hacía el lookup O(N) carísimo.
+    NUNCA usar con claves elegidas por humanos.
+    """
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def verificar_token_hash(token: str, almacenada: str) -> bool:
+    """
+    Verifica un TOKEN contra su hash guardado, SIN variantes de case.
+
+    Los tokens son urlsafe y llegan verbatim de la URL: probar mayúsculas/
+    minúsculas (como hace verificar_clave para el hack legacy de claves)
+    tripletaba el costo bcrypt sin ninguna ganancia de seguridad.
+    """
+    guardada = str(almacenada or "").strip()
+    if not guardada:
+        return False
+    if es_hash(guardada):
+        return contexto_pwd.verify(str(token), guardada)
+    return hmac.compare_digest(str(token), guardada)

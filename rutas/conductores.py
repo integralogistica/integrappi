@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import pytz
 
 from bd.bd_cliente import bd_cliente
-from Funciones.claves import crear_hash, verificar_clave
+from Funciones.claves import crear_hash, verificar_clave, verificar_token_hash, hash_token
 from Funciones.whatsapp_utils_integra import enviar_template_sync
 
 # ==============================================================================
@@ -51,6 +51,10 @@ try:
     # Sujetos SIN cuenta: evidencia de autorización por cédula (sparse).
     coleccion_aceptaciones.create_index("sujeto_cedula", sparse=True)
     coleccion_tokens_aut.create_index("cedula")
+    # Lookup O(1) de tokens por SHA-256 (fix CPU 2026-10-08: el scan bcrypt
+    # quemaba ~30 s de CPU por GET /verificar-correo con 68 tokens pendientes).
+    coleccion_conductores.create_index("verificacion_token_sha", sparse=True)
+    coleccion_tokens_aut.create_index("token_sha", sparse=True)
 except Exception:
     pass
 
@@ -482,41 +486,62 @@ def _buscar_por_usuario(usuario_o_correo: str):
 
 
 def _generar_token_verificacion(doc_id) -> str:
-    """Token plano de un solo uso; en BD queda solo su hash (patrón de aut2.py)."""
+    """Token plano de un solo uso; en BD queda solo su hash (patrón de aut2.py).
+    Se persiste además el SHA-256 para el lookup O(1) (fix CPU 2026-10-08)."""
     token_plano = secrets.token_urlsafe(32)
     coleccion_conductores.update_one(
         {"_id": doc_id},
         {"$set": {
             "verificacion_token_hash": crear_hash(token_plano),
+            "verificacion_token_sha": hash_token(token_plano),
             "verificacion_expira": datetime.now(timezone.utc) + timedelta(hours=EXPIRA_HORAS_VERIFICACION),
         }},
     )
     return token_plano
 
 
-def _verificar_token_verificacion(doc: dict, token_plano: str) -> bool:
-    token_hash = doc.get("verificacion_token_hash")
+def _token_verificacion_vigente(doc: dict) -> bool:
     expira = doc.get("verificacion_expira")
-    if not token_hash or not expira:
+    if not expira:
         return False
     # Fechas Mongo naive = UTC (convención del proyecto).
     if expira.tzinfo is None:
         expira = expira.replace(tzinfo=timezone.utc)
-    if datetime.now(timezone.utc) > expira:
+    return datetime.now(timezone.utc) <= expira
+
+
+def _verificar_token_verificacion(doc: dict, token_plano: str) -> bool:
+    """Fallback legacy: bcrypt (UNA verificación, sin variantes de case)."""
+    token_hash = doc.get("verificacion_token_hash")
+    if not token_hash or not _token_verificacion_vigente(doc):
         return False
-    return verificar_clave(token_plano, token_hash)
+    return verificar_token_hash(token_plano, token_hash)
 
 
 def _buscar_conductor_por_token(token_plano: str) -> Optional[dict]:
     """
     Conductor cuyo token de verificación coincide (hash + expiración).
     Comparte el bucle entre /verificar-correo (GET) y /aceptar-politica (POST).
+
+    (2026-10-08, fix CPU en Render) FAST-PATH: los tokens nuevos guardan además
+    `verificacion_token_sha` (SHA-256 determinístico) → find_one por índice.
+    El token es token_urlsafe(32) (256 bits de entropía): la igualdad del SHA-256
+    ES la prueba de posesión — el scan bcrypt anterior recorría hasta 200
+    candidatos a ~0,4 s de CPU c/u (68 pendientes en prod ≈ 30 s de CPU por
+    request, pico del 100% en Render sin rastro en el log de acceso).
+    El scan bcrypt queda SOLO para tokens legacy creados antes del campo nuevo.
     """
     if not token_plano:
         return None
+    doc = coleccion_conductores.find_one(
+        {"verificacion_token_sha": hash_token(token_plano)})
+    if doc and _token_verificacion_vigente(doc):
+        return doc
     for doc in coleccion_conductores.find(
         {"verificacion_token_hash": {"$exists": True}},
     ).limit(200):
+        if doc.get("verificacion_token_sha"):
+            continue  # ya resuelto (o vencido) por la fast-path
         if _verificar_token_verificacion(doc, token_plano):
             return doc
     return None
@@ -838,7 +863,7 @@ async def consultar_habeas_data(cedulas: str = ""):
         # se busca por dígitos anclados (mismo criterio del /buscar).
         cuenta = coleccion_conductores.find_one(
             {"cedula": {"$regex": f"^{re.escape(cedula)}$", "$options": "i"}},
-            {"clave": 0, "verificacion_token_hash": 0},
+            {"clave": 0, "verificacion_token_hash": 0, "verificacion_token_sha": 0},
         )
 
         entrada = {
@@ -964,23 +989,33 @@ def _sujeto_ya_autorizado(cedula: str) -> bool:
     return coleccion_aceptaciones.find_one({"sujeto_cedula": cedula}) is not None
 
 
+def _token_aut_vigente(doc: dict, ahora: datetime) -> bool:
+    expira = doc.get("expira")
+    if not expira or not doc.get("token_hash"):
+        return False
+    if expira.tzinfo is not None:  # fechas Mongo naive = UTC (convención)
+        expira = expira.replace(tzinfo=None)
+    return ahora <= expira
+
+
 def _buscar_token_aut(token_plano: str) -> Optional[dict]:
     """Token de autorización VÁLIDO (hash correcto + sin usar + no expirado).
-    Igual que el token de verificación: solo el hash vive en BD (bcrypt), así
-    que se recorren los candidatos y se verifica (tope 200)."""
+    (2026-10-08, fix CPU) FAST-PATH por `token_sha` (SHA-256 → find_one O(1),
+    mismo arreglo que _buscar_conductor_por_token); el scan bcrypt queda como
+    fallback SOLO para tokens legacy creados antes del campo nuevo."""
     if not token_plano:
         return None
     ahora = datetime.utcnow()
+    doc = coleccion_tokens_aut.find_one(
+        {"token_sha": hash_token(token_plano), "usado_en": None})
+    if doc and _token_aut_vigente(doc, ahora):
+        return doc
     for doc in coleccion_tokens_aut.find({"usado_en": None}).limit(200):
-        expira = doc.get("expira")
-        token_hash = doc.get("token_hash")
-        if not expira or not token_hash:
+        if doc.get("token_sha"):
+            continue  # ya resuelto (o inválido) por la fast-path
+        if not _token_aut_vigente(doc, ahora):
             continue
-        if expira.tzinfo is not None:  # fechas Mongo naive = UTC (convención)
-            expira = expira.replace(tzinfo=None)
-        if ahora > expira:
-            continue
-        if verificar_clave(token_plano, doc.get("token_hash", "")):
+        if verificar_token_hash(token_plano, doc.get("token_hash", "")):
             return doc
     return None
 
@@ -1062,6 +1097,7 @@ def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
         "cedula": cedula, "correo": correo.upper(),
         "placa": (placa or "").strip().upper(), "nombre": (nombre or "").strip(),
         "token_hash": crear_hash(token_plano),
+        "token_sha": hash_token(token_plano),
         "creado_en": ahora,
         "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION),
         "solicitado_por": (solicitado_por or "").strip() or "seguridad",
