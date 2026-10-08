@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import hashlib
 from datetime import datetime, date, timedelta
@@ -1518,6 +1519,30 @@ def _tiene_estudio_seguridad(vehiculo: dict) -> bool:
     return False
 
 
+def _parsear_capacidad_kg(valor) -> Optional[int]:
+    """Capacidad de carga (kg) → int, tolerante al formato colombiano.
+
+    La IA (o el conductor) puede dejar el valor con separador de miles
+    ('2.415' = 2415 kg): float() lo leería como 2.4 y el gate de
+    completado_revision lo rechazaría por fuera del rango (bug real en
+    QTZ352, 2026-10-08). Reglas: puntos/comas de MILES con grupos de 3
+    dígitos se eliminan; coma decimal se asume solo si NO encaja en miles.
+    Devuelve None si no hay número utilizable."""
+    texto = str(valor or "").strip().replace(" ", "")
+    if not texto:
+        return None
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+", texto):        # 2.415 / 12.345.678
+        texto = texto.replace(".", "")
+    elif re.fullmatch(r"\d{1,3}(,\d{3})+", texto):       # 2,415 / 12,345
+        texto = texto.replace(",", "")
+    else:
+        texto = texto.replace(",", ".")                  # coma decimal
+    try:
+        return int(round(float(texto)))
+    except ValueError:
+        return None
+
+
 # Transiciones permitidas de estadoIntegra (2026-08-27): todo pasa por
 # actualizar-estado, que antes aceptaba cualquier string. `inactivo` es un
 # aprobado pausado por Seguridad (motivo obligatorio); reactivar vuelve a
@@ -1565,6 +1590,7 @@ async def actualizar_estado(
     # Al pasar a completado_revision el conductor declara la documentación
     # completa: validar server-side ( Seguridad usa este endpoint con otros
     # estados y NO se le exige nada).
+    capacidad_saneada = None
     if nuevo_estado == "completado_revision":
         faltantes = _documentos_faltantes(vehiculo)
         if faltantes:
@@ -1575,16 +1601,18 @@ async def actualizar_estado(
             )
         # Capacidad de carga (kg): obligatoria y dentro del rango operativo
         # (300–50.000). Si la IA leyó 0/ilegible, el conductor la digita a mano.
-        capacidad = str(vehiculo.get("vehCapacidadCarga") or "").strip()
-        try:
-            capacidad_num = int(float(capacidad)) if capacidad else 0
-        except ValueError:
-            capacidad_num = 0
-        if not capacidad or capacidad_num < 300 or capacidad_num > 50000:
+        # Parser tolerante al formato colombiano: '2.415' son 2415 kg, no 2.4
+        # (bug real QTZ352 2026-10-08: el gate lo rechazaba por '2.4' < 300).
+        capacidad_num = _parsear_capacidad_kg(vehiculo.get("vehCapacidadCarga"))
+        if capacidad_num is None or capacidad_num < 300 or capacidad_num > 50000:
             raise HTTPException(
                 status_code=400,
                 detail="La Capacidad de Carga (kg) es obligatoria y debe estar entre 300 y 50.000 kg. Diligénciala en Datos del Vehículo.",
             )
+        # Auto-sanear el valor guardado ('2.415' → '2415') para que el dato
+        # quede limpio de raíz y los próximos gates/exports no lo re-padezcan.
+        capacidad_saneada = str(capacidad_num) \
+            if str(vehiculo.get("vehCapacidadCarga") or "").strip() != str(capacidad_num) else None
 
     # Inactivar un aprobado exige SIEMPRE un motivo (quedar en la base sin
     # operar debe ser explicable).
@@ -1630,6 +1658,9 @@ async def actualizar_estado(
         # Sello temporal del último cambio de estado (para "tiempo esperando").
         "fechaEstado": ahora,
     }
+    # Capacidad saneada por el gate de completado_revision ('2.415' → '2415').
+    if capacidad_saneada:
+        datos_actualizar["vehCapacidadCarga"] = capacidad_saneada
 
     if observaciones:
         datos_actualizar["observaciones"] = observaciones

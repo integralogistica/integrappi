@@ -434,6 +434,34 @@ class ActualizarEstadoValidacionTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 200, f"capacidad={capacidad!r} debió pasar")
             mock_notif.assert_called_once()
 
+    def test_parsear_capacidad_kg_formato_colombiano(self):
+        """'2.415' con punto de MILES son 2415 kg, no 2.4 (bug real QTZ352
+        2026-10-08: el gate de completado_revision lo rechazaba)."""
+        casos = {
+            "2.415": 2415, "12.345": 12345, "1.234.567": 1234567,
+            "2,415": 2415, "2 415": 2415, "2415": 2415, 2415: 2415,
+            "3500.5": 3500,              # decimal real (punto con ≠3 dígitos; round banquero)
+            "": None, None: None, "abc": None, "2.4": 2, "0": 0,
+        }
+        for entrada, esperado in casos.items():
+            self.assertEqual(vehiculos._parsear_capacidad_kg(entrada), esperado,
+                             f"_parsear_capacidad_kg({entrada!r}) debía ser {esperado}")
+
+    def test_completado_revision_capacidad_con_punto_de_miles_pasa_y_sanea(self):
+        """'2.415' pasa el gate Y el valor queda saneado ('2415') en el doc —
+        el dato se limpia de raíz para gates/exports futuros."""
+        fake = FakeColeccionVehiculos([vehiculo_completo(vehCapacidadCarga="2.415")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "enviar_notificacion_seguridad") as mock_notif:
+            resp = self.client.put(
+                "/vehiculos/actualizar-estado",
+                data={"placa": "TEST01", "nuevo_estado": "completado_revision", "usuario_id": "u1"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        mock_notif.assert_called_once()
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "completado_revision")
+        self.assertEqual(str(fake.documents[0]["vehCapacidadCarga"]), "2415")
+
 
 class DocumentoValidoTests(unittest.TestCase):
     """El veredicto documento_valido del LLM: 409 si la imagen no es el doc
