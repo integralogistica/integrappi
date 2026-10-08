@@ -832,7 +832,7 @@ Los usuarios no quieren ver usernames sino **nombres de personas**. Aunque `/his
 
 ### Otros Costos — Excel del histórico: una fila por concepto + columna Proveedor
 
-`POST /otros-costos/exportar-excel` ya no concatena los tipos de costo en una sola celda (`"AFORO, DESCARGUE"`). Ahora cada solicitud se expande en **una fila POR CONCEPTO de costo** (ej: `BUCARAMANGA-OC-20260930-0001` con AFORO y DESCARGUE → 2 filas), con las columnas nuevas **«Tipo de Costo»** (individual), **«Proveedor»** (el del concepto; vacío en docs anteriores al campo o conceptos sin proveedor) y **«Valor»** (el valor de ese concepto). **«Valor Total»** y **«Valor Despues Retenciones»** van **solo en la primera fila del grupo** (mismo criterio que el ahorro en fusionadas: al sumar la columna en Excel no se duplican). Solicitudes sin conceptos generan una fila con el tipo vacío (como antes). Sólo backend; el frontend no cambió. PENDIENTE deploy.
+`POST /otros-costos/exportar-excel` ya no concatena los tipos de costo en una sola celda (`"AFORO, DESCARGUE"`). Ahora cada solicitud se expande en **una fila POR CONCEPTO de costo** (ej: `BUCARAMANGA-OC-20260930-0001` con AFORO y DESCARGUE → 2 filas), con las columnas nuevas **«Tipo de Costo»** (individual), **«Proveedor»** (el del concepto; vacío en docs anteriores al campo o conceptos sin proveedor) y **«Valor»** (el valor de ese concepto, sumable — se eliminó «Valor Total»). **«Valor Despues Retenciones»** (dato de la solicitud) va **solo en la primera fila del grupo** para no duplicarlo al sumar. Solicitudes sin conceptos generan una fila con el tipo vacío (como antes). Sólo backend; el frontend no cambió. PENDIENTE deploy.
 
 ## Actualizaciones Recientes (2026-10-07)
 

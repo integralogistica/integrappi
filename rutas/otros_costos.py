@@ -2285,7 +2285,7 @@ async def exportar_excel(req: ExportarExcelRequest):
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
         "Tipo de Costo", "Proveedor", "Valor",
-        "Valor Total", "Valor Despues Retenciones",
+        "Valor Despues Retenciones",
         "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
         "Fecha Aprobación", "Fecha Pago",
@@ -2308,9 +2308,10 @@ async def exportar_excel(req: ExportarExcelRequest):
         aprob = d.get("aprobacion", {}) or {}
         pago = d.get("pago", {}) or {}
         # Una fila POR CONCEPTO de costo (ej: BUCARAMANGA-OC-...-0001 con AFORO y
-        # DESCARGUE → 2 filas). Los totales de la solicitud van SOLO en la primera
-        # fila del grupo para no duplicarlos al sumar en el Excel. Solicitudes sin
-        # conceptos generan una fila con el tipo vacío (como antes).
+        # DESCARGUE → 2 filas). El «Valor Despues Retenciones» (dato de la
+        # solicitud, no del concepto) va SOLO en la primera fila del grupo para no
+        # duplicarlo al sumar en el Excel. Solicitudes sin conceptos generan una
+        # fila con el tipo vacío (como antes).
         conceptos = [
             {
                 "tipo": (c.get("tipo_costo") or "").strip(),
@@ -2329,7 +2330,6 @@ async def exportar_excel(req: ExportarExcelRequest):
                 concepto["tipo"],
                 concepto["proveedor"],
                 concepto["valor"],
-                d.get("valor_total", 0) if idx == 0 else None,
                 d.get("valor_despues_retenciones") if idx == 0 else None,
                 (d.get("creado_por", {}) or {}).get("usuario", ""),
                 aprob.get("usuario", ""),
