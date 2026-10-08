@@ -2284,7 +2284,8 @@ async def exportar_excel(req: ExportarExcelRequest):
 
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
-        "Tipo de Costo", "Valor Total", "Valor Despues Retenciones",
+        "Tipo de Costo", "Proveedor", "Valor",
+        "Valor Total", "Valor Despues Retenciones",
         "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
         "Fecha Aprobación", "Fecha Pago",
@@ -2300,32 +2301,48 @@ async def exportar_excel(req: ExportarExcelRequest):
         cell.alignment = Alignment(horizontal="center")
 
     enmascarar = info["perfil"] not in {"FINANCIERO", "ADMIN"}
-    for r, d in enumerate(docs, start=2):
+    fila_excel = 2
+    for d in docs:
         ds = d.get("datos_servicio", {}) or {}
         costos = d.get("costos", []) or []
-        tipos = ", ".join((c.get("tipo_costo") or "") for c in costos)
         aprob = d.get("aprobacion", {}) or {}
         pago = d.get("pago", {}) or {}
-        fila = [
-            d.get("consecutivo", ""),
-            d.get("pedido_vulcano_original", ""),
-            ds.get("cliente", ""),
-            ds.get("placa", ""),
-            d.get("manifiesto", ""),
-            tipos,
-            d.get("valor_total", 0),
-            d.get("valor_despues_retenciones"),
-            (d.get("creado_por", {}) or {}).get("usuario", ""),
-            aprob.get("usuario", ""),
-            aprob.get("rol", ""),
-            pago.get("usuario", ""),
-            d.get("estado", ""),
-            _fecha_ddmmyyyy(d.get("created_at")),
-            _fecha_ddmmyyyy(aprob.get("fecha")),
-            _fecha_ddmmyyyy(pago.get("fecha_pago")),
-        ]
-        for i, v in enumerate(fila, 1):
-            ws.cell(row=r, column=i, value=v).border = thin
+        # Una fila POR CONCEPTO de costo (ej: BUCARAMANGA-OC-...-0001 con AFORO y
+        # DESCARGUE → 2 filas). Los totales de la solicitud van SOLO en la primera
+        # fila del grupo para no duplicarlos al sumar en el Excel. Solicitudes sin
+        # conceptos generan una fila con el tipo vacío (como antes).
+        conceptos = [
+            {
+                "tipo": (c.get("tipo_costo") or "").strip(),
+                "proveedor": (c.get("proveedor") or "").strip(),
+                "valor": _a_numero(c.get("valor")),
+            }
+            for c in costos
+        ] or [{"tipo": "", "proveedor": "", "valor": 0}]
+        for idx, concepto in enumerate(conceptos):
+            fila = [
+                d.get("consecutivo", ""),
+                d.get("pedido_vulcano_original", ""),
+                ds.get("cliente", ""),
+                ds.get("placa", ""),
+                d.get("manifiesto", ""),
+                concepto["tipo"],
+                concepto["proveedor"],
+                concepto["valor"],
+                d.get("valor_total", 0) if idx == 0 else None,
+                d.get("valor_despues_retenciones") if idx == 0 else None,
+                (d.get("creado_por", {}) or {}).get("usuario", ""),
+                aprob.get("usuario", ""),
+                aprob.get("rol", ""),
+                pago.get("usuario", ""),
+                d.get("estado", ""),
+                _fecha_ddmmyyyy(d.get("created_at")),
+                _fecha_ddmmyyyy(aprob.get("fecha")),
+                _fecha_ddmmyyyy(pago.get("fecha_pago")),
+            ]
+            for i, v in enumerate(fila, 1):
+                ws.cell(row=fila_excel, column=i, value=v).border = thin
+            fila_excel += 1
 
     output = io.BytesIO()
     wb.save(output)

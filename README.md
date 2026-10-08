@@ -828,6 +828,12 @@ Los usuarios no quieren ver usernames sino **nombres de personas**. Aunque `/his
 - Nuevo endpoint que devuelve `{USUARIO_UPPER: nombre}` de `baseusuarios` (projection sólo `usuario`+`nombre`; no expone correo/celular como sí hace `GET /baseusuarios/`).
 - Los frontends de SolicitudVehiculos e HistóricoPedidos lo consultan **una vez al montar** y resuelven con el helper `nombrePersona(valor)`: prioriza el `*_nombre` del backend, luego el mapa local, y como último recurso deja el valor tal cual. Aplica a la trazabilidad del modal, al historial de cambios y al aviso «Devuelta por» de las filas.
 
+## Actualizaciones Recientes (2026-10-08)
+
+### Otros Costos — Excel del histórico: una fila por concepto + columna Proveedor
+
+`POST /otros-costos/exportar-excel` ya no concatena los tipos de costo en una sola celda (`"AFORO, DESCARGUE"`). Ahora cada solicitud se expande en **una fila POR CONCEPTO de costo** (ej: `BUCARAMANGA-OC-20260930-0001` con AFORO y DESCARGUE → 2 filas), con las columnas nuevas **«Tipo de Costo»** (individual), **«Proveedor»** (el del concepto; vacío en docs anteriores al campo o conceptos sin proveedor) y **«Valor»** (el valor de ese concepto). **«Valor Total»** y **«Valor Despues Retenciones»** van **solo en la primera fila del grupo** (mismo criterio que el ahorro en fusionadas: al sumar la columna en Excel no se duplican). Solicitudes sin conceptos generan una fila con el tipo vacío (como antes). Sólo backend; el frontend no cambió. PENDIENTE deploy.
+
 ## Actualizaciones Recientes (2026-10-07)
 
 ### Otros Costos — campo «Proveedor» por concepto de costo
