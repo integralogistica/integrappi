@@ -1167,12 +1167,13 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
 # ── WHATSAPP A SEGURIDAD (2026-10-07, pedido del usuario) ────────────────────
 # Misma notificación del correo pero por el canal que el equipo sí mira:
 # el conductor dejó un vehículo pendiente de revisión. Plantilla Meta
-# `enruta_revision_pendiente` (Utilidad, es) con {{1}}=nombre de Seguridad,
+# `enruta_revision_pendiente` (Utilidad, es_CO) con {{1}}=nombre de Seguridad,
 # {{2}}=conductor, {{3}}=placa y botón URL «Abrir IntegrApp».
-# ⚠️ REQUIERE crear y aprobar la plantilla en Meta Business Manager; sin
-# aprobar, el envío falla en silencio (fire-and-forget, queda en el log).
+# APROBADA en Meta desde 2026-10-08. ⚠️ El language.code debe ser «es_CO»
+# EXACTO: la plantilla se creó en español (Colombia) y con «es» Meta responde
+# 404 «Template name does not exist in the translation» aunque esté aprobada.
 # Los celulares viven en `baseusuarios.celular` (mismo patrón de Otros Costos).
-PLANTILLA_WA_REVISION = ("enruta_revision_pendiente", "es")
+PLANTILLA_WA_REVISION = ("enruta_revision_pendiente", "es_CO")
 
 # WhatsApp al CONDUCTOR/TENEDOR cuando Seguridad devuelve el vehículo con
 # observaciones (2026-10-07, pedido del usuario): plantilla Meta
@@ -1180,7 +1181,7 @@ PLANTILLA_WA_REVISION = ("enruta_revision_pendiente", "es")
 # {{2}}=placa, {{3}}=observaciones y botón URL «Abrir IntegrApp».
 # ⚠️ REQUIERE crear y aprobar la plantilla en Meta Business Manager; sin
 # aprobar, el envío falla en silencio (fire-and-forget, queda en el log).
-PLANTILLA_WA_DEVOLUCION = ("enruta_vehiculo_devuelto", "es")
+PLANTILLA_WA_DEVOLUCION = ("enruta_vehiculo_devuelto", "es_CO")
 
 
 def _normalizar_celular_co(celular) -> Optional[str]:
