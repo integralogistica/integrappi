@@ -1019,5 +1019,261 @@ class BlindajesTests(unittest.TestCase):
             self.assertNotIn("historialEstudios", v)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Robustez ante fallos del proveedor (2026-10-09, lección NNM001):
+# PDF "processing" archivado como si fuera el reporte, fallos de
+# lanzamiento que superan el reintento único, error sin la respuesta cruda
+# y reintento de UN estudio fallido desde la tarjeta.
+# ═══════════════════════════════════════════════════════════════════════
+class PdfGeneracionAsincronaTests(unittest.TestCase):
+    """El proveedor responde 200 + JSON {"status":"processing"} mientras
+    genera el PDF: ese cuerpo JAMÁS se archiva como el PDF del estudio."""
+
+    JSON_PROCESSING = (b'{"job_id":"x","message":"El reporte esta tardando",'
+                       b'"retry_after":10,"status":"processing"}')
+
+    def _dormir_instantaneo(self):
+        async def _dormir(_s):
+            return None
+        return _dormir
+
+    def test_el_json_de_processing_no_se_archiva_jamas(self):
+        import asyncio
+        subidas = []
+
+        async def siempre_processing(_id):
+            return self.JSON_PROCESSING
+
+        with patch.object(estudios_automaticos, "_td_reporte_pdf", siempre_processing), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf",
+                          lambda r, c: subidas.append((r, c))), \
+             patch.object(estudios_automaticos.asyncio, "sleep",
+                          self._dormir_instantaneo()):
+            resultado = asyncio.run(estudios_automaticos._archivar_pdf_reporte(
+                "ABC123", {"tipo": "persona", "cedula": "1020304050"}, "rep-9"))
+        self.assertIsNone(resultado)
+        self.assertEqual(subidas, [])  # nada subió al bucket
+
+    def test_se_espera_la_generacion_y_entonces_se_archiva(self):
+        import asyncio
+        llamadas = {"n": 0}
+        subidas = []
+
+        async def processing_luego_pdf(_id):
+            llamadas["n"] += 1
+            if llamadas["n"] == 1:
+                return self.JSON_PROCESSING
+            return b"%PDF-1.7 el reporte de verdad"
+
+        with patch.object(estudios_automaticos, "_td_reporte_pdf", processing_luego_pdf), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf",
+                          lambda r, c: subidas.append((r, c))), \
+             patch.object(estudios_automaticos.asyncio, "sleep",
+                          self._dormir_instantaneo()):
+            resultado = asyncio.run(estudios_automaticos._archivar_pdf_reporte(
+                "ABC123", {"tipo": "persona", "cedula": "1020304050"}, "rep-9"))
+        self.assertIsNotNone(resultado)
+        self.assertEqual(llamadas["n"], 2)      # esperó y reintentó
+        self.assertEqual(subidas[0][1], b"%PDF-1.7 el reporte de verdad")
+
+    def test_estudio_finaliza_solo_si_el_pdf_llega(self):
+        """Si el proveedor nunca genera el PDF, el estudio IGUAL finaliza
+        (best-effort) pero SIN pdf_gcs corrupto."""
+        import asyncio
+
+        async def siempre_processing(_id):
+            return self.JSON_PROCESSING
+
+        veh = vehiculo_completo(
+            condCedulaCiudadania="1020304050", propDocumento="1020304050",
+            tenedDocumento="987654321")
+        fake = FakeColeccion([veh])
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
+             patch.object(estudios_automaticos, "_td_reporte_pdf", siempre_processing), \
+             patch.object(estudios_automaticos, "_td_reporte_car_pdf", siempre_processing), \
+             patch.object(estudios_automaticos.asyncio, "sleep",
+                          self._dormir_instantaneo()):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        for e in fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]:
+            self.assertEqual(e["estado"], "finalizado")
+            self.assertNotIn("pdf_gcs", e)  # sin PDF archivado, PERO sin basura
+
+
+class FallosDeLanzamientoTests(unittest.TestCase):
+
+    @staticmethod
+    def _fallo_lanzamiento():
+        return HTTPException(status_code=502, detail={
+            "detalle": "TusDatos no entregó jobid",
+            "lanzamiento": {"error": "falla iniciando la consulta"}})
+
+    def test_backoff_aguenta_3_fallos_consecutivos(self):
+        """NNM001: el pico transitorio del upstream duró >5 s y el reintento
+        único no alcanzó. Ahora hay 3 reintentos (5/15/30 s)."""
+        import asyncio
+        llamadas = {"n": 0}
+
+        async def persona_falla_tres_veces(_modelo):
+            # SOLO el estudio de persona falla (el de vehículo va sano):
+            # comparten el contador pero corren en paralelo (gather).
+            llamadas["n"] += 1
+            if llamadas["n"] <= 3:
+                raise self._fallo_lanzamiento()
+            return await _respuesta_ok()
+
+        veh = vehiculo_completo(condCedulaCiudadania="1020304050",
+                                propDocumento="1020304050")
+        fake = FakeColeccion([veh])
+
+        async def _dormir(_s):
+            return None
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", persona_falla_tres_veces), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
+             patch.object(estudios_automaticos.asyncio, "sleep", _dormir):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        estudios = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
+        self.assertEqual(llamadas["n"], 4)  # 3 fallos + el bueno
+        for e in estudios:
+            self.assertEqual(e["estado"], "finalizado")
+
+    def test_el_error_conserva_la_respuesta_cruda_del_proveedor(self):
+        """Sin la respuesta cruda no se podía diagnosticar NNM001 a
+        posteriori ('no entregó jobid' tapaba el body real)."""
+        import asyncio
+
+        async def siempre_falla(*a, **kw):
+            raise self._fallo_lanzamiento()
+
+        veh = vehiculo_completo(condCedulaCiudadania="1020304050")
+        fake = FakeColeccion([veh])
+
+        async def _dormir(_s):
+            return None
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", siempre_falla), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", siempre_falla), \
+             patch.object(estudios_automaticos.asyncio, "sleep", _dormir):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        estudio = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"][0]
+        self.assertEqual(estudio["estado"], "error")
+        self.assertIn("jobid", estudio["error"])
+        self.assertIn("falla iniciando la consulta", estudio["error_proveedor"])
+
+
+class ReintentarEstudioUnicoTests(unittest.TestCase):
+    """POST /vehiculos/estudios-seguridad/{placa}/reintentar-estudio:
+    botón «Reintentar esta consulta» de las tarjetas en error."""
+
+    def _vehiculo_con_error(self):
+        return vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            estudiosSeguridadAuto=[{
+                "id": "est-err", "tipo": "persona", "estado": "error",
+                "cedula": "1020304050", "roles": ["conductor"],
+                "error": "TusDatos no entregó jobid",
+            }])
+
+    def test_reintenta_solo_el_estudio_fallido(self):
+        import asyncio
+        veh = self._vehiculo_con_error()
+        fake = FakeColeccion([veh])
+        consultadas = []
+
+        async def persona_ok(modelo):
+            consultadas.append(modelo.doc)
+            return await _respuesta_ok()
+
+        async def pdf(_id):
+            return b"%PDF-1.4"
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "consulta_completa", persona_ok), \
+             patch.object(estudios_automaticos, "_td_reporte_pdf", pdf), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf", lambda r, c: None):
+            actualizado = asyncio.run(
+                estudios_automaticos.reintentar_estudio_unico("ABC123", "est-err"))
+        self.assertEqual(consultadas, ["1020304050"])  # SOLO la cédula fallida
+        self.assertEqual(actualizado["estado"], "finalizado")
+        self.assertEqual(actualizado["reporte_id"], "rep-123")
+
+    def test_422_si_el_estudio_no_esta_fallido(self):
+        import asyncio
+        veh = vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            estudiosSeguridadAuto=[{
+                "id": "est-ok", "tipo": "persona", "estado": "finalizado",
+                "cedula": "1020304050", "reporte_id": "rep-viejo"}])
+        fake = FakeColeccion([veh])
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(estudios_automaticos.reintentar_estudio_unico(
+                    "ABC123", "est-ok"))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_404_si_el_estudio_no_existe(self):
+        import asyncio
+        fake = FakeColeccion([self._vehiculo_con_error()])
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(estudios_automaticos.reintentar_estudio_unico(
+                    "ABC123", "no-existe"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_endpoint(self):
+        veh = self._vehiculo_con_error()
+        fake = FakeColeccion([veh])
+        cliente = cliente_de_prueba()
+
+        async def persona_ok(_modelo):
+            return await _respuesta_ok()
+
+        async def pdf(_id):
+            return b"%PDF-1.4"
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "consulta_completa", persona_ok), \
+             patch.object(estudios_automaticos, "_td_reporte_pdf", pdf), \
+             patch.object(estudios_automaticos, "_subir_blob_pdf", lambda r, c: None):
+            r = cliente.post(
+                "/vehiculos/estudios-seguridad/ABC123/reintentar-estudio",
+                data={"estudio_id": "est-err"})
+        self.assertEqual(r.status_code, 200)
+        cuerpo = r.json()
+        self.assertEqual(cuerpo["estudio"]["estado"], "finalizado")
+
+    def test_endpoint_sigue_fallando_responde_el_error(self):
+        import asyncio
+        veh = self._vehiculo_con_error()
+        fake = FakeColeccion([veh])
+        cliente = cliente_de_prueba()
+
+        async def siempre_falla(*a, **kw):
+            raise HTTPException(status_code=502, detail={
+                "detalle": "TusDatos no entregó jobid",
+                "lanzamiento": {"error": "falla iniciando la consulta"}})
+
+        async def _dormir(_s):
+            return None
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "consulta_completa", siempre_falla), \
+             patch.object(estudios_automaticos.asyncio, "sleep", _dormir):
+            r = cliente.post(
+                "/vehiculos/estudios-seguridad/ABC123/reintentar-estudio",
+                data={"estudio_id": "est-err"})
+        self.assertEqual(r.status_code, 200)  # el reintento corrió; reporta el fallo
+        cuerpo = r.json()
+        self.assertEqual(cuerpo["estudio"]["estado"], "error")
+        self.assertIn("sigue fallando", cuerpo["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

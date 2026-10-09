@@ -37,6 +37,7 @@
 #                                             webhooks, endpoints nuevos)
 # ============================================================
 import asyncio
+import json
 import logging
 import os
 from typing import Optional
@@ -116,6 +117,48 @@ async def _bajar_reporte_car_pdf(id_reporte: str) -> bytes:
     proveedor responde 410 «identificador inválido» (bug real: los PDFs de
     los estudios de placa nunca se pudieron abrir ni archivar)."""
     return (await _pedido("GET", f"/api/v2/report_car_pdf/{id_reporte}")).content
+
+
+# ── PDFs de generación ASÍNCRONA (2026-10-09, bug real NNM001) ──────────────
+# TusDatos genera el PDF del reporte EN BACKGROUND: mientras tanto responde
+# HTTP 200 + JSON {"status":"processing","retry_after":10} (¡con content-type
+# application/pdf!). Si ese cuerpo se archiva tal cual, el blob queda
+# corrupto para SIEMPRE (la ruta es determinística por reporte_id y el
+# archivo tiene prioridad sobre el vivo → «Ver reporte PDF» no abre nada).
+PDF_GENERACION_INTENTOS = int(os.getenv("TUSDATOS_PDF_INTENTOS", "7"))
+PDF_GENERACION_ESPERA = 10  # s (default del retry_after del proveedor)
+
+
+def _es_pdf(contenido) -> bool:
+    """True si los bytes empiezan con la firma %PDF (con tolerancia a
+    espacios/BOM iniciales). Un JSON "processing" NO lo es."""
+    if not contenido:
+        return False
+    return bytes(contenido[:1024]).lstrip()[:4] == b"%PDF"
+
+
+async def _bajar_pdf_validado(bajar, id_reporte: str) -> Optional[bytes]:
+    """
+    Descarga el PDF del reporte ESPERANDO la generación asíncrona del
+    proveedor: reintenta respetando su `retry_after` (máx
+    PDF_GENERACION_INTENTOS × ~10 s ≈ 1 min). Devuelve los bytes SOLO si son
+    un PDF real; None si tras la espera sigue sin estar listo (el llamador
+    decide — JAMÁS tratar ese cuerpo como el PDF).
+    """
+    espera = PDF_GENERACION_ESPERA
+    for intento in range(max(1, PDF_GENERACION_INTENTOS)):
+        contenido = await bajar(id_reporte)
+        if _es_pdf(contenido):
+            return contenido
+        # Respetar el retry_after del proveedor si viene en el JSON.
+        try:
+            datos = json.loads(bytes(contenido).decode("utf-8", "replace"))
+            espera = min(30, max(5, int(datos.get("retry_after") or PDF_GENERACION_ESPERA)))
+        except Exception:
+            pass
+        if intento < PDF_GENERACION_INTENTOS - 1:
+            await asyncio.sleep(espera)
+    return None
 
 
 # --- Modelos ------------------------------------------------

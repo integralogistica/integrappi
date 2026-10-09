@@ -49,6 +49,7 @@ from rutas.tusdatos import (
     ConsultaCompletaIn,
     NitIn,
     VehiculoCompletaIn,
+    _bajar_pdf_validado as _td_bajar_pdf_validado,
     _bajar_reporte_car_pdf as _td_reporte_car_pdf,
     _bajar_reporte_nit_pdf as _td_reporte_nit_pdf,
     _bajar_reporte_pdf as _td_reporte_pdf,
@@ -101,7 +102,28 @@ def _subir_blob_pdf(ruta_blob: str, contenido: bytes) -> None:
     bucket.blob(ruta_blob).upload_from_string(contenido, content_type="application/pdf")
 
 
-async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | None:
+async def _bajar_pdf_reporte_validado(tipo_sujeto: str, reporte_id) -> bytes | None:
+    """
+    Descarga el PDF del reporte VALIDANDO que sea un PDF real (2026-10-09,
+    bug real NNM001): el proveedor genera el PDF de forma asíncrona y
+    mientras tanto responde 200 + JSON {"status":"processing"} — ese cuerpo
+    JAMÁS se archiva ni se sirve como PDF. Reintenta respetando el
+    `retry_after` del proveedor (~1 min); None si nunca llegó.
+    """
+    # Cada tipo de reporte tiene SU endpoint de PDF en el proveedor:
+    # empresa → report_nit_pdf, vehículo (launch/car) → report_car_pdf,
+    # persona → report_pdf. Los handlers devuelven BYTES.
+    if tipo_sujeto == "empresa":
+        handler_pdf = _td_reporte_nit_pdf
+    elif tipo_sujeto == "vehiculo":
+        handler_pdf = _td_reporte_car_pdf
+    else:
+        handler_pdf = _td_reporte_pdf
+    return await _td_bajar_pdf_validado(handler_pdf, str(reporte_id))
+
+
+async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id,
+                                 contenido: bytes | None = None) -> dict | None:
     """
     Descarga el PDF del reporte del proveedor y lo archiva EN el bucket
     privado: `Vehiculos/{PLACA}/{AAAA-MM-DD}/estudioAuto_{sujeto}_{reporte_id}.pdf`
@@ -109,20 +131,18 @@ async def _archivar_pdf_reporte(placa: str, sujeto: dict, reporte_id) -> dict | 
     JAMÁS tumba el estudio (el reporte sigue servible en vivo por reporte_id).
     La ruta es determinística por reporte_id → el reintento de fuentes
     SOBREESCRIBE el blob con la versión regenerada.
+    `contenido` permite archivar unos descargados ya validados por el
+    llamador (evita la doble descarga del endpoint /pdf/).
     """
     try:
-        # Cada tipo de reporte tiene SU endpoint de PDF en el proveedor:
-        # empresa → report_nit_pdf, vehículo (launch/car) → report_car_pdf,
-        # persona → report_pdf. Los handlers devuelven BYTES.
-        tipo_sujeto = sujeto.get("tipo")
-        if tipo_sujeto == "empresa":
-            handler_pdf = _td_reporte_nit_pdf
-        elif tipo_sujeto == "vehiculo":
-            handler_pdf = _td_reporte_car_pdf
-        else:
-            handler_pdf = _td_reporte_pdf
-        contenido = await handler_pdf(str(reporte_id))
+        # (2026-10-09) Validación ANTES de subir: un JSON "processing" del
+        # proveedor NO es un PDF — archivarlo corrompería el blob para
+        # siempre (bug real: NNM001 quedó con un PDF de 225 bytes ilegible).
+        if contenido is None:
+            contenido = await _bajar_pdf_reporte_validado(sujeto.get("tipo"), reporte_id)
         if not contenido:
+            print(f"[estudios-auto] PDF de {placa} (reporte {reporte_id}) aún no "
+                  f"está generado en el proveedor — NO se archiva nada")
             return None
         if sujeto.get("tipo") == "persona":
             sufijo = f"persona_{_digitos(sujeto.get('cedula'))}"
@@ -574,6 +594,62 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
     return cambios
 
 
+async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
+    """
+    Reintenta UN estudio fallido (botón «Reintentar esta consulta» de la
+    tarjeta en error, 2026-10-09 — pedido del usuario: «Volver a consultar»
+    re-consulta TODOS los sujetos con force y su costo; acá solo el que
+    falló, SIN force: si el proveedor ya tiene el resultado/caché, sale
+    gratis o barato). El sujeto se reconstruye de la ficha ACTUAL del
+    vehículo (mismas reglas de sujetos_estudio: fecha de expedición, tdoc
+    del RUT, etc.). Devuelve el estudio actualizado.
+    """
+    placa = str(placa or "").strip().upper()
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    estudio = next(
+        (e for e in (vehiculo.get("estudiosSeguridadAuto") or [])
+         if isinstance(e, dict) and e.get("id") == estudio_id), None)
+    if not estudio:
+        raise HTTPException(
+            status_code=404,
+            detail="Estudio no encontrado en la corrida vigente "
+                   "(las corridas anteriores no se re-intentan: usa «Volver a consultar»).")
+    if estudio.get("estado") != "error":
+        raise HTTPException(
+            status_code=422,
+            detail="Solo se puede reintentar un estudio FALLIDO. Los finalizados "
+                   "se renuevan con «Volver a consultar» y sus fuentes caídas con "
+                   "«Reintentar fuentes fallidas».")
+
+    def _clave(e: dict) -> str:
+        if e.get("tipo") == "vehiculo":
+            return f"vehiculo:{e.get('placa')}"
+        if e.get("tipo") == "empresa":
+            return f"empresa:{e.get('nit')}"
+        return f"persona:{e.get('cedula')}"
+
+    objetivo = _clave(estudio)
+    sujeto = next((s for s in sujetos_estudio(vehiculo) if s["clave"] == objetivo), None)
+    if not sujeto:
+        raise HTTPException(
+            status_code=422,
+            detail="El sujeto de este estudio ya no corresponde a la ficha del "
+                   "vehículo (¿cambiaron cédula/placa?). Usa «Volver a consultar».")
+
+    # _ejecutar_uno hace TODO el ciclo: en_curso → proveedor (con sus
+    # reintentos de lanzamiento) → resultado/PDF → persistir (o error crudo).
+    await _ejecutar_uno(placa, sujeto, estudio_id)
+
+    vehiculo = coleccion_vehiculos.find_one(
+        {"placa": placa}, {"estudiosSeguridadAuto": 1})
+    actualizado = next(
+        (e for e in ((vehiculo or {}).get("estudiosSeguridadAuto") or [])
+         if isinstance(e, dict) and e.get("id") == estudio_id), estudio)
+    return actualizado
+
+
 def _log(mensaje: str) -> None:
     """print SEGURO: en consolas sin UTF-8 (Windows/cp1252) el emoji del
     mensaje de reúso reventaba con UnicodeEncodeError DENTRO del try y el
@@ -631,17 +707,26 @@ def _es_fallo_lanzamiento(exc: HTTPException) -> bool:
     return "jobid" in str(detalle).lower()
 
 
+# Backoff de los reintentos de LANZAMIENTO (2026-10-09, NNM001: el fallo
+# transitorio del upstream duró >5 s y el reintento único de entonces no
+# alcanzó — el estudio quedaba en error pidiendo una re-consulta completa).
+# 3 reintentos con esperas crecientes ≈ 50 s de tolerancia a los picos.
+LANZAMIENTO_BACKOFF_S = (5, 15, 30)
+
+
 async def _llamar_proveedor(sujeto: dict) -> dict:
     """Llama al handler del wrapper según el tipo de sujeto. Un fallo de
-    LANZAMIENTO se reintenta UNA vez (el propio TusDatos lo sugiere)."""
+    LANZAMIENTO ('realice la consulta nuevamente', sin jobid — el propio
+    TusDatos lo sugiere) se reintenta con backoff 5/15/30 s."""
     ultimo_error = None
-    for intento in range(2):
+    total_intentos = 1 + len(LANZAMIENTO_BACKOFF_S)
+    for intento in range(total_intentos):
         try:
             return await _invocar_handler(sujeto)
         except HTTPException as e:
-            if intento == 0 and _es_fallo_lanzamiento(e):
+            if intento < total_intentos - 1 and _es_fallo_lanzamiento(e):
                 ultimo_error = e
-                await asyncio.sleep(5)  # transitorio: reintentar una vez
+                await asyncio.sleep(LANZAMIENTO_BACKOFF_S[intento])
                 continue
             raise
     raise ultimo_error  # inalcanzable en la práctica
@@ -716,14 +801,22 @@ async def _ejecutar_uno(placa: str, sujeto: dict, estudio_id: str) -> None:
         _actualizar_estudio(placa, estudio_id, cambios)
     except (HTTPException, ValidationError, ValueError) as e:
         detalle = e.detail if isinstance(e, HTTPException) else str(e)
+        crudo = None
         if isinstance(detalle, dict):
-            # El wrapper anida {detalle, lanzamiento}: mostrar solo lo legible.
+            # El wrapper anida {detalle, lanzamiento}: el texto legible va en
+            # `error` y la respuesta CRUDA del proveedor se conserva en
+            # `error_proveedor` (2026-10-09, NNM001: sin ella no se podía
+            # diagnosticar a posteriori qué respondió TusDatos).
+            crudo = detalle.get("lanzamiento") or detalle
             detalle = detalle.get("detalle") or str(detalle)
-        _actualizar_estudio(placa, estudio_id, {
+        cambios = {
             "estado": "error",
             "error": str(detalle)[:300],
             "finalizado_en": datetime.utcnow(),
-        })
+        }
+        if crudo is not None:
+            cambios["error_proveedor"] = str(crudo)[:600]
+        _actualizar_estudio(placa, estudio_id, cambios)
     except Exception as e:
         _actualizar_estudio(placa, estudio_id, {
             "estado": "error",

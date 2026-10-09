@@ -3288,16 +3288,12 @@ async def pdf_estudio(placa: str, estudio_id: str):
                    "Usa «Volver a consultar» para regenerarlo.")
 
     try:
-        # Los handlers devuelven los BYTES del PDF (no un Response HTTP).
-        # Cada tipo tiene SU endpoint en el proveedor: empresa → nit,
-        # vehículo (launch/car) → car, persona → normal.
-        if estudio.get("tipo") == "empresa":
-            handler_pdf = ea._td_reporte_nit_pdf
-        elif estudio.get("tipo") == "vehiculo":
-            handler_pdf = ea._td_reporte_car_pdf
-        else:
-            handler_pdf = ea._td_reporte_pdf
-        contenido = await handler_pdf(str(reporte_id))
+        # (2026-10-09) Descarga VALIDADA: el proveedor genera el PDF de forma
+        # asíncrona y responde 200 + JSON "processing" mientras tanto — servir
+        # o archivar ese cuerpo corrompe el estudio (bug real NNM001). El
+        # helper espera su retry_after (~1 min) y solo entrega PDFs reales.
+        contenido = await ea._bajar_pdf_reporte_validado(
+            estudio.get("tipo"), reporte_id)
     except HTTPException as e:
         raise HTTPException(
             status_code=410,
@@ -3310,15 +3306,18 @@ async def pdf_estudio(placa: str, estudio_id: str):
             detail=f"No se pudo descargar el reporte del proveedor: {e}")
     if not contenido:
         raise HTTPException(
-            status_code=410,
-            detail="El reporte ya no está disponible en el proveedor (expira). "
-                   "Usa «Volver a consultar» para regenerarlo.")
+            status_code=425,
+            detail="El proveedor sigue generando el PDF de este reporte (tarda ~1 min "
+                   "tras finalizar la consulta). Espera un momento y vuelve a abrirlo; "
+                   "si persiste, usa «Volver a consultar».")
 
-    # Archivar best-effort: la próxima vez el PDF sale directo del bucket.
+    # Archivar best-effort: la próxima vez el PDF sale directo del bucket
+    # (se le pasa el contenido YA validado para no descargarlo dos veces).
     try:
         sujeto = {"tipo": estudio.get("tipo"), "cedula": estudio.get("cedula"),
                   "nit": estudio.get("nit"), "placa": estudio.get("placa")}
-        archivado = await ea._archivar_pdf_reporte(placa_limpia, sujeto, reporte_id)
+        archivado = await ea._archivar_pdf_reporte(placa_limpia, sujeto, reporte_id,
+                                                   contenido=contenido)
         if archivado:
             coleccion_vehiculos.update_one(
                 {"placa": placa_limpia},
@@ -3356,6 +3355,27 @@ def actualizar_config_estudios(auto_disparo: str = Form(...)):
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "auto_disparo": efectivo,
         "message": f"Disparo automático de estudios {_log_switch}.",
+    })
+
+
+@ruta_vehiculos.post("/estudios-seguridad/{placa}/reintentar-estudio")
+async def reintentar_estudio(placa: str, estudio_id: str = Form(...)):
+    """
+    Reintenta UN estudio fallido (2026-10-09, botón «Reintentar esta
+    consulta» de la tarjeta en error): relanza SOLO ese sujeto, sin force
+    (si el proveedor ya tiene el resultado, sale barato) y SIN tocar los
+    demás estudios de la corrida. Bloquea mientras corre (~1 min).
+    """
+    from Funciones import estudios_automaticos as ea
+    estudio = await ea.reintentar_estudio_unico(placa, estudio_id)
+    if estudio.get("estado") == "finalizado":
+        mensaje = "Estudio re-consultado y finalizado."
+    else:
+        mensaje = (f"El estudio sigue fallando: {estudio.get('error', 'sin detalle')} "
+                   "— revisa el mensaje del proveedor.")
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": mensaje,
+        "estudio": _json_seguro(estudio),
     })
 
 
