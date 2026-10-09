@@ -695,6 +695,8 @@ class ActualizarEstadoPlanillaRequest(BaseModel):
     estado: str  # 'CREADO', 'PREAPROBADO', 'REQUIERE_APROBACION_COORDINADOR', 'REQUIERE_APROBACION_CONTROL' o 'APROBADO'
     aprobado_por: str  # Usuario que aprueba o que devuelve
     motivo_devolucion: Optional[str] = None  # Motivo cuando se devuelve a CREADO (rechazo de coordinador/control)
+    # Observación opcional que acompaña la aprobación (la ve todo el mundo en trazabilidad)
+    observacion_aprobacion: Optional[str] = None
 
 
 # ============= ENDPOINT IMPORTAR VULCANO =============
@@ -3523,6 +3525,15 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         motivo = (request.motivo_devolucion or "").strip()
         es_devolucion = request.estado == "CREADO" and bool(motivo)
 
+        # Observación opcional al aprobar (solo se guarda si aprueba). Al volver a
+        # aprobar se reemplaza (None limpia la anterior si no se envía de nuevo).
+        observacion_aprobacion = (request.observacion_aprobacion or "").strip()
+        if len(observacion_aprobacion) > 500:
+            raise HTTPException(
+                status_code=400,
+                detail="La observación de aprobación no puede superar 500 caracteres.",
+            )
+
         # Bloqueo por municipio restringido (.env): al "Enviar" una planilla que aplicaría
         # a PREAPROBADO con varios municipios incluyendo el restringido de su regional,
         # sube a REQUIERE_APROBACION_COORDINADOR. Se muta request.estado ANTES para que
@@ -3586,6 +3597,9 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             }
             if es_devolucion:
                 nuevo_historial["motivo"] = motivo
+            # Observación opcional registrada al aprobar (queda en el historial del cambio)
+            if request.estado == "APROBADO" and observacion_aprobacion:
+                nuevo_historial["observacion_aprobacion"] = observacion_aprobacion
             historial_cambios.append(nuevo_historial)
 
             logger.info(f"[TRAZABILIDAD] Cambio de estado: {estado_anterior} → {request.estado} por {request.aprobado_por}")
@@ -3615,6 +3629,11 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
             campos_actualizar["motivo_devolucion"] = motivo
             campos_actualizar["devuelto_por"] = request.aprobado_por
             campos_actualizar["fecha_devolucion"] = fecha_actual
+
+        # Observación opcional de la aprobación: se guarda siempre que se apruebe
+        # (vacía limpia una observación anterior, p.ej. tras reabrir y re-aprobar).
+        if request.estado == "APROBADO":
+            campos_actualizar["observacion_aprobacion"] = observacion_aprobacion or None
 
         # Registrar la fecha en que dejó de ser CREADO (visible para todos), sea cual sea
         # el estado destino (PREAPROBADO, REQUIERE_APROBACION_* o APROBADO). En otros
