@@ -161,6 +161,29 @@ async def _bajar_pdf_validado(bajar, id_reporte: str) -> Optional[bytes]:
     return None
 
 
+def _fallo_sin_jobid(lanzamiento: dict) -> HTTPException:
+    """
+    502 cuando el launch responde 200 SIN jobid. Dos casos muy distintos
+    (caso real WDN489, 2026-10-09): si el body trae un 'error' de NEGOCIO
+    (p. ej. «los datos registrados no corresponden con los propietarios
+    activos para el vehículo consultado»), ese texto es el motivo REAL,
+    el fallo es DEFINITIVO (reintentar devuelve lo mismo) y así se marca
+    para que _es_fallo_lanzamiento no queme el backoff. Sin 'error' es el
+    fallo transitorio de siempre («realice la consulta nuevamente»).
+    """
+    texto = str((lanzamiento or {}).get("error") or "").strip()
+    if texto:
+        return HTTPException(status_code=502, detail={
+            "detalle": f"El proveedor rechazó la consulta: {texto}",
+            "lanzamiento": lanzamiento,
+            "definitivo": True,
+        })
+    return HTTPException(status_code=502, detail={
+        "detalle": "TusDatos no entregó jobid",
+        "lanzamiento": lanzamiento,
+    })
+
+
 # --- Modelos ------------------------------------------------
 
 TIPOS_DOCUMENTO = ("CC", "CE", "INT", "NIT", "PP", "PPT", "NOMBRE")
@@ -274,8 +297,7 @@ async def consulta_completa(consulta: ConsultaCompletaIn):
     lanzamiento = await _pedido_json("POST", "/api/launch", json=payload)
     jobid = lanzamiento.get("jobid")
     if not jobid:
-        raise HTTPException(status_code=502, detail={"detalle": "TusDatos no entregó jobid",
-                                                     "lanzamiento": lanzamiento})
+        raise _fallo_sin_jobid(lanzamiento)
     resultado = await _esperar(jobid, consulta.esperar_maximo, consulta.intervalo)
     return {"lanzamiento": lanzamiento, "resultado": resultado}
 
@@ -291,8 +313,7 @@ async def consulta_vehiculo(vehiculo: VehiculoCompletaIn):
     )
     jobid = lanzamiento.get("jobid")
     if not jobid:
-        raise HTTPException(status_code=502, detail={"detalle": "TusDatos no entregó jobid",
-                                                     "lanzamiento": lanzamiento})
+        raise _fallo_sin_jobid(lanzamiento)
     resultado = await _esperar(jobid, vehiculo.esperar_maximo, vehiculo.intervalo)
     return {"lanzamiento": lanzamiento, "resultado": resultado}
 

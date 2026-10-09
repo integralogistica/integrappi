@@ -1167,6 +1167,62 @@ class FallosDeLanzamientoTests(unittest.TestCase):
         self.assertIn("jobid", estudio["error"])
         self.assertIn("falla iniciando la consulta", estudio["error_proveedor"])
 
+    @staticmethod
+    def _rechazo_negocio(mensaje):
+        """200 + {'error': ...} sin jobid: rechazo DEFINITIVO del proveedor
+        (caso WDN489: el documento no corresponde a los propietarios activos
+        de la placa). El wrapper lo marca `definitivo` y pone el texto real."""
+        return HTTPException(status_code=502, detail={
+            "detalle": f"El proveedor rechazó la consulta: {mensaje}",
+            "lanzamiento": {"error": mensaje},
+            "definitivo": True})
+
+    def test_rechazo_de_negocio_no_gasta_backoff_y_es_legible(self):
+        """WDN489: reintentar un rechazo de negocio devuelve SIEMPRE lo
+        mismo — el estudio queda en error con el TEXTO REAL del proveedor
+        (no 'no entregó jobid') y con UNA sola llamada por estudio."""
+        import asyncio
+        llamadas = {"n": 0}
+        mensaje = ("Los datos registrados no corresponden con los "
+                   "propietarios activos para el vehículo consultado.")
+
+        async def rechaza(*a, **kw):
+            llamadas["n"] += 1
+            raise self._rechazo_negocio(mensaje)
+
+        async def dormir_prohibido(_s):
+            raise AssertionError("un fallo DEFINITIVO no debe entrar al backoff")
+
+        veh = vehiculo_completo(condCedulaCiudadania="1020304050",
+                                propDocumento="1020304050")
+        fake = FakeColeccion([veh])
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", rechaza), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", rechaza), \
+             patch.object(estudios_automaticos.asyncio, "sleep", dormir_prohibido):
+            asyncio.run(estudios_automaticos.disparar_estudios("ABC123"))
+        estudios = fake.find_one({"placa": "ABC123"})["estudiosSeguridadAuto"]
+        # UNA llamada por estudio: cero reintentos de lanzamiento.
+        self.assertEqual(llamadas["n"], len(estudios))
+        for e in estudios:
+            self.assertEqual(e["estado"], "error")
+            self.assertIn("propietarios activos", e["error"])
+            self.assertIn("propietarios activos", e["error_proveedor"])
+
+    def test_wrapper_marca_definitivo_solo_con_error_de_negocio(self):
+        """Contrato de _fallo_sin_jobid (tusdatos.py): body con 'error' →
+        definitivo + texto legible; sin 'error' → transitorio de siempre."""
+        from rutas.tusdatos import _fallo_sin_jobid
+        definitiva = _fallo_sin_jobid(
+            {"error": "Los datos registrados no corresponden."})
+        self.assertTrue(definitiva.detail["definitivo"])
+        self.assertIn("Los datos registrados", definitiva.detail["detalle"])
+        transitoria = _fallo_sin_jobid({"detail": "realice la consulta nuevamente"})
+        self.assertNotIn("definitivo", transitoria.detail)
+        self.assertIn("jobid", transitoria.detail["detalle"])
+
 
 class ReintentarEstudioUnicoTests(unittest.TestCase):
     """POST /vehiculos/estudios-seguridad/{placa}/reintentar-estudio:

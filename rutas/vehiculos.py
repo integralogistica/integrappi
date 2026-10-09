@@ -3371,8 +3371,9 @@ async def reintentar_estudio(placa: str, estudio_id: str = Form(...)):
     if estudio.get("estado") == "finalizado":
         mensaje = "Estudio re-consultado y finalizado."
     else:
-        mensaje = (f"El estudio sigue fallando: {estudio.get('error', 'sin detalle')} "
-                   "— revisa el mensaje del proveedor.")
+        # El error ya viene legible (con el rechazo crudo del proveedor
+        # cuando lo hay — caso WDN489); sin coletillas que tapen.
+        mensaje = f"El estudio sigue fallando: {estudio.get('error', 'sin detalle')}"
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "message": mensaje,
         "estudio": _json_seguro(estudio),

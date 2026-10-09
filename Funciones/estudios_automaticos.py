@@ -700,9 +700,15 @@ def _buscar_estudio_reutilizable(sujeto: dict) -> tuple:
 
 def _es_fallo_lanzamiento(exc: HTTPException) -> bool:
     """El upstream falló al INICIAR la consulta (sin jobid): 'realice la
-    consulta nuevamente' — transitorio, admite un reintento."""
+    consulta nuevamente' — transitorio, admite backoff. Un rechazo de
+    NEGOCIO del proveedor (200 + {'error': ...}, marcado `definitivo` por
+    el wrapper — caso WDN489: «los datos registrados no corresponden con
+    los propietarios activos del vehículo») NO se reintenta: la respuesta
+    sería idéntica y solo quemaría ~50 s de backoff."""
     detalle = exc.detail
     if isinstance(detalle, dict):
+        if detalle.get("definitivo"):
+            return False
         return "lanzamiento" in detalle or "jobid" in str(detalle.get("detalle", "")).lower()
     return "jobid" in str(detalle).lower()
 
