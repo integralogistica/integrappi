@@ -836,6 +836,14 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
             "total_flete_solicitado":       total_flete_solicitado,
             "usr_solicita_ajuste":          solicitante,
 
+            # Sincronizar totales FÍSICOS desde los docs (auto-reparación): el kg
+            # real y las cajas del vehículo son siempre la suma de sus pedidos
+            # (mismo invariante que la carga, la fusión y la división). Permite
+            # reparar desde "Editar vehículo" carros que quedaron con totales
+            # viejos, p.ej. tras una división fallida.
+            "total_kilos_vehiculo":         float(sum(float(dd.get("num_kilos", 0) or 0) for dd in docs)),
+            "total_cajas_vehiculo":         int(sum(int(dd.get("num_cajas", 0) or 0) for dd in docs)),
+
             # Totales y diferenciales
             "total_flete_vehiculo":         costo_real,
             "costo_teorico_vehiculo":       costo_teorico,
@@ -2926,47 +2934,31 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             "consecutivo_pedido":    f"{cp_orig}{sufijo}",
         }
 
-    if docs_B:
-        coleccion_pedidos.update_many(
-            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_B]}},
-            {"$set": {
-                "consecutivo_vehiculo": cv_B,
-                "destino": destino_unico,
-                "usuario_division": usuario,
-                "observacion_division": (payload.observacion_division or ""),
-                "fecha_division": ahora_str,
-            }}
-        )
-        for d in docs_B:
-            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "B")})
+    # --- Atomicidad de la división ---
+    # Los writes (movimientos y splits) ocurren ANTES del recálculo por carro,
+    # y _calc puede fallar después (p.ej. tarifa faltante para el tipo resultante).
+    # Registramos cada write para poder revertirlo si algo explota más abajo:
+    # sin esto quedan carros "a medias" (docs movidos, totales sin recalcular).
+    movidos = []           # docs movidos a B/C/D (con sus valores pre-movimiento)
+    split_originales = []  # (doc_id, valores originales del doc fuente del split)
+    clones_insertados = [] # _id de docs clonados por split
 
-    if docs_C:
+    def _mover_docs(docs_grupo: list, cv_destino, sufijo: str):
+        if not docs_grupo or not cv_destino:
+            return
         coleccion_pedidos.update_many(
-            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_C]}},
+            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_grupo]}},
             {"$set": {
-                "consecutivo_vehiculo": cv_C,
+                "consecutivo_vehiculo": cv_destino,
                 "destino": destino_unico,
                 "usuario_division": usuario,
                 "observacion_division": (payload.observacion_division or ""),
                 "fecha_division": ahora_str,
             }}
         )
-        for d in docs_C:
-            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "C")})
-
-    if docs_D:
-        coleccion_pedidos.update_many(
-            {"consecutivo_vehiculo": cv_origen, "_id": {"$in": [d["_id"] for d in docs_D]}},
-            {"$set": {
-                "consecutivo_vehiculo": cv_D,
-                "destino": destino_unico,
-                "usuario_division": usuario,
-                "observacion_division": (payload.observacion_division or ""),
-                "fecha_division": ahora_str,
-            }}
-        )
-        for d in docs_D:
-            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, "D")})
+        for d in docs_grupo:
+            coleccion_pedidos.update_one({"_id": d["_id"]}, {"$set": _sobrescribir_campos_doc(d, sufijo)})
+            movidos.append(d)
 
     # 7) SPLIT por KILOS (RUNT) hacia B/C – requiere doc_id si el CI no es único en A
     def _split_por_kilos(
@@ -3047,6 +3039,16 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         if kilos_runt_rem <= EPS:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"split.{sufijo}: el remanente quedaría en 0 kg RUNT")
 
+        # Registro para rollback: valores ORIGINALES del doc fuente (sólo la
+        # primera vez; si el mismo doc se parte hacia B y C, ya quedó registrado)
+        if not any(did == doc_src["_id"] for did, _ in split_originales):
+            split_originales.append((doc_src["_id"], {
+                "num_cajas":         doc_src.get("num_cajas", 0),
+                "num_kilos_sicetac": doc_src.get("num_kilos_sicetac", 0),
+                "num_kilos":         doc_src.get("num_kilos", 0),
+                "valor_flete":       doc_src.get("valor_flete", 0),
+            }))
+
         # Clonar hacia el destino
         doc_new = deepcopy(doc_src)
         doc_new.pop("_id", None)
@@ -3073,77 +3075,115 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
             }}
         )
         coleccion_pedidos.insert_one(doc_new)
+        clones_insertados.append(doc_new["_id"])
 
-    # Ejecutar splits si vienen (doc_id es opcional pero requerido si el CI no es único)
-    if getattr(getattr(payload, "grupo_B", None), "split", None):
-        _split_por_kilos(
-            payload.grupo_B.split.consecutivo_integrapp,
-            float(payload.grupo_B.split.kilos),
-            "B",
-            cv_B,
-            getattr(payload.grupo_B.split, "cajas", None),
-            getattr(payload.grupo_B.split, "doc_id", None)
-        )
-
-    if getattr(getattr(payload, "grupo_C", None), "split", None):
-        _split_por_kilos(
-            payload.grupo_C.split.consecutivo_integrapp,
-            float(payload.grupo_C.split.kilos),
-            "C",
-            cv_C,
-            getattr(payload.grupo_C.split, "cajas", None),
-            getattr(payload.grupo_C.split, "doc_id", None)
-        )
-
-    if getattr(getattr(payload, "grupo_D", None), "split", None):
-        _split_por_kilos(
-            payload.grupo_D.split.consecutivo_integrapp,
-            float(payload.grupo_D.split.kilos),
-            "D",
-            cv_D,
-            getattr(payload.grupo_D.split, "cajas", None),
-            getattr(payload.grupo_D.split, "doc_id", None)
-        )
-
-    # 8) Refrescar grupos A/B/C/D tras movimientos/splits
-    docs_A  = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
-    docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B})) if cv_B else []
-    docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C})) if cv_C else []
-    docs_D2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_D})) if cv_D else []
-
-    if not docs_A:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo A no puede quedar vacío (A conserva el consecutivo original)")
-    if cv_C and not cv_B:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear C sin B")
-    if cv_D and not cv_C:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear D sin C")
-    if not docs_B2 and not docs_C2 and not docs_D2:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
-
-    # 9) Recalcular por carro (tipo_vehiculo_sicetac calculado por kilos del grupo)
-    #    Calculamos TODOS los grupos primero, validamos la causal de sobre costo
-    #    y sólo entonces aplicamos (evita una división a medias si falta la causal).
-    grupos_a_aplicar = []  # [(cv, calc), ...]
-    if docs_A:
-        grupos_a_aplicar.append((cv_origen, _calc(docs_A, payload.grupo_A.overrides if payload.grupo_A else None)))
-    if docs_B2:
-        grupos_a_aplicar.append((cv_B, _calc(docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)))
-    if docs_C2:
-        grupos_a_aplicar.append((cv_C, _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)))
-    if docs_D2:
-        grupos_a_aplicar.append((cv_D, _calc(docs_D2, payload.grupo_D.overrides if payload.grupo_D else None)))
-
-    # Pre-validación: si cualquier vehículo resultante genera sobre costo, exige causal
-    for cv, calc in grupos_a_aplicar:
-        if (calc["creal"] - calc["costo_teo"]) > 0 and not (payload.causal_sobrecosto or "").strip():
-            raise HTTPException(
-                status_code=400,
-                detail=f"La división genera un sobre costo en {cv}; selecciona una causal del sobre costo."
+    def _rollback():
+        # Revertir en orden inverso a la ejecución: borrar clones, restaurar el
+        # doc fuente del split y devolver los docs movidos a A con su CI/CP y
+        # destino originales.
+        for oid in clones_insertados:
+            coleccion_pedidos.delete_one({"_id": oid})
+        for doc_id, orig in split_originales:
+            coleccion_pedidos.update_one({"_id": doc_id}, {"$set": orig})
+        for d in movidos:
+            coleccion_pedidos.update_one(
+                {"_id": d["_id"]},
+                {"$set": {
+                    "consecutivo_vehiculo":  cv_origen,
+                    "consecutivo_integrapp": str(d.get("consecutivo_integrapp") or ""),
+                    "consecutivo_pedido":    str(d.get("consecutivo_pedido") or ""),
+                    "destino":               d.get("destino"),
+                }}
             )
 
-    # Aplicar (ya validado)
-    for cv, calc in grupos_a_aplicar:
-        _apply(cv, calc)
+    try:
+        # 6b) Mover docs de los grupos B/C/D hacia sus nuevos consecutivos
+        # (el refresh del paso 8 y el _calc releen de la BD, así que los
+        # movimientos deben haber ocurrido; si algo falla después, _rollback
+        # los devuelve a A con su CI/CP original)
+        _mover_docs(docs_B, cv_B, "B")
+        _mover_docs(docs_C, cv_C, "C")
+        _mover_docs(docs_D, cv_D, "D")
+
+        # 7) Ejecutar splits si vienen (doc_id es opcional pero requerido si el CI no es único)
+        if getattr(getattr(payload, "grupo_B", None), "split", None):
+            _split_por_kilos(
+                payload.grupo_B.split.consecutivo_integrapp,
+                float(payload.grupo_B.split.kilos),
+                "B",
+                cv_B,
+                getattr(payload.grupo_B.split, "cajas", None),
+                getattr(payload.grupo_B.split, "doc_id", None)
+            )
+
+        if getattr(getattr(payload, "grupo_C", None), "split", None):
+            _split_por_kilos(
+                payload.grupo_C.split.consecutivo_integrapp,
+                float(payload.grupo_C.split.kilos),
+                "C",
+                cv_C,
+                getattr(payload.grupo_C.split, "cajas", None),
+                getattr(payload.grupo_C.split, "doc_id", None)
+            )
+
+        if getattr(getattr(payload, "grupo_D", None), "split", None):
+            _split_por_kilos(
+                payload.grupo_D.split.consecutivo_integrapp,
+                float(payload.grupo_D.split.kilos),
+                "D",
+                cv_D,
+                getattr(payload.grupo_D.split, "cajas", None),
+                getattr(payload.grupo_D.split, "doc_id", None)
+            )
+
+        # 8) Refrescar grupos A/B/C/D tras movimientos/splits
+        docs_A  = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_origen}))
+        docs_B2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_B})) if cv_B else []
+        docs_C2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_C})) if cv_C else []
+        docs_D2 = list(coleccion_pedidos.find({"consecutivo_vehiculo": cv_D})) if cv_D else []
+
+        if not docs_A:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "El grupo A no puede quedar vacío (A conserva el consecutivo original)")
+        if cv_C and not cv_B:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear C sin B")
+        if cv_D and not cv_C:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No puedes crear D sin C")
+        if not docs_B2 and not docs_C2 and not docs_D2:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No hay nada para dividir (ni filtros ni split)")
+
+        # 9) Recalcular por carro (tipo_vehiculo_sicetac calculado por kilos del grupo)
+        #    Calculamos TODOS los grupos primero, validamos la causal de sobre costo
+        #    y sólo entonces aplicamos. Si algo falla, el except revierte todo.
+        grupos_a_aplicar = []  # [(cv, calc), ...]
+        if docs_A:
+            grupos_a_aplicar.append((cv_origen, _calc(docs_A, payload.grupo_A.overrides if payload.grupo_A else None)))
+        if docs_B2:
+            grupos_a_aplicar.append((cv_B, _calc(docs_B2, payload.grupo_B.overrides if payload.grupo_B else None)))
+        if docs_C2:
+            grupos_a_aplicar.append((cv_C, _calc(docs_C2, payload.grupo_C.overrides if payload.grupo_C else None)))
+        if docs_D2:
+            grupos_a_aplicar.append((cv_D, _calc(docs_D2, payload.grupo_D.overrides if payload.grupo_D else None)))
+
+        # Pre-validación: si cualquier vehículo resultante genera sobre costo, exige causal
+        for cv, calc in grupos_a_aplicar:
+            if (calc["creal"] - calc["costo_teo"]) > 0 and not (payload.causal_sobrecosto or "").strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La división genera un sobre costo en {cv}; selecciona una causal del sobre costo."
+                )
+
+        # Aplicar (ya validado)
+        for cv, calc in grupos_a_aplicar:
+            _apply(cv, calc)
+    except HTTPException:
+        _rollback()
+        raise
+    except Exception as exc:
+        _rollback()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"División fallida; se revirtieron todos los cambios: {exc}"
+        )
 
     resumen = {
         "A": {"vehiculo": cv_origen, "docs": len(docs_A)},

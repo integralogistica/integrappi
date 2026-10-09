@@ -828,6 +828,18 @@ Los usuarios no quieren ver usernames sino **nombres de personas**. Aunque `/his
 - Nuevo endpoint que devuelve `{USUARIO_UPPER: nombre}` de `baseusuarios` (projection sólo `usuario`+`nombre`; no expone correo/celular como sí hace `GET /baseusuarios/`).
 - Los frontends de SolicitudVehiculos e HistóricoPedidos lo consultan **una vez al montar** y resuelven con el helper `nombrePersona(valor)`: prioriza el `*_nombre` del backend, luego el mapa local, y como último recurso deja el valor tal cual. Aplica a la trazabilidad del modal, al historial de cambios y al aviso «Devuelta por» de las filas.
 
+## Actualizaciones Recientes (2026-10-09)
+
+### Pedidos — FIX: división de vehículos atómica + totales físicos sincronizados
+
+**Problema** (detectado en `CELTA-20261006-M-2026106-EJE CAFETERO-1/1B` al 199% de % uso): `dividir-vehiculo` movía los docs hacia el carro B/C/D (paso 6) y recién después recalculaba por carro (paso 9, `_calc`). Si `_calc` fallaba —p.ej. **tarifa faltante para el tipo resultante**— la división quedaba "a medias": los docs ya movidos (con carro B creado) pero **los totales del vehículo sin repartir** — tanto el carro A como el B conservaban el `total_kilos_vehiculo`/`total_cajas_vehiculo` ORIGINALES → columna «Kg Reales» inflada y % uso absurdo (8937 kg ÷ tope TURBO 4500 = 199%). El flujo de "completar" mueve los docs tal cual, así que el estado roto viajaba a `pedidos_completados` sin salida de reparación por UI (Editar vehículo no tocaba esos campos).
+
+**Fix**:
+- **`dividir-vehiculo` atómico** (`rutas/pedidos.py`): todo write se registra (`movidos`, `split_originales`, `clones_insertados`) y la ejecución (movimientos, splits, recálculo, `_apply`) va envuelta en `try/except` con `_rollback()`: borra los clones del split, restaura los valores originales del doc fuente (kilos/cajas/flete) y devuelve los docs movidos a A con su CI/CP y destino originales. Cualquier 400/500 deja la BD exactamente como estaba.
+- **`ajustar-totales-vehiculo` sincroniza los totales físicos**: ahora también escribe `total_kilos_vehiculo` y `total_cajas_vehiculo` como la **suma de los docs** del vehículo (mismo invariante que la carga, la fusión y la división) → un carro con totales viejos se repara desde «Editar vehículo» con sólo guardar.
+- **Reparación de datos (2026-10-09, ya aplicada en prod)**: escaneo de `pedidos` + `pedidos_completados` por vehículos cuyo `total_kilos_vehiculo`/`total_cajas_vehiculo` no coincidiera con la suma de sus docs → **46 vehículos corregidos** (todos en `pedidos_completados`, familias divididas de CELTA/FUNZA entre 2025-10 y 2026-10; 0 en activos). Before-state en `repair_backup_totales_2026-10-09.json`. Los kg RUNT (`total_kilos_vehiculo_sicetac`, que pueden diferir de los físicos por diseño) NO se tocaron.
+- **Tests**: `tests/test_dividir_vehiculo_atomico.py` (rollback de movimiento, rollback de split por kilos, y división exitosa repartiendo totales). Suite completa: 711 OK.
+
 ## Actualizaciones Recientes (2026-10-08)
 
 ### Otros Costos — Excel del histórico: una fila por concepto + columna Proveedor

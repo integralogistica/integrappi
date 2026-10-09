@@ -1,0 +1,373 @@
+{
+ "fecha": "2026-10-09T10:47:48.212285",
+ "backup": [
+  {
+   "cv": "CELTA-20260811-M-2026811-COSTA NORTE 2-1B",
+   "docs": 1,
+   "kg_viejo": 11404.0,
+   "kg_nuevo": 8000.0,
+   "cajas_viejo": 572,
+   "cajas_nuevo": 400
+  },
+  {
+   "cv": "CELTA-20260319-M-2026319-ANTIOQUIA-1B",
+   "docs": 2,
+   "kg_viejo": 2500.0,
+   "kg_nuevo": 9500.0,
+   "cajas_viejo": 180,
+   "cajas_nuevo": 530
+  },
+  {
+   "cv": "CELTA-20260903-M-202693-BOGOTA CENTRO BAJO-4B",
+   "docs": 1,
+   "kg_viejo": 19358.0,
+   "kg_nuevo": 6500.0,
+   "cajas_viejo": 1041,
+   "cajas_nuevo": 300
+  },
+  {
+   "cv": "CELTA-20260702-M-202672-SANTANDER-1",
+   "docs": 5,
+   "kg_viejo": 17675.0,
+   "kg_nuevo": 2175.0,
+   "cajas_viejo": 962,
+   "cajas_nuevo": 212
+  },
+  {
+   "cv": "CELTA-20260915-M-2026915-SUR-1B",
+   "docs": 1,
+   "kg_viejo": 17345.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 978,
+   "cajas_nuevo": 198
+  },
+  {
+   "cv": "CELTA-20251107-M-2025117-SUR-2B",
+   "docs": 2,
+   "kg_viejo": 6000.0,
+   "kg_nuevo": 13500.0,
+   "cajas_viejo": 250,
+   "cajas_nuevo": 650
+  },
+  {
+   "cv": "CELTA-20260903-M-202693-BOGOTA CENTRO BAJO-4",
+   "docs": 1,
+   "kg_viejo": 19358.0,
+   "kg_nuevo": 6358.0,
+   "cajas_viejo": 1041,
+   "cajas_nuevo": 441
+  },
+  {
+   "cv": "CELTA-20260828-M-2026828-COSTA NORTE 2-3B",
+   "docs": 1,
+   "kg_viejo": 10242.0,
+   "kg_nuevo": 7142.0,
+   "cajas_viejo": 613,
+   "cajas_nuevo": 400
+  },
+  {
+   "cv": "CELTA-20260915-M-2026915-SUR-1",
+   "docs": 3,
+   "kg_viejo": 17345.0,
+   "kg_nuevo": 3345.0,
+   "cajas_viejo": 978,
+   "cajas_nuevo": 580
+  },
+  {
+   "cv": "CELTA-20260702-M-202672-SANTANDER-1B",
+   "docs": 1,
+   "kg_viejo": 17675.0,
+   "kg_nuevo": 8000.0,
+   "cajas_viejo": 962,
+   "cajas_nuevo": 400
+  },
+  {
+   "cv": "CELTA-20260903-M-202693-BOGOTA CENTRO BAJO-4C",
+   "docs": 1,
+   "kg_viejo": 19358.0,
+   "kg_nuevo": 6500.0,
+   "cajas_viejo": 1041,
+   "cajas_nuevo": 300
+  },
+  {
+   "cv": "CELTA-20260901-M-202691-CENTRO 1-2",
+   "docs": 4,
+   "kg_viejo": 13293.0,
+   "kg_nuevo": 6693.0,
+   "cajas_viejo": 728,
+   "cajas_nuevo": 378
+  },
+  {
+   "cv": "CELTA-20260319-M-2026319-ANTIOQUIA-1",
+   "docs": 2,
+   "kg_viejo": 6038.0,
+   "kg_nuevo": 8265.0,
+   "cajas_viejo": 328,
+   "cajas_nuevo": 1370
+  },
+  {
+   "cv": "CELTA-20260819-M-2026819-COSTA NORTE 1-2B",
+   "docs": 1,
+   "kg_viejo": 9583.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 478,
+   "cajas_nuevo": 250
+  },
+  {
+   "cv": "CELTA-20260828-M-2026828-BOGOTA CENTRO ALTO-1",
+   "docs": 1,
+   "kg_viejo": 9050.0,
+   "kg_nuevo": 2550.0,
+   "cajas_viejo": 578,
+   "cajas_nuevo": 178
+  },
+  {
+   "cv": "CELTA-20260811-M-2026811-COSTA NORTE 2-1",
+   "docs": 1,
+   "kg_viejo": 11404.0,
+   "kg_nuevo": 3404.0,
+   "cajas_viejo": 572,
+   "cajas_nuevo": 172
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-SANTANDER-1C",
+   "docs": 1,
+   "kg_viejo": 19134.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 1035,
+   "cajas_nuevo": 500
+  },
+  {
+   "cv": "FUNZA-20260728-M-2026728-COSTA NORTE 3-2B",
+   "docs": 4,
+   "kg_viejo": 12133.0,
+   "kg_nuevo": 10600.0,
+   "cajas_viejo": 691,
+   "cajas_nuevo": 650
+  },
+  {
+   "cv": "CELTA-20260907-M-202697-COSTA NORTE 3-1",
+   "docs": 3,
+   "kg_viejo": 5708.0,
+   "kg_nuevo": 2772.01,
+   "cajas_viejo": 322,
+   "cajas_nuevo": 158
+  },
+  {
+   "cv": "CELTA-20260921-M-2026921-COSTA NORTE 1-1",
+   "docs": 1,
+   "kg_viejo": 10035.0,
+   "kg_nuevo": 2535.0,
+   "cajas_viejo": 689,
+   "cajas_nuevo": 210
+  },
+  {
+   "cv": "CELTA-20260907-M-202697-COSTA NORTE 3-1B",
+   "docs": 1,
+   "kg_viejo": 5708.0,
+   "kg_nuevo": 2935.99,
+   "cajas_viejo": 322,
+   "cajas_nuevo": 164
+  },
+  {
+   "cv": "CELTA-20260921-M-2026921-SUR-1",
+   "docs": 1,
+   "kg_viejo": 11107.0,
+   "kg_nuevo": 4807.0,
+   "cajas_viejo": 588,
+   "cajas_nuevo": 169
+  },
+  {
+   "cv": "CELTA-20251014-M-20251014-ANTIOQUIA-1",
+   "docs": 2,
+   "kg_viejo": 1642.0,
+   "kg_nuevo": 9394.0,
+   "cajas_viejo": 164,
+   "cajas_nuevo": 810
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-COSTA NORTE 2-3",
+   "docs": 3,
+   "kg_viejo": 10906.0,
+   "kg_nuevo": 2502.0,
+   "cajas_viejo": 669,
+   "cajas_nuevo": 319
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-SANTANDER-1B",
+   "docs": 1,
+   "kg_viejo": 19134.0,
+   "kg_nuevo": 8200.0,
+   "cajas_viejo": 1035,
+   "cajas_nuevo": 400
+  },
+  {
+   "cv": "CELTA-20260806-M-202686-CENTRO 1-2B",
+   "docs": 1,
+   "kg_viejo": 11161.0,
+   "kg_nuevo": 5580.0,
+   "cajas_viejo": 599,
+   "cajas_nuevo": 425
+  },
+  {
+   "cv": "CELTA-20261006-M-2026106-EJE CAFETERO-1B",
+   "docs": 1,
+   "kg_viejo": 8937.0,
+   "kg_nuevo": 2850.0,
+   "cajas_viejo": 612,
+   "cajas_nuevo": 295
+  },
+  {
+   "cv": "CELTA-20261006-M-2026106-EJE CAFETERO-1",
+   "docs": 7,
+   "kg_viejo": 8937.0,
+   "kg_nuevo": 6087.0,
+   "cajas_viejo": 612,
+   "cajas_nuevo": 317
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-BOGOTA CENTRO ALTO-1",
+   "docs": 1,
+   "kg_viejo": 13611.0,
+   "kg_nuevo": 6611.0,
+   "cajas_viejo": 678,
+   "cajas_nuevo": 278
+  },
+  {
+   "cv": "CELTA-20260911-M-2026911-BOGOTA CENTRO BAJO-3",
+   "docs": 1,
+   "kg_viejo": 11369.0,
+   "kg_nuevo": 5069.0,
+   "cajas_viejo": 605,
+   "cajas_nuevo": 105
+  },
+  {
+   "cv": "CELTA-20260818-M-2026818-BOGOTA CENTRO BAJO-3",
+   "docs": 1,
+   "kg_viejo": 13575.0,
+   "kg_nuevo": 6786.0,
+   "cajas_viejo": 742,
+   "cajas_nuevo": 392
+  },
+  {
+   "cv": "CELTA-20260818-M-2026818-BOGOTA CENTRO BAJO-3B",
+   "docs": 1,
+   "kg_viejo": 13575.0,
+   "kg_nuevo": 6789.0,
+   "cajas_viejo": 742,
+   "cajas_nuevo": 350
+  },
+  {
+   "cv": "CELTA-20260915-M-2026915-SUR-1C",
+   "docs": 1,
+   "kg_viejo": 17345.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 978,
+   "cajas_nuevo": 200
+  },
+  {
+   "cv": "CELTA-20260921-M-2026921-SUR-1B",
+   "docs": 1,
+   "kg_viejo": 11107.0,
+   "kg_nuevo": 6300.0,
+   "cajas_viejo": 588,
+   "cajas_nuevo": 419
+  },
+  {
+   "cv": "CELTA-20260811-M-2026811-ANTIOQUIA-1",
+   "docs": 1,
+   "kg_viejo": 9810.0,
+   "kg_nuevo": 2810.0,
+   "cajas_viejo": 543,
+   "cajas_nuevo": 193
+  },
+  {
+   "cv": "CELTA-20260819-M-2026819-COSTA NORTE 1-2",
+   "docs": 1,
+   "kg_viejo": 9583.0,
+   "kg_nuevo": 2583.0,
+   "cajas_viejo": 478,
+   "cajas_nuevo": 228
+  },
+  {
+   "cv": "CELTA-20260901-M-202691-CENTRO 1-2B",
+   "docs": 1,
+   "kg_viejo": 13293.0,
+   "kg_nuevo": 6600.0,
+   "cajas_viejo": 728,
+   "cajas_nuevo": 350
+  },
+  {
+   "cv": "CELTA-20260806-M-202686-CENTRO 1-2",
+   "docs": 3,
+   "kg_viejo": 11161.0,
+   "kg_nuevo": 5581.0,
+   "cajas_viejo": 599,
+   "cajas_nuevo": 174
+  },
+  {
+   "cv": "CELTA-20260811-M-2026811-ANTIOQUIA-1B",
+   "docs": 1,
+   "kg_viejo": 9810.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 543,
+   "cajas_nuevo": 350
+  },
+  {
+   "cv": "FUNZA-20260728-M-2026728-COSTA NORTE 3-2",
+   "docs": 2,
+   "kg_viejo": 12133.0,
+   "kg_nuevo": 1533.0,
+   "cajas_viejo": 691,
+   "cajas_nuevo": 78
+  },
+  {
+   "cv": "CELTA-20260911-M-2026911-BOGOTA CENTRO BAJO-3B",
+   "docs": 1,
+   "kg_viejo": 11369.0,
+   "kg_nuevo": 6300.0,
+   "cajas_viejo": 605,
+   "cajas_nuevo": 500
+  },
+  {
+   "cv": "CELTA-20260828-M-2026828-COSTA NORTE 2-3",
+   "docs": 1,
+   "kg_viejo": 10242.0,
+   "kg_nuevo": 3100.0,
+   "cajas_viejo": 613,
+   "cajas_nuevo": 213
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-SANTANDER-1",
+   "docs": 6,
+   "kg_viejo": 19134.0,
+   "kg_nuevo": 3934.0,
+   "cajas_viejo": 1035,
+   "cajas_nuevo": 135
+  },
+  {
+   "cv": "CELTA-20260828-M-2026828-BOGOTA CENTRO ALTO-1B",
+   "docs": 1,
+   "kg_viejo": 9050.0,
+   "kg_nuevo": 6500.0,
+   "cajas_viejo": 578,
+   "cajas_nuevo": 400
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-COSTA NORTE 2-3B",
+   "docs": 1,
+   "kg_viejo": 10906.0,
+   "kg_nuevo": 8404.0,
+   "cajas_viejo": 669,
+   "cajas_nuevo": 350
+  },
+  {
+   "cv": "CELTA-20260814-M-2026814-BOGOTA CENTRO ALTO-1B",
+   "docs": 1,
+   "kg_viejo": 13611.0,
+   "kg_nuevo": 7000.0,
+   "cajas_viejo": 678,
+   "cajas_nuevo": 400
+  }
+ ]
+}
