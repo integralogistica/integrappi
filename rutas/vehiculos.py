@@ -2190,6 +2190,16 @@ async def subir_documento(
     # `lectura_datos`/`lectura_avisos` (JSON): lectura YA hecha por el front
     # (flujo de dos caras: cédula/licencia/tarjeta leyeron frente+reverso por
     # separado) — se persiste en lecturasIA sin re-pagar Gemini.
+    # Planilla de Seguridad Social (2026-10-11): si quien sube ya DIGITÓ la
+    # fecha de vencimiento (obligatoria en ambas UIs: conductor y Seguridad),
+    # NO se paga la lectura IA — Gemini tardaba 30-120 s con el request abierto
+    # y el modal del conductor quedaba "pensando" eternamente aunque el
+    # documento SÍ se guardaba (la gente cerraba creyendo que falló). La
+    # lectura queda solo como fallback cuando no viene fecha manual, y sus
+    # datos (eps/arl) no se consumen en ningún formulario del front.
+    saltar_lectura = (
+        tipo == "planillaEpsArl" and str(fecha_vencimiento or "").strip()
+    )
     lectura_ia = None
     esquema_ia = TIPOS_SUBIDA_LEIBLES.get(tipo)
     if lectura_datos:
@@ -2200,7 +2210,7 @@ async def subir_documento(
             }
         except (ValueError, TypeError):
             lectura_ia = None
-    elif esquema_ia and (extraer or "true").lower() != "false":
+    elif esquema_ia and not saltar_lectura and (extraer or "true").lower() != "false":
         try:
             contexto = {
                 "placa_vehiculo": placa,

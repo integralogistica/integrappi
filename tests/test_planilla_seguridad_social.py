@@ -219,6 +219,21 @@ class FechaVencimientoPlanillaTests(unittest.TestCase):
         # clave punteada que la colección fake de este archivo no expande).
         self.assertEqual(resp.json()["lectura_ia"]["datos"]["eps"], "Sanitas")
 
+    def test_con_fecha_digitada_NO_se_llama_la_IA(self):
+        """(2026-10-11) La fecha manual es obligatoria en ambas UIs: pagar la
+        lectura Gemini con el request abierto mantenía el modal «pensando»
+        30-120 s aunque el documento sí se guardaba. Con fecha digitada NO se
+        llama a Gemini y la respuesta es inmediata."""
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"), \
+             patch.object(vehiculos, "extraer_datos_con_llm") as mock_llm:
+            resp = _subir(self.client)  # fecha default, extraer NO se manda
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_llm.assert_not_called()               # cero llamadas a Gemini
+        self.assertIsNone(resp.json()["lectura_ia"])  # y nada de lectura IA
+
     def test_fecha_dd_mm_aaaa_se_normaliza(self):
         from datetime import date, timedelta
         d = date.today() + timedelta(days=12)
