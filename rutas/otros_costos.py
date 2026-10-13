@@ -132,11 +132,36 @@ CLIENTES_OTROS_COSTOS_DEFAULT = [
 ]
 # Catálogo por defecto de proveedores para el formulario (se siembra en
 # `proveedores_otros_costos`). Mismo patrón que clientes/causales: editable
-# directamente en Mongo (documentos `{ "nombre": "..." }`) sin tocar código.
+# directamente en Mongo (documentos `{ "nombre": ..., "nit": ... }`) sin tocar
+# código. El NIT queda almacenado para uso futuro (p. ej. pagos/contabilidad);
+# el dropdown del formulario sólo usa el `nombre`.
 PROVEEDORES_OTROS_COSTOS_DEFAULT = [
-    "OTROS",
-    "ALL CARGO",
-    "OPERATIVO",
+    {"nombre": "OTROS"},
+    {"nombre": "CONDUCTOR CONTRATA"},
+    {"nombre": "AEROSUR SAS", "nit": "838000218"},
+    {"nombre": "ALL CARGO TRANSPORTE DE CARGA SAS", "nit": "900109610"},
+    {"nombre": "AUTO MONTACARGAS GILCAR SAS", "nit": "800214054"},
+    {"nombre": "CARIBE CARGO SAS", "nit": "830029321"},
+    {"nombre": "CGR TRANSPORTES SIN FRONTERAS SAS", "nit": "900304221"},
+    {"nombre": "COLOMBIAN AIR CARGO SAS", "nit": "830069259"},
+    {"nombre": "COLOMBIANA DE GELES SAS", "nit": "830514982"},
+    {"nombre": "GRÚAS & EQUIPOS DEL NORTE SAS", "nit": "900681097"},
+    {"nombre": "GRUPO GLM SAS", "nit": "900135005"},
+    {"nombre": "INTERMODAL SAS", "nit": "860053047"},
+    {"nombre": "LOGÍSTICA ROBLE SAS", "nit": "901515484"},
+    {"nombre": "M.K. SOLUCIONES LOGÍSTICAS SAS", "nit": "900936943"},
+    {"nombre": "MAXCONTROL SAS", "nit": "900416068"},
+    {"nombre": "CARLOS VICENTE PÉREZ RAMÍREZ (PERSONA NATURAL)", "nit": "80047876"},
+    {"nombre": "PM SOLUCIONES SAS", "nit": "901271414"},
+    {"nombre": "RAFAEL ESPINOSA G Y CÍA. SAS", "nit": "800202447"},
+    {"nombre": "SERUTIL SAS", "nit": "901286849"},
+    {"nombre": "SOPORTE OPERATIVO SAS", "nit": "900592096"},
+    {"nombre": "COOPERATIVA DE TRANSPORTADORES DE TAME — COOTRANSTAME", "nit": "892099421"},
+    {"nombre": "UNIÓN TEMPORAL EMINSER-SOLOASEO 2023", "nit": "901076825"},
+    {"nombre": "G4S SECURE SOLUTIONS COLOMBIA SA", "nit": "860013951"},
+    {"nombre": "ORGANIZACIÓN TERPEL SA", "nit": "830095213"},
+    {"nombre": "ZILOG PARQUE INDUSTRIAL P.H.", "nit": "901042470"},
+    {"nombre": "OPERACIONES NACIONALES DE MERCADEO LTDA. (OPEN MARKET LTDA.)", "nit": "860350940"},
 ]
 # Tipos de costo que EXIGEN proveedor (cargues y descargues: siempre debe ir una opción).
 TIPOS_COSTO_REQUIEREN_PROVEEDOR = {"CARGUE", "DESCARGUE"}
@@ -1271,8 +1296,9 @@ class CostoConcepto(BaseModel):
     descripcion: str = ""
     valor: float = 0
     proveedor: str = ""  # opcional por concepto; OBLIGATORIO en CARGUE/DESCARGUE (catálogo `proveedores_otros_costos`)
+    oc_proveedor: str = ""  # orden de compra del proveedor; opcional, sólo aplica cuando hay proveedor
 
-    @field_validator("descripcion", "proveedor", mode="before")
+    @field_validator("descripcion", "proveedor", "oc_proveedor", mode="before")
     @classmethod
     def _upper(cls, v):
         return _norm_upper(v)
@@ -1493,9 +1519,10 @@ async def proveedores():
     """Proveedores para el campo opcional del formulario de Otros Costos.
     Auto-siembra la colección `proveedores_otros_costos` con el listado por
     defecto la primera vez (si está vacía); desde entonces es editable
-    directamente en Mongo (agregar/ quitar documentos `{ "nombre": "..." }`)."""
+    directamente en Mongo (documentos `{ "nombre": ..., "nit": ... }`; el NIT
+    es informativo, el dropdown sólo usa el nombre)."""
     if col_proveedores.count_documents({}) == 0:
-        col_proveedores.insert_many([{"nombre": p} for p in PROVEEDORES_OTROS_COSTOS_DEFAULT])
+        col_proveedores.insert_many([dict(p) for p in PROVEEDORES_OTROS_COSTOS_DEFAULT])
         logger.info(
             "[PROVEEDORES OTROS COSTOS] Colección sembrada con %d proveedores por defecto.",
             len(PROVEEDORES_OTROS_COSTOS_DEFAULT),
@@ -2284,7 +2311,7 @@ async def exportar_excel(req: ExportarExcelRequest):
 
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
-        "Tipo de Costo", "Proveedor", "Valor",
+        "Tipo de Costo", "Proveedor", "OC Proveedor", "Valor",
         "Valor Despues Retenciones",
         "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
@@ -2316,10 +2343,11 @@ async def exportar_excel(req: ExportarExcelRequest):
             {
                 "tipo": (c.get("tipo_costo") or "").strip(),
                 "proveedor": (c.get("proveedor") or "").strip(),
+                "oc_proveedor": (c.get("oc_proveedor") or "").strip(),
                 "valor": _a_numero(c.get("valor")),
             }
             for c in costos
-        ] or [{"tipo": "", "proveedor": "", "valor": 0}]
+        ] or [{"tipo": "", "proveedor": "", "oc_proveedor": "", "valor": 0}]
         for idx, concepto in enumerate(conceptos):
             fila = [
                 d.get("consecutivo", ""),
@@ -2329,6 +2357,7 @@ async def exportar_excel(req: ExportarExcelRequest):
                 d.get("manifiesto", ""),
                 concepto["tipo"],
                 concepto["proveedor"],
+                concepto["oc_proveedor"],
                 concepto["valor"],
                 d.get("valor_despues_retenciones") if idx == 0 else None,
                 (d.get("creado_por", {}) or {}).get("usuario", ""),

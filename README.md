@@ -137,7 +137,7 @@ if bodega:
 - **`historico_otros_costos`** - Solicitudes de otros costos pagadas
 - **`anulados_otros_costos`** - Solicitudes de otros costos anuladas
 - **`clientes_otros_costos`** - Catálogo de clientes sugeridos en el formulario de Otros Costos (`GET /otros-costos/clientes`; auto-siembra 9 clientes por defecto la primera vez)
-- **`proveedores_otros_costos`** - Catálogo de proveedores por concepto de costo del formulario de Otros Costos (`GET /otros-costos/proveedores`; auto-siembra `PROVEEDORES_OTROS_COSTOS_DEFAULT`: OTROS, ALL CARGO, OPERATIVO la primera vez; editable directo en Mongo con documentos `{ "nombre": "..." }`)
+- **`proveedores_otros_costos`** - Catálogo de proveedores por concepto de costo del formulario de Otros Costos (`GET /otros-costos/proveedores`; auto-siembra `PROVEEDORES_OTROS_COSTOS_DEFAULT` la primera vez; editable directo en Mongo con documentos `{ "nombre": ..., "nit": ... }`). El **NIT** queda almacenado para uso futuro (pagos/contabilidad); el endpoint devuelve sólo los nombres (el dropdown no cambió). 2026-10-13: catálogo reconstruido en prod — 26 documentos: `OTROS` y `CONDUCTOR CONTRATA` (sin NIT) + 24 proveedores con NIT. Nombres canónicos según la tabla de NITs (M.K. SOLUCIONES LOGÍSTICAS SAS, G4S … SA, ORGANIZACIÓN TERPEL SA).
 - **`causales_otros_costos`** - Catálogo de causales/tipos de costo del formulario de Otros Costos (`GET /otros-costos/tipos-costo`; auto-siembra 14 causales por defecto la primera vez, editable en Mongo)
 - **`bancos_otros_costos`** - Catálogo de bancos del formulario de Otros Costos y de Cuentas por Placa (`GET /otros-costos/bancos`; auto-siembra `BANCOS_OTROS_COSTOS_DEFAULT`, 30 bancos con código)
 - **`cuentas_por_placa`** - Catálogo «Cuentas por Placa»: datos bancarios/conductor por placa scoped por regional (`rutas/cuentas_placa.py`). Índice unique `(placa, regional)` — una placa puede repetirse entre regionales, no dentro de la misma. `regional` guarda el código CO + `regional_info {co, regional, bodega}`
@@ -855,3 +855,13 @@ Campo **`proveedor`** en **cada concepto de costo** del formulario «Nueva solic
 - **Catálogo**: colección **`proveedores_otros_costos`**, mismo patrón que `clientes_otros_costos`/`causales_otros_costos`. `GET /otros-costos/proveedores` **auto-siembra** `PROVEEDORES_OTROS_COSTOS_DEFAULT = [OTROS, ALL CARGO, OPERATIVO]` la primera vez; desde entonces es **editable directamente en Mongo** (documentos `{ "nombre": "..." }`) — así se agregan más proveedores sin tocar código ni re-desplegar.
 - **Modelo**: `CostoConcepto.proveedor: str = ""` (normalizado a MAYÚSCULAS con `_norm_upper`). Viaja dentro del array `costos` → al histórico con el doc completo (`_mover_documento`). La exigencia CARGUE/DESCARGUE se valida en `_validar_solicitud` (422) para crear y editar.
 - **Frontend** (`OtrosCostosP`): dropdown «Proveedor» en cada fila de concepto (columna nueva en `OC-costRow`, grilla a 5 columnas), con asterisco y borde rojo cuando el tipo lo exige y está vacío; validación espejo en `validarForm`; columna «Proveedor» en la tabla de conceptos del modal de detalle. Nuevo `getProveedores` en `otrosCostos.tsx`. Requiere deploy de backend y frontend.
+
+## Actualizaciones Recientes (2026-10-13)
+
+### Otros Costos — campo «OC del proveedor» (`oc_proveedor`)
+
+Campo **`oc_proveedor`** (orden de compra del proveedor) por concepto de costo, **opcional**, que sólo aparece en el formulario cuando el concepto tiene `proveedor` diligenciado. Guarda la OC que emite el negocio para pagarle a ese proveedor.
+
+- **Modelo**: `CostoConcepto.oc_proveedor: str = ""` (normalizado a MAYÚSCULAS). Viaja en el array `costos` → al histórico con el doc completo (`_mover_documento`); se persiste solo en crear/editar vía `model_dump()` (sin cambios adicionales).
+- **Excel histórico** (`/exportar-excel`): columna nueva **«OC Proveedor»** junto a «Proveedor» en la fila por concepto (vacía en docs anteriores al campo).
+- **Frontend** (`OtrosCostosP`): input «OC del proveedor ({PROVEEDOR})» a ancho completo debajo de la fila del concepto, visible sólo con proveedor lleno (mayúsculas, máx 50 car.); columna «OC Proveedor» en la tabla de conceptos del modal de detalle. Docs viejos lo muestran como `-`. Requiere deploy de backend y frontend.
