@@ -3563,12 +3563,28 @@ def estudios_por_antiguedad(
     })
 
 
+# Filtro por bandeja de /revision (2026-10-13): el front carga SOLO la bandeja
+# que está viendo — antes este endpoint devolvía TODOS los vehículos en TODOS
+# los estados con cada ruta de documento firmada (payload gigante + miles de
+# firmas v4 con la flota creciendo). Sin el param mantiene el comportamiento
+# completo (compat con el front desplegado); «aprobados» sigue yendo por
+# obtener-aprobados-paginados, que ya es paginado.
+BANDEJAS_REVISION = {
+    "pendientes": ["registro_incompleto"],
+    "revision": ["completado_revision", "en_revision"],
+    "inactivos": ["inactivo"],
+    "actualizacion": ["en_actualizacion"],
+    "rechazados": ["rechazado"],
+}
+
+
 @ruta_vehiculos.get("/obtener-vehiculos-incompletos")
-def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None):
+def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Optional[str] = None):
     filtro = {
         "estadoIntegra": {
-            "$in": ["registro_incompleto", "completado_revision", "aprobado",
-                    "inactivo", "rechazado", "en_actualizacion"]
+            "$in": BANDEJAS_REVISION.get(bandeja, ["registro_incompleto", "completado_revision",
+                                                    "aprobado", "inactivo", "rechazado",
+                                                    "en_actualizacion"])
         },
         # Borradores del alta (placa validada, responsable sin vincular): se
         # retoman desde el módulo de alta, no desde las bandejas de revisión.
@@ -3619,8 +3635,14 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
         ]
     
     vehiculos_cursor = coleccion_vehiculos.find(filtro).sort("_id", -1).limit(limit)
+    # Total real de la consulta (sin el limit): el contador de la bandeja
+    # Aprobados del front lo muestra junto al título (2026-10-13).
+    try:
+        total = coleccion_vehiculos.count_documents(filtro)
+    except Exception:
+        total = None
     vehiculos_final = []
-    
+
     for veh in vehiculos_cursor:
         veh["_id"] = str(veh["_id"])
         # Los estudios automáticos son insumo de SEGURIDAD (/revision).
@@ -3639,7 +3661,7 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"vehiculos": _json_seguro(_firmar_documentos(vehiculos_final))}
+        content={"vehiculos": _json_seguro(_firmar_documentos(vehiculos_final)), "total": total}
     )
 
 

@@ -10,8 +10,24 @@ Cubre:
 - obtener-vehiculos-incompletos incluye los inactivos en el $in.
 - Devolver (completado_revision→registro_incompleto) sigue funcionando.
 """
+import json
+import sys
+import types
 import unittest
 from unittest.mock import patch
+
+# Stub de BD (patrón del repo): permite correr este archivo standalone sin
+# Atlas (la red local suele no alcanzar el cluster).
+if "bd.bd_cliente" not in sys.modules:
+    _stub = types.ModuleType("bd.bd_cliente")
+
+    class _BDFake(dict):
+        def __getitem__(self, clave):
+            from unittest.mock import MagicMock
+            return self.setdefault(clave, MagicMock())
+
+    _stub.bd_cliente = _BDFake()
+    sys.modules["bd.bd_cliente"] = _stub
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -398,6 +414,40 @@ class InactivosEnListasTests(unittest.TestCase):
         import inspect
         fuente = inspect.getsource(vehiculos.obtener_vehiculos_incompletos)
         self.assertIn('"inactivo"', fuente)
+
+
+class FiltroPorBandejaTests(unittest.TestCase):
+    """Param `bandeja` de obtener-vehiculos-incompletos (2026-10-13): el front
+    de /revision carga SOLO la bandeja que está viendo; sin el param el filtro
+    queda igual que siempre (compat con el front desplegado)."""
+
+    def test_bandeja_revision_solo_completado_revision(self):
+        vehiculo = {"_id": "a", "placa": "AAA111", "estadoIntegra": "completado_revision"}
+        otro = {"_id": "b", "placa": "BBB222", "estadoIntegra": "registro_incompleto"}
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionFiltro([vehiculo, otro])), \
+             patch.object(vehiculos, "_firmar_documentos", lambda x: x):
+            r = vehiculos.obtener_vehiculos_incompletos(bandeja="revision")
+        data = json.loads(r.body)
+        placas = [v["placa"] for v in data["vehicles"]]
+        self.assertIn("AAA111", placas)
+        self.assertNotIn("BBB222", placas)
+
+    def test_sin_bandeja_mantiene_el_filtro_completo(self):
+        import inspect
+        fuente = inspect.getsource(vehiculos.obtener_vehiculos_incompletos)
+        self.assertIn('"aprobado"', fuente)  # el $in completo sigue en el default
+        self.assertIn('BANDEJAS_REVISION.get(bandeja', fuente)
+
+
+class FakeColeccionFiltro:
+    """Stub que aplica el $in de estadoIntegra del filtro (para el test del param)."""
+
+    def __init__(self, docs):
+        self._docs = docs
+
+    def find(self, filtro):
+        estados = filtro.get("estadoIntegra", {}).get("$in")
+        return [d for d in self._docs if not estados or d.get("estadoIntegra") in estados]
 
 
 if __name__ == "__main__":
