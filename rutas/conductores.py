@@ -838,6 +838,166 @@ async def buscar_conductores(q: str = ""):
 
 
 # ==============================================================================
+# 📭 CUENTAS SIN VEHÍCULO (2026-10-13)
+# Pedido del usuario: "¿quiénes se registraron con correo pero aún no han
+# inscrito una placa?" — no existía ninguna vista. Cuentas ACTIVAS (self-
+# registro o alta de Seguridad) sin ningún vehículo vinculado NI como dueño
+# (idUsuario) NI como conductor invitado (idConductor), con su estado de
+# verificación para reenviarle el enlace o un recordatorio.
+# ==============================================================================
+def _fecha_creacion_cuenta(doc: dict) -> Optional[datetime]:
+    """
+    Fecha de alta de la cuenta: `alta_seguridad_en` si la creó Seguridad; si
+    no, la incrustada en el ObjectId (los self-registros no guardaban fecha
+    propia — ObjectId.generation_time es UTC). Naive → UTC (convención del
+    proyecto). None si no se puede derivar.
+    """
+    fecha = doc.get("alta_seguridad_en")
+    if isinstance(fecha, datetime):
+        return fecha.replace(tzinfo=timezone.utc) if fecha.tzinfo is None else fecha
+    try:
+        from bson import ObjectId as _ObjectId
+        return _ObjectId(doc["_id"]).generation_time  # tz-aware UTC
+    except Exception:
+        return None
+
+
+@ruta_conductores.get("/sin-vehiculo", response_model=dict)
+async def cuentas_sin_vehiculo():
+    """
+    Cuentas CONDUCTOR/TENEDOR sin NINGUNA placa inscrita (ni propia por
+    idUsuario ni como conductor invitado por idConductor), con su estado de
+    verificación de correo — para que Seguridad sepa a quién reenviarle el
+    enlace o enviarle un recordatorio. Sin claves JAMÁS.
+    """
+    cuentas = []
+    for doc in coleccion_conductores.find({"activo": {"$ne": False}}).limit(500):
+        cid = str(doc.get("_id"))
+        placas = coleccion_vehiculos.count_documents(
+            {"$or": [{"idUsuario": cid}, {"idConductor": cid}]})
+        if placas:
+            continue
+        fecha = _fecha_creacion_cuenta(doc)
+        cuentas.append({
+            "id": cid,
+            "nombre": doc.get("nombre", ""),
+            "correo": doc.get("correo", ""),
+            "perfil": (doc.get("perfil") or "CONDUCTOR").upper(),
+            "celular": doc.get("celular") or "",
+            "correo_verificado": bool(doc.get("correo_verificado")),
+            "alta_por_seguridad": bool(doc.get("alta_por_seguridad")),
+            "creado": fecha.isoformat() if fecha else None,
+        })
+    # Pendientes de verificación primero (son los que necesitan el reenvío);
+    # dentro de cada grupo, las más recientes primero.
+    cuentas.sort(key=lambda c: ((not c["correo_verificado"]), c["creado"] or ""), reverse=True)
+    return {"cuentas": cuentas, "total": len(cuentas)}
+
+
+def _cuenta_por_id(conductor_id: str) -> Optional[dict]:
+    from bson import ObjectId as _ObjectId
+    try:
+        oid = _ObjectId(conductor_id)
+    except Exception:
+        return None
+    return coleccion_conductores.find_one({"_id": oid})
+
+
+@ruta_conductores.post("/{conductor_id}/reenviar-verificacion", response_model=dict)
+async def reenviar_verificacion_seguridad(conductor_id: str, background_tasks: BackgroundTasks):
+    """
+    Reenvía el correo de verificación a UNA cuenta concreta, con respuesta
+    EXPLÍCITA para Seguridad (el /reenviar-verificacion público es neutro
+    anti-enumeración y no dice si envió): regenera el token — invalida el
+    anterior aunque haya expirado — y encola el correo.
+    409 si el correo ya está verificado (usa el recordatorio).
+    """
+    doc = _cuenta_por_id(conductor_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+    if doc.get("correo_verificado", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Ese correo ya está verificado: usa «Enviar recordatorio».")
+    token = _generar_token_verificacion(doc["_id"])
+    enlace = f"{FRONTEND_URL_VERIFICAR}?token={token}"
+    background_tasks.add_task(
+        enviar_correo_verificacion, doc.get("correo") or "", enlace,
+        (doc.get("nombre") or "").strip())
+    return {"mensaje": f"Enlace de verificación reenviado a {doc.get('correo', '')} "
+                       f"(vence en {EXPIRA_HORAS_VERIFICACION} horas)."}
+
+
+def enviar_correo_recordatorio_vehiculo(destinatario: str, nombre: str):
+    """
+    Recordatorio para cuentas VERIFICADAS que aún no inscriben su vehículo:
+    el correo de verificación ya no les aplica (su cuenta está activa) — se
+    les empuja a entrar al portal y registrar la placa. Fire-and-forget.
+    """
+    if not resend.api_key or "TuApiKeyAqui" in resend.api_key:
+        print("[WARN] Falta API KEY de Resend; no se envió el recordatorio.")
+        return
+    saludo = f"Hola, {nombre}" if (nombre or "").strip() else "Hola"
+    html = f"""
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto;">
+      <h2 style="color: #0f1928;">{saludo}</h2>
+      <p>Tu cuenta de <strong>IntegrApp En Ruta</strong> ya está activa, pero todavía
+      no has inscrito tu vehículo.</p>
+      <p>Para que tu camión quede registrado y pueda entrar a la bolsa de flota
+      de Integra, ingresa al portal y completa el registro con la placa, tus
+      datos y los documentos obligatorios:</p>
+      <p style="text-align: center; margin: 28px 0;">
+        <a href="{FRONTEND_URL_LOGIN}"
+           style="background: #0f1928; color: #fff; padding: 12px 28px; border-radius: 10px;
+                  text-decoration: none; font-weight: bold;">
+          Ingresar y registrar mi vehículo
+        </a>
+      </p>
+      <p>O copia y pega este enlace en tu navegador:</p>
+      <p><a href="{FRONTEND_URL_LOGIN}">{FRONTEND_URL_LOGIN}</a></p>
+      <p>Si tienes dudas, comunícate con Integra Logística.</p>
+    </div>
+    """
+    try:
+        resend.Emails.send({
+            "from": MAIL_FROM,
+            "to": [destinatario],
+            "subject": "Registra tu vehículo — IntegrApp En Ruta",
+            "html": html,
+        })
+        print(f"[OK] Recordatorio de vehículo enviado a {destinatario}")
+    except Exception as e:
+        print(f"[ERROR] Error enviando recordatorio de vehículo: {e}")
+
+
+@ruta_conductores.post("/{conductor_id}/recordatorio-vehiculo", response_model=dict)
+async def recordatorio_vehiculo(conductor_id: str, background_tasks: BackgroundTasks):
+    """
+    Recordatorio por correo a una cuenta VERIFICADA que aún no inscribe su
+    vehículo. 409 si el correo no está verificado (reenvía la verificación) o
+    si ya tiene placas vinculadas.
+    """
+    doc = _cuenta_por_id(conductor_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+    if not doc.get("correo_verificado", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Ese correo aún no está verificado: reenvía primero el enlace de verificación.")
+    cid = str(doc["_id"])
+    placas = coleccion_vehiculos.count_documents(
+        {"$or": [{"idUsuario": cid}, {"idConductor": cid}]})
+    if placas:
+        raise HTTPException(
+            status_code=409,
+            detail=f"La cuenta ya tiene {placas} vehículo(s) vinculado(s).")
+    background_tasks.add_task(
+        enviar_correo_recordatorio_vehiculo, doc.get("correo") or "",
+        (doc.get("nombre") or "").strip())
+    return {"mensaje": f"Recordatorio enviado a {doc.get('correo', '')}."}
+
+
+# ==============================================================================
 # ⚖️ HABEAS DATA — EVIDENCIA DE AUTORIZACIÓN POR CÉDULA (2026-10-05)
 # Consulta de SOLO LECTURA para auditorías: dadas las cédulas de los sujetos de
 # un estudio de seguridad, resuelve la cuenta del portal y TODO su historial de
