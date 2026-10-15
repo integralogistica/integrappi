@@ -2292,7 +2292,16 @@ async def aceptar_invitacion(data: AceptarInvitacionInput, request: Request):
 
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
+        # (2026-10-15) El link de invitación lleva la placa del momento en que
+        # se envió: si Seguridad la corrigió después, el token SIGUE siendo
+        # válido (nunca estuvo atado a la placa) → resolver por la trazabilidad
+        # `placaAnterior` que deja /vehiculos/corregir-placa.
+        vehiculo = coleccion_vehiculos.find_one({"placaAnterior": placa})
+    if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    # Placa REAL del vehículo (≠ la del link si fue corregida): las mutaciones
+    # y notificaciones de abajo van sobre el documento renombrado.
+    placa = vehiculo.get("placa", placa)
 
     ahora = datetime.now(timezone.utc)
 

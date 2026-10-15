@@ -80,6 +80,9 @@ coleccion_disponibilidades = bd['disponibilidades']
 # cada firma del conductor sella un registro que sobrevive a ediciones del
 # documento del vehículo.
 coleccion_firmas = bd['firmas_conductor']
+# Historial de flota usada (la escribe /disponibilidad; corregir-placa la
+# re-etiqueta para mantener la continuidad del historial del vehículo).
+coleccion_asignaciones = bd['asignaciones_flota']
 
 
 def _json_seguro(valor):
@@ -170,6 +173,11 @@ CAMPOS_VOLATILES_FIRMA = {
     # gestiona con adoptar/desadoptar-placa DESPUÉS de firmar — jamás debe
     # romper la verificación del hash.
     "padrinos",
+    # Corrección de placa por Seguridad (2026-10-15): bookkeeping de la
+    # corrección (la placa vieja se recupera del sello `placa_firmada` de la
+    # evidencia, no del hash). Sin esto, corregir un typo rompería TODOS los
+    # sellos existentes en falso.
+    "placaAnterior", "placaCorregidaEn",
 }
 
 def _hash_datos_firmados(vehiculo: dict) -> str:
@@ -2183,6 +2191,9 @@ CLAVES_PROTEGIDAS = {
     # PADRINOS que adoptaron la placa (2026-10-15): lo escriben los endpoints
     # adoptar/desadoptar-placa, jamás el front.
     "padrinos",
+    # Trazabilidad de la corrección de placa (2026-10-15): lo escribe SOLO
+    # /vehiculos/corregir-placa.
+    "placaAnterior", "placaCorregidaEn",
 }
 
 # URLs de documentos: sus dueños son subir-documento/eliminar-documento.
@@ -3036,6 +3047,151 @@ async def desadoptar_placa(placa: str = Form(...), padrino_id: str = Form(...)):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CORRECCIÓN DE PLACA por SEGURIDAD/ADMIN (2026-10-15, pedido del usuario:
+# un vehículo registrado con la placa mal digitada era imposible de corregir
+# — la placa es la clave primaria lógica del módulo). Decisiones con el
+# usuario: permitido en CUALQUIER estado, NO baja a re-revisión (un typo no
+# cambia el vehículo; queda en auditoría) y los blobs NO se mueven (Mongo
+# guarda la ruta completa → siguen sirviendo; las subidas nuevas ya caen en
+# la carpeta de la placa nueva).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _avisar_correccion_placa(correo: Optional[str], vieja: str, nueva: str) -> None:
+    """
+    Correo best-effort (Resend) al conductor/tenedor avisando que su placa fue
+    corregida. Fire-and-forget: un fallo JAMÁS tumba corregir-placa.
+    """
+    try:
+        destinatario = (correo or "").strip()
+        if not destinatario or not RESEND_API_KEY:
+            return
+        cuerpo_html = f"""
+        <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px;">
+            <h2 style="color: #006f7a;">Corrección de tu placa</h2>
+            <p>Hola. El área de Seguridad corrigió la placa de tu vehículo:</p>
+            <div style="background-color: #f0f8f8; padding: 15px; border-radius: 8px;
+                        margin: 20px 0; border: 1px solid #cce5e8; text-align: center;">
+                <p style="margin: 0; font-size: 17px;">
+                    <span style="text-decoration: line-through; color: #999;">{vieja}</span>
+                    &nbsp;→&nbsp;
+                    <strong style="color: #006f7a;">{nueva}</strong>
+                </p>
+            </div>
+            <p>Todos tus datos, documentos y firmas siguen intactos: solo cambió
+            la placa. Ingresa a <b>IntegraApp</b> y verás tu vehículo con la
+            placa corregida.</p>
+            <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;">
+            <p style="font-size: 12px; color: #999;">Notificación automática de IntegraApp.</p>
+        </div>"""
+        email = resend.Emails.send({
+            "from": MAIL_FROM, "to": [destinatario],
+            "subject": f"🪪 Tu placa fue corregida: {vieja} → {nueva}",
+            "html": cuerpo_html,
+        })
+        print(f"[corregir-placa] Correo de aviso enviado a {destinatario}. ID: {email}")
+    except Exception as e:
+        print(f"[corregir-placa] No se pudo enviar el aviso a {correo}: {e}")
+
+
+@ruta_vehiculos.put("/corregir-placa")
+async def corregir_placa(
+    placa: str = Form(...),
+    placa_nueva: str = Form(...),
+    editado_por: Optional[str] = Form(None),
+    via: Optional[str] = Form(None),
+):
+    """
+    Seguridad/Admin corrige la placa de un vehículo con error de digitación.
+    Renombra la placa en `vehiculos` (dejando `placaAnterior` para trazabilidad
+    y los links de invitación viejos) y re-etiqueta las colecciones hermanas
+    (`firmas_conductor` — sellando la placa del momento de la firma —,
+    `disponibilidades` y `asignaciones_flota`). NO cambia el estado del
+    vehículo (decisión: corregir un typo no es una edición de datos) y NO mueve
+    los blobs del bucket (las rutas guardadas siguen sirviendo).
+    """
+    # Endpoint EXCLUSIVO de Seguridad/Admin (más estricto que actualizar-estado,
+    # que solo excluye al padrino): cambia la identidad del vehículo.
+    if (via or "") != "seguridad":
+        raise HTTPException(
+            status_code=403,
+            detail="Solo Seguridad puede corregir la placa de un vehículo.",
+        )
+    perfil_actor = _perfil_de_actor(editado_por)
+    if perfil_actor in ("PADRINO", "CONDUCTOR", "TENEDOR") or \
+            (perfil_actor is not None and perfil_actor not in ("SEGURIDAD", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo Seguridad o Admin pueden corregir la placa de un vehículo.",
+        )
+
+    vieja = placa.strip().upper()
+    nueva = placa_nueva.strip().upper()
+    if nueva == vieja:
+        raise HTTPException(status_code=400, detail="La placa nueva es igual a la actual.")
+    if not re.fullmatch(r"[A-Z0-9]{1,7}", nueva):
+        raise HTTPException(
+            status_code=400,
+            detail="Placa inválida: 1 a 7 caracteres alfanuméricos, sin espacios.",
+        )
+    vehiculo = coleccion_vehiculos.find_one({"placa": vieja})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    if coleccion_vehiculos.find_one({"placa": nueva}):
+        raise HTTPException(
+            status_code=409,
+            detail=f"La placa {nueva} ya está registrada en otro vehículo.",
+        )
+
+    ahora = datetime.utcnow()
+    # 1. El vehículo: placa nueva + trazabilidad. `placaAnterior` permite que
+    #    los links de invitación ya enviados (?placa=vieja) sigan resolviendo.
+    coleccion_vehiculos.update_one(
+        {"placa": vieja},
+        {"$set": {"placa": nueva, "placaAnterior": vieja, "placaCorregidaEn": ahora}},
+    )
+    # 2. Evidencias de firma: se mueven a la placa nueva sellando la placa del
+    #    MOMENTO DE FIRMAR (`placa_firmada`) — verificar-firma recalcula con
+    #    esa, no con la actual, para no romper la verificación en falso.
+    coleccion_firmas.update_many(
+        {"placa": vieja},
+        {"$set": {"placa": nueva, "placa_firmada": vieja}},
+    )
+    # 3. Check-ins y asignaciones de flota: re-etiquetados (el índice único
+    #    (placa, fecha) no choca: la placa nueva no existía). Sin esto el
+    #    conductor perdería el check-in del día y el historial de uso.
+    coleccion_disponibilidades.update_many({"placa": vieja}, {"$set": {"placa": nueva}})
+    coleccion_asignaciones.update_many({"placa": vieja}, {"$set": {"placa": nueva}})
+
+    # 4. Auditoría DESPUÉS del rename para que caiga en el documento renombrado.
+    _registrar_auditoria(
+        nueva, "placa_corregida", actor=editado_por, via="seguridad",
+        detalle=f"{vieja} → {nueva}",
+    )
+    # 5. Avisos fire-and-forget (jamás tumban la corrección).
+    _notificar_padrinos(
+        nueva,
+        f"La placa {vieja} fue corregida a {nueva} por Seguridad. Tus avisos "
+        f"siguen llegando bajo la placa nueva.",
+        titulo=f"La placa {vieja} fue corregida",
+    )
+    _avisar_correccion_placa(vehiculo.get("condCorreo"), vieja, nueva)
+
+    invitacion_pendiente = any(
+        (vehiculo.get(k) or {}).get("estado") == "pendiente"
+        for k in ("invitacionConductor", "invitacionConductor2")
+    )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": f"Placa corregida: {vieja} → {nueva}",
+            "placa_anterior": vieja,
+            "placa": nueva,
+            "invitacion_pendiente": invitacion_pendiente,
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RECORTE de documentos por SEGURIDAD (2026-10-07, pedido del usuario: hay
 # fotos tomadas muy lejos que muestran cosas de sobra y no quieren que las
 # imágenes queden así). Seguridad dibuja un recuadro sobre la imagen en
@@ -3616,6 +3772,10 @@ async def firmar(
     version = 1 + coleccion_firmas.count_documents(filtro_version)
     registro = {
         "placa": placa,
+        # Placa sellada AL MOMENTO de firmar (2026-10-15): si Seguridad luego
+        # corrige la placa del vehículo, la verificación recalcula el hash con
+        # ESTA placa (la que el conductor vio al firmar), no con la actual.
+        "placa_firmada": placa,
         "slot": slot,
         "version": version,
         "id_usuario": id_usuario,
@@ -3695,6 +3855,17 @@ async def verificar_firma(placa: str, slot: int = 1):
         articulo = "segundo conductor" if slot == 2 else "vehículo"
         raise HTTPException(status_code=404, detail=f"Este {articulo} no tiene firmas registradas.")
     hash_actual = _hash_datos_firmados_slot2(vehiculo) if slot == 2 else _hash_datos_firmados(vehiculo)
+    # (2026-10-15) Corrección de placa: la placa forma parte del hash (en el
+    # slot 2 de forma explícita, en el 1 porque hashcea el documento completo).
+    # Si Seguridad corrigió la placa después de firmado, el sello guarda la
+    # placa del momento de la firma (`placa_firmada`) → recalcular con ESA,
+    # no con la actual, para no reportar «datos cambiaron» en falso.
+    placa_firmada = evidencia.get("placa_firmada")
+    if placa_firmada and placa_firmada != vehiculo.get("placa"):
+        vehiculo_para_hash = dict(vehiculo)
+        vehiculo_para_hash["placa"] = placa_firmada
+        hash_actual = (_hash_datos_firmados_slot2(vehiculo_para_hash)
+                       if slot == 2 else _hash_datos_firmados(vehiculo_para_hash))
     return {
         "placa": placa,
         "slot": slot,
