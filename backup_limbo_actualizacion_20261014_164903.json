@@ -1,0 +1,50 @@
+[
+  {
+    "placa": "ETM370",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-12 23:00:32.607000",
+    "observaciones": ""
+  },
+  {
+    "placa": "JTZ665",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-13 21:24:46.675000",
+    "observaciones": ""
+  },
+  {
+    "placa": "QVK730",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-09 20:38:25.341000",
+    "observaciones": ""
+  },
+  {
+    "placa": "QPO391",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-13 20:11:45.257000",
+    "observaciones": ""
+  },
+  {
+    "placa": "TVC742",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-10 02:27:40.046000",
+    "observaciones": ""
+  },
+  {
+    "placa": "PRZ723",
+    "estadoIntegra": "completado_revision",
+    "fechaEstado": "2026-10-13 18:48:49.895000",
+    "observaciones": ""
+  },
+  {
+    "placa": "EXX734",
+    "estadoIntegra": "aprobado",
+    "fechaEstado": "2026-10-13 19:30:34.999000",
+    "observaciones": "Estado: Aprobado\r\nNivel de Riesgo: Bajo\r\nConcepto del Estudio de Seguridad:\r\nRealizadas las validaciones de antecedentes, listas restrictivas y documentación del propietario, conductor y/o vehículo, no se evidencian hallazgos que representen un riesgo para la operación. Se emite concepto favorable para su vinculación, sujeto al monitoreo y actualización periódica de la información conforme a las políticas de seguridad de la organización."
+  },
+  {
+    "placa": "SPX714",
+    "estadoIntegra": "aprobado",
+    "fechaEstado": "2026-10-13 22:26:33.888000",
+    "observaciones": ""
+  }
+]

@@ -88,6 +88,12 @@ def vehiculo_completo(**extra):
         # Capacidad de carga (kg): obligatoria y en rango 300–50.000 para
         # pasar a completado_revision (2026-09-07).
         "vehCapacidadCarga": "8000",
+        # Fotos del vehículo POR ÁNGULO (2026-10-14): los 4 exigidos viven en
+        # `fotosVehiculo` (el array plano `fotos` dejó de bastar).
+        "fotosVehiculo": [
+            {"tipo": t, "ruta": f"https://x/foto_{t}"}
+            for t in ("frontal", "lateral_izq", "lateral_der", "posterior")
+        ],
         **TODOS_DOCS,
     }
     doc.update(extra)
@@ -209,8 +215,12 @@ class DocumentosFaltantesTests(unittest.TestCase):
         self.assertEqual(vehiculos._documentos_faltantes(v), [])
 
     def test_array_fotos_vacio_cuenta_como_faltante(self):
-        v = vehiculo_completo(fotos=[])
-        self.assertIn("fotos", vehiculos._documentos_faltantes(v))
+        """(2026-10-14) El array plano ya NO basta: sin el catálogo de
+        ángulos faltan los 4 (frontal/laterales/posterior) por su slug."""
+        v = vehiculo_completo(fotos=[], fotosVehiculo=[])
+        faltantes = vehiculos._documentos_faltantes(v)
+        for angulo in ("frontal", "lateral_izq", "lateral_der", "posterior"):
+            self.assertIn(angulo, faltantes)
 
     def test_url_basura_cuenta_como_faltante(self):
         v = vehiculo_completo(licencia="null")
@@ -263,9 +273,13 @@ class DocumentosFaltantesTests(unittest.TestCase):
         self.assertIn("documentoAcreditacionTenedor", vehiculos._documentos_faltantes(v))
 
     def test_fotos_minimo_una(self):
-        # Fotos del vehículo: se exige al menos 1 (máximo 10 lo valida subir-fotos).
-        v = vehiculo_completo(fotos=None)
-        self.assertIn("fotos", vehiculos._documentos_faltantes(v))
+        """(2026-10-14) Sin NINGUNA foto faltan los 4 ÁNGULOS — el gate ya no
+        habla de "fotos" planas sino de cada ángulo exigido."""
+        v = vehiculo_completo(fotos=None, fotosVehiculo=None)
+        self.assertEqual(
+            set(vehiculos._documentos_faltantes(v)),
+            {"frontal", "lateral_izq", "lateral_der", "posterior"},
+        )
 
 
 class PdfConClaveTests(unittest.TestCase):

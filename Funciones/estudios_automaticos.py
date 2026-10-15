@@ -248,7 +248,11 @@ def _digitos(valor) -> str:
 # (2026-10-05) Dueño del remolque: figura OPCIONAL — solo entra como sujeto
 # si `RemolDuenoDocumento` viene diligenciado (dedup por dígitos igual que
 # las demás: si es la misma persona, combina roles en un solo estudio).
+# (2026-10-14) SEGUNDO CONDUCTOR: figura OPCIONAL con HV completa — entra
+# como sujeto persona por SU cédula cuando el slot 2 está vinculado y ya la
+# diligenció (mismo dedup: si coincide con otra figura, combina roles).
 _ROLES = (("conductor", "condCedulaCiudadania", "condFechaExpedicion", None),
+          ("conductor2", "cond2CedulaCiudadania", "cond2FechaExpedicion", None),
           ("propietario", "propDocumento", None, "propTipoDocumento"),
           ("tenedor", "tenedDocumento", None, "tenedTipoDocumento"),
           ("dueño_remolque", "RemolDuenoDocumento", None, "RemolDuenoTipoDocumento"))
@@ -416,6 +420,27 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
             previa = _huella_estudios_previos(vehiculo.get("estudiosSeguridadAuto"))
             if previa and previa == _huella_sujetos(sujetos):
                 return
+
+        # Bitácora del vehículo (2026-10-14): la corrida no dejaba rastro en
+        # la auditoría de /revision y en la pestaña Cambios no se veía NADA
+        # del disparo (reporte del usuario con LCM768: "no se ve la 1:57 pm").
+        # Inline (no importa _registrar_auditoria de rutas.vehiculos: ciclo).
+        try:
+            quienes = ", ".join(
+                f"{s['tipo']} {s.get('cedula') or s.get('nit') or s.get('placa', '')}"
+                for s in sujetos)
+            coleccion_vehiculos.update_one(
+                {"placa": placa},
+                {"$push": {"auditoriaVehiculo": {"$each": [{
+                    "fecha": datetime.utcnow(),
+                    "actor": None,
+                    "via": "seguridad" if manual else "sistema",
+                    "accion": "estudios_consultados",
+                    "detalle": f"{len(sujetos)} sujeto(s): {quienes}"[:300],
+                }], "$slice": -200}}},
+            )
+        except Exception as e:
+            print(f"[estudios-auto] No se pudo auditar la corrida de {placa}: {e}")
 
         _EN_CURSO.add(placa)
 

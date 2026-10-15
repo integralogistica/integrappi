@@ -384,6 +384,11 @@ class HojaVidaFisicaTests(unittest.TestCase):
             "condFoto": "u11", "condCertificacionBancaria": "u12",
             "tenedCertificacionBancaria": "u14", "documentoAcreditacionTenedor": "u15",
             "rutTenedor": "u16", "fotos": ["f1"],
+# Fotos del vehículo POR ÁNGULO (2026-10-14): los 4 exigidos.
+"fotosVehiculo": [
+    {"tipo": t, "ruta": "https://x/foto_" + t}
+    for t in ("frontal", "lateral_izq", "lateral_der", "posterior")
+],
         }
         # (2026-10-01) La HV física la sube Seguridad en /revision solo en los
         # casos históricos: SIN ella el vehículo ya puede finalizar.

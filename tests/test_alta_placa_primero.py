@@ -131,8 +131,9 @@ class AsignarResponsableTests(unittest.TestCase):
                             data={"id_usuario": OID})
         self.assertEqual(r.status_code, 404)
 
-    def test_conductor_con_placa_rechazado_tenedor_pasa(self):
-        # CONDUCTOR que ya tiene su placa → 400.
+    def test_conductor_con_placa_se_promueve_a_tenedor(self):
+        # (2026-10-14) CONDUCTOR dueño de otra ficha → ya es tenedor de facto:
+        # se PROMUEVE automáticamente y la asignación pasa (antes: 400).
         veh_fake = FakeColeccion([
             _borrador(),
             {"_id": "v2", "placa": "OTRA01", "idUsuario": OID, "fotos": []},
@@ -144,8 +145,10 @@ class AsignarResponsableTests(unittest.TestCase):
              patch.object(vehiculos, "coleccion_conductores_cuenta", cuentas):
             r = cliente.put("/vehiculos/asignar-responsable/ABC123",
                             data={"id_usuario": OID})
-        self.assertEqual(r.status_code, 400)
-        # El mismo caso con TENEDOR → pasa (flota).
+        self.assertEqual(r.status_code, 200)
+        # La cuenta quedó promovida.
+        self.assertEqual(cuentas.documents[0]["perfil"], "TENEDOR")
+        # El mismo caso naciendo ya como TENEDOR → pasa igual (flota).
         cuentas.documents[0]["perfil"] = "TENEDOR"
         with patch.object(vehiculos, "coleccion_vehiculos", veh_fake), \
              patch.object(vehiculos, "coleccion_conductores_cuenta", cuentas):

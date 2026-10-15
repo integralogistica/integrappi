@@ -105,6 +105,29 @@ def _json_seguro(valor):
 # Firma electrónica — helpers de sellado
 # ==========================================
 
+# SEGUNDO CONDUCTOR (2026-10-14, pedido del usuario): el slot 2 es OPCIONAL y
+# tiene hoja de vida COMPLETA — sus datos (`cond2*`, espejo de los `cond*`) y
+# sus propios documentos. Catálogo ÚNICO de contenido declarado del slot 2: de
+# aquí se derivan la volatilidad de la firma, el hash de SU firma
+# (_hash_datos_firmados_slot2) y el gate de documentos. La VINCULACIÓN
+# (`idConductor2`/`invitacionConductor2`) y la firma (`firmaUrl2`/
+# `firmaEvidencia2`) son bookkeeping y viven aparte.
+CAMPOS_CONDUCTOR_2 = frozenset({
+    "cond2PrimerApellido", "cond2SegundoApellido", "cond2Nombres",
+    "cond2CedulaCiudadania", "cond2FechaNacimiento", "cond2ExpedidaEn",
+    "cond2FechaExpedicion", "cond2DeptoCiudad", "cond2Ciudad", "cond2Direccion",
+    "cond2Celular", "cond2Correo", "cond2Eps", "cond2Arl", "cond2NoLicencia",
+    "cond2FechaVencimientoLic", "cond2CategoriaLic", "cond2GrupoSanguineo",
+    "cond2Banco", "cond2TipoCuenta", "cond2NumeroCuenta",
+    "cond2NombreEmergencia", "cond2CelularEmergencia", "cond2ParentescoEmergencia",
+    "cond2EmpresaRef", "cond2CelularRef", "cond2DeptoCiudadRef", "cond2CiudadRef",
+    "cond2NroViajesRef", "cond2AntiguedadRef", "cond2MercTransportada",
+    # Documentos del slot 2 (otra persona: NO entran en FAMILIAS_FIGURA ni
+    # tienen gemelos con propietario/tenedor/conductor 1).
+    "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
+    "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
+})
+
 # Campos EXCLUIDOS del hash de datos firmados: bookkeeping interno, estado
 # administrativo o la propia evidencia. Todo lo demás (datos del formulario y
 # URLs de los documentos cargados) queda amarrado criptográficamente a la firma.
@@ -125,6 +148,24 @@ CAMPOS_VOLATILES_FIRMA = {
     # Bitácora de auditoría: se escribe DESPUÉS de cada mutación; jamás debe
     # romper la verificación del hash de datos firmados.
     "auditoriaVehiculo", "historialInactivacion",
+    # Catálogo de ángulos de las fotos del vehículo (2026-10-14): lo escribe
+    # subir-fotos, jamás el front ni la firma (el espejo plano `fotos` ya está
+    # amparado por el hash).
+    "fotosVehiculo",
+    # Sello temporal del último cambio de estado (2026-10-14): bookkeeping
+    # administrativo como estadoIntegra — sin esto CADA transición posterior
+    # a la firma rompía la verificación del hash en falso.
+    "fechaEstado",
+    # Estado al que volver cuando un vehículo en_actualizacion por documento
+    # eliminado vuelva a estar completo (2026-10-14).
+    "actualizacionOrigen",
+    # SEGUNDO CONDUCTOR (2026-10-14): TODO su contenido es volátil para la
+    # firma del conductor 1 — el slot 1 firmó SUS datos; la HV del 2º se llena
+    # después y el 2º tiene SU PROPIA firma sobre estos mismos campos
+    # (_hash_datos_firmados_slot2). Sin esto, llenar la HV del 2º rompería la
+    # verificación de TODAS las firmas del slot 1.
+    "idConductor2", "invitacionConductor2", "firmaUrl2", "firmaEvidencia2",
+    *CAMPOS_CONDUCTOR_2,
 }
 
 def _hash_datos_firmados(vehiculo: dict) -> str:
@@ -135,6 +176,18 @@ def _hash_datos_firmados(vehiculo: dict) -> str:
     el hash recalculado ya no coincide → integridad verificable.
     """
     datos = {k: v for k, v in _json_seguro(vehiculo).items() if k not in CAMPOS_VOLATILES_FIRMA}
+    canonico = json.dumps(datos, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
+
+def _hash_datos_firmados_slot2(vehiculo: dict) -> str:
+    """
+    SHA-256 canónico de los datos declarados del SEGUNDO conductor (2026-10-14):
+    su HV (`CAMPOS_CONDUCTOR_2`) anclada a la placa — la placa impide reutilizar
+    la misma firma en otra ficha. La vinculación y la propia evidencia de firma
+    quedan fuera (bookkeeping, misma convención del slot 1).
+    """
+    datos = {"placa": vehiculo.get("placa")}
+    datos.update({k: v for k, v in _json_seguro(vehiculo).items() if k in CAMPOS_CONDUCTOR_2})
     canonico = json.dumps(datos, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
 
@@ -707,6 +760,17 @@ TIPOS_SUBIDA_LEIBLES = {
     "soat": "soat",
     # Planilla de Seguridad Social: la IA lee la fecha de VENCIMIENTO (2026-10-07).
     "planillaEpsArl": "planilla_seguridad_social",
+    # SEGUNDO CONDUCTOR (2026-10-14): mismos esquemas — el contexto de cédula
+    # para los avisos sale de cond2CedulaCiudadania (ver subir-documento).
+    "documentoIdentidadConductor2": "cedula",
+    "licencia2": "licencia",
+    "cond2CertificacionBancaria": "certificado_bancario",
+}
+
+# Tipos leíbles que pertenecen al SEGUNDO conductor: la IA valida contra SU
+# cédula (cond2CedulaCiudadania) y no contra la del conductor 1.
+TIPOS_LEIBLES_CONDUCTOR2 = {
+    "documentoIdentidadConductor2", "licencia2", "cond2CertificacionBancaria",
 }
 
 
@@ -738,8 +802,11 @@ FAMILIAS_FIGURA = {
 # Reversos OBLIGATORIOS (2026-08-27): licencia y tarjeta de propiedad tienen
 # dos caras y ambas se exigen; el de la cédula queda opcional (solo amarilla).
 # La Tarjeta de Remolque es OPCIONAL (2026-08-27, orden del usuario: no todo
-# vehículo arrastra remolque). Las fotos del vehículo: mínimo 1 (exigida como
-# "fotos"), máximo 10 (tope en subir-fotos).
+# vehículo arrastra remolque).
+# FOTOS del vehículo (2026-10-14, pedido del usuario): se exigen CUATRO
+# ÁNGULOS — FRONTAL, LATERAL IZQUIERDA, LATERAL DERECHA y POSTERIOR — en el
+# array `fotosVehiculo` (ver ANGULOS_FOTO_VEHICULO abajo; "fotos" deja de
+# estar en esta lista y queda como espejo plano de TODAS las fotos, tope 10).
 # TODAS las cédulas exigen reverso (2026-08-27, orden del usuario: siempre
 # dos caras, ya no solo la cédula amarilla del conductor).
 # OPCIONALES (2026-08-31, orden del usuario): la Póliza de Responsabilidad
@@ -757,15 +824,38 @@ DOCUMENTOS_REQUERIDOS = [
     "documentoIdentidadTenedor", "documentoIdentidadTenedorReverso",
     "licencia", "licenciaReverso", "planillaEpsArl", "condFoto",
     "condCertificacionBancaria", "tenedCertificacionBancaria",
-    "documentoAcreditacionTenedor", "rutTenedor", "fotos",
+    "documentoAcreditacionTenedor", "rutTenedor",
     # (2026-10-01) La Hoja de vida FÍSICA salió de los requeridos: NO se le pide
     # al conductor en el paso 3 — la sube SEGURIDAD desde /revision solo en los
     # casos históricos que la entregaron en papel (sigue siendo tipo válido en
     # subir-documento y campo blindado).
+    # (2026-10-14) "fotos" salió de la lista: los 4 ÁNGULOS se exigen aparte.
 ]
 
-# Tope de fotos del vehículo por placa (mínimo 1 = "fotos" requerida arriba).
+# Tope de fotos del vehículo por placa (4 ángulos + adicionales, en total).
 MAX_FOTOS_VEHICULO = 10
+
+# ÁNGULOS de foto del vehículo EXIGIDOS al finalizar (2026-10-14, pedido del
+# usuario): «que se suban al menos 4 fotos — FRONTAL, LATERAL IZQ Y DERECHO,
+# POSTERIOR». Cada ángulo vive en `fotosVehiculo` [{tipo, ruta, fecha}] (una
+# por ángulo; re-subirla la REEMPLAZA) y `fotos` queda como espejo plano de
+# todas (compat: carrusel, /revision, Excel, hash de la firma).
+ANGULOS_FOTO_VEHICULO = ["frontal", "lateral_izq", "lateral_der", "posterior"]
+
+# Documentos del SEGUNDO CONDUCTOR (2026-10-14): se exigen SOLO cuando el
+# slot 2 está VINCULADO (`idConductor2`) — el 2º conductor es opcional y un
+# vehículo con un solo conductor no debe exigir nada de él. Sin gemelos: es
+# otra persona, ningún documento de otra figura lo cubre.
+DOCUMENTOS_REQUERIDOS_CONDUCTOR2 = (
+    "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
+    "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
+)
+ETIQUETAS_FOTO_VEHICULO = {
+    "frontal": "Foto Frontal del Vehículo",
+    "lateral_izq": "Foto Lateral Izquierda del Vehículo",
+    "lateral_der": "Foto Lateral Derecha del Vehículo",
+    "posterior": "Foto Posterior del Vehículo",
+}
 
 ETIQUETAS_DOCUMENTO = {
     "tarjetaPropiedad": "Tarjeta de Propiedad",
@@ -793,6 +883,16 @@ ETIQUETAS_DOCUMENTO = {
     "rutTenedor": "RUT del Tenedor",
     "rutPropietario": "RUT del Propietario",
     "fotos": "Fotos del vehículo",
+    # SEGUNDO CONDUCTOR (2026-10-14): mismos documentos, persona distinta.
+    "documentoIdentidadConductor2": "Documento de Identidad del Conductor 2",
+    "documentoIdentidadConductor2Reverso": "Documento de Identidad del Conductor 2 (Reverso)",
+    "licencia2": "Licencia de Conducción del Conductor 2",
+    "licencia2Reverso": "Licencia de Conducción del Conductor 2 (Reverso)",
+    "cond2Foto": "Foto del Conductor 2",
+    "cond2CertificacionBancaria": "Certificación Bancaria del Conductor 2",
+    # Ángulos de foto exigidos (2026-10-14): los devuelve _documentos_faltantes
+    # y así el gate de «Finalizar» los lista con nombre legible.
+    **ETIQUETAS_FOTO_VEHICULO,
     "hojaVidaFisica": "Hoja de Vida Física (autorización firmada)",
 }
 
@@ -802,6 +902,9 @@ TIPOS_DOS_CARAS_SUBIDA = {
     "documentoIdentidadConductor", "documentoIdentidadPropietario",
     "documentoIdentidadTenedor", "documentoIdentidadRemolque",
     "licencia", "tarjetaPropiedad",
+    # SEGUNDO CONDUCTOR (2026-10-14): cédula y licencia del slot 2 también
+    # suben reverso (misma regla de dos caras).
+    "documentoIdentidadConductor2", "licencia2",
 }
 
 # Tipos aceptados por subir-documento (referencia compartida).
@@ -818,6 +921,11 @@ TIPOS_SUBIDA_VALIDOS = [
     "licenciaReverso", "tarjetaPropiedadReverso",
     # (2026-09-28) Hoja de vida física firmada (alta por Seguridad).
     "hojaVidaFisica",
+    # SEGUNDO CONDUCTOR (2026-10-14): sus documentos son tipos de subida
+    # propios (reverso de la licencia como ítem; el de la cédula vía `reverso`
+    # en la subida del frente, igual que el slot 1).
+    "documentoIdentidadConductor2", "licencia2", "licencia2Reverso",
+    "cond2Foto", "cond2CertificacionBancaria",
 ]
 
 # Campos que SEGURIDAD puede RECORTAR en /revision (2026-10-07, pedido del
@@ -975,6 +1083,20 @@ def _documentos_faltantes(vehiculo: dict) -> list:
     # pide).
     if _tiene_remolque(vehiculo) and not _doc_lleno(vehiculo, "tarjetaRemolque"):
         faltantes.append("tarjetaRemolque")
+    # FOTOS del vehículo por ÁNGULO (2026-10-14, pedido del usuario): se
+    # exigen las 4 — frontal, lateral izquierda, lateral derecha y posterior.
+    # `fotosVehiculo` las cataloga; un histórico con fotos sin catalogar
+    # (solo el array plano) no pasa: hay que subir los 4 ángulos.
+    angulos_fotos = {str(f.get("tipo") or "").strip() for f in (vehiculo.get("fotosVehiculo") or [])
+                     if isinstance(f, dict) and str(f.get("ruta") or "").strip()}
+    for angulo in ANGULOS_FOTO_VEHICULO:
+        if angulo not in angulos_fotos:
+            faltantes.append(angulo)
+    # SEGUNDO CONDUCTOR (2026-10-14): sus 6 documentos, SOLO si está vinculado.
+    if vehiculo.get("idConductor2"):
+        for campo in DOCUMENTOS_REQUERIDOS_CONDUCTOR2:
+            if not _doc_lleno(vehiculo, campo):
+                faltantes.append(campo)
     return faltantes
 
 
@@ -1032,6 +1154,102 @@ def _via_de_actor(actor: Optional[str], via: Optional[str] = None) -> str:
     if via in ("conductor", "impersonacion", "seguridad"):
         return via
     return "impersonacion" if (actor or "").strip() else "conductor"
+
+
+# ── Etiquetas legibles de campos para la bitácora (2026-10-14) ─────────────
+# La auditoría de "datos_actualizados" decía solo "N campo(s)" y no se sabía
+# QUÉ había cambiado (reporte del usuario con LCM768: filas "3 campo(s)" sin
+# sentido). Las etiquetas espejan las de la pestaña Datos de /revision; los
+# campos fuera del mapa caen a la regla de prefijos por figura.
+ETIQUETAS_CAMPO_AUDITORIA = {
+    "condNombres": "Nombres Conductor", "condPrimerApellido": "1er Apellido Conductor",
+    "condSegundoApellido": "2do Apellido Conductor", "condCedulaCiudadania": "Cédula Conductor",
+    "condExpedidaEn": "Ciudad Exp. Cédula", "condFechaExpedicion": "Fecha Expedición Cédula",
+    "condFechaNacimiento": "Fecha Nacimiento Conductor", "condDireccion": "Dirección Conductor",
+    "condCiudad": "Ciudad Residencia", "condDeptoCiudad": "Depto Residencia",
+    "condCelular": "Celular Conductor", "condCorreo": "Correo Conductor",
+    "condEps": "EPS", "condArl": "ARL", "condGrupoSanguineo": "Grupo Sanguíneo",
+    "condNoLicencia": "No. Licencia", "condFechaVencimientoLic": "Vencimiento Licencia",
+    "condCategoriaLic": "Categoría Licencia",
+    "condNombreEmergencia": "Nombre Emergencia", "condCelularEmergencia": "Celular Emergencia",
+    "condParentescoEmergencia": "Parentesco Emergencia",
+    "condEmpresaRef": "Empresa Referencia", "condCelularRef": "Celular Referencia",
+    "condCiudadRef": "Ciudad Referencia", "condDeptoCiudadRef": "Depto Referencia",
+    "condNroViajesRef": "Nro. Viajes Ref", "condAntiguedadRef": "Antigüedad Ref",
+    "condMercTransportada": "Mercancía Transportada",
+    "condBanco": "Banco Conductor", "condTipoCuenta": "Tipo Cuenta Conductor",
+    "condNumeroCuenta": "No. Cuenta Conductor",
+    "propNombre": "Nombre Propietario", "propDocumento": "Doc. Propietario",
+    "propTipoDocumento": "Tipo Doc. Propietario", "propCiudadExpDoc": "Ciudad Exp. Doc Prop",
+    "propCorreo": "Correo Propietario", "propCelular": "Celular Propietario",
+    "propDireccion": "Dirección Propietario", "propCiudad": "Ciudad Propietario",
+    "propDeptoCiudad": "Depto Propietario", "propBanco": "Banco Propietario",
+    "propTipoCuenta": "Tipo Cuenta Propietario", "propNumeroCuenta": "No. Cuenta Propietario",
+    "propFechaInicioActividad": "Inicio Actividad RUT Prop.", "propFechaExpedicionRut": "Fecha Expedición RUT Prop.",
+    "tenedNombre": "Nombre Tenedor", "tenedDocumento": "Doc. Tenedor",
+    "tenedTipoDocumento": "Tipo Doc. Tenedor", "tenedCiudadExpDoc": "Ciudad Exp. Doc Tenedor",
+    "tenedCorreo": "Correo Tenedor", "tenedCelular": "Celular Tenedor",
+    "tenedDireccion": "Dirección Tenedor", "tenedCiudad": "Ciudad Tenedor",
+    "tenedDeptoCiudad": "Depto Tenedor", "tenedBanco": "Banco Tenedor",
+    "tenedTipoCuenta": "Tipo Cuenta Tenedor", "tenedNumeroCuenta": "No. Cuenta Tenedor",
+    "tenedFechaInicioActividad": "Inicio Actividad RUT Tenedor", "tenedFechaExpedicionRut": "Fecha Expedición RUT Tenedor",
+    "vehMarca": "Marca Vehículo", "vehLinea": "Línea Vehículo", "vehModelo": "Modelo Vehículo",
+    "vehColor": "Color Vehículo", "vehTipoCarroceria": "Carrocería Vehículo",
+    "vehCapacidadCarga": "Capacidad de Carga (kg)", "vehAno": "Año Repotenciación",
+    "vehRepotenciado": "Repotenciado", "vehNoLicTransito": "Nº Licencia Tránsito",
+    "vehCodigoLicTransito": "Código Licencia (LT)", "vehClase": "Clase Vehículo",
+    "vehServicio": "Servicio Vehículo", "vehCilindraje": "Cilindraje",
+    "vehCombustible": "Combustible", "vehCapPasajeros": "Capacidad Pasajeros",
+    "vehVin": "VIN", "vehChasis": "Chasis", "vehMotor": "Motor",
+    "vehAseguradoraSoat": "Aseguradora SOAT", "vehPolizaSoat": "Póliza SOAT",
+    "vehVencimientoSoat": "Vencimiento SOAT",
+    "vehEmpresaSat": "Empresa Satelital", "vehUsuarioSat": "Usuario Satelital", "vehClaveSat": "Clave Satelital",
+    "RemolPlaca": "Placa Remolque", "RemolModelo": "Modelo Remolque", "RemolClase": "Clase Remolque",
+    "RemolTipoCarroceria": "Carrocería Remolque", "RemolAlto": "Alto Remolque",
+    "RemolLargo": "Largo Remolque", "RemolAncho": "Ancho Remolque",
+    "RemolDuenoNombre": "Nombre Dueño Remolque", "RemolDuenoDocumento": "Doc. Dueño Remolque",
+    "RemolDuenoTipoDocumento": "Tipo Doc. Dueño Remolque", "RemolDuenoCorreo": "Correo Dueño Remolque",
+    "referenciasAdicionales": "Referencias Adicionales",
+    "idConductor": "Conductor Vinculado", "idConductor2": "Conductor 2 Vinculado",
+    "invitacionConductor2": "Invitación Conductor 2",
+}
+# SEGUNDO CONDUCTOR (2026-10-14): etiquetas de los campos del 2º derivadas de
+# las del conductor 1 (cond2X → «<etiqueta> (2º Conductor)»).
+ETIQUETAS_CAMPO_AUDITORIA.update({
+    f"cond2{k[4:]}": f"{v} (2º Conductor)"
+    for k, v in list(ETIQUETAS_CAMPO_AUDITORIA.items())
+    if k.startswith("cond") and k != "condCorreo"
+})
+ETIQUETAS_CAMPO_AUDITORIA["cond2Correo"] = "Correo (2º Conductor)"
+
+_PREFIJOS_FIGURA = (
+    ("cond", "Conductor"), ("prop", "Propietario"), ("tened", "Tenedor"),
+    ("Remol", "Remolque"), ("veh", "Vehículo"),
+)
+
+
+def _etiqueta_campo_auditoria(campo: str) -> str:
+    """Etiqueta legible de un campo de la ficha (mapa curado → regla de
+    prefijos por figura → nombre crudo como último recurso)."""
+    if campo in ETIQUETAS_CAMPO_AUDITORIA:
+        return ETIQUETAS_CAMPO_AUDITORIA[campo]
+    for prefijo, figura in _PREFIJOS_FIGURA:
+        if campo.startswith(prefijo):
+            resto = re.sub(r"(?<!^)(?=[A-Z])", " ", campo[len(prefijo):]).strip()
+            return f"{figura} · {resto}" if resto else figura
+    return campo
+
+
+def _detalle_campos_auditoria(cambios: list) -> str:
+    """Detalle legible para la bitácora de datos_actualizados: cuántos campos
+    y CUÁLES (etiquetas legibles). Con muchos campos se resume para no golpear
+    el tope de 300 chars de la entrada."""
+    etiquetas = [_etiqueta_campo_auditoria(c.get("campo", "")) for c in cambios]
+    if len(etiquetas) > 6:
+        resumen = ", ".join(etiquetas[:6]) + f" y {len(etiquetas) - 6} más"
+    else:
+        resumen = ", ".join(etiquetas)
+    return f"{len(cambios)} campo(s) — {resumen}"
 
 
 def _registrar_auditoria(placa: str, accion: str, actor: Optional[str] = None,
@@ -1239,7 +1457,8 @@ def _celular_conductor_vehiculo(vehiculo: dict) -> Optional[str]:
     celular = _normalizar_celular_co(vehiculo.get("condCelular"))
     if celular:
         return celular
-    for campo in ("idUsuario", "idConductor"):
+    # 2026-10-14: el 2º conductor también es responsable de la ficha.
+    for campo in ("idUsuario", "idConductor", "idConductor2"):
         valor = vehiculo.get(campo)
         if not valor:
             continue
@@ -1317,10 +1536,17 @@ async def crear_vehiculo(
         if (perfil_usuario or "CONDUCTOR").strip().upper() != "TENEDOR":
             propios = coleccion_vehiculos.count_documents({"idUsuario": id_usuario})
             if propios >= 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Como conductor solo puedes registrar un vehículo. Para registrar varias placas, tu cuenta debe ser de tenedor (dueño de flota).",
-                )
+                # (2026-10-14, pedido del usuario) Ya es dueño de su(s) ficha(s)
+                # y conduce → ES tenedor de facto: se promueve automáticamente
+                # en vez de bloquear (la regla CONDUCTOR=1 placa quedaba corta
+                # para el dueño-conductor que quiere otra placa).
+                try:
+                    coleccion_conductores_cuenta.update_one(
+                        {"_id": _a_objectid(id_usuario)}, {"$set": {"perfil": "TENEDOR"}})
+                    print(f"[perfil] {id_usuario} promovido a TENEDOR al registrar "
+                          f"su placa #{propios + 1} (era dueño-conductor)")
+                except Exception as e:
+                    print(f"[perfil] No se pudo promover a TENEDOR a {id_usuario}: {e}")
 
     nuevo_vehiculo = {
         "idUsuario": None if es_borrador else id_usuario,
@@ -1354,6 +1580,10 @@ async def crear_vehiculo(
         # ficha (tenedor o conductor legacy); idConductor = conductor invitado.
         "idConductor": None,
         "invitacionConductor": None,   # {correo, estado: pendiente|aceptada, creado_en, expira}
+        # SEGUNDO CONDUCTOR (2026-10-14): slot 2 OPCIONAL con HV completa
+        # (cond2* + documentos propios + firma propia).
+        "idConductor2": None,
+        "invitacionConductor2": None,
         # Auditoría de ediciones sobre vehículos aprobados (re-revisión).
         "historialCambios": [],
         # Histórico de inactivaciones/reactivaciones por Seguridad.
@@ -1448,16 +1678,20 @@ def asignar_responsable(
     if not cuenta:
         raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
 
-    # Regla de negocio (misma de /crear): el CONDUCTOR solo puede tener UN
-    # vehículo propio; el TENEDOR una flota. El borrador no cuenta (sin dueño).
+    # Regla de negocio (misma de /crear): el TENEDOR tiene flota. El
+    # CONDUCTOR dueño de otra ficha se PROMUEVE automáticamente a TENEDOR
+    # (2026-10-14, pedido del usuario): ya es tenedor de facto.
     perfil = (cuenta.get("perfil") or "CONDUCTOR").strip().upper()
     if perfil != "TENEDOR":
         propios = coleccion_vehiculos.count_documents({"idUsuario": id_usuario})
         if propios >= 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Esta cuenta de CONDUCTOR ya tiene su placa. Para varias placas la cuenta debe ser TENEDOR.",
-            )
+            try:
+                coleccion_conductores_cuenta.update_one(
+                    {"_id": cuenta["_id"]}, {"$set": {"perfil": "TENEDOR"}})
+                print(f"[perfil] {id_usuario} promovido a TENEDOR al asignarle "
+                      f"su placa #{propios + 1} (era dueño-conductor)")
+            except Exception as e:
+                print(f"[perfil] No se pudo promover a TENEDOR a {id_usuario}: {e}")
 
     coleccion_vehiculos.update_one(
         {"placa": placa_limpia},
@@ -1474,8 +1708,11 @@ def asignar_responsable(
 @ruta_vehiculos.get("/obtener-vehiculos")
 def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
     # $or: vehículos propios (idUsuario = dueño de la ficha, conductor legacy o
-    # tenedor) + vehículos donde soy el conductor invitado (idConductor).
-    filtro = {"$or": [{"idUsuario": id_usuario}, {"idConductor": id_usuario}]}
+    # tenedor) + vehículos donde soy el conductor invitado (idConductor /
+    # idConductor2 — el 2º conductor también ve la placa, 2026-10-14).
+    filtro = {"$or": [
+        {"idUsuario": id_usuario}, {"idConductor": id_usuario}, {"idConductor2": id_usuario},
+    ]}
     if estadoIntegra:
         filtro = {"$and": [filtro, {"estadoIntegra": estadoIntegra}]}
 
@@ -1564,6 +1801,26 @@ TRANSICIONES_VALIDAS = {
     "rechazado": set(),
 }
 
+def _perfil_de_actor(nombre: Optional[str]) -> Optional[str]:
+    """
+    Perfil REAL en `baseusuarios` del actor declarado (2026-10-14, patrón de
+    `_resolver_usuario_flota`): busca por `usuario` o `nombre`. Best-effort:
+    si no resuelve (actor de prueba, nombre libre) devuelve None y el llamador
+    deja pasar — mismo nivel de confianza declarada del resto del sistema.
+    """
+    texto = (nombre or "").strip()
+    if not texto:
+        return None
+    try:
+        doc = coleccion_baseusuarios.find_one({"usuario": texto.upper()})
+        if not doc:
+            doc = coleccion_baseusuarios.find_one({"nombre": {"$regex": f"^{re.escape(texto)}$", "$options": "i"}})
+        return (doc or {}).get("perfil")
+    except Exception as e:
+        print(f"[perfil-actor] No se pudo resolver el perfil de {texto!r}: {e}")
+        return None
+
+
 @ruta_vehiculos.put("/actualizar-estado")
 async def actualizar_estado(
     placa: str = Form(...),
@@ -1578,6 +1835,15 @@ async def actualizar_estado(
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+
+    # PADRINO (2026-10-14): impersona placas SOLO para cargar documentos y
+    # datos — NO autoriza estados. El front del padrino no ofrece los botones;
+    # este guard tapa la llamada directa al endpoint.
+    if (via or "") == "seguridad" and _perfil_de_actor(editado_por) == "PADRINO":
+        raise HTTPException(
+            status_code=403,
+            detail="El perfil PADRINO no puede cambiar estados de vehículos: solo cargar documentos y datos. Pide a Seguridad que autorice.",
+        )
 
     # Whitelist de transiciones: evita estados basura y saltos inválidos
     # (ej. registro_incompleto → aprobado directo, o re-revisión de un inactivo).
@@ -1676,6 +1942,10 @@ async def actualizar_estado(
         datos_actualizar["observaciones"] = ""
 
     operacion = {"$set": datos_actualizar}
+    # El origen de una actualización automática (documento eliminado, 2026-10-14)
+    # deja de aplicar en cuanto el vehículo sale de en_actualizacion.
+    if nuevo_estado != "en_actualizacion":
+        operacion["$unset"] = {"actualizacionOrigen": ""}
 
     # Histórico de inactivación (append-only): quién, cuándo y por qué.
     if nuevo_estado == "inactivo":
@@ -1765,11 +2035,17 @@ async def actualizar_estado(
 CLAVES_PROTEGIDAS = {
     "_id", "placa", "idUsuario", "idConductor", "estadoIntegra",
     "invitacionConductor", "historialCambios", "usuarioIntegra",
+    # SEGUNDO CONDUCTOR (2026-10-14): la vinculación la gestionan los
+    # endpoints de /conductores (invitar/desvincular), jamás el front.
+    # Los `cond2*` SÍ fluyen por aquí (son datos de formulario).
+    "idConductor2", "invitacionConductor2",
     # Borrador del alta (placa-primero): lo escribe /asignar-responsable.
     "responsable_pendiente",
     "estudioSeguridad", "fotoconductorseguridad", "estudioSeguridadFecha", "lecturasIA", "fotos",
     # Sello de la firma electrónica: solo /vehiculos/firmar lo escribe.
     "firmaEvidencia",
+    # Sello de la firma del SEGUNDO conductor (2026-10-14): igual, /firmar.
+    "firmaEvidencia2",
     # Estudios automáticos (TusDatos): los escribe el disparador en
     # background, jamás el front.
     "estudiosSeguridadAuto", "historialEstudios", "documentosEstudioSeguridad",
@@ -1783,6 +2059,11 @@ CLAVES_PROTEGIDAS = {
     # Bitácora de auditoría (quién creó/modificó cada cosa): la escriben los
     # endpoints del backend, jamás el front.
     "auditoriaVehiculo", "historialInactivacion",
+    # Origen de una actualización automática por documento eliminado
+    # (2026-10-14): lo escriben eliminar-documento/subir-documento.
+    "actualizacionOrigen",
+    # Catálogo de ángulos de fotos (2026-10-14): lo escribe subir-fotos.
+    "fotosVehiculo",
 }
 
 # URLs de documentos: sus dueños son subir-documento/eliminar-documento.
@@ -1807,6 +2088,13 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
     # Cédula del dueño del remolque (2026-10-05): figura opcional aparte.
     "documentoIdentidadRemolque", "documentoIdentidadRemolqueReverso",
+    # Catálogo de ángulos de las fotos (2026-10-14): lo escribe subir-fotos.
+    "fotosVehiculo",
+    # SEGUNDO CONDUCTOR (2026-10-14): sus documentos y su imagen de firma
+    # (mismo blindaje que los del slot 1).
+    "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
+    "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
+    "firmaUrl2",
 }
 
 # Referencias laborales adicionales (2026-08-31): la #1 son los campos planos
@@ -1895,7 +2183,7 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
     if cambios:
         _registrar_auditoria(
             placa, "datos_actualizados", actor=editado_por,
-            detalle=f"{len(cambios)} campo(s)",
+            detalle=_detalle_campos_auditoria(cambios),
         )
         _registrar_cambio_aprobado(vehiculo, editado_por or "", "datos", cambios)
 
@@ -1915,6 +2203,21 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
                 )
             except Exception as e:
                 print(f"[cedula] No se pudo propagar la cedula a la cuenta {id_cuenta}: {e}")
+
+    # La cédula del SEGUNDO conductor (2026-10-14) va SOLO a SU cuenta
+    # (idConductor2) — jamás a las del dueño/conductor 1.
+    cedula2 = str(datos_limpios.get("cond2CedulaCiudadania") or "").strip()
+    if cedula2:
+        cedula2 = re.sub(r"\D", "", cedula2)
+        id_cuenta2 = vehiculo.get("idConductor2")
+        if id_cuenta2:
+            try:
+                coleccion_conductores_cuenta.update_one(
+                    {"_id": _a_objectid(id_cuenta2), "cedula": {"$in": [None, ""]}},
+                    {"$set": {"cedula": cedula2}},
+                )
+            except Exception as e:
+                print(f"[cedula] No se pudo propagar la cedula a la cuenta {id_cuenta2}: {e}")
 
     # El NOMBRE llega igual a las cuentas que no lo tengan (el alta de
     # Seguridad pide solo correo + celular: el nombre lo aporta la IA al
@@ -1962,6 +2265,34 @@ async def actualizar_informacion_vehiculo(placa: str, datos: dict, editado_por: 
                 )
             except Exception as e:
                 print(f"[celular] No se pudo propagar el celular a la cuenta {id_cuenta}: {e}")
+
+    # SEGUNDO CONDUCTOR (2026-10-14): nombre y celular del 2º → SU cuenta.
+    id_cuenta2 = vehiculo.get("idConductor2")
+    if id_cuenta2:
+        claves_nombre2 = {"cond2Nombres", "cond2PrimerApellido", "cond2SegundoApellido"}
+        if any(k in datos_limpios for k in claves_nombre2):
+            def _val2(clave):
+                return str(datos_limpios.get(clave) or vehiculo.get(clave) or "").strip()
+            nombre2 = " ".join(filter(None, [
+                _val2("cond2Nombres"), _val2("cond2PrimerApellido"), _val2("cond2SegundoApellido"),
+            ])).upper() or None
+            if nombre2:
+                try:
+                    coleccion_conductores_cuenta.update_one(
+                        {"_id": _a_objectid(id_cuenta2), "nombre": {"$in": [None, ""]}},
+                        {"$set": {"nombre": nombre2}},
+                    )
+                except Exception as e:
+                    print(f"[nombre] No se pudo propagar el nombre a la cuenta {id_cuenta2}: {e}")
+        celular2 = str(datos_limpios.get("cond2Celular") or "").strip()
+        if celular2:
+            try:
+                coleccion_conductores_cuenta.update_one(
+                    {"_id": _a_objectid(id_cuenta2), "celular": {"$in": [None, ""]}},
+                    {"$set": {"celular": celular2}},
+                )
+            except Exception as e:
+                print(f"[celular] No se pudo propagar el celular a la cuenta {id_cuenta2}: {e}")
 
     return JSONResponse(status_code=200, content={"message": "Información actualizada"})
 
@@ -2212,9 +2543,14 @@ async def subir_documento(
             lectura_ia = None
     elif esquema_ia and not saltar_lectura and (extraer or "true").lower() != "false":
         try:
+            # SEGUNDO CONDUCTOR (2026-10-14): sus documentos se validan contra
+            # SU cédula — si no, la IA marcaría la cédula legítima del 2º como
+            # "documento ajeno" (409) y bloquearía la subida completa.
+            campo_cedula = ("cond2CedulaCiudadania" if tipo in TIPOS_LEIBLES_CONDUCTOR2
+                            else "condCedulaCiudadania")
             contexto = {
                 "placa_vehiculo": placa,
-                "cedula_conductor": vehiculo.get("condCedulaCiudadania") or "",
+                "cedula_conductor": vehiculo.get(campo_cedula) or "",
             }
             datos_leidos = await asyncio.to_thread(extraer_datos_con_llm, esquema_ia, [archivo])
             archivo.file.seek(0)
@@ -2357,6 +2693,12 @@ async def subir_documento(
                 for g in gemelos
             ]
         _registrar_cambio_aprobado(vehiculo, editado_por or "", "documentos", campos_diff)
+
+    # (2026-10-14) La planilla es el documento que se elimina/re-sube sin
+    # generar re-revisión: si el vehículo estaba inhabilitado en
+    # en_actualizacion POR eliminarla y ya no falta nada, se rehabilita solo.
+    if tipo == "planillaEpsArl":
+        _rehabilitar_tras_planilla(placa, editado_por)
 
     if lectura_ia:
         lecturas_set = {f"lecturasIA.{tipo}": {**lectura_ia, "fecha": datetime.utcnow()}}
@@ -2713,17 +3055,55 @@ async def subir_fotos(
     archivos: List[UploadFile],
     placa: str = Form(...),
     editado_por: Optional[str] = Form(None),   # actor real (el front ya lo enviaba)
+    # Ángulo de la foto (2026-10-14): frontal | lateral_izq | lateral_der |
+    # posterior — UNA foto por ángulo (re-subirla la reemplaza). Sin el parámetro
+    # (o "otra") son fotos adicionales: comportamiento histórico (acumulan).
+    foto_tipo: Optional[str] = Form(None),
 ):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     _asegurar_editable(vehiculo)
 
+    es_angulo = (foto_tipo or "").strip() in ANGULOS_FOTO_VEHICULO
+    if es_angulo and len(archivos) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El ángulo «{ETIQUETAS_FOTO_VEHICULO.get(foto_tipo, foto_tipo)}» lleva UNA foto (llevas {len(archivos)}).",
+        )
+
     # Tope de fotos por vehículo: máximo 10 en total (las ya subidas + estas).
     # Se deduplican primero (sanear docs contaminados por el bug de numeración:
     # la misma URL repetida N veces cuenta como UNA foto).
     actuales = [u for u in (vehiculo.get("fotos") or []) if u and str(u).strip()]
     actuales = list(dict.fromkeys(actuales))
+    # Re-subir un ÁNGULO reemplaza su foto: la anterior sale del espejo plano
+    # (el blob queda en el bucket) para no ocupar cupo del tope.
+    angulos_previos = [f for f in (vehiculo.get("fotosVehiculo") or []) if isinstance(f, dict)]
+    ruta_anterior_angulo = None
+    if es_angulo:
+        previa = next((f for f in angulos_previos if f.get("tipo") == foto_tipo
+                       and str(f.get("ruta") or "").strip()), None)
+        if previa:
+            ruta_anterior_angulo = str(previa["ruta"])
+    # La numeración se calcula sobre TODAS las fotos existentes (ANTES de
+    # sacar la reemplazada): si no, la nueva reutilizaría su nombre foto_00N
+    # del mismo día y PISARÍA el blob que acaba de reemplazar. El número se
+    # extrae con regex del segmento foto_NN (desde 2026-10-02 el nombre lleva
+    # sufijo _{placa} al final — el parser viejo rsplit("_") leía "test01.webp",
+    # int() reventaba en silencio y CADA tanda del día reiniciaba en 001
+    # pisando los blobs de las tandas anteriores).
+    fecha_hoy = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+    prefijo_hoy = f"{placa.strip().upper()}/{fecha_hoy}/foto_"
+    maximo_hoy = 0
+    for url_existente in actuales:
+        s = str(url_existente)
+        if prefijo_hoy in s:
+            m = re.search(r"foto_(\d+)", s)
+            if m:
+                maximo_hoy = max(maximo_hoy, int(m.group(1)))
+    if ruta_anterior_angulo:
+        actuales = [u for u in actuales if u != ruta_anterior_angulo]
     if len(actuales) + len(archivos) > MAX_FOTOS_VEHICULO:
         raise HTTPException(
             status_code=400,
@@ -2734,35 +3114,37 @@ async def subir_fotos(
         )
 
     urls_fotos = []
-    # La numeración CONTINÚA desde el mayor sufijo _NNN usado HOY para esta
-    # placa: si empezara en _001 cada tanda, subir de a una foto repetiría el
-    # nombre (foto_001), el blob nuevo pisaría al anterior y Mongo quedaría con
-    # la MISMA URL varias veces (bug real: la última foto aparecía "repetida N
-    # veces"). Contar hoy (y no el total histórico) evita pisar también tras
-    # borrar fotos de días anteriores.
-    fecha_hoy = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
-    prefijo_hoy = f"{placa.strip().upper()}/{fecha_hoy}/foto_"
-    maximo_hoy = 0
-    for url_existente in actuales:
-        s = str(url_existente)
-        if prefijo_hoy in s:
-            try:
-                numero = int(s.rsplit("_", 1)[-1].split(".")[0])
-                maximo_hoy = max(maximo_hoy, numero)
-            except ValueError:
-                continue
-
+    # (La numeración CONTINÚA desde el mayor sufijo _NNN usado HOY — ver el
+    # bloque de arriba: evita que re-subir pise el blob de foto_001.)
     for indice, archivo in enumerate(archivos, start=maximo_hoy + 1):
         nombre_archivo = _nombre_doc_bucket(placa, "foto", "webp", vehiculo, sufijo=f"_{indice:03d}")
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
         urls_fotos.append(url_archivo)
 
-    # $set (no $push): escribe el array saneado (sin duplicados) + las nuevas,
-    # reparando de paso los docs con URLs repetidas del bug de numeración.
-    coleccion_vehiculos.update_one({"placa": placa}, {"$set": {"fotos": actuales + urls_fotos}})
+    operacion: dict = {
+        # $set (no $push): escribe el array saneado (sin duplicados) + las
+        # nuevas, reparando de paso los docs con URLs repetidas del bug de
+        # numeración.
+        "$set": {"fotos": actuales + urls_fotos}
+    }
+    if es_angulo:
+        # Catálogo de ángulos: la foto nueva REEMPLAZA a la anterior del mismo
+        # ángulo (una por ángulo, orden fijo de ANGULOS_FOTO_VEHICULO).
+        nuevos_angulos = [f for f in angulos_previos if f.get("tipo") != foto_tipo]
+        nuevos_angulos.append({
+            "tipo": foto_tipo,
+            "ruta": urls_fotos[0],
+            "fecha": datetime.utcnow(),
+        })
+        nuevos_angulos.sort(key=lambda f: ANGULOS_FOTO_VEHICULO.index(f.get("tipo")))
+        operacion["$set"]["fotosVehiculo"] = nuevos_angulos
+    coleccion_vehiculos.update_one({"placa": placa}, operacion)
     _registrar_auditoria(
         placa, "fotos_subidas", actor=editado_por,
-        detalle=f"{len(urls_fotos)} foto(s)",
+        detalle=(f"{ETIQUETAS_FOTO_VEHICULO.get(foto_tipo, foto_tipo)} (reemplazada)"
+                 if es_angulo and ruta_anterior_angulo else
+                 (ETIQUETAS_FOTO_VEHICULO.get(foto_tipo, foto_tipo) if es_angulo
+                  else f"{len(urls_fotos)} foto(s)")),
     )
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -2846,6 +3228,7 @@ async def firmar(
     placa: str = Form(...),
     id_usuario: Optional[str] = Form(None),
     editado_por: Optional[str] = Form(None),
+    slot: int = Form(1),  # 1|2: conductor principal | segundo conductor (2026-10-14)
 ):
     """
     Firma ELECTRÓNICA del conductor (nivel de evidencia reforzada, Ley 1955
@@ -2857,11 +3240,21 @@ async def firmar(
          IP y user-agent (mismo patrón de evidencia que aceptaciones_politica).
     El registro es inmutable y sobrevive a ediciones posteriores del vehículo;
     re-firmar agrega un registro nuevo (version 2, 3, …), nunca reemplaza.
+    `slot=2` (2026-10-14): firma del SEGUNDO conductor — exige `idConductor2`
+    vinculado, hashea SOLO sus datos (`_hash_datos_firmados_slot2`) y escribe
+    los punteros firmaUrl2/firmaEvidencia2. Los registros llevan `slot`.
     """
+    if slot not in (1, 2):
+        raise HTTPException(status_code=400, detail="slot inválido: debe ser 1 o 2.")
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     _asegurar_editable(vehiculo)
+    if slot == 2 and not vehiculo.get("idConductor2"):
+        raise HTTPException(
+            status_code=400,
+            detail="Este vehículo no tiene un segundo conductor vinculado.",
+        )
 
     contenido = await archivo.read()
     if not contenido:
@@ -2869,11 +3262,14 @@ async def firmar(
     hash_firma = hashlib.sha256(contenido).hexdigest()
 
     # El hash amarra la firma a los datos EXACTOS declarados en este momento.
-    hash_datos = _hash_datos_firmados(vehiculo)
+    if slot == 2:
+        hash_datos = _hash_datos_firmados_slot2(vehiculo)
+    else:
+        hash_datos = _hash_datos_firmados(vehiculo)
 
     try:
         archivo.file.seek(0)
-        nombre_archivo = _nombre_doc_bucket(placa, "firma", "webp", vehiculo)
+        nombre_archivo = _nombre_doc_bucket(placa, "firma" if slot == 1 else "firma2", "webp", vehiculo)
         url_archivo = subir_a_google_storage(archivo, nombre_archivo)
     except HTTPException:
         raise
@@ -2884,20 +3280,35 @@ async def firmar(
     ip = request.client.host if request.client else ""
     user_agent = (request.headers.get("user-agent") or "")[:300]
 
-    cedula = re.sub(r"\D", "", str(vehiculo.get("condCedulaCiudadania") or ""))
-    nombre = " ".join(
-        str(vehiculo.get(k) or "").strip()
-        for k in ("condNombres", "condPrimerApellido", "condSegundoApellido")
-    ).strip()
+    if slot == 2:
+        prefijo = "cond2"
+        campos_nombre = ("cond2Nombres", "cond2PrimerApellido", "cond2SegundoApellido")
+        cedula = re.sub(r"\D", "", str(vehiculo.get("cond2CedulaCiudadania") or ""))
+        nombre = " ".join(str(vehiculo.get(k) or "").strip() for k in campos_nombre).strip()
+        correo = (vehiculo.get("cond2Correo") or "").upper()
+        id_usuario = id_usuario or vehiculo.get("idConductor2")
+    else:
+        prefijo = "cond"
+        cedula = re.sub(r"\D", "", str(vehiculo.get("condCedulaCiudadania") or ""))
+        nombre = " ".join(
+            str(vehiculo.get(k) or "").strip()
+            for k in ("condNombres", "condPrimerApellido", "condSegundoApellido")
+        ).strip()
+        correo = (vehiculo.get("condCorreo") or "").upper()
+        id_usuario = id_usuario or vehiculo.get("idUsuario")
 
-    version = 1 + coleccion_firmas.count_documents({"placa": placa})
+    # Versiones POR SLOT: las del 1 son los registros históricos (sin `slot`)
+    # más los nuevos slot=1; las del 2 cuentan solo los slot=2.
+    filtro_version = {"placa": placa, "slot": 2} if slot == 2 else {"placa": placa, "slot": {"$ne": 2}}
+    version = 1 + coleccion_firmas.count_documents(filtro_version)
     registro = {
         "placa": placa,
+        "slot": slot,
         "version": version,
-        "id_usuario": id_usuario or vehiculo.get("idUsuario"),
+        "id_usuario": id_usuario,
         "cedula": cedula,
         "nombre": nombre,
-        "correo": (vehiculo.get("condCorreo") or "").upper(),
+        "correo": correo,
         "hash_datos": hash_datos,
         "firma_url": url_archivo,
         "hash_firma": hash_firma,
@@ -2909,27 +3320,32 @@ async def firmar(
 
     # Puntero de conveniencia en el vehículo (la evidencia vive en la colección
     # append-only; esto es solo para mostrar el sello en panel/revisión/HV).
+    campos_puntero = ("firmaUrl", "firmaEvidencia") if slot == 1 else ("firmaUrl2", "firmaEvidencia2")
     coleccion_vehiculos.update_one(
         {"placa": placa},
         {"$set": {
-            "firmaUrl": url_archivo,
-            "firmaEvidencia": {
+            campos_puntero[0]: url_archivo,
+            campos_puntero[1]: {
                 "hash_datos": hash_datos,
                 "hash_firma": hash_firma,
                 "firmado_en": ahora,
                 "version": version,
                 "registro_id": str(resultado.inserted_id),
+                "slot": slot,
             },
         }},
     )
 
+    sufijo_detalle = "Conductor 2 — " if slot == 2 else ""
     _registrar_cambio_aprobado(
         vehiculo, editado_por or "", "documentos",
-        [{"campo": "firmaUrl", "antes": vehiculo.get("firmaUrl") or "(ninguna)", "despues": url_archivo}],
+        [{"campo": campos_puntero[0],
+          "antes": vehiculo.get(campos_puntero[0]) or "(ninguna)",
+          "despues": url_archivo}],
     )
     _registrar_auditoria(
         placa, "firma_sellada", actor=editado_por,
-        detalle=f"Versión {version} — hash {hash_datos[:12]}…",
+        detalle=f"{sufijo_detalle}Versión {version} — hash {hash_datos[:12]}…",
     )
 
     return JSONResponse(
@@ -2946,35 +3362,45 @@ async def firmar(
 
 
 @ruta_vehiculos.get("/verificar-firma/{placa}")
-async def verificar_firma(placa: str):
+async def verificar_firma(placa: str, slot: int = 1):
     """
     Verificación de integridad de la firma electrónica: recalcula el hash de
     los datos actuales del vehículo y lo compara con el sellado en la última
     firma. `coincide=false` = el documento cambió después de firmado (el diff
     de qué cambió vive en `historialCambios`).
+    `slot=2` (2026-10-14): verifica la firma del SEGUNDO conductor (sus datos
+    y SUS registros `slot=2`). Los históricos sin `slot` se leen como slot 1.
     """
+    if slot not in (1, 2):
+        raise HTTPException(status_code=400, detail="slot inválido: debe ser 1 o 2.")
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    evidencia = coleccion_firmas.find_one({"placa": placa}, sort=[("firmado_en", -1)])
+    filtro = {"placa": placa, "slot": 2} if slot == 2 else {"placa": placa, "slot": {"$ne": 2}}
+    evidencia = coleccion_firmas.find_one(filtro, sort=[("firmado_en", -1)])
     if not evidencia:
-        raise HTTPException(status_code=404, detail="Este vehículo no tiene firmas registradas.")
-    hash_actual = _hash_datos_firmados(vehiculo)
+        articulo = "segundo conductor" if slot == 2 else "vehículo"
+        raise HTTPException(status_code=404, detail=f"Este {articulo} no tiene firmas registradas.")
+    hash_actual = _hash_datos_firmados_slot2(vehiculo) if slot == 2 else _hash_datos_firmados(vehiculo)
     return {
         "placa": placa,
+        "slot": slot,
         "coincide": hash_actual == evidencia.get("hash_datos"),
         "hash_actual": hash_actual,
         "evidencia": _json_seguro(_firmar_documentos({k: v for k, v in evidencia.items() if k != "_id"})),
     }
 
 @ruta_vehiculos.get("/obtener-firma")
-async def obtener_firma(placa: str):
-    vehiculo = coleccion_vehiculos.find_one({"placa": placa}, {"firmaUrl": 1, "_id": 0})
-    
-    if not vehiculo or not vehiculo.get("firmaUrl"):
+async def obtener_firma(placa: str, slot: int = 1):
+    if slot not in (1, 2):
+        raise HTTPException(status_code=400, detail="slot inválido: debe ser 1 o 2.")
+    campo_firma = "firmaUrl2" if slot == 2 else "firmaUrl"
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa}, {campo_firma: 1, "_id": 0})
+
+    if not vehiculo or not vehiculo.get(campo_firma):
         raise HTTPException(status_code=404, detail="Firma no encontrada")
-    
-    url_firma = vehiculo.get("firmaUrl")
+
+    url_firma = vehiculo.get(campo_firma)
 
     try:
         # El blob es privado: se descarga server-side (antes era una URL
@@ -3009,12 +3435,106 @@ async def obtener_firma(placa: str):
         raise HTTPException(status_code=500, detail="Error al procesar la imagen")
 
 
+# ==========================================
+# ELIMINAR DOC REQUERIDO → en_actualizacion (2026-10-14)
+# ==========================================
+
+def _mover_a_actualizacion_por_eliminacion(placa: str, actor: Optional[str] = None,
+                                           estado_previo: Optional[str] = None):
+    """(2026-10-14, caso real QVK730 + pedido del usuario) El gate de
+    documentación solo vive en la TRANSICIÓN a completado_revision: eliminar
+    un documento DESPUÉS dejaba el vehículo anclado en la bandeja de revisión
+    (o en la bolsa de oferta) con avance < 100 % para siempre. Regla: si tras
+    la eliminación falta documentación EXIGIDA y el vehículo estaba en
+    revisión o aprobado, pasa a `en_actualizacion` — el estado que existe para
+    eso — y queda INHABILITADO hasta que el documento vuelva a subirse.
+
+    `actualizacionOrigen` recuerda a dónde volver cuando la documentación
+    vuelva a estar completa (la planilla lo hace sola; el resto exige
+    «Finalizar» → revisión) y distingue esta actualización automática de la
+    que pide Seguridad con «Actualizar datos», que NO se auto-restaura.
+    """
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        return
+    estado_actual = vehiculo.get("estadoIntegra")
+    if estado_actual not in ("completado_revision", "aprobado"):
+        return
+    faltantes = _documentos_faltantes(vehiculo)
+    if not faltantes:
+        return
+    # El origen es el estado REAL antes de eliminar: si la eliminación bajó
+    # un aprobado a re-revisión (_registrar_cambio_aprobado corre antes), el
+    # origen sigue siendo el aprobado original.
+    origen = estado_previo if estado_previo in ("aprobado", "completado_revision") else estado_actual
+    nombres = ", ".join(ETIQUETAS_DOCUMENTO.get(f, f) for f in faltantes)
+    ahora = datetime.utcnow()
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {"$set": {
+            "estadoIntegra": "en_actualizacion",
+            "fechaEstado": ahora,
+            "actualizacionOrigen": origen,
+            "observaciones": (
+                f"Documento eliminado: {nombres}. El vehículo queda inhabilitado "
+                f"hasta cargar de nuevo la documentación faltante."
+            ),
+        }},
+    )
+    # Sacarlo de la bolsa del día por si tenía check-in activo (la /bolsa
+    # además filtra por estado — misma defensa doble del inactivo).
+    try:
+        coleccion_disponibilidades.update_many(
+            {"placa": placa, "estado": "activa"},
+            {"$set": {"estado": "cancelada", "actualizado_en": ahora}},
+        )
+    except Exception as e:
+        print(f"[disponibilidad] No se pudo cancelar el check-in de {placa}: {e}")
+    _registrar_auditoria(
+        placa, "estado_en_actualizacion", actor=actor,
+        detalle=f"{estado_actual} → en_actualizacion · faltan: {nombres}",
+    )
+
+
+def _rehabilitar_tras_planilla(placa: str, actor: Optional[str] = None):
+    """(2026-10-14, pedido del usuario: "inhabilitado hasta que se lo vuelvan
+    a subir") Re-subir la Planilla de Seguridad Social rehabilita SOLO al
+    vehículo que pasó a en_actualizacion POR HABERLA ELIMINADO
+    (`actualizacionOrigen` existe) y cuya documentación vuelve a estar
+    completa — es el documento de renovación mensual que por diseño no genera
+    re-revisión (TIPOS_SIN_REVISION). La actualización pedida por Seguridad
+    (sin origen) la cierra ella con «Aprobar»/«Cancelar actualización».
+    """
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo or vehiculo.get("estadoIntegra") != "en_actualizacion":
+        return
+    origen = vehiculo.get("actualizacionOrigen")
+    if origen not in ("aprobado", "completado_revision"):
+        return
+    if _documentos_faltantes(vehiculo):
+        return  # aún falta otra documentación: sigue inhabilitado
+    ahora = datetime.utcnow()
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {"$set": {"estadoIntegra": origen, "fechaEstado": ahora, "observaciones": ""},
+         "$unset": {"actualizacionOrigen": ""}},
+    )
+    _registrar_auditoria(
+        placa, f"estado_{origen}", actor=actor,
+        detalle=f"en_actualizacion → {origen} · rehabilitado al subir la planilla",
+    )
+
+
 @ruta_vehiculos.delete("/eliminar-documento")
 async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] = None):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or not vehiculo.get(tipo):
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
     _asegurar_editable(vehiculo)
+    # Estado ANTES de cualquier mutación (_registrar_cambio_aprobado puede
+    # bajar un aprobado a re-revisión: el origen que se recuerda debe ser el
+    # original, no el intermedio).
+    estado_previo = vehiculo.get("estadoIntegra")
 
     url_previa = vehiculo[tipo]
     eliminar_de_google_storage(url_previa)
@@ -3032,7 +3552,16 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
     gemelos_eliminados = [g for g in gemelos if vehiculo.get(g) == url_previa]
     for g in gemelos_eliminados:
         unset_campos[g] = None
-    coleccion_vehiculos.update_one({"placa": placa}, {"$unset": unset_campos})
+
+    operacion: dict = {"$unset": unset_campos}
+    # Planilla de Seguridad Social (2026-10-14, caso QVK730): su entrada del
+    # historial apunta a un blob recién borrado y el vencimiento dejó de
+    # aplicar — sin esto el bloque de /revision la seguía listando como
+    # VENCIDA para siempre pese a NO existir.
+    if tipo == "planillaEpsArl":
+        operacion["$pull"] = {"documentosPlanillaSegSocial": {"ruta": url_previa}}
+        unset_campos["planillaVencimiento"] = None
+    coleccion_vehiculos.update_one({"placa": placa}, operacion)
 
     campos_diff = [{"campo": tipo, "antes": url_previa, "despues": "(eliminado)"}]
     if campo_reverso in unset_campos:
@@ -3048,6 +3577,12 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
         campos_diff,
     )
 
+    # (2026-10-14) Eliminar documentación EXIGIDA inhabilita el vehículo
+    # (en_actualizacion) hasta que se cargue de nuevo — sin esto quedaba
+    # anclado en revisión/aprobado con avance < 100 % (caso QVK730).
+    _mover_a_actualizacion_por_eliminacion(
+        placa, actor=editado_por, estado_previo=estado_previo)
+
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"message": f"{tipo} eliminado correctamente", "gemelos_eliminados": gemelos_eliminados},
@@ -3062,7 +3597,12 @@ async def eliminar_foto(placa: str, url: str, editado_por: Optional[str] = None)
     _asegurar_editable(vehiculo)
 
     eliminar_de_google_storage(url)
-    coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"fotos": url}})
+    # El espejo plano Y el catálogo de ángulos (2026-10-14): si era una foto
+    # frontal/lateral/posterior, su ángulo vuelve a faltar.
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {"$pull": {"fotos": url, "fotosVehiculo": {"ruta": url}}},
+    )
     _registrar_auditoria(placa, "foto_eliminada", actor=editado_por)
 
     _registrar_cambio_aprobado(
@@ -3579,7 +4119,8 @@ BANDEJAS_REVISION = {
 
 
 @ruta_vehiculos.get("/obtener-vehiculos-incompletos")
-def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Optional[str] = None):
+def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Optional[str] = None,
+                                  placa: Optional[str] = None):
     filtro = {
         "estadoIntegra": {
             "$in": BANDEJAS_REVISION.get(bandeja, ["registro_incompleto", "completado_revision",
@@ -3590,6 +4131,13 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Opt
         # retoman desde el módulo de alta, no desde las bandejas de revisión.
         "responsable_pendiente": {"$ne": True},
     }
+    # Filtro por placa (2026-10-14): restaurar el panel de UN vehículo en
+    # /revision (?placa= tras un atrás/adelante o F5) NO debe traer la bandeja
+    # completa — cada vehículo firma todas sus rutas de documento y con la
+    # flota creciendo eso era lo que se sentía lento. Sin el param (o vacío)
+    # el filtro queda igual que siempre (compat con el front desplegado).
+    if placa and placa.strip():
+        filtro["placa"] = placa.strip().upper()
     vehiculos_raw = list(coleccion_vehiculos.find(filtro))
 
     if not vehiculos_raw:
@@ -3662,6 +4210,101 @@ def obtener_aprobados_paginados(search: Optional[str] = None, limit: int = 10):
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"vehiculos": _json_seguro(_firmar_documentos(vehiculos_final)), "total": total}
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Indicadores de /revision (2026-10-14): placas registradas POR DÍA y en qué
+# estado están HOY. La fecha de registro es el timestamp del _id (ObjectId.
+# generation_time, ya UTC naive): NO existe un campo fechaCreacion y
+# fechaEstado cambia con cada transición. El día agrupado es el de Colombia
+# (UTC−5, misma regla del _MS_5H de indicadores_costo_operacion.py).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Orden de apilado del gráfico (verde abajo → grises arriba) + etiqueta y
+# color; el front renderiza un <Bar> por entrada en este orden, así la
+# leyenda y el apilado nunca divergen entre backend y front.
+# Paleta VALIDADA (dataviz/validate_palette, pares adyacentes): dentro de cada
+# familia cálida la luminosidad ALTERNNA (claro/oscuro) para que protanopes
+# separen los segmentos que se tocan — los tonos rojo/naranja solos colapsan
+# bajo CVD. Los grises finales son intencionales (estados «muertos»: inactivo/
+# rechazado), con leyenda+tooltip como encoding secundario.
+ESTADOS_REGISTRO_DIA = [
+    ("aprobado", "Aprobado", "#15803d"),
+    ("en_revision", "En revisión (histórico)", "#f59e0b"),
+    ("completado_revision", "En revisión", "#9a3412"),
+    ("devuelto", "Devuelto", "#f87171"),
+    ("registro_incompleto", "Pendiente conductor", "#b91c1c"),
+    ("en_actualizacion", "En actualización", "#fb923c"),
+    ("inactivo", "Inactivo", "#94a3b8"),
+    ("rechazado", "Rechazado", "#475569"),
+]
+
+_OFFSET_COLOMBIA = timedelta(hours=5)
+
+
+@ruta_vehiculos.get("/registros-por-dia")
+def registros_por_dia(dias: int = 30):
+    if dias < 1 or dias > 365:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dias debe estar entre 1 y 365",
+        )
+    hoy_colombia = (datetime.utcnow() - _OFFSET_COLOMBIA).date()
+    desde = hoy_colombia - timedelta(days=dias - 1)
+
+    # La flota es pequeña (cientos): proyección mínima + agrupación en Python
+    # en vez de aggregate (mismo resultado, testeable con el FakeColeccion).
+    conteos: dict = {}
+    for doc in coleccion_vehiculos.find({}, {"estadoIntegra": 1}):
+        _id = doc.get("_id")
+        if not isinstance(_id, ObjectId):
+            continue  # sin ObjectId no hay fecha de registro confiable
+        dia = (_id.generation_time - _OFFSET_COLOMBIA).date()
+        if dia < desde:
+            continue
+        estado = doc.get("estadoIntegra") or "sin_estado"
+        conteos.setdefault((dia, estado), 0)
+        conteos[(dia, estado)] += 1
+
+    # Estados conocidos en su orden de apilado + cualquiera otro que aparezca
+    # (p. ej. «sin_estado» en fichas viejas) al final, para no perder placas.
+    # etiquetas conserva el orden de inserción → orden de apilado del gráfico.
+    extra = sorted({
+        estado for (_, estado) in conteos
+        if estado not in {e for e, _, _ in ESTADOS_REGISTRO_DIA}
+    })
+    etiquetas = {e: etiqueta for e, etiqueta, _ in ESTADOS_REGISTRO_DIA}
+    colores = {e: color for e, _, color in ESTADOS_REGISTRO_DIA}
+    for estado in extra:
+        etiquetas[estado] = ESTADOS_FLOTA_LEGIBLES.get(estado, estado or "sin estado")
+        colores[estado] = "#cbd5e1"
+
+    series = []
+    dia = desde
+    while dia <= hoy_colombia:
+        fecha = dia.isoformat()
+        conteo_dia = {estado: conteos.get((dia, estado), 0) for estado in etiquetas}
+        series.append({
+            "fecha": fecha,
+            "total": sum(conteo_dia.values()),
+            "conteos": conteo_dia,
+        })
+        dia += timedelta(days=1)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": "Registros por día",
+            "dias": dias,
+            "desde": desde.isoformat(),
+            # [{estado, etiqueta, color}] en orden de apilado del gráfico.
+            "estados": [
+                {"estado": estado, "etiqueta": etiqueta, "color": colores[estado]}
+                for estado, etiqueta in etiquetas.items()
+            ],
+            "series": series,
+        },
     )
 
 
@@ -3822,6 +4465,12 @@ ACCIONES_AUDITORIA_LEGIBLES = {
     "firma_sellada": "Firma electrónica sellada",
     "estudio_seguridad_cargado": "Estudio de seguridad cargado",
     "foto_seguridad_cargada": "Foto del conductor cargada",
+    "estudios_consultados": "Estudios de seguridad consultados",
+    # Cambios de conductor (2026-10-14): vinculación/desvinculación de los
+    # dos slots — los escribe /conductores (invitar·aceptar·desvincular).
+    "conductor_vinculado": "Conductor vinculado",
+    "conductor_desvinculado": "Conductor desvinculado",
+    "invitacion_conductor_enviada": "Invitación de conductor enviada",
 }
 
 # Cambios de estado (accion=estado_X de la auditoría) con etiqueta legible.
@@ -3839,6 +4488,7 @@ VIAS_AUDITORIA_LEGIBLES = {
     "conductor": "Conductor",
     "impersonacion": "Seguridad (como conductor)",
     "seguridad": "Seguridad",
+    "sistema": "Automático (sistema)",
 }
 
 

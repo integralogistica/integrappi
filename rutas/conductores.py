@@ -48,6 +48,15 @@ try:
     # Cédula: sparse (cuentas legacy no la tienen); NO unique hasta sanear datos.
     coleccion_conductores.create_index("cedula", sparse=True)
     coleccion_vehiculos.create_index("idConductor")
+    # SEGUNDO CONDUCTOR (2026-10-14): lookup de placas por los dos slots.
+    coleccion_vehiculos.create_index("idConductor2")
+    # Versiones de firma POR SLOT (firmas_conductor: slot 1 históricos sin
+    # campo + slot=1 nuevos + slot=2 del segundo conductor).
+    try:
+        coleccion_firmas = bd["firmas_conductor"]
+        coleccion_firmas.create_index([("placa", 1), ("slot", 1), ("firmado_en", -1)])
+    except Exception:
+        pass
     # Sujetos SIN cuenta: evidencia de autorización por cédula (sparse).
     coleccion_aceptaciones.create_index("sujeto_cedula", sparse=True)
     coleccion_tokens_aut.create_index("cedula")
@@ -874,7 +883,7 @@ async def cuentas_sin_vehiculo():
     for doc in coleccion_conductores.find({"activo": {"$ne": False}}).limit(500):
         cid = str(doc.get("_id"))
         placas = coleccion_vehiculos.count_documents(
-            {"$or": [{"idUsuario": cid}, {"idConductor": cid}]})
+            {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
         if placas:
             continue
         fecha = _fecha_creacion_cuenta(doc)
@@ -986,7 +995,7 @@ async def recordatorio_vehiculo(conductor_id: str, background_tasks: BackgroundT
             detail="Ese correo aún no está verificado: reenvía primero el enlace de verificación.")
     cid = str(doc["_id"])
     placas = coleccion_vehiculos.count_documents(
-        {"$or": [{"idUsuario": cid}, {"idConductor": cid}]})
+        {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
     if placas:
         raise HTTPException(
             status_code=409,
@@ -1886,11 +1895,69 @@ class InvitarConductorInput(BaseModel):
     # Celular (WhatsApp) del conductor invitado (2026-10-02): lo pide el popup
     # de invitación en el paso 2; queda en la cuenta stub para notificaciones.
     celular_conductor: Optional[str] = None
+    # SEGUNDO CONDUCTOR (2026-10-14): slot 1 (principal, default) | 2 (opcional).
+    slot: int = 1
+    # Nombre de SEGURIDAD (cookie seguridadNombre) cuando invita desde /revision:
+    # actúa por fuera del tenedor — identidad declarada, patrón del proyecto.
+    solicitante: Optional[str] = None
 
 
 def _correo_patron(correo: str) -> dict:
     """Query de correo exacto case-insensitive (anclada, con el campo incluido)."""
     return {"correo": {"$regex": f"^{re.escape((correo or '').strip())}$", "$options": "i"}}
+
+
+def _campos_slot(slot: int) -> tuple:
+    """Campos de vinculación del slot de conductor (1=principal, 2=segundo).
+    Levanta 400 si el slot no es 1 ni 2."""
+    if slot not in (1, 2):
+        raise HTTPException(status_code=400, detail="slot inválido: debe ser 1 o 2.")
+    return ("idConductor", "invitacionConductor") if slot == 1 else ("idConductor2", "invitacionConductor2")
+
+
+def _rechazar_padrino(solicitante: Optional[str]) -> None:
+    """
+    PADRINO (2026-10-14): el perfil puede impersonar placas para cargar
+    documentos y datos, pero NO gestionar conductores. Si el `solicitante`
+    declarado resuelve en baseusuarios con perfil PADRINO → 403. Best-effort
+    por nombre (patrón del resto del sistema); si no resuelve, pasa.
+    """
+    nombre = (solicitante or "").strip()
+    if not nombre:
+        return
+    try:
+        doc = coleccion_baseusuarios.find_one({"usuario": nombre.upper()})
+        if not doc:
+            doc = coleccion_baseusuarios.find_one(
+                {"nombre": {"$regex": f"^{re.escape(nombre)}$", "$options": "i"}})
+        if (doc or {}).get("perfil") == "PADRINO":
+            raise HTTPException(
+                status_code=403,
+                detail="El perfil PADRINO no gestiona conductores: solo carga documentos y datos. Pide a Seguridad que lo haga.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[padrino] No se pudo validar el perfil de {nombre!r}: {e}")
+
+
+def _pos_cambio_conductor(placa: str, vehiculo: dict, actor: str, via: str,
+                          accion: str, detalle: str, cambio: list) -> None:
+    """
+    Efectos comunes de toda vinculación/desvinculación de conductor
+    (2026-10-14, decisión del usuario): bitácora legible + si el vehículo está
+    APROBADO baja a re-revisión (diff + notificación a Seguridad + estudios).
+    Import local: rutas.vehiculos importa conductores dentro de funciones.
+    """
+    try:
+        from rutas.vehiculos import (
+            _registrar_auditoria, _registrar_cambio_aprobado,
+        )
+        _registrar_auditoria(placa, accion, actor=actor, via=via, detalle=detalle)
+        if cambio:
+            _registrar_cambio_aprobado(vehiculo, actor or "", "vinculación", cambio)
+    except Exception as e:
+        print(f"[vinculacion] No se pudo registrar el cambio de conductor de {placa}: {e}")
 
 
 def enviar_correo_invitacion(destinatario: str, enlace: str, nombre: str, placa: str, tenedor: str):
@@ -1933,7 +2000,8 @@ def enviar_correo_invitacion(destinatario: str, enlace: str, nombre: str, placa:
 @ruta_conductores.post("/invitar-conductor", response_model=dict)
 async def invitar_conductor(data: InvitarConductorInput, background_tasks: BackgroundTasks):
     """
-    El tenedor invita a un conductor para su placa:
+    El tenedor (o SEGURIDAD vía `solicitante`, 2026-10-14) invita a un conductor
+    para su placa — slot 1 (principal) o slot 2 (segundo conductor, OPCIONAL):
     - Si ya tiene cuenta CONDUCTOR activa → se vincula directo.
     - Si no → se crea cuenta stub (inactiva, sin clave usable) y se envía
       el correo de activación; al aceptar queda vinculada.
@@ -1946,8 +2014,47 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    if str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
+
+    # SEGURIDAD actúa directo desde /revision (identidad declarada); si no,
+    # el tenedor declarado debe ser el dueño de la ficha.
+    es_seguridad = bool((data.solicitante or "").strip())
+    actor = (data.solicitante or "").strip() or None
+    _rechazar_padrino(data.solicitante)
+    if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
+
+    # Slots: 1 = principal, 2 = segundo conductor. El 2º exige el 1º y NO se
+    # pisa en silencio: hay que desvincular antes de reemplazar (2026-10-14).
+    campo_id, campo_inv = _campos_slot(data.slot)
+    etiqueta_slot = "Conductor 2" if data.slot == 2 else "Conductor"
+    if data.slot == 2:
+        if not vehiculo.get("idConductor") and not (vehiculo.get("invitacionConductor") or {}).get("correo"):
+            raise HTTPException(
+                status_code=400,
+                detail="Primero invita al conductor PRINCIPAL: el segundo conductor es opcional y va después.",
+            )
+        # El mismo correo no puede ocupar ambos slots de la placa.
+        correo_otro = str((vehiculo.get("invitacionConductor") or {}).get("correo") or "").upper()
+        if correo_otro == correo_invitado.upper():
+            raise HTTPException(
+                status_code=400,
+                detail="Ese correo ya es el conductor PRINCIPAL de esta placa.",
+            )
+        # La cuenta del 2º conductor solo puede ser 2º conductor de UNA placa.
+        existente_unicidad = coleccion_conductores.find_one(_correo_patron(correo_invitado))
+        if existente_unicidad and coleccion_vehiculos.count_documents(
+                {"idConductor2": str(existente_unicidad["_id"]), "placa": {"$ne": placa}}) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Esa cuenta ya es segundo conductor de otra placa.",
+            )
+    ocupado = vehiculo.get(campo_id) or (vehiculo.get(campo_inv) or {}).get("correo")
+    if ocupado:
+        detalle_ocupado = (vehiculo.get(campo_inv) or {}).get("correo") or "un conductor vinculado"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Esa placa ya tiene {detalle_ocupado} en ese espacio. Desvincúlalo primero para reemplazarlo.",
+        )
 
     existente = coleccion_conductores.find_one(_correo_patron(correo_invitado))
 
@@ -1960,13 +2067,21 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
             coleccion_vehiculos.update_one(
                 {"placa": placa},
                 {"$set": {
-                    "idConductor": str(existente["_id"]),
-                    "invitacionConductor": {
+                    campo_id: str(existente["_id"]),
+                    campo_inv: {
                         "correo": existente.get("correo", ""),
                         "estado": "aceptada",
                         "creado_en": datetime.now(timezone.utc),
                     },
                 }},
+            )
+            _pos_cambio_conductor(
+                placa, vehiculo, actor or "tenedor", "seguridad" if es_seguridad else "conductor",
+                "conductor_vinculado",
+                f"{etiqueta_slot} — {existente.get('correo', '')}",
+                [{"campo": campo_id,
+                  "antes": vehiculo.get(campo_id) or "(ninguno)",
+                  "despues": existente.get("correo", "")}],
             )
             return {
                 "estado": "vinculado",
@@ -2005,20 +2120,27 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
 
     token = _generar_token_verificacion(stub_id)
     enlace = f"{FRONTEND_URL_INVITACION}?token={token}&placa={placa}"
+    if data.slot == 2:
+        enlace += "&slot=2"
 
-    # Nombre del tenedor para el correo (si existe su cuenta).
-    doc_tenedor = None
-    try:
-        from bson import ObjectId as _ObjectId
-        doc_tenedor = coleccion_conductores.find_one({"_id": _ObjectId(data.id_tenedor)})
-    except Exception:
-        doc_tenedor = coleccion_conductores.find_one({"_id": data.id_tenedor})
-    nombre_tenedor = (doc_tenedor or {}).get("nombre", "") or "Integra"
+    # Nombre del tenedor para el correo (si existe su cuenta). Cuando invita
+    # SEGURIDAD, el remitente visible del correo es Seguridad.
+    nombre_remitente = "Integra"
+    if es_seguridad:
+        nombre_remitente = f"Seguridad ({actor})"
+    else:
+        doc_tenedor = None
+        try:
+            from bson import ObjectId as _ObjectId
+            doc_tenedor = coleccion_conductores.find_one({"_id": _ObjectId(data.id_tenedor)})
+        except Exception:
+            doc_tenedor = coleccion_conductores.find_one({"_id": data.id_tenedor})
+        nombre_remitente = (doc_tenedor or {}).get("nombre", "") or nombre_remitente
 
     coleccion_vehiculos.update_one(
         {"placa": placa},
         {"$set": {
-            "invitacionConductor": {
+            campo_inv: {
                 "correo": correo_invitado.upper(),
                 "estado": "pendiente",
                 "creado_en": ahora,
@@ -2027,9 +2149,16 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
         }},
     )
 
+    _pos_cambio_conductor(
+        placa, vehiculo, actor or "tenedor", "seguridad" if es_seguridad else "conductor",
+        "invitacion_conductor_enviada",
+        f"{etiqueta_slot} — invitación enviada a {correo_invitado}",
+        [],  # la invitación pendiente NO baja un aprobado: baja al VINCULARSE.
+    )
+
     background_tasks.add_task(
         enviar_correo_invitacion, correo_invitado, enlace,
-        (data.nombre_conductor or "").strip(), placa, nombre_tenedor,
+        (data.nombre_conductor or "").strip(), placa, nombre_remitente,
     )
     return {
         "estado": "invitado",
@@ -2040,6 +2169,8 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
 class ReenviarInvitacionInput(BaseModel):
     id_tenedor: str
     placa: str
+    slot: int = 1
+    solicitante: Optional[str] = None
 
 
 @ruta_conductores.post("/reenviar-invitacion", response_model=dict)
@@ -2049,12 +2180,16 @@ async def reenviar_invitacion(data: ReenviarInvitacionInput, background_tasks: B
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    if str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
+    es_seguridad = bool((data.solicitante or "").strip())
+    _rechazar_padrino(data.solicitante)
+    if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
+    campo_id, campo_inv = _campos_slot(data.slot)
 
-    invitacion = vehiculo.get("invitacionConductor") or {}
-    if vehiculo.get("idConductor"):
-        raise HTTPException(status_code=400, detail="Esa placa ya tiene un conductor vinculado.")
+    invitacion = vehiculo.get(campo_inv) or {}
+    if vehiculo.get(campo_id):
+        etiqueta = "ese espacio" if data.slot == 2 else "esta placa"
+        raise HTTPException(status_code=400, detail=f"Esa placa ya tiene un conductor vinculado en {etiqueta}.")
     if not invitacion.get("correo"):
         raise HTTPException(status_code=400, detail="No hay invitación pendiente para esta placa.")
 
@@ -2064,9 +2199,11 @@ async def reenviar_invitacion(data: ReenviarInvitacionInput, background_tasks: B
 
     token = _generar_token_verificacion(stub["_id"])
     enlace = f"{FRONTEND_URL_INVITACION}?token={token}&placa={placa}"
+    if data.slot == 2:
+        enlace += "&slot=2"
     coleccion_vehiculos.update_one(
         {"placa": placa},
-        {"$set": {"invitacionConductor.expira": datetime.now(timezone.utc) + timedelta(hours=EXPIRA_HORAS_VERIFICACION)}},
+        {"$set": {f"{campo_inv}.expira": datetime.now(timezone.utc) + timedelta(hours=EXPIRA_HORAS_VERIFICACION)}},
     )
     background_tasks.add_task(
         enviar_correo_invitacion, invitacion["correo"], enlace, "", placa, "Integra",
@@ -2083,13 +2220,18 @@ class AceptarInvitacionInput(BaseModel):
     declaraciones_aceptadas: Optional[list] = None
     celular: Optional[str] = None
     cedula: Optional[str] = None
+    # SEGUNDO CONDUCTOR (2026-10-14): slot de la invitación que se acepta.
+    # Opcional: si no viene (links viejos), se deriva comparando el correo
+    # del stub contra las dos invitaciones de la placa.
+    slot: Optional[int] = None
 
 
 @ruta_conductores.post("/aceptar-invitacion", response_model=dict)
 async def aceptar_invitacion(data: AceptarInvitacionInput, request: Request):
     """
     El conductor invitado activa su cuenta: valida el token, registra la
-    aceptación de política (evidencia), fija su clave y queda vinculado a la placa.
+    aceptación de política (evidencia), fija su clave y queda vinculado a la placa
+    (slot 1 o 2 — el segundo conductor es opcional, 2026-10-14).
     """
     token_plano = (data.token or "").strip()
     placa = (data.placa or "").strip().upper()
@@ -2145,49 +2287,108 @@ async def aceptar_invitacion(data: AceptarInvitacionInput, request: Request):
         updates["cedula"] = re.sub(r"\D", "", data.cedula)
     coleccion_conductores.update_one({"_id": doc["_id"]}, {"$set": updates})
 
-    # Vinculación al vehículo.
+    # Vinculación al vehículo (slot 1 o 2; si el link no trae slot, se deriva
+    # por el correo del stub contra las dos invitaciones de la placa).
+    slot = data.slot
+    if slot is None:
+        correo_stub = str(doc.get("correo") or "").upper()
+        slot = 2 if str((vehiculo.get("invitacionConductor2") or {}).get("correo") or "").upper() == correo_stub else 1
+    campo_id, campo_inv = _campos_slot(slot)
+    etiqueta_slot = "Conductor 2" if slot == 2 else "Conductor"
+
     coleccion_vehiculos.update_one(
         {"placa": placa},
         {"$set": {
-            "idConductor": str(doc["_id"]),
-            "invitacionConductor": {
+            campo_id: str(doc["_id"]),
+            campo_inv: {
                 "correo": doc.get("correo", ""),
                 "estado": "aceptada",
-                "creado_en": (vehiculo.get("invitacionConductor") or {}).get("creado_en", ahora),
+                "creado_en": (vehiculo.get(campo_inv) or {}).get("creado_en", ahora),
                 "aceptada_en": ahora,
             },
         }},
     )
 
+    # La vinculación efectiva (2026-10-14): bitácora + re-revisión si estaba
+    # aprobado + estudios del sujeto nuevo.
+    _pos_cambio_conductor(
+        placa, vehiculo, str(doc.get("correo") or etiqueta_slot), "conductor",
+        "conductor_vinculado",
+        f"{etiqueta_slot} — {doc.get('correo', '')} aceptó la invitación",
+        [{"campo": campo_id,
+          "antes": vehiculo.get(campo_id) or "(ninguno)",
+          "despues": doc.get("correo", "")}],
+    )
+    try:
+        from rutas.vehiculos import _disparar_estudios_seguridad
+        _disparar_estudios_seguridad(placa)
+    except Exception as e:
+        print(f"[estudios] No se dispararon al vincular {etiqueta_slot} de {placa}: {e}")
+
     return {
         "estado": "aceptada",
         "mensaje": "Cuenta activada y vehículo vinculado. Ya puedes iniciar sesión.",
         "correo": doc.get("correo", ""),
+        "slot": slot,
     }
 
 
 class DesvincularConductorInput(BaseModel):
     id_tenedor: str
     placa: str
+    slot: int = 1
+    solicitante: Optional[str] = None
 
 
 @ruta_conductores.put("/desvincular-conductor", response_model=dict)
 async def desvincular_conductor(data: DesvincularConductorInput):
-    """El tenedor quita al conductor (o la invitación pendiente) de una placa."""
+    """
+    El tenedor (o SEGURIDAD vía `solicitante`) quita al conductor — o la
+    invitación pendiente — de una placa (slot 1 o 2, 2026-10-14). Los datos y
+    documentos del conductor quedan como historial (el gate solo exige con el
+    slot vinculado); los PUNTEROS de firma del slot se limpian para que el
+    conductor nuevo firme de nuevo. La evidencia append-only de `firmas_conductor`
+    NO se toca. Si el vehículo está APROBADO baja a re-revisión (decisión del
+    usuario: todo cambio de conductor se revisa).
+    """
     placa = (data.placa or "").strip().upper()
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
-    if str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
+    es_seguridad = bool((data.solicitante or "").strip())
+    _rechazar_padrino(data.solicitante)
+    if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
-    if not vehiculo.get("idConductor") and not (vehiculo.get("invitacionConductor") or {}).get("correo"):
-        raise HTTPException(status_code=400, detail="Esa placa no tiene conductor ni invitación.")
+    campo_id, campo_inv = _campos_slot(data.slot)
+    etiqueta_slot = "Conductor 2" if data.slot == 2 else "Conductor"
+
+    saliente = vehiculo.get(campo_id) or (vehiculo.get(campo_inv) or {}).get("correo")
+    if not saliente:
+        etiqueta = "segundo conductor" if data.slot == 2 else "conductor"
+        raise HTTPException(status_code=400, detail=f"Esa placa no tiene {etiqueta} ni invitación.")
+
+    # Firma del slot: el conductor entrante debe firmar de nuevo (la evidencia
+    # histórica vive en firmas_conductor y no se toca).
+    campo_firma, campo_evidencia = (
+        ("firmaUrl", "firmaEvidencia") if data.slot == 1 else ("firmaUrl2", "firmaEvidencia2")
+    )
+    correo_saliente = (vehiculo.get(campo_inv) or {}).get("correo") or str(saliente)
 
     coleccion_vehiculos.update_one(
         {"placa": placa},
-        {"$set": {"idConductor": None, "invitacionConductor": None}},
+        {"$set": {
+            campo_id: None, campo_inv: None,
+            campo_firma: None, campo_evidencia: None,
+        }},
     )
-    return {"mensaje": "Conductor desvinculado del vehículo."}
+    _pos_cambio_conductor(
+        placa, vehiculo, (data.solicitante or "").strip() or "tenedor",
+        "seguridad" if es_seguridad else "conductor",
+        "conductor_desvinculado",
+        f"{etiqueta_slot} — {correo_saliente}",
+        [{"campo": campo_id, "antes": correo_saliente, "despues": "(ninguno)"}],
+    )
+    return {"mensaje": f"{etiqueta_slot} desvinculado del vehículo."}
 
 
 # ==============================================================================

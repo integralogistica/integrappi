@@ -145,6 +145,11 @@ TODOS_DOCS = {
     "tenedCertificacionBancaria": "https://x/14",
     "documentoAcreditacionTenedor": "https://x/15",
     "rutTenedor": "https://x/16", "fotos": ["https://x/f1"],
+# Fotos del vehículo POR ÁNGULO (2026-10-14): los 4 exigidos.
+"fotosVehiculo": [
+    {"tipo": t, "ruta": "https://x/foto_" + t}
+    for t in ("frontal", "lateral_izq", "lateral_der", "posterior")
+],
     "hojaVidaFisica": "https://x/17",
 }
 

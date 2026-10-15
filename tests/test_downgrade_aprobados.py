@@ -128,7 +128,9 @@ class ActualizarInformacionTests(unittest.TestCase):
 
     def test_todas_las_claves_criticas_estan_protegidas(self):
         for clave in ["_id", "placa", "idUsuario", "idConductor", "estadoIntegra",
-                      "invitacionConductor", "historialCambios", "lecturasIA"]:
+                      "invitacionConductor", "historialCambios", "lecturasIA",
+                      # Segundo conductor (2026-10-14): vinculación y firma slot 2.
+                      "idConductor2", "invitacionConductor2", "firmaEvidencia2"]:
             self.assertIn(clave, vehiculos.CLAVES_PROTEGIDAS, f"Falta proteger {clave}")
 
     def test_diff_solo_campos_cambiados(self):

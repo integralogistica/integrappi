@@ -122,9 +122,12 @@ async def checkin(
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     # Propiedad: dueño de la ficha (idUsuario = tenedor o conductor legacy) o
-    # conductor invitado vinculado (idConductor).
+    # conductor invitado vinculado (idConductor / idConductor2 — el 2º
+    # conductor también puede ofrecer la placa, 2026-10-14).
     es_dueno = str(vehiculo.get("idUsuario", "")) == str(id_usuario)
-    es_conductor_vinculado = str(vehiculo.get("idConductor") or "") == str(id_usuario)
+    es_conductor_vinculado = str(id_usuario) in {
+        str(vehiculo.get("idConductor") or ""), str(vehiculo.get("idConductor2") or ""),
+    }
     if not (es_dueno or es_conductor_vinculado):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este conductor.")
     if vehiculo.get("estadoIntegra") != "aprobado":
@@ -203,10 +206,12 @@ def mia(id_usuario: str):
     hoy = _fecha_hoy_str()
 
     # Placas aprobadas del usuario: propias (idUsuario) o como conductor
-    # invitado (idConductor). `planillaVencida` avisa al conductor ANTES de
-    # intentar el check-in (2026-10-07).
+    # invitado (idConductor / idConductor2, 2026-10-14). `planillaVencida`
+    # avisa al conductor ANTES de intentar el check-in (2026-10-07).
     aprobados = list(coleccion_vehiculos.find(
-        {"$or": [{"idUsuario": id_usuario}, {"idConductor": id_usuario}], "estadoIntegra": "aprobado"},
+        {"$or": [
+            {"idUsuario": id_usuario}, {"idConductor": id_usuario}, {"idConductor2": id_usuario},
+        ], "estadoIntegra": "aprobado"},
         {
             "_id": 0, "placa": 1, "vehMarca": 1, "vehLinea": 1,
             "vehClase": 1, "vehTipoCarroceria": 1, "tipo_veh_sicetac": 1,

@@ -92,6 +92,11 @@ TODOS_DOCS = {
     "tenedCertificacionBancaria": "https://x/14", "documentoAcreditacionTenedor": "https://x/15",
     "rutTenedor": "https://x/16", "rutPropietario": "https://x/17",
     "fotos": ["https://x/f1"],
+# Fotos del vehículo POR ÁNGULO (2026-10-14): los 4 exigidos.
+"fotosVehiculo": [
+    {"tipo": t, "ruta": "https://x/foto_" + t}
+    for t in ("frontal", "lateral_izq", "lateral_der", "posterior")
+],
 }
 
 
@@ -438,6 +443,25 @@ class FiltroPorBandejaTests(unittest.TestCase):
         self.assertIn('"aprobado"', fuente)  # el $in completo sigue en el default
         self.assertIn('BANDEJAS_REVISION.get(bandeja', fuente)
 
+    def test_placa_trae_solo_ese_vehiculo(self):
+        # Param `placa` (2026-10-14): restaurar el panel de un vehículo no
+        # debe traer la bandeja completa. Sin bandeja consulta TODOS los
+        # estados (la placa puede estar en cualquier bandeja).
+        vehiculo = {"_id": "a", "placa": "AAA111", "estadoIntegra": "aprobado"}
+        otro = {"_id": "b", "placa": "BBB222", "estadoIntegra": "completado_revision"}
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionFiltro([vehiculo, otro])), \
+             patch.object(vehiculos, "_firmar_documentos", lambda x: x):
+            r = vehiculos.obtener_vehiculos_incompletos(placa="aaa111")
+        data = json.loads(r.body)
+        placas = [v["placa"] for v in data["vehicles"]]
+        self.assertEqual(placas, ["AAA111"])
+
+    def test_placa_vacia_mantiene_el_filtro_completo(self):
+        import inspect
+        fuente = inspect.getsource(vehiculos.obtener_vehiculos_incompletos)
+        # El filtro por placa es condicional: '' o None no lo activan.
+        self.assertIn('if placa and placa.strip()', fuente)
+
 
 class FakeColeccionFiltro:
     """Stub que aplica el $in de estadoIntegra del filtro (para el test del param)."""
@@ -447,7 +471,11 @@ class FakeColeccionFiltro:
 
     def find(self, filtro):
         estados = filtro.get("estadoIntegra", {}).get("$in")
-        return [d for d in self._docs if not estados or d.get("estadoIntegra") in estados]
+        docs = [d for d in self._docs if not estados or d.get("estadoIntegra") in estados]
+        placa = filtro.get("placa")
+        if placa:
+            docs = [d for d in docs if d.get("placa") == placa]
+        return docs
 
 
 if __name__ == "__main__":

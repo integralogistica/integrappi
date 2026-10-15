@@ -460,7 +460,10 @@ async def obtener_baseusuarios():
     return [modelo_usuario(u) for u in usuarios]
 
 
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'SEGURIDAD', 'VISUALIZADOR']
+# (2026-10-14) PADRINO: como Seguridad pero SOLO impersonar placas para
+# cargar documentos/datos — sin autorizar estados ni gestionar conductores
+# (guards en vehiculos.actualizar-estado y conductores.invitar/desvincular).
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'PADRINO', 'SEGURIDAD', 'VISUALIZADOR']
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
