@@ -479,7 +479,8 @@ class ActualizarEstadoValidacionTests(unittest.TestCase):
 
 class DocumentoValidoTests(unittest.TestCase):
     """El veredicto documento_valido del LLM: 409 si la imagen no es el doc
-    esperado (no se guarda NADA); ilegible (422) sube igual."""
+    esperado; 422 si no leyó nada legible — en AMBOS casos no se guarda NADA
+    (anti-basura 2026-10-15; antes el 422 se guardaba «por si acaso»)."""
 
     def test_prompt_pide_veredicto(self):
         for tipo in ["cedula", "rut", "soat"]:
@@ -595,13 +596,36 @@ class SubirDocumentoReplicarTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         mock_storage.assert_not_called()
 
-    def test_fallo_lectura_ia_no_rompe_subida(self):
+    def test_ilegible_422_rechaza_la_subida(self):
+        """Anti-basura (2026-10-15): si la IA no logra leer NADA, el documento
+        NO se guarda — el front ofrece «Adjuntar de todos modos» con
+        extraer=false. Antes el 422 se guardaba silenciosamente."""
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage, \
+             patch.object(
+                 vehiculos, "extraer_datos_con_llm",
+                 side_effect=HTTPException(status_code=422, detail="No se logró leer ningún dato legible."),
+             ):
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "licencia"},
+                files={"archivo": ("lic.png", b"img", "image/png")},
+            )
+        self.assertEqual(resp.status_code, 422)
+        mock_storage.assert_not_called()
+        # El doc preexistente del fixture queda INTACTO (nada nuevo guardado).
+        self.assertEqual(fake.documents[0]["licencia"], "https://x/9")
+
+    def test_fallo_proveedor_ia_no_rompe_subida(self):
+        """429/503/504 (servicio de lectura saturado o caído): el archivo SÍ se
+        sube, campos a mano — no se bloquea la operación por el proveedor."""
         fake = FakeColeccionVehiculos([vehiculo_completo()])
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "subir_a_google_storage", return_value="https://x/n3"), \
              patch.object(
                  vehiculos, "extraer_datos_con_llm",
-                 side_effect=HTTPException(status_code=422, detail="ilegible"),
+                 side_effect=HTTPException(status_code=503, detail="Servicio de lectura no configurado"),
              ):
             resp = self.client.put(
                 "/vehiculos/subir-documento",
@@ -611,6 +635,36 @@ class SubirDocumentoReplicarTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["lectura_ia"], None)
         self.assertEqual(fake.documents[0]["licencia"], "https://x/n3")
+
+    def test_pdf_con_clave_se_rechaza_antes_de_guardar(self):
+        """PDF con /Encrypt (2026-10-15): antes se guardaba «bien» y después
+        nadie podía abrirlo. Ahora 400 antes de tocar bucket/Mongo."""
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "licencia", "extraer": "false"},
+                files={"archivo": ("lic.pdf", b"%PDF-1.4 ... /Encrypt 123 0 R", "application/pdf")},
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("contraseña", resp.json()["detail"])
+        mock_storage.assert_not_called()
+        # El doc preexistente del fixture queda INTACTO (nada nuevo guardado).
+        self.assertEqual(fake.documents[0]["licencia"], "https://x/9")
+
+    def test_pdf_sin_clave_sube_normal(self):
+        """Un PDF normal (sin /Encrypt) no lo toca el chequeo anti-clave."""
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage", return_value="https://x/n4"):
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "licencia", "extraer": "false"},
+                files={"archivo": ("lic.pdf", b"%PDF-1.4 sin clave", "application/pdf")},
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(fake.documents[0]["licencia"], "https://x/n4")
 
 
 class EliminarDocumentoGemelosTests(unittest.TestCase):
@@ -1027,6 +1081,93 @@ class ReferenciasAdicionalesTests(unittest.TestCase):
         self.assertTrue(any("auditoriaVehiculo" in p for p in pushes))
         campos_diff = [c["campo"] for p in pushes_cambios for c in p["campos"]]
         self.assertIn("referenciasAdicionales", campos_diff)
+
+
+class DocumentoAdicionalTests(unittest.TestCase):
+    """Documentos ADICIONALES con nombre libre (2026-10-15): Seguridad/Admin
+    adjuntan cualquier otro documento con etiqueta propia desde /revision.
+    Acumula en `documentosAdicionales` + historial universal; NO baja a
+    re-revisión; PADRINO y PDF con clave rechazados."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def _subir(self, fake, archivo=("contrato.pdf", b"%PDF-1.4 sin clave", "application/pdf"),
+               nombre="Contrato de teneduría", editado_por=None):
+        data = {"placa": "TEST01", "nombre": nombre}
+        if editado_por:
+            data["editado_por"] = editado_por
+        return self.client.put(
+            "/vehiculos/subir-documento-adicional",
+            data=data,
+            files={"archivo": archivo},
+        )
+
+    def test_se_guarda_con_nombre_y_historial(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage", side_effect=lambda a, n: f"https://x/{n}") as mock_storage:
+            resp = self._subir(fake, editado_por="Ana Seguridad")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["nombre"], "Contrato de teneduría")
+        # Blob con numeración adicional_NNN y sufijo de placa.
+        self.assertIn("adicional_001", body["ruta"])
+        mock_storage.assert_called_once()
+        # $push a documentosAdicionales e historialDocumentos (el Fake no
+        # aplica $push: se verifica sobre los updates registrados).
+        pushes = [c["$push"] for _, c in fake.updates if "$push" in c]
+        self.assertTrue(any("documentosAdicionales" in p for p in pushes))
+        self.assertTrue(any("historialDocumentos" in p for p in pushes))
+        entrada = next(p["historialDocumentos"]["$each"][0]
+                       for p in pushes if "historialDocumentos" in p)
+        self.assertEqual(entrada["etiqueta"], "Contrato de teneduría")
+        self.assertEqual(entrada["tipo"], "adicional")
+        self.assertEqual(entrada["actor"], "Ana Seguridad")
+
+    def test_no_baja_aprobado_a_re_revision(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="aprobado")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage", return_value="https://x/ad1"), \
+             patch.object(vehiculos, "_registrar_cambio_aprobado") as mock_cambio:
+            resp = self._subir(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_cambio.assert_not_called()
+
+    def test_padrino_rechazado(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage, \
+             patch.object(vehiculos, "_perfil_de_actor", return_value="PADRINO"):
+            resp = self._subir(fake, editado_por="El Padrino")
+        self.assertEqual(resp.status_code, 403)
+        mock_storage.assert_not_called()
+
+    def test_pdf_con_clave_rechazado(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = self._subir(
+                fake, archivo=("cifrado.pdf", b"%PDF-1.4 /Encrypt 5 0 R", "application/pdf"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("contraseña", resp.json()["detail"])
+        mock_storage.assert_not_called()
+
+    def test_sin_nombre_rechazado(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = self._subir(fake, nombre="   ")
+        self.assertEqual(resp.status_code, 400)
+        mock_storage.assert_not_called()
+
+    def test_vehiculo_rechazado_es_solo_lectura(self):
+        fake = FakeColeccionVehiculos([vehiculo_completo(estadoIntegra="rechazado")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage") as mock_storage:
+            resp = self._subir(fake)
+        self.assertEqual(resp.status_code, 403)
+        mock_storage.assert_not_called()
 
 
 if __name__ == "__main__":

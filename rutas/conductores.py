@@ -1921,6 +1921,10 @@ def _rechazar_padrino(solicitante: Optional[str]) -> None:
     documentos y datos, pero NO gestionar conductores. Si el `solicitante`
     declarado resuelve en baseusuarios con perfil PADRINO → 403. Best-effort
     por nombre (patrón del resto del sistema); si no resuelve, pasa.
+
+    (2026-10-15) Perfil ADICIONAL: también aplica a usuarios con otro perfil
+    principal (p. ej. OPERATIVO) que tengan PADRINO en `perfiles_adicionales`
+    — su única puerta a estas mutaciones es el portal simplificado.
     """
     nombre = (solicitante or "").strip()
     if not nombre:
@@ -1930,7 +1934,14 @@ def _rechazar_padrino(solicitante: Optional[str]) -> None:
         if not doc:
             doc = coleccion_baseusuarios.find_one(
                 {"nombre": {"$regex": f"^{re.escape(nombre)}$", "$options": "i"}})
-        if (doc or {}).get("perfil") == "PADRINO":
+        if not doc:
+            return
+        perfil = str(doc.get("perfil") or "").upper()
+        es_padrino = perfil == "PADRINO" or (
+            perfil not in ("SEGURIDAD", "ADMIN")
+            and "PADRINO" in [str(p).upper() for p in (doc.get("perfiles_adicionales") or [])]
+        )
+        if es_padrino:
             raise HTTPException(
                 status_code=403,
                 detail="El perfil PADRINO no gestiona conductores: solo carga documentos y datos. Pide a Seguridad que lo haga.",

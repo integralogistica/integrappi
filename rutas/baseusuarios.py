@@ -69,6 +69,10 @@ class BaseUsuario(BaseModel):
     usuario: str
     clave: str
     clientes: Optional[List[str]] = None
+    # (2026-10-15) Perfiles ADICIONALES: un usuario conserva su perfil
+    # principal (p. ej. OPERATIVO) y gana capacidades extra. Hoy solo PADRINO
+    # (entrada al portal de Seguridad en modo simplificado).
+    perfiles_adicionales: Optional[List[str]] = None
     # Módulo Estudios de Seguridad: solo aplican con perfil SEGURIDAD.
     empresa_id_seguridad: Optional[str] = None  # _id de empresas_seguridad
     rol_seguridad: Optional[str] = None  # CONSULTADOR | ADMIN_EMPRESA
@@ -134,12 +138,36 @@ def modelo_usuario(u) -> dict:
         "clientes": u["clientes"] if isinstance(u.get("clientes"), list) else ["KABI"],
         # Alcance de aprobación por cliente en Otros Costos ([] = TODOS)
         "clientes_aprobacion": u.get("clientes_aprobacion") if isinstance(u.get("clientes_aprobacion"), list) else [],
+        # Perfiles adicionales (2026-10-15): p. ej. OPERATIVO que también es Padrino.
+        "perfiles_adicionales": u.get("perfiles_adicionales") or [],
         "activo": u.get("activo", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
         # En BD puede ser ObjectId (scripts viejos) o string: normalizar.
         "empresa_id_seguridad": str(u["empresa_id"]) if u.get("empresa_id") else None,
         "rol_seguridad": u.get("rol_seguridad"),
     }
+
+
+# Perfiles que pueden asignarse como ADICIONALES (2026-10-15). Por ahora solo
+# PADRINO: no gobierna ningún portal, solo la vista simplificada de /revision
+# (cookie seguridadPerfil), así que puede sumarse a un perfil principal sin
+# tocar ningún otro módulo.
+PERFILES_ADICIONALES_VALIDOS = {"PADRINO"}
+
+
+def _normalizar_perfiles_adicionales(perfil: str, adicionales: Optional[List[str]]) -> list:
+    """Sanitiza la lista: mayúsculas, dedupe, solo válidos, y SIN redundancias
+    (un SEGURIDAD/ADMIN/PADRINO principal no necesita el PADRINO adicional:
+    los dos primeros tienen más permisos y el tercero ya es padrino)."""
+    principal = str(perfil or "").upper()
+    if principal in ("SEGURIDAD", "ADMIN", "PADRINO"):
+        return []
+    salida = []
+    for p in adicionales or []:
+        norm = str(p or "").strip().upper()
+        if norm in PERFILES_ADICIONALES_VALIDOS and norm not in salida:
+            salida.append(norm)
+    return salida
 
 
 def _campos_seguridad(data: BaseUsuario) -> dict:
@@ -443,6 +471,7 @@ async def crear_baseusuario(data: BaseUsuario):
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
         "perfil": data.perfil.upper(),
+        "perfiles_adicionales": _normalizar_perfiles_adicionales(data.perfil, data.perfiles_adicionales),
         "usuario": data.usuario.upper(),
         "clave": crear_hash(data.clave.strip()),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
@@ -507,6 +536,7 @@ async def actualizar_baseusuario(usuario_id: str, data: BaseUsuario):
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
         "perfil": data.perfil.upper(),
+        "perfiles_adicionales": _normalizar_perfiles_adicionales(data.perfil, data.perfiles_adicionales),
         "usuario": data.usuario.upper(),
         "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
     }
@@ -566,6 +596,7 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
             "nombre": encontrado.get("nombre", ""),
             "correo": encontrado.get("correo") or "",
             "perfil": encontrado["perfil"],
+            "perfiles_adicionales": encontrado.get("perfiles_adicionales") or [],
             "regional": encontrado["regional"],
             "clientes": encontrado.get("clientes") or ["KABI"],
         }
@@ -721,6 +752,30 @@ async def actualizar_perfil_usuario(id: str, data: ActualizarPerfilInput):
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     return {"mensaje": "Perfil actualizado", "perfil": perfil_norm}
+
+
+class ActualizarPerfilesAdicionalesInput(BaseModel):
+    perfiles_adicionales: List[str] = []
+
+
+@ruta_baseusuarios.patch("/{id}/perfiles-adicionales", response_model=dict)
+async def actualizar_perfiles_adicionales(id: str, data: ActualizarPerfilesAdicionalesInput):
+    """(2026-10-15) Perfiles ADICIONALES del usuario (hoy solo PADRINO): el
+    perfil principal NO cambia — p. ej. un OPERATIVO que además entra al
+    portal de Seguridad en modo Padrino. Si el perfil principal pasa a
+    SEGURIDAD/ADMIN/PADRINO, la lista se colapsa a [] (redundante)."""
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    usuario = coleccion_usuarios.find_one({"_id": oid})
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    adicionales = _normalizar_perfiles_adicionales(usuario.get("perfil"), data.perfiles_adicionales)
+    coleccion_usuarios.update_one({"_id": oid}, {"$set": {"perfiles_adicionales": adicionales}})
+    return {"mensaje": "Perfiles adicionales actualizados", "perfiles_adicionales": adicionales}
 
 
 @ruta_baseusuarios.post("/loginseguridad", response_model=dict)

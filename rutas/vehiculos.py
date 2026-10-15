@@ -1807,6 +1807,12 @@ def _perfil_de_actor(nombre: Optional[str]) -> Optional[str]:
     `_resolver_usuario_flota`): busca por `usuario` o `nombre`. Best-effort:
     si no resuelve (actor de prueba, nombre libre) devuelve None y el llamador
     deja pasar — mismo nivel de confianza declarada del resto del sistema.
+
+    (2026-10-15) Perfil ADICIONAL PADRINO: un usuario con otro perfil
+    principal (p. ej. OPERATIVO) que tiene PADRINO en `perfiles_adicionales`
+    solo entra a las mutaciones de vehículos por el portal simplificado → se
+    le aplican los mismos límites del padrino. Los SEGURIDAD/ADMIN no se
+    ven afectados (su perfil principal ya tiene más permisos).
     """
     texto = (nombre or "").strip()
     if not texto:
@@ -1815,7 +1821,14 @@ def _perfil_de_actor(nombre: Optional[str]) -> Optional[str]:
         doc = coleccion_baseusuarios.find_one({"usuario": texto.upper()})
         if not doc:
             doc = coleccion_baseusuarios.find_one({"nombre": {"$regex": f"^{re.escape(texto)}$", "$options": "i"}})
-        return (doc or {}).get("perfil")
+        if not doc:
+            return None
+        perfil = str(doc.get("perfil") or "").upper()
+        if perfil not in ("SEGURIDAD", "ADMIN", "PADRINO"):
+            adicionales = doc.get("perfiles_adicionales") or []
+            if "PADRINO" in [str(p).upper() for p in adicionales]:
+                return "PADRINO"
+        return perfil
     except Exception as e:
         print(f"[perfil-actor] No se pudo resolver el perfil de {texto!r}: {e}")
         return None
@@ -2503,9 +2516,33 @@ async def subir_documento(
     if archivo.content_type.startswith("image/"):
         extension = "webp"
     elif archivo.content_type == "application/pdf":
+        # PDF protegido con contraseña (2026-10-15, pedido del usuario): antes
+        # se guardaba «bien» y después nadie podía abrirlo. Se detecta el
+        # diccionario /Encrypt del trailer y se rechaza ANTES de guardar nada.
+        datos_pdf = await archivo.read()
+        archivo.file.seek(0)
+        if b"/Encrypt" in datos_pdf:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "El PDF está protegido con contraseña y NO se puede guardar: "
+                    "ábrelo con la clave y expórtalo/guárdalo de nuevo SIN contraseña "
+                    "(o tómale una foto) antes de subirlo."
+                ),
+            )
         extension = "pdf"
     else:
         raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen o PDF.")
+
+    # El REVERSO también puede ser un PDF con clave: mismo rechazo.
+    if reverso is not None and (reverso.content_type or "") == "application/pdf":
+        datos_reverso = await reverso.read()
+        reverso.file.seek(0)
+        if b"/Encrypt" in datos_reverso:
+            raise HTTPException(
+                status_code=400,
+                detail="El PDF del REVERSO está protegido con contraseña. Expórtalo sin clave y vuelve a subirlo.",
+            )
 
     # Gemelos (figuras iguales): los que manda el front, filtrados por válidos,
     # + los que el propio backend calcula por si el front no los manda.
@@ -2516,8 +2553,11 @@ async def subir_documento(
     ))
 
     # Para tipos leíbles: leer con IA ANTES de subir. Si Gemini determina que
-    # NO es el documento esperado (409), se rechaza la subida completa (nada
-    # en el bucket ni en Mongo). Ilegible (422) u otros fallos: se sube igual.
+    # NO es el documento esperado (409), que es un PDF con clave (400) o que no
+    # logró leer NADA legible (422), se RECHAZA la subida completa (nada en el
+    # bucket ni en Mongo) — 2026-10-15, pedido del usuario: "no subir basura";
+    # el front ofrece «Adjuntar de todos modos» reenviando con extraer=false.
+    # Fallos del PROVEEDOR (429/503/504 u otros): el archivo SÍ se sube.
     # `lectura_datos`/`lectura_avisos` (JSON): lectura YA hecha por el front
     # (flujo de dos caras: cédula/licencia/tarjeta leyeron frente+reverso por
     # separado) — se persiste en lecturasIA sin re-pagar Gemini.
@@ -2557,17 +2597,17 @@ async def subir_documento(
             avisos = _generar_avisos(esquema_ia, datos_leidos, contexto)
             lectura_ia = {"datos": datos_leidos, "avisos": avisos}
         except HTTPException as e:
-            if e.status_code == 409:
-                # Documento equivocado (meme/factura/otro doc): NO guardar nada.
+            if e.status_code in (409, 400, 422):
+                # Documento equivocado (409, meme/factura/otro doc), PDF con
+                # clave (400) o ilegible total (422): NO guardar nada — antes
+                # el 422/400 se guardaban "por si acaso" y llenaban el bucket
+                # de basura (2026-10-15). El conductor puede reintentar con
+                # mejor foto o adjuntar de todos modos (extraer=false).
                 raise
-            if e.status_code == 400:
-                # PDF con contraseña (2026-08-31): el documento es legítimo,
-                # solo ilegible para la IA → se guarda y el motivo viaja como
-                # aviso para que el conductor sepa qué hacer.
-                lectura_ia = {"datos": {}, "avisos": [str(e.detail)]}
-                archivo.file.seek(0)
             else:
-                # Ilegible o servicio caído: el archivo SÍ se guarda, campos a mano.
+                # 429/503/504 (servicio saturado o caído): el archivo SÍ se
+                # sube, campos a mano — no bloqueamos la operación por un
+                # problema del proveedor de IA.
                 print(f"[lecturaIA] Fallo leyendo {tipo} de {placa}: {e.detail}")
                 lectura_ia = None
                 archivo.file.seek(0)
@@ -2718,6 +2758,99 @@ async def subir_documento(
             "replicado_en": gemelos,
             "ruta_reverso": url_reverso,
             "url_reverso": _url_para_cliente(url_reverso) if url_reverso else None,
+        }
+    )
+
+
+@ruta_vehiculos.put("/subir-documento-adicional")
+async def subir_documento_adicional(
+    archivo: UploadFile = File(...),
+    placa: str = Form(...),
+    nombre: str = Form(...),
+    editado_por: Optional[str] = Form(None),
+):
+    """
+    Documento ADICIONAL con NOMBRE libre (2026-10-15, pedido del usuario):
+    Seguridad/Admin adjuntan desde /revision cualquier otro documento
+    (contratos, certificados, comunicaciones…) con una etiqueta propia que
+    ellos digitan. Acumula en `documentosAdicionales` (nada se reemplaza) y
+    entra al `historialDocumentos` universal. NO baja un aprobado a
+    re-revisión: es un adjunto de archivo, no un dato del conductor (misma
+    excepción de la Hoja de Vida física). Solo SEGURIDAD/ADMIN: el perfil
+    PADRINO no puede (403 best-effort por actor, patrón del resto del módulo).
+    """
+    etiqueta = (nombre or "").strip()[:80]
+    if not etiqueta:
+        raise HTTPException(status_code=400, detail="Escribe un nombre para el documento adicional.")
+
+    if _perfil_de_actor(editado_por) == "PADRINO":
+        raise HTTPException(
+            status_code=403,
+            detail="El perfil PADRINO no puede cargar documentos adicionales (solo Seguridad).",
+        )
+
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
+
+    if archivo.content_type.startswith("image/"):
+        extension = "webp"
+    elif archivo.content_type == "application/pdf":
+        # Mismo chequeo anti-clave que subir-documento (2026-10-15).
+        datos_pdf = await archivo.read()
+        archivo.file.seek(0)
+        if b"/Encrypt" in datos_pdf:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "El PDF está protegido con contraseña y NO se puede guardar: "
+                    "expórtalo de nuevo SIN contraseña (o tómale una foto) antes de subirlo."
+                ),
+            )
+        extension = "pdf"
+    else:
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos de imagen o PDF.")
+
+    # Numeración adicional_NNN por vehículo: cada adjunto lleva su blob propio.
+    previos = sum(
+        1 for h in (vehiculo.get("historialDocumentos") or [])
+        if h.get("tipo") == "adicional"
+    )
+    nombre_archivo = _nombre_doc_bucket(
+        placa, "adicional", extension, vehiculo, sufijo=f"_{previos + 1:03d}")
+    url_archivo = subir_a_google_storage(archivo, nombre_archivo)
+
+    fecha_carga = datetime.utcnow()
+    entrada_historial = {
+        "tipo": "adicional",
+        "etiqueta": etiqueta,
+        "ruta": url_archivo,
+        "fecha": fecha_carga,
+        "nombre": archivo.filename or "",
+        "actor": editado_por or "",
+    }
+    coleccion_vehiculos.update_one(
+        {"placa": placa},
+        {"$push": {
+            "historialDocumentos": {"$each": [entrada_historial], "$position": 0, "$slice": -200},
+            "documentosAdicionales": {"$each": [{
+                "nombre": etiqueta,
+                "ruta": url_archivo,
+                "fecha": fecha_carga,
+                "actor": editado_por or "",
+            }], "$position": 0},
+        }},
+    )
+    _registrar_auditoria(placa, "documento_subido", actor=editado_por, detalle=f"Adicional: {etiqueta}")
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": f"Documento adicional «{etiqueta}» cargado",
+            "ruta": url_archivo,
+            "url": _url_para_cliente(url_archivo),
+            "nombre": etiqueta,
         }
     )
 
