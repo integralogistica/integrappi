@@ -44,7 +44,21 @@ class FakeColeccion:
     def update_one(self, filtro, cambio):
         for d in self.documents:
             if self._match(d, filtro):
-                d.update(cambio.get("$set", {}))
+                if "$set" in cambio:
+                    d.update(cambio["$set"])
+                # $pull/$push (adoptar/desadoptar-placa): soporte mínimo.
+                if "$pull" in cambio:
+                    for campo, cond in cambio["$pull"].items():
+                        lista = d.get(campo) or []
+                        if isinstance(cond, dict):
+                            d[campo] = [x for x in lista
+                                        if not isinstance(x, dict)
+                                        or any(x.get(k) != v for k, v in cond.items())]
+                        else:
+                            d[campo] = [x for x in lista if x != cond]
+                if "$push" in cambio:
+                    for campo, valor in cambio["$push"].items():
+                        d.setdefault(campo, []).append(valor)
 
     def count_documents(self, query=None):
         return len([d for d in self.documents if self._match(d, query or {})])
@@ -336,3 +350,117 @@ class LoginAdicionalTests(unittest.TestCase):
             r = self.client.post("/baseusuarios/login", json={"usuario": "maria@test.com", "clave": "secreta"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["usuario"]["perfiles_adicionales"], ["PADRINO"])
+
+
+# ── (2026-10-15) ADOPCIÓN DE PLACAS + AVISOS DIRIGIDOS ────────────────────────
+class AdoptarPlacaTests(unittest.TestCase):
+    def setUp(self):
+        self.client = _cliente(vehiculos.ruta_vehiculos)
+        self.cuenta = dict(CUENTA_OPERATIVO_PADRINO,
+                           celular="3123456789", correo="maria@test.com")
+
+    def _adoptar(self, veh, cuentas=None, **extra):
+        with patch.object(vehiculos, "coleccion_vehiculos", veh), \
+             patch.object(vehiculos, "coleccion_baseusuarios", cuentas or FakeColeccion([self.cuenta])), \
+             patch.object(vehiculos, "_registrar_auditoria"):
+            data = {"placa": "ABC123", "padrino_id": str(self.cuenta["_id"]),
+                    "nombre": "Fallback", "correo": "fallback@x.com"}
+            data.update(extra)
+            return self.client.put("/vehiculos/adoptar-placa", data=data)
+
+    def test_adopta_con_datos_de_la_cuenta(self):
+        veh = FakeColeccion([{"placa": "ABC123", "estadoIntegra": "pendiente"}])
+        r = self._adoptar(veh)
+        self.assertEqual(r.status_code, 200, r.text)
+        padrinos = veh.documents[0]["padrinos"]
+        self.assertEqual(len(padrinos), 1)
+        self.assertEqual(padrinos[0]["nombre"], "Maria Operativa")  # baseusuarios manda
+        self.assertEqual(padrinos[0]["correo"], "maria@test.com")
+        self.assertEqual(padrinos[0]["celular"], "573123456789")    # normalizado 57…
+
+    def test_idempotente_no_duplica(self):
+        veh = FakeColeccion([{"placa": "ABC123", "estadoIntegra": "pendiente"}])
+        self._adoptar(veh)
+        self._adoptar(veh)
+        self.assertEqual(len(veh.documents[0]["padrinos"]), 1)
+
+    def test_404_si_no_existe(self):
+        r = self._adoptar(FakeColeccion([]))
+        self.assertEqual(r.status_code, 404)
+
+    def test_rechazado_es_solo_lectura(self):
+        veh = FakeColeccion([{"placa": "ABC123", "estadoIntegra": "rechazado"}])
+        r = self._adoptar(veh)
+        self.assertEqual(r.status_code, 403)
+
+    def test_desadoptar_quita_solo_al_padrino(self):
+        otro = {"id": "otro-id", "nombre": "Otro", "correo": "otro@x.com"}
+        veh = FakeColeccion([{"placa": "ABC123", "estadoIntegra": "pendiente",
+                              "padrinos": [otro, {"id": str(self.cuenta["_id"]), "nombre": "Maria"}]}])
+        with patch.object(vehiculos, "coleccion_vehiculos", veh), \
+             patch.object(vehiculos, "coleccion_baseusuarios", FakeColeccion([self.cuenta])), \
+             patch.object(vehiculos, "_registrar_auditoria"):
+            r = self.client.put("/vehiculos/desadoptar-placa", data={
+                "placa": "ABC123", "padrino_id": str(self.cuenta["_id"])})
+        self.assertEqual(r.status_code, 200)
+        restantes = veh.documents[0]["padrinos"]
+        self.assertEqual(len(restantes), 1)
+        self.assertEqual(restantes[0]["id"], "otro-id")
+
+
+class NotificarPadrinosTests(unittest.TestCase):
+    def test_sin_padrinos_no_envia(self):
+        with patch.object(vehiculos, "coleccion_vehiculos",
+                          FakeColeccion([{"placa": "ABC123"}])), \
+             patch.object(vehiculos, "RESEND_API_KEY", "k"), \
+             patch.object(vehiculos.resend.Emails, "send") as mock_send:
+            vehiculos._notificar_padrinos("ABC123", "algo")
+        mock_send.assert_not_called()
+
+    def test_correo_a_los_que_adoptaron(self):
+        veh = FakeColeccion([{"placa": "ABC123", "padrinos": [
+            {"id": "1", "nombre": "A", "correo": "a@x.com"},
+            {"id": "2", "nombre": "B", "correo": "b@x.com"},
+            {"id": "3", "nombre": "Sin contacto"},  # sin correo/celular: fuera
+        ]}])
+        with patch.object(vehiculos, "coleccion_vehiculos", veh), \
+             patch.object(vehiculos, "RESEND_API_KEY", "k"), \
+             patch.object(vehiculos.resend.Emails, "send") as mock_send, \
+             patch("Funciones.whatsapp_utils_integra.enviar_template_sync", return_value=True) as mock_wa:
+            vehiculos._notificar_padrinos("ABC123", "Fue aprobada", titulo="Prueba")
+        mock_send.assert_called_once()
+        # El envío es posicional: params = args[0].
+        self.assertEqual(mock_send.call_args.args[0]["to"], ["a@x.com", "b@x.com"])
+        self.assertEqual(mock_wa.call_count, 0)  # ninguno tiene celular
+
+    def test_error_no_tumba_el_flujo(self):
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccion([{"placa": "X"}])), \
+             patch.object(vehiculos, "RESEND_API_KEY", "k"), \
+             patch.object(vehiculos.resend.Emails, "send", side_effect=Exception("boom")):
+            vehiculos._notificar_padrinos("X", "msg")  # no lanza
+
+
+class AvisoEstadoAPadrinosTests(unittest.TestCase):
+    """actualizar-estado notifica a los padrinos de la placa."""
+
+    def test_cambio_de_estado_avisa(self):
+        veh = FakeColeccion([{"placa": "XYZ789", "estadoIntegra": "completado_revision",
+                              "estudiosVigencia": {"hasta": "2999-01-01"},
+                              "padrinos": [{"id": "p1", "nombre": "P", "correo": "p@x.com"}]}])
+        with patch.object(vehiculos, "coleccion_vehiculos", veh), \
+             patch.object(vehiculos, "coleccion_baseusuarios", FakeColeccion([CUENTA_SEGURIDAD])), \
+             patch.object(vehiculos, "_registrar_auditoria"), \
+             patch.object(vehiculos, "_disparar_estudios_seguridad"), \
+             patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+             patch.object(vehiculos, "_enviar_wa_seguridad"), \
+             patch.object(vehiculos, "_tiene_estudio_seguridad", return_value=True), \
+             patch.object(vehiculos, "_notificar_padrinos") as mock_aviso:
+            c = _cliente(vehiculos.ruta_vehiculos)
+            r = c.put("/vehiculos/actualizar-estado", data={
+                "placa": "XYZ789", "nuevo_estado": "aprobado",
+                "usuario_id": "seg-1", "editado_por": "Diana Seguridad", "via": "seguridad",
+            })
+        self.assertEqual(r.status_code, 200)
+        mock_aviso.assert_called_once()
+        self.assertEqual(mock_aviso.call_args.args[0], "XYZ789")
+        self.assertIn("APROBADA", mock_aviso.call_args.args[1])

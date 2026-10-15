@@ -2171,6 +2171,18 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
         enviar_correo_invitacion, correo_invitado, enlace,
         (data.nombre_conductor or "").strip(), placa, nombre_remitente,
     )
+    # AVISO a los PADRINOS que adoptaron la placa (2026-10-15), mismo correo
+    # que recibe el involucrado. Import local: vehiculos importa conductores.
+    try:
+        from rutas.vehiculos import _notificar_padrinos
+        background_tasks.add_task(
+            _notificar_padrinos, placa,
+            f"Se invitó a {correo_invitado} como {etiqueta_slot.lower()} de la placa {placa}. "
+            "Quedará vinculado al aceptar la invitación.",
+            titulo=f"Invitación de conductor — {placa}",
+        )
+    except Exception as e:
+        print(f"[padrinos] No se pudo agendar el aviso de invitación de {placa}: {e}")
     return {
         "estado": "invitado",
         "mensaje": f"Invitación enviada a {correo_invitado}. El conductor quedará vinculado al aceptar.",

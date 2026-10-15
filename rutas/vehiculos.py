@@ -166,6 +166,10 @@ CAMPOS_VOLATILES_FIRMA = {
     # verificación de TODAS las firmas del slot 1.
     "idConductor2", "invitacionConductor2", "firmaUrl2", "firmaEvidencia2",
     *CAMPOS_CONDUCTOR_2,
+    # PADRINOS que adoptaron la placa (2026-10-15): suscripción de avisos, se
+    # gestiona con adoptar/desadoptar-placa DESPUÉS de firmar — jamás debe
+    # romper la verificación del hash.
+    "padrinos",
 }
 
 def _hash_datos_firmados(vehiculo: dict) -> str:
@@ -1506,6 +1510,95 @@ def _enviar_wa_devolucion(placa: str, vehiculo: dict, observaciones: str = "") -
     except Exception as e:
         print(f"[WA-Devolucion] Error: {e}")
 
+
+# ── PADRINOS: adopción de placas + avisos dirigidos (2026-10-15) ─────────────
+# El padrino se AUTO-ASIGNA las placas que quiere apadrinar desde /revision
+# (botón «Adoptar esta placa»); los avisos de cada placa le llegan SOLO a los
+# padrinos que la adoptaron — no a todos los padrinos.
+# Plantilla Meta `enruta_aviso_padrino` (Utilidad, es_CO) con {{1}}=nombre del
+# padrino, {{2}}=placa, {{3}}=mensaje y botón URL «Abrir IntegrApp».
+# ⚠️ REQUIERE crear/aprobar la plantilla en Meta Business Manager; sin aprobar,
+# el WA falla en silencio (fire-and-forget) y el CORREO sigue llegando.
+PLANTILLA_WA_PADRINO = ("enruta_aviso_padrino", "es_CO")
+
+# Mensajes de cambio de estado para los padrinos (actualizar-estado).
+ETIQUETAS_ESTADO_PADRINO = {
+    "registro_incompleto": "La placa {placa} fue DEVUELTA al conductor para correcciones: {detalle}",
+    "completado_revision": "El conductor finalizó el registro de {placa}: quedó PENDIENTE DE REVISIÓN.",
+    "aprobado": "¡La placa {placa} fue APROBADA!",
+    "en_actualizacion": "Se solicitó al conductor actualizar datos de {placa}: {detalle}",
+    "inactivo": "La placa {placa} fue INACTIVADA: {detalle}",
+    "rechazado": "La placa {placa} fue RECHAZADA de forma definitiva: {detalle}",
+}
+
+
+def _padrinos_de_placa(placa_o_vehiculo) -> list:
+    """Padrinos que adoptaron la placa: acepta la placa (str) o el doc del
+    vehículo (evita re-consultar cuando el llamador ya lo tiene)."""
+    vehiculo = placa_o_vehiculo
+    if isinstance(placa_o_vehiculo, str):
+        vehiculo = coleccion_vehiculos.find_one({"placa": placa_o_vehiculo}, {"padrinos": 1})
+    return [p for p in ((vehiculo or {}).get("padrinos") or [])
+            if isinstance(p, dict) and (p.get("correo") or p.get("celular"))]
+
+
+def _notificar_padrinos(placa: str, mensaje: str, titulo: Optional[str] = None) -> None:
+    """
+    Correo (Resend) + WhatsApp (plantilla entra_aviso_padrino) a los PADRINOS
+    que adoptaron la placa. Fire-and-forget: un fallo JAMÁS tumba el flujo del
+    que lo dispara (mismo patrón de _enviar_wa_seguridad).
+    """
+    try:
+        padrinos = _padrinos_de_placa(placa)
+        if not padrinos:
+            return
+        asunto = titulo or f"Actualización de la placa {placa}"
+        # 1. Correo: canal que no depende de plantillas de Meta.
+        if RESEND_API_KEY:
+            destinatarios = [p.get("correo") for p in padrinos if p.get("correo")]
+            if destinatarios:
+                cuerpo_html = f"""
+                <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px;">
+                    <h2 style="color: #006f7a;">{asunto}</h2>
+                    <p>Como padrino de la placa <strong>{placa}</strong>, esta
+                    actualización también te concierne:</p>
+                    <div style="background-color: #f0f8f8; padding: 15px; border-radius: 8px;
+                                margin: 20px 0; border: 1px solid #cce5e8;">
+                        <p style="margin: 0; font-size: 15px;">{mensaje}</p>
+                    </div>
+                    <p>Ingresa a <b>IntegraApp</b> para ver el detalle.</p>
+                    <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;">
+                    <p style="font-size: 12px; color: #999;">Notificación automática —
+                    eres padrino de esta placa.</p>
+                </div>"""
+                params = {"from": MAIL_FROM, "to": destinatarios,
+                          "subject": f"🤝 {asunto}", "html": cuerpo_html}
+                email = resend.Emails.send(params)
+                print(f"[padrinos] Correo enviado a {len(destinatarios)} padrino(s) de {placa}. ID: {email}")
+        # 2. WhatsApp (fire-and-forget, plantilla pendiente de aprobación).
+        from Funciones.whatsapp_utils_integra import enviar_template_sync
+        mensaje_wa = (mensaje or "").strip()
+        if len(mensaje_wa) > 250:
+            mensaje_wa = mensaje_wa[:250].rstrip() + "…"
+        for p in padrinos:
+            celular = _normalizar_celular_co(p.get("celular"))
+            if not celular:
+                continue
+            res = enviar_template_sync(
+                to=celular,
+                template_name=PLANTILLA_WA_PADRINO[0],
+                language_code=PLANTILLA_WA_PADRINO[1],
+                body_params=[(p.get("nombre") or "Padrino").strip(), placa, mensaje_wa],
+            )
+            if res:
+                print(f"[padrinos] WA OK -> {celular} | {placa}")
+            else:
+                print(f"[padrinos] WA NO enviado a {celular} | {placa} — revisar plantilla "
+                      f"'{PLANTILLA_WA_PADRINO[0]}' y aprobación en Meta.")
+    except Exception as e:
+        print(f"[padrinos] No se pudo notificar a los padrinos de {placa}: {e}")
+
+
 # ==========================================
 # 3. ENDPOINTS
 # ==========================================
@@ -2001,6 +2094,16 @@ async def actualizar_estado(
     if nuevo_estado == "registro_incompleto" and estado_actual == "completado_revision":
         _enviar_wa_devolucion(placa, vehiculo, observaciones or motivo or "")
 
+    # AVISO A LOS PADRINOS que adoptaron la placa (2026-10-15): correo + WA
+    # SOLO a quienes la adoptaron. Mismo cambio de estado que ve el conductor.
+    _notificar_padrinos(
+        placa,
+        ETIQUETAS_ESTADO_PADRINO.get(nuevo_estado, f"Cambio de estado: {nuevo_estado}").format(
+            placa=placa,
+            detalle=(observaciones or motivo or "").strip() or "sin observaciones"),
+        titulo=f"La placa {placa} cambió de estado",
+    )
+
     # Al inactivar, el carro sale de la bolsa del día aunque tuviera check-in
     # activo (mismo patrón de _registrar_cambio_aprobado; la /bolsa además
     # filtra por estado como segunda barrera).
@@ -2077,6 +2180,9 @@ CLAVES_PROTEGIDAS = {
     "actualizacionOrigen",
     # Catálogo de ángulos de fotos (2026-10-14): lo escribe subir-fotos.
     "fotosVehiculo",
+    # PADRINOS que adoptaron la placa (2026-10-15): lo escriben los endpoints
+    # adoptar/desadoptar-placa, jamás el front.
+    "padrinos",
 }
 
 # URLs de documentos: sus dueños son subir-documento/eliminar-documento.
@@ -2855,6 +2961,80 @@ async def subir_documento_adicional(
     )
 
 
+def _padrinos_para_respuesta(padrinos: list) -> list:
+    """`fecha` es datetime en Mongo: a ISO para la respuesta JSON."""
+    return [{**p, "fecha": p["fecha"].isoformat()} if isinstance(p.get("fecha"), datetime) else p
+            for p in (padrinos or [])]
+
+
+@ruta_vehiculos.put("/adoptar-placa")
+async def adoptar_placa(
+    placa: str = Form(...),
+    padrino_id: str = Form(...),
+    nombre: Optional[str] = Form(None),
+    correo: Optional[str] = Form(None),
+):
+    """
+    El PADRINO se auto-asigna la placa que quiere apadrinar (2026-10-15,
+    pedido del usuario): desde el panel de la placa en /revision. Los avisos
+    de la placa (cambios de estado, invitaciones, documentos eliminados…)
+    les llegan SOLO a los padrinos que la adoptaron.
+    Datos de contacto AUTORITATIVOS desde baseusuarios por id (correo y
+    celular para las notificaciones); los pasados por el front son fallback.
+    Idempotente: adoptar dos veces no duplica.
+    """
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
+
+    # Resolver la cuenta del padrino (por id: el front manda seguridadId).
+    cuenta = None
+    try:
+        cuenta = coleccion_baseusuarios.find_one({"_id": ObjectId(padrino_id)})
+    except Exception:
+        cuenta = None
+    entrada = {
+        "id": padrino_id,
+        "nombre": ((cuenta or {}).get("nombre") or nombre or "Padrino").strip(),
+        "correo": str((cuenta or {}).get("correo") or correo or "").strip().lower() or None,
+        "celular": _normalizar_celular_co((cuenta or {}).get("celular")),
+        "fecha": datetime.utcnow(),
+    }
+    # $pull + $push no pueden ir en el mismo update (conflicto de ruta): dos pasos.
+    coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"padrinos": {"id": padrino_id}}})
+    coleccion_vehiculos.update_one({"placa": placa}, {"$push": {"padrinos": entrada}})
+    _registrar_auditoria(placa, "placa_adoptada", actor=entrada["nombre"],
+                         detalle="El padrino comenzará a recibir los avisos de esta placa")
+    actualizado = coleccion_vehiculos.find_one({"placa": placa}, {"padrinos": 1}) or {}
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": f"Ahora eres padrino de {placa}", "padrinos": _padrinos_para_respuesta(actualizado.get("padrinos"))},
+    )
+
+
+@ruta_vehiculos.put("/desadoptar-placa")
+async def desadoptar_placa(placa: str = Form(...), padrino_id: str = Form(...)):
+    """El padrino deja de apadrinar la placa: deja de recibir sus avisos."""
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+    _asegurar_editable(vehiculo)
+    coleccion_vehiculos.update_one({"placa": placa}, {"$pull": {"padrinos": {"id": padrino_id}}})
+    try:
+        cuenta = coleccion_baseusuarios.find_one({"_id": ObjectId(padrino_id)}) or {}
+    except Exception:
+        cuenta = {}
+    _registrar_auditoria(placa, "placa_desadoptada",
+                         actor=(cuenta.get("nombre") or padrino_id),
+                         detalle="El padrino dejó de recibir los avisos de esta placa")
+    actualizado = coleccion_vehiculos.find_one({"placa": placa}, {"padrinos": 1}) or {}
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": f"Dejaste de ser padrino de {placa}", "padrinos": _padrinos_para_respuesta(actualizado.get("padrinos"))},
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # RECORTE de documentos por SEGURIDAD (2026-10-07, pedido del usuario: hay
 # fotos tomadas muy lejos que muestran cosas de sobra y no quieren que las
@@ -3626,6 +3806,14 @@ def _mover_a_actualizacion_por_eliminacion(placa: str, actor: Optional[str] = No
     _registrar_auditoria(
         placa, "estado_en_actualizacion", actor=actor,
         detalle=f"{estado_actual} → en_actualizacion · faltan: {nombres}",
+    )
+    # AVISO a los PADRINOS que adoptaron la placa (2026-10-15): el vehículo
+    # quedó inhabilitado por documento eliminado (no pasa por actualizar-estado).
+    _notificar_padrinos(
+        placa,
+        f"Se eliminó documentación exigida ({nombres}): la placa {placa} quedó INHABILITADA "
+        "en actualización hasta que se suba de nuevo.",
+        titulo=f"Documento eliminado — {placa}",
     )
 
 
