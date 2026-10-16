@@ -653,6 +653,46 @@ class SubirDocumentoReplicarTests(unittest.TestCase):
         # El doc preexistente del fixture queda INTACTO (nada nuevo guardado).
         self.assertEqual(fake.documents[0]["licencia"], "https://x/9")
 
+    def test_certificado_nequi_se_rechaza(self):
+        """Nequi/Daviplata NO son certificación bancaria válida (2026-10-16):
+        rechazo DURO (400) — nada al bucket ni a Mongo, sin escape
+        «adjuntar de todos modos» (es política, no legibilidad)."""
+        for banco in ("Nequi", "DAVI PLATA"):
+            with self.subTest(banco=banco):
+                fake = FakeColeccionVehiculos([vehiculo_completo()])
+                with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+                     patch.object(vehiculos, "subir_a_google_storage") as mock_storage, \
+                     patch.object(vehiculos, "_llamar_gemini", return_value=(
+                         '{"documento_valido": true, "banco": "%s", "tipo_cuenta": "AHORROS",'
+                         ' "numero_cuenta": "123", "titular": "PERICO", "documento_titular": "123"}' % banco)):
+                    resp = self.client.put(
+                        "/vehiculos/subir-documento",
+                        data={"placa": "TEST01", "tipo": "condCertificacionBancaria"},
+                        files={"archivo": ("cert.png", b"img", "image/png")},
+                    )
+                self.assertEqual(resp.status_code, 400, resp.text)
+                self.assertIn("Nequi", resp.json()["detail"])
+                mock_storage.assert_not_called()
+                # El doc preexistente del fixture queda INTACTO.
+                self.assertEqual(fake.documents[0]["condCertificacionBancaria"], "https://x/12")
+
+    def test_certificado_banco_tradicional_sube_normal(self):
+        """Un banco tradicional (ej. Davivienda) NO lo toca el chequeo —
+        ojo con el parecido léxico: DAVIVIENDA ≠ DAVIPLATA."""
+        fake = FakeColeccionVehiculos([vehiculo_completo()])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage", return_value="https://x/n5"), \
+             patch.object(vehiculos, "_llamar_gemini", return_value=(
+                 '{"documento_valido": true, "banco": "Banco Davivienda", "tipo_cuenta": "AHORROS",'
+                 ' "numero_cuenta": "123", "titular": "PERICO", "documento_titular": "123"}')):
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "condCertificacionBancaria"},
+                files={"archivo": ("cert.png", b"img", "image/png")},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["condCertificacionBancaria"], "https://x/n5")
+
     def test_pdf_sin_clave_sube_normal(self):
         """Un PDF normal (sin /Encrypt) no lo toca el chequeo anti-clave."""
         fake = FakeColeccionVehiculos([vehiculo_completo()])

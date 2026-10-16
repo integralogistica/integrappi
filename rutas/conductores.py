@@ -1060,6 +1060,10 @@ async def consultar_habeas_data(cedulas: str = ""):
                     "declaracion_titulo": acep.get("declaracion_titulo", ""),
                     "aceptado_en": acep.get("aceptado_en"),
                     "canal": acep.get("canal", ""),
+                    # (2026-10-16) A QUÉ correo llegó la aceptación (pedido del
+                    # usuario). La evidencia de CUENTA lo guarda como
+                    # `conductor_correo`; fallback al correo actual de la cuenta.
+                    "correo": acep.get("conductor_correo") or (cuenta or {}).get("correo", ""),
                     "ip": acep.get("ip", ""),
                     "user_agent": (acep.get("user_agent") or "")[:120],
                 })
@@ -1075,6 +1079,9 @@ async def consultar_habeas_data(cedulas: str = ""):
                 "declaracion_titulo": acep.get("declaracion_titulo", ""),
                 "aceptado_en": acep.get("aceptado_en"),
                 "canal": acep.get("canal", ""),
+                # (2026-10-16) A qué correo llegó el link: la evidencia de
+                # sujetos-sin-cuenta lo guarda como `sujeto_correo`.
+                "correo": acep.get("sujeto_correo", ""),
                 "ip": acep.get("ip", ""),
                 "user_agent": (acep.get("user_agent") or "")[:120],
                 "documento_ruta": acep.get("documento_ruta"),
@@ -1237,11 +1244,14 @@ def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, plac
 
 
 def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
-                            nombre: str = "", solicitado_por: str = "") -> dict:
+                            nombre: str = "", solicitado_por: str = "",
+                            forzar: bool = False) -> dict:
     """Crea/regenera el token y envía el correo. Compartido por el endpoint
     manual (botón de /revision) y el envío automático al pasar a revisión.
-    Idempotente: si ya hay link vigente no se re-envía; si la persona ya
-    autorizó, no se envía nada."""
+    Idempotente por defecto (envío AUTOMÁTICO): si ya hay link vigente no se
+    re-envía. Con `forzar` (botón «Reenviar» manual, 2026-10-16) SÍ invalida
+    el link anterior y manda un correo nuevo — un botón que dice reenviar
+    debe reenviar; si la persona ya autorizó, no se envía nada nunca."""
     correo = (correo or "").strip()
     if not correo or "@" not in correo:
         raise HTTPException(status_code=400,
@@ -1251,7 +1261,7 @@ def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
     ahora = datetime.utcnow()
     pendiente = coleccion_tokens_aut.find_one({
         "cedula": cedula, "usado_en": None, "expira": {"$gt": ahora}})
-    if pendiente:
+    if pendiente and not forzar:
         return {"estado": "pendiente", "enviado_en": pendiente.get("creado_en"),
                 "expira": pendiente.get("expira")}
     # Invalidar tokens previos sin usar y crear el nuevo (hash en BD).
@@ -1283,6 +1293,9 @@ class SolicitarAutorizacionInput(BaseModel):
     correo: str
     nombre: Optional[str] = None
     solicitado_por: Optional[str] = None
+    # «Reenviar» manual (2026-10-16): invalida el link vigente y manda correo
+    # nuevo (aunque sea a OTRO correo). El envío automático no lo usa.
+    forzar: Optional[bool] = False
 
 
 class AceptarAutorizacionInput(BaseModel):
@@ -1299,7 +1312,8 @@ async def solicitar_autorizacion(data: SolicitarAutorizacionInput):
     if len(cedula) < 4:
         raise HTTPException(status_code=400, detail="Cédula no válida.")
     return _solicitar_autorizacion(data.placa, cedula, data.correo,
-                                   data.nombre or "", data.solicitado_por or "")
+                                   data.nombre or "", data.solicitado_por or "",
+                                   forzar=bool(data.forzar))
 
 
 @ruta_conductores.get("/autorizacion/verificar", response_model=dict)
@@ -1592,11 +1606,22 @@ async def login_conductor(usuario: str = Body(..., embed=True), clave: str = Bod
         perfil = "ADMIN"
 
     if not encontrado:
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+        # (2026-10-16) Mensaje ESPECÍFICO por pedido del usuario: el correo
+        # no existe es distinto de clave errónea (antes todo era el genérico
+        # «Usuario o clave incorrectos» y nadie sabía qué corregir).
+        raise HTTPException(
+            status_code=401,
+            detail=f"No existe una cuenta con el correo {usuario_ingresado}. "
+                   "Verifícalo o créala con «Crear cuenta».",
+        )
 
     clave_almacenada = str(encontrado.get("clave", "")).strip()
     if not verificar_clave(clave_ingresada, clave_almacenada):
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+        raise HTTPException(
+            status_code=401,
+            detail="El correo es correcto pero la contraseña NO lo es. "
+                   "Verifícala o recupérala con «¿Olvidaste tu contraseña?».",
+        )
 
     # Cuentas stub de invitación pendiente (sin aceptar el enlace del tenedor).
     if perfil in ("CONDUCTOR", "TENEDOR") and not encontrado.get("activo", True):

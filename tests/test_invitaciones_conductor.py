@@ -292,6 +292,32 @@ class AceptarInvitacionTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("pendiente", ctx.exception.detail.lower())
 
+    def test_login_mensajes_especificos(self):
+        """(2026-10-16) El login DISTINGUE correo-no-registrado de
+        clave-incorrecta (pedido del usuario — antes un genérico para ambos)."""
+        import asyncio
+        doc = dict(self.conductores.documents[0])
+        doc["correo"] = "pedro@correo.com"
+        doc["clave"] = crear_hash("buenaclave")
+        doc["activo"] = True
+        doc["correo_verificado"] = True
+        parches = [
+            patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])),
+            patch.object(conductores, "coleccion_baseusuarios", FakeColeccion()),
+        ]
+        # 1) El correo NO está registrado.
+        with ExitStackContext(parches):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(conductores.login_conductor(usuario="nadie@correo.com", clave="x"))
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("No existe una cuenta", ctx.exception.detail)
+        # 2) El correo SÍ existe pero la clave NO es.
+        with ExitStackContext(parches):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(conductores.login_conductor(usuario="pedro@correo.com", clave="mala"))
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("contraseña NO", ctx.exception.detail)
+
 
 class ExitStackContext:
     """Helper: aplica una lista de patch en un with."""

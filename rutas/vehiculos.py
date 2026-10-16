@@ -702,6 +702,21 @@ def extraer_datos_con_llm(tipo_doc: str, archivos: list[UploadFile]) -> dict:
     datos = {k: datos.get(k) for k in esquema["campos"] if datos.get(k) is not None}
     if not datos:
         raise HTTPException(status_code=422, detail="No se logró leer ningún dato legible. Intenta con una foto más nítida y con buena luz.")
+
+    # (2026-10-16) NEQUI/DAVIPLATA NO se aceptan como certificación bancaria
+    # (pedido del usuario): rechazo DURO, mismo tratamiento que el PDF con
+    # clave (400 → nada al bucket ni a Mongo, sin escape «adjuntar igual»).
+    # Vivir acá cubre las DOS puertas de lectura: la subida del documento
+    # (paso 3 y /revision) y la tarjeta ⚡ del paso 2 (guarda-al-leer).
+    if tipo_doc == "certificado_bancario":
+        banco_norm = re.sub(r"[\s.\-]", "", str(datos.get("banco") or "")).upper()
+        if "NEQUI" in banco_norm or "DAVIPLATA" in banco_norm:
+            raise HTTPException(
+                status_code=400,
+                detail=("No se aceptan certificaciones de Nequi ni Daviplata. "
+                        "Adjunta una certificación bancaria de un banco tradicional "
+                        "(cuenta de ahorros o corriente a nombre del titular)."),
+            )
     return datos
 
 
@@ -1950,13 +1965,19 @@ async def actualizar_estado(
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
-    # PADRINO (2026-10-14): impersona placas SOLO para cargar documentos y
-    # datos — NO autoriza estados. El front del padrino no ofrece los botones;
-    # este guard tapa la llamada directa al endpoint.
-    if (via or "") == "seguridad" and _perfil_de_actor(editado_por) == "PADRINO":
+    # PADRINO (2026-10-14; FINALIZAR habilitado 2026-10-16 a pedido del
+    # usuario): impersona placas para CARGAR documentos y datos y para
+    # FINALIZAR (completado_revision — p. ej. corrigió una foto y debe poder
+    # enviar a revisión; sin eso se perdía la esencia del rol). Lo que NO
+    # hace es autorizar como Seguridad: aprobar/devolver/rechazar/inactivar/
+    # actualizar → 403 para CUALQUIER otro estado, venga con via=seguridad
+    # o via=impersonacion (el front del padrino no ofrece esos botones;
+    # este guard tapa la llamada directa al endpoint).
+    if _perfil_de_actor(editado_por) == "PADRINO" and nuevo_estado != "completado_revision":
         raise HTTPException(
             status_code=403,
-            detail="El perfil PADRINO no puede cambiar estados de vehículos: solo cargar documentos y datos. Pide a Seguridad que autorice.",
+            detail="El perfil PADRINO solo puede finalizar el registro (enviar a revisión): "
+                   "aprobar, devolver o cambiar estados corresponde a Seguridad.",
         )
 
     # Whitelist de transiciones: evita estados basura y saltos inválidos
@@ -2111,6 +2132,13 @@ async def actualizar_estado(
             detalle=(observaciones or motivo or "").strip() or "sin observaciones"),
         titulo=f"La placa {placa} cambió de estado",
     )
+
+    # (2026-10-16) APROBACIÓN REAL (revisión → aprobado): correo a FINANCIERO
+    # con la información financiera y los certificados ADJUNTOS. En background
+    # (descarga blobs + arma PDF): no demora el response de la aprobación.
+    # Reactivar un inactivo NO re-notifica (no es una aprobación de revisión).
+    if nuevo_estado == "aprobado" and estado_actual == "completado_revision":
+        asyncio.create_task(asyncio.to_thread(_notificar_financieros_aprobacion, vehiculo))
 
     # Al inactivar, el carro sale de la bolsa del día aunque tuviera check-in
     # activo (mismo patrón de _registrar_cambio_aprobado; la /bolsa además
@@ -4823,7 +4851,7 @@ def registros_por_dia(dias: int = 30):
 # visualizar el estado.
 # ─────────────────────────────────────────────────────────────────────────────
 
-PERFILES_ESTADO_FLOTA = {"OPERATIVO", "CONTROL", "COORDINADOR", "ADMIN"}
+PERFILES_ESTADO_FLOTA = {"OPERATIVO", "CONTROL", "COORDINADOR", "ADMIN", "FINANCIERO"}
 
 ESTADOS_FLOTA_LEGIBLES = {
     "registro_incompleto": "Pendiente conductor",
@@ -5092,3 +5120,305 @@ def obtener_detalle_estado_flota(placa: str, usuario: str = ""):
             "timeline": timeline[:200],
         })
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INFORME FINANCIERO por vehículo (2026-10-16, pedido del usuario): SOLO el
+# perfil FINANCIERO lo puede descargar (botón del detalle en /EstadoVehiculos).
+# Un PDF con los datos bancarios de las figuras + los CERTIFICADOS bancarios
+# guardados EMBEBIDOS (imágenes directo; PDFs renderizados por página) —
+# incluye las versiones históricas del historial universal de documentos.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FIGURAS_FINANCIERAS = [
+    ("cond", "Conductor",
+     lambda v: " ".join(x for x in [v.get("condNombres"), v.get("condPrimerApellido"),
+                                    v.get("condSegundoApellido")] if x).strip(),
+     "condCedulaCiudadania"),
+    ("prop", "Propietario", lambda v: v.get("propNombre") or "", "propDocumento"),
+    ("tened", "Tenedor", lambda v: v.get("tenedNombre") or "", "tenedDocumento"),
+    ("cond2", "Conductor 2",
+     lambda v: " ".join(x for x in [v.get("cond2Nombres"), v.get("cond2PrimerApellido"),
+                                    v.get("cond2SegundoApellido")] if x).strip(),
+     "cond2CedulaCiudadania"),
+]
+
+TIPOS_CERT_BANCARIO = {
+    "condCertificacionBancaria", "propCertificacionBancaria",
+    "tenedCertificacionBancaria", "cond2CertificacionBancaria",
+}
+
+
+@ruta_vehiculos.get("/financiero/{placa}")
+def exportar_informe_financiero(placa: str, usuario: str = ""):
+    user = _resolver_usuario_flota(usuario)
+    # (2026-10-16) FINANCIERO y ADMIN (pedido del usuario: admin también).
+    if user["perfil"] not in {"FINANCIERO", "ADMIN"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo FINANCIERO o ADMIN pueden descargar la información financiera del vehículo.",
+        )
+
+    placa_limpia = placa.strip().upper()
+    veh = coleccion_vehiculos.find_one({"placa": placa_limpia})
+    if not veh:
+        veh = coleccion_vehiculos.find_one(
+            {"placa": {"$regex": f"^{re.escape(placa_limpia)}$", "$options": "i"}})
+    if not veh:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehículo no encontrado")
+
+    contenido = _pdf_informe_financiero(veh, user["usuario"], user["perfil"])
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Financiero_{placa_limpia}.pdf"'},
+    )
+
+
+def _pdf_informe_financiero(veh: dict, usuario_genera: str, perfil_genera: str) -> bytes:
+    """Construye el PDF del informe financiero (lo comparten el endpoint
+    /financiero/{placa} y el correo a FINANCIERO al aprobar una placa)."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    doc_pdf = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        title=f"Información financiera {veh.get('placa', '')}",
+        leftMargin=1.4 * cm, rightMargin=1.4 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilo_titulo = ParagraphStyle("TituloFin", parent=estilos["Title"], fontSize=15)
+    estilo_sub = ParagraphStyle("SubFin", parent=estilos["Normal"],
+                                fontSize=8.5, textColor=colors.HexColor("#5a6b78"),
+                                alignment=TA_CENTER)
+    estilo_seccion = ParagraphStyle("SeccionFin", parent=estilos["Heading2"], fontSize=12)
+    # Celdas de tabla como Paragraph: el texto hace WRAP y jamás se sale del
+    # recuadro (pedido del usuario 2026-10-16 — los strings planos de reportlab
+    # no parten línea y desbordaban la columna).
+    estilo_celda = ParagraphStyle("CeldaFin", parent=estilos["Normal"], fontSize=8, leading=9.5)
+    estilo_celda_enc = ParagraphStyle("CeldaFinEnc", parent=estilo_celda,
+                                      textColor=colors.white, fontName="Helvetica-Bold")
+    estilo_link = ParagraphStyle("LinkFin", parent=estilo_celda,
+                                 textColor=colors.HexColor("#0e5a8a"))
+    estilo_nota = ParagraphStyle("NotaFin", parent=estilos["Normal"], fontSize=8,
+                                 textColor=colors.HexColor("#8a1c1c"))
+    elementos = []
+
+    def celda(texto, estilo=None):
+        return Paragraph(str(texto or "-"), estilo or estilo_celda)
+
+    # ── Encabezado ──
+    generado = datetime.now(_TZ_BOGOTA).strftime("%d/%m/%Y %I:%M %p")
+    est = veh.get("estadoIntegra") or ""
+    elementos.append(Paragraph("INFORMACIÓN FINANCIERA DEL VEHÍCULO", estilo_titulo))
+    elementos.append(Paragraph(
+        f"Placa <b>{veh.get('placa', '')}</b> · Estado: "
+        f"<b>{ESTADOS_FLOTA_LEGIBLES.get(est, est)}</b> · Generado el {generado} "
+        f"por {usuario_genera} ({perfil_genera})", estilo_sub))
+    elementos.append(Spacer(1, 10))
+
+    # ── Tabla de datos bancarios por figura ──
+    elementos.append(Paragraph("Cuentas bancarias registradas", estilo_seccion))
+    encabezados = ["Figura", "Nombre", "Documento", "Banco", "Tipo", "Número de cuenta"]
+    filas = [[celda(h, estilo_celda_enc) for h in encabezados]]
+    hay_datos = False
+    for prefijo, etiqueta, fn_nombre, campo_doc in FIGURAS_FINANCIERAS:
+        banco = (veh.get(f"{prefijo}Banco") or "").strip()
+        cert = (veh.get(f"{prefijo}CertificacionBancaria") or "").strip()
+        if not banco and not cert:
+            continue
+        hay_datos = True
+        filas.append([
+            celda(f"<b>{etiqueta}</b>"),
+            celda(fn_nombre(veh)),
+            celda(veh.get(campo_doc)),
+            celda(banco),
+            celda(veh.get(f"{prefijo}TipoCuenta")),
+            celda(veh.get(f"{prefijo}NumeroCuenta")),
+        ])
+    if hay_datos:
+        # Carta útil ≈ 18.8 cm con estos márgenes; las columnas suman eso.
+        tabla = Table(filas, colWidths=[2.1 * cm, 5.3 * cm, 2.7 * cm, 3.4 * cm, 2.2 * cm, 3.1 * cm])
+        tabla.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0e6b5c")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d3da")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f6f8")]),
+        ]))
+        elementos.append(tabla)
+    else:
+        elementos.append(Paragraph("Sin cuentas bancarias registradas para este vehículo.",
+                                   estilos["Normal"]))
+    elementos.append(Spacer(1, 6))
+    elementos.append(Paragraph(
+        "⚠ Documento de uso interno — contiene datos bancarios personales sujetos a "
+        "tratamiento de datos (Ley 1581 de 2012).", estilo_nota))
+    elementos.append(Spacer(1, 12))
+
+    # ── Documentos con LINKS firmados para ABRIRLOS (2026-10-16): SOLO las
+    # certificaciones bancarias VIGENTES (las históricas no interesan) + las
+    # cédulas/NIT cargados. (Feedback del usuario, misma fecha) ORDENADOS POR
+    # ACTOR: una mini-tabla por figura con sus documentos — cada actor queda
+    # separado y legible. Las URLs v4 duran VEHICULOS_URL_FIRMADA_MIN minutos.
+    elementos.append(Paragraph("Documentos (enlaces para abrir)", estilo_seccion))
+    elementos.append(Paragraph(
+        f"Los enlaces son privados y válidos {VEHICULOS_URL_FIRMADA_MIN} minutos; "
+        "si se vencen, vuelve a generar el informe.", estilo_sub))
+
+    prop_es_nit = "NIT" in str(veh.get("propTipoDocumento") or "").upper() \
+        or len(re.sub(r"\D", "", str(veh.get("propDocumento") or ""))) >= 9
+
+    def _docs_actor(prefijo: str):
+        """(documento, ruta) de TODO lo financiero + identidad de UN actor."""
+        pares = []
+        cert = (veh.get(f"{prefijo}CertificacionBancaria") or "").strip()
+        if cert:
+            pares.append(("Certificación bancaria (vigente)", cert))
+        identidad = {
+            "cond": ("Cédula del conductor",
+                     "documentoIdentidadConductor", "documentoIdentidadConductorReverso"),
+            "prop": (("RUT del propietario (NIT)" if prop_es_nit else "Cédula del propietario"),
+                     ("rutPropietario" if prop_es_nit else "documentoIdentidadPropietario"),
+                     (None if prop_es_nit else "documentoIdentidadPropietarioReverso")),
+            "tened": ("Cédula del tenedor",
+                      "documentoIdentidadTenedor", "documentoIdentidadTenedorReverso"),
+            "cond2": ("Cédula del conductor 2",
+                      "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso"),
+        }[prefijo]
+        etiqueta, campo_frente, campo_reverso = identidad
+        frente = (veh.get(campo_frente) or "").strip()
+        if frente:
+            pares.append((etiqueta, frente))
+            reverso = (veh.get(campo_reverso) or "").strip() if campo_reverso else ""
+            if reverso:
+                pares.append((f"{etiqueta} (reverso)", reverso))
+        return pares
+
+    estilo_actor = ParagraphStyle("ActorFin", parent=estilos["Normal"], fontSize=10,
+                                  fontName="Helvetica-Bold",
+                                  textColor=colors.HexColor("#0e6b5c"), spaceBefore=10)
+    total_docs = 0
+    for prefijo, etiqueta_figura, fn_nombre, campo_doc in FIGURAS_FINANCIERAS:
+        pares = _docs_actor(prefijo)
+        if not pares:
+            continue
+        # Título del actor: figura + quién es (nombre y documento).
+        elementos.append(Paragraph(
+            f"{etiqueta_figura} — {fn_nombre(veh) or '(sin nombre)'}"
+            f" · doc. {veh.get(campo_doc) or '-'}", estilo_actor))
+        filas = [[celda("Documento", estilo_celda_enc), celda("Enlace", estilo_celda_enc)]]
+        for documento, ruta in pares:
+            filas.append([
+                celda(documento),
+                Paragraph(f"<link href=\"{_url_firmada_documento(ruta)}\">"
+                          "<u>Abrir documento</u></link>", estilo_link),
+            ])
+            total_docs += 1
+        tabla_actor = Table(filas, colWidths=[10.4 * cm, 8.4 * cm])
+        tabla_actor.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0e6b5c")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c9d3da")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f6f8")]),
+        ]))
+        elementos.append(tabla_actor)
+
+    if total_docs == 0:
+        elementos.append(Paragraph(
+            "Este vehículo no tiene certificaciones bancarias ni documentos de "
+            "identidad cargados.", estilos["Normal"]))
+
+    doc_pdf.build(elementos)
+    return buffer.getvalue()
+
+
+def _notificar_financieros_aprobacion(vehiculo: dict) -> None:
+    """(2026-10-16, pedido del usuario) Al APROBAR una placa: correo a los
+    usuarios con perfil FINANCIERO con la información financiera del vehículo
+    en el cuerpo y ADJUNTOS el informe PDF + las certificaciones bancarias de
+    las figuras. Fire-and-forget: jamás tumba la aprobación."""
+    try:
+        financieros = list(coleccion_baseusuarios.find(
+            {"perfil": "FINANCIERO", "activo": True}))
+        destinatarios = [f["correo"].strip() for f in financieros
+                         if (f.get("correo") or "").strip()]
+        if not destinatarios:
+            print("[financiero] Aprobación sin destinatarios: no hay perfiles FINANCIERO activos con correo")
+            return
+
+        placa = vehiculo.get("placa", "")
+
+        # Cuerpo: tabla HTML con las cuentas de las figuras diligenciadas
+        # (actor + cédula/NIT + banco + tipo + número).
+        filas_html = ""
+        for prefijo, etiqueta, fn_nombre, campo_doc in FIGURAS_FINANCIERAS:
+            banco = (vehiculo.get(f"{prefijo}Banco") or "").strip()
+            cert = (vehiculo.get(f"{prefijo}CertificacionBancaria") or "").strip()
+            if not banco and not cert:
+                continue
+            filas_html += (
+                f"<tr><td>{etiqueta}</td><td>{fn_nombre(vehiculo) or '-'}</td>"
+                f"<td>{vehiculo.get(campo_doc) or '-'}</td>"
+                f"<td>{banco or '-'}</td><td>{vehiculo.get(f'{prefijo}TipoCuenta') or '-'}</td>"
+                f"<td>{vehiculo.get(f'{prefijo}NumeroCuenta') or '-'}</td></tr>")
+        if not filas_html:
+            filas_html = "<tr><td colspan='6'>Sin cuentas bancarias registradas</td></tr>"
+
+        # Adjuntos: informe PDF + certificaciones bancarias de las figuras.
+        adjuntos = [{
+            "filename": f"Informe_Financiero_{placa}.pdf",
+            "content": base64.b64encode(
+                _pdf_informe_financiero(vehiculo, "sistema (aprobación)", "FINANCIERO")
+            ).decode("utf-8"),
+        }]
+        for tipo in sorted(TIPOS_CERT_BANCARIO):
+            ruta = (vehiculo.get(tipo) or "").strip()
+            if not ruta:
+                continue
+            try:
+                datos_blob = _descargar_blob(ruta)
+            except Exception as e:
+                print(f"[financiero] No se pudo descargar {ruta} para adjuntar: {e}")
+                continue
+            etiqueta_doc = ETIQUETAS_DOCUMENTO.get(tipo, tipo).replace(" ", "_")
+            extension = str(ruta).split("?")[0].rsplit(".", 1)[-1] or "bin"
+            adjuntos.append({
+                "filename": f"{etiqueta_doc}_{placa}.{extension}",
+                "content": base64.b64encode(datos_blob).decode("utf-8"),
+            })
+
+        resend.Emails.send({
+            "from": MAIL_FROM,
+            "to": destinatarios,
+            "subject": f"✅ Placa {placa} aprobada — información financiera",
+            "html": (
+                "<div style='font-family:Arial,sans-serif'>"
+                f"<h2>La placa <b>{placa}</b> fue aprobada por Seguridad</h2>"
+                "<p>Cuentas bancarias registradas del vehículo:</p>"
+                "<table border='1' cellpadding='6' style='border-collapse:collapse;font-size:13px'>"
+                "<tr style='background:#0e6b5c;color:#fff'>"
+                "<th>Figura</th><th>Nombre</th><th>Documento</th><th>Banco</th>"
+                "<th>Tipo</th><th>Número de cuenta</th></tr>"
+                f"{filas_html}</table>"
+                "<p style='color:#666;font-size:12px'>Adjuntos: informe financiero en PDF y las "
+                "certificaciones bancarias cargadas. Documento de uso interno (Ley 1581).</p>"
+                "</div>"
+            ),
+            "attachments": adjuntos,
+        })
+        print(f"[OK] Correo de aprobación financiera enviado ({len(destinatarios)} destinatario(s), {placa})")
+    except Exception as e:
+        print(f"[financiero] No se pudo notificar la aprobación a FINANCIERO: {e}")

@@ -80,6 +80,14 @@ class FakeCol:
             self.documents.append(nuevo)
         return MagicMock(modified_count=0)
 
+    def update_many(self, filtro, cambio, upsert=False):
+        n = 0
+        for d in self.documents:
+            if self._match(d, filtro):
+                d.update(cambio.get("$set") or {})
+                n += 1
+        return MagicMock(modified_count=n)
+
 
 def _doc_verificacion(token_plano, **extra):
     """Doc de conductor con token de verificación NUEVO (hash + sha)."""
@@ -181,6 +189,36 @@ class TokensAutorizacionShaTests(unittest.TestCase):
         doc = self.tokens.find_one({"cedula": "1010"})
         self.assertIn("token_sha", doc)
         self.assertTrue(doc["token_hash"].startswith("$2"))
+
+    def test_envio_automatico_no_duplica_link_vigente(self):
+        """(compat) El envío AUTOMÁTICO (sistema) sigue idempotente: con un
+        link vigente no inserta ni manda otro correo."""
+        _, doc = self._nuevo_token()
+        self.tokens.documents.append(doc)
+        with patch.object(conductores, "enviar_correo_autorizacion") as mail:
+            r = conductores._solicitar_autorizacion("ABC123", "1010", "p@q.co", "Perico")
+        self.assertEqual(r["estado"], "pendiente")
+        mail.assert_not_called()
+        self.assertEqual(len(self.tokens.documents), 1)
+
+    def test_reenviar_manual_forza_correo_nuevo(self):
+        """(2026-10-16) Botón «Reenviar» (forzar=True): anula el link vigente
+        y manda correo NUEVO — antes respondía «pendiente» sin enviar nada,
+        aunque el usuario hubiera digitado otro correo."""
+        _, doc = self._nuevo_token()
+        self.tokens.documents.append(doc)
+        with patch.object(conductores, "enviar_correo_autorizacion") as mail:
+            r = conductores._solicitar_autorizacion("ABC123", "1010", "otro@q.co",
+                                                    "Perico", forzar=True)
+        self.assertEqual(r["estado"], "enviado")
+        mail.assert_called_once()
+        # El link viejo quedó anulado (usado_en + resultado) y hay exactamente
+        # un token utilizable, apuntando al correo NUEVO.
+        self.assertEqual(doc.get("resultado"), "reemplazado")
+        self.assertIsNotNone(doc.get("usado_en"))
+        vigentes = [d for d in self.tokens.documents if d.get("usado_en") is None]
+        self.assertEqual(len(vigentes), 1)
+        self.assertEqual(vigentes[0]["correo"], "OTRO@Q.CO")
 
     def test_fast_path_encuentra_sin_bcrypt(self):
         token, doc = self._nuevo_token()

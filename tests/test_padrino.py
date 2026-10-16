@@ -81,14 +81,16 @@ class PerfilDisponibleTests(unittest.TestCase):
 
 
 class GuardEstadoTests(unittest.TestCase):
-    """actualizar-estado: via=seguridad + actor PADRINO → 403; Seguridad pasa."""
+    """actualizar-estado: actor PADRINO solo puede FINALIZAR
+    (completado_revision, 2026-10-16); cualquier otro estado → 403;
+    Seguridad pasa."""
 
     def _vehiculo(self):
         return {"placa": "XYZ789", "estadoIntegra": "completado_revision",
                 "estudiosVigencia": {"hasta": "2999-01-01"},
                 "condCedulaCiudadania": "123", "placa_doc": "x"}
 
-    def _llamar(self, actor, cuentas):
+    def _llamar(self, actor, cuentas, via="seguridad"):
         veh = FakeColeccion([self._vehiculo()])
         with patch.object(vehiculos, "coleccion_vehiculos", veh), \
              patch.object(vehiculos, "coleccion_baseusuarios", cuentas), \
@@ -99,7 +101,7 @@ class GuardEstadoTests(unittest.TestCase):
             c = _cliente(vehiculos.ruta_vehiculos)
             return c.put("/vehiculos/actualizar-estado", data={
                 "placa": "XYZ789", "nuevo_estado": "aprobado",
-                "usuario_id": "seg-1", "editado_por": actor, "via": "seguridad",
+                "usuario_id": "seg-1", "editado_por": actor, "via": via,
             })
 
     def test_padrino_no_cambia_estados(self):
@@ -119,11 +121,15 @@ class GuardEstadoTests(unittest.TestCase):
             r = self._llamar("Alguien Random", FakeColeccion([CUENTA_SEGURIDAD]))
         self.assertEqual(r.status_code, 200)
 
-    def test_padrino_sin_via_seguridad_no_toca_el_guard(self):
-        """via=impersonacion (acciones del conductor impersonado): sin guard."""
-        veh = FakeColeccion([self._vehiculo()])
+    def test_padrino_si_puede_finalizar(self):
+        """(2026-10-16) El padrino SÍ puede FINALIZAR (enviar a revisión):
+        corrigió una foto y debe poder mandar la ficha a revisión."""
+        veh = FakeColeccion([{"placa": "XYZ789", "estadoIntegra": "registro_incompleto",
+                              "condCedulaCiudadania": "123",
+                              "vehCapacidadCarga": "8000", "placa_doc": "x"}])
         with patch.object(vehiculos, "coleccion_vehiculos", veh), \
              patch.object(vehiculos, "coleccion_baseusuarios", FakeColeccion([CUENTA_PADRINO])), \
+             patch.object(vehiculos, "_documentos_faltantes", return_value=[]), \
              patch.object(vehiculos, "_registrar_auditoria"), \
              patch.object(vehiculos, "_disparar_estudios_seguridad"), \
              patch.object(vehiculos, "enviar_notificacion_seguridad"), \
@@ -135,6 +141,14 @@ class GuardEstadoTests(unittest.TestCase):
                 "via": "impersonacion",
             })
         self.assertNotEqual(r.status_code, 403)
+        self.assertIn("completado_revision", [d.get("estadoIntegra") for d in veh.documents])
+
+    def test_padrino_no_aprueba_ni_por_impersonacion(self):
+        """El guard tapa la llamada DIRECTA: aunque el padrino mande
+        via=impersonacion (la del Finalizar), aprobar sigue vetado."""
+        r = self._llamar("Padrino Juan", FakeColeccion([CUENTA_PADRINO]), via="impersonacion")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("PADRINO", r.json()["detail"])
 
 
 class GuardConductoresTests(unittest.TestCase):

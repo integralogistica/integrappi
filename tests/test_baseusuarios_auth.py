@@ -23,7 +23,7 @@ class FakeCollection:
     def __init__(self, documents):
         self.documents = documents if isinstance(documents, list) else [documents]
 
-    def find_one(self, query):
+    def find_one(self, query, *args, **kwargs):
         for doc in self.documents:
             if "usuario" in query and query["usuario"] == doc["usuario"]:
                 return doc
@@ -127,6 +127,14 @@ class BaseUsuariosAuthTests(unittest.TestCase):
         with patch.object(baseusuarios, "coleccion_usuarios", FakeCollection(self.user)):
             encontrado = baseusuarios._buscar_baseusuario_activo("ADMIN_TEST", "clave-prueba")
         self.assertIsNone(encontrado)
+
+    def test_detalle_login_distingue_los_casos(self):
+        """(2026-10-16) El login de la Torre de Control avisa QUÉ falló
+        (pedido del usuario): sin arroba / cuenta inexistente / clave mala."""
+        with patch.object(baseusuarios, "coleccion_usuarios", FakeCollection(self.user)):
+            self.assertIn("CORREO", baseusuarios._detalle_login_invalido("ADMIN_TEST"))
+            self.assertIn("No existe una cuenta", baseusuarios._detalle_login_invalido("nadie@example.com"))
+            self.assertIn("contraseña NO", baseusuarios._detalle_login_invalido("admin@example.com"))
 
     def test_token_identifica_fuente_y_perfil(self):
         token = baseusuarios._crear_token_baseusuario(self.user)

@@ -581,11 +581,27 @@ async def eliminar_baseusuario(usuario_id: str):
 # 🚪 RUTAS DE LOGIN
 # ==============================================================================
 
+def _detalle_login_invalido(usuario: str) -> str:
+    """(2026-10-16) Motivo ESPECÍFICO del rechazo (pedido del usuario): la
+    cuenta no existe es distinto de clave errónea — antes todo era el genérico
+    «Usuario o clave incorrectos». Solo se consulta en el camino de FALLO del
+    login, así que no cuesta nada en el caso feliz."""
+    valor = usuario.strip()
+    if "@" not in valor:
+        return ("Ingresa tu CORREO institucional (ej: nombre@empresa.com) — "
+                "el usuario de texto ya no se usa para entrar.")
+    query_correo = {"correo": {"$regex": f"^{re.escape(valor.lower())}$", "$options": "i"}}
+    if coleccion_usuarios.find_one(query_correo, {"_id": 1}) is None:
+        return (f"No existe una cuenta con el correo {valor}. "
+                "Verifícalo o pide al administrador que la cree.")
+    return "El correo es correcto pero la contraseña NO lo es. Verifícala e inténtalo de nuevo."
+
+
 @ruta_baseusuarios.post("/login", response_model=dict)
 async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = Body(..., embed=True)):
     encontrado = _buscar_baseusuario_activo(usuario, clave)
     if not encontrado:
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
+        raise HTTPException(status_code=401, detail=_detalle_login_invalido(usuario))
     return {
         "mensaje": "Login exitoso",
         "access_token": _crear_token_baseusuario(encontrado),
