@@ -4084,22 +4084,36 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
 @ruta_vehiculos.delete("/eliminar-foto")
 async def eliminar_foto(placa: str, url: str, editado_por: Optional[str] = None):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
-    if not vehiculo or url not in vehiculo["fotos"]:
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail="Foto no encontrada.")
+    # El front recibe URLs FIRMADAS (`https://storage.googleapis.com/{bucket}/
+    # Vehiculos/...`) pero desde el bucket privado (2026-08-31) Mongo guarda
+    # la RUTA plana (`Vehiculos/...`) — la comparación EXACTA de antes solo
+    # funcionaba con las URLs públicas históricas y toda eliminación desde el
+    # visor rebotaba 404. Normalizar por nombre de blob y operar sobre el
+    # valor ALMACENADO (que $pull/eliminar blob usan tal cual están en Mongo).
+    objetivo = _nombre_blob_de_ruta(str(url).split("?")[0])
+    foto_guardada = next(
+        (f for f in (vehiculo.get("fotos") or [])
+         if _nombre_blob_de_ruta(str(f)) == objetivo),
+        None,
+    )
+    if not foto_guardada:
         raise HTTPException(status_code=404, detail="Foto no encontrada.")
     _asegurar_editable(vehiculo)
 
-    eliminar_de_google_storage(url)
+    eliminar_de_google_storage(foto_guardada)
     # El espejo plano Y el catálogo de ángulos (2026-10-14): si era una foto
     # frontal/lateral/posterior, su ángulo vuelve a faltar.
     coleccion_vehiculos.update_one(
         {"placa": placa},
-        {"$pull": {"fotos": url, "fotosVehiculo": {"ruta": url}}},
+        {"$pull": {"fotos": foto_guardada, "fotosVehiculo": {"ruta": foto_guardada}}},
     )
     _registrar_auditoria(placa, "foto_eliminada", actor=editado_por)
 
     _registrar_cambio_aprobado(
         vehiculo, editado_por or "", "documentos",
-        [{"campo": "fotos", "antes": url, "despues": "(eliminada)"}],
+        [{"campo": "fotos", "antes": foto_guardada, "despues": "(eliminada)"}],
     )
 
     return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Foto eliminada correctamente"})

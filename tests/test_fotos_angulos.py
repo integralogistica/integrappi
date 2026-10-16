@@ -184,6 +184,50 @@ class SubirFotosAnguloTests(unittest.TestCase):
                          ["lateral_izq", "lateral_der", "posterior"])
         self.assertEqual(vehiculos._documentos_faltantes(doc), ["frontal"])
 
+    def test_eliminar_foto_con_URL_firmada_como_las_del_front(self):
+        """Regresión (2026-10-16, caso STA796): Mongo guarda la RUTA plana
+        (`Vehiculos/...`) pero el front recibe la URL FIRMADA y la devuelve
+        (sin query) al eliminar — la comparación exacta rebotaba 404 y la
+        foto era imposible de borrar desde el visor."""
+        ruta_plana = "Vehiculos/STA796/2026-10-14/foto_006_sta796.webp"
+        url_front = "https://storage.googleapis.com/integrapp-privado/" + ruta_plana
+        v = vehiculo_completo(estadoIntegra="registro_incompleto")
+        v["fotos"] = [ruta_plana]
+        v["fotosVehiculo"] = [{"tipo": "frontal", "ruta": ruta_plana}]
+        fake = FakeColeccion([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage") as mock_del:
+            resp = self.client.delete(f"/vehiculos/eliminar-foto?placa=TEST01&url={url_front}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        doc = fake.documents[0]
+        self.assertEqual(doc["fotos"], [])            # sacó la RUTA almacenada
+        self.assertEqual(doc["fotosVehiculo"], [])    # y su ángulo
+        mock_del.assert_called_once_with(ruta_plana)  # el blob por su ruta plana
+
+    def test_eliminar_foto_con_URL_con_query(self):
+        """Defensivo: si el front llegara a mandar la URL firmada COMPLETA
+        (con ?X-Goog-...), también debe resolverla a la ruta almacenada."""
+        ruta_plana = "Vehiculos/STA796/2026-10-14/foto_006_sta796.webp"
+        url_front = (f"https://storage.googleapis.com/integrapp-privado/{ruta_plana}"
+                     f"?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=abc")
+        v = vehiculo_completo(estadoIntegra="registro_incompleto")
+        v["fotos"] = [ruta_plana]
+        v["fotosVehiculo"] = [{"tipo": "frontal", "ruta": ruta_plana}]
+        fake = FakeColeccion([v])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage"):
+            resp = self.client.delete(f"/vehiculos/eliminar-foto?placa=TEST01&url={url_front}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["fotos"], [])
+
+    def test_eliminar_foto_inexistente_sigue_404(self):
+        fake = FakeColeccion([vehiculo_completo(estadoIntegra="registro_incompleto")])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage"):
+            resp = self.client.delete("/vehiculos/eliminar-foto?placa=TEST01&url=Vehiculos/OTRA/9.webp")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(len(fake.documents[0]["fotos"]), 4)  # intactas
+
 
 class BlindajeTests(unittest.TestCase):
 
