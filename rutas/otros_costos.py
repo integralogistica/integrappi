@@ -1049,6 +1049,12 @@ def _eliminar_blob_oc(ruta: str) -> None:
         logger.warning("No se pudo eliminar el adjunto %s: %s", ruta, e)
 
 
+def _ruta_blob_adjunto(url: str) -> str:
+    """Ruta plana del blob a partir de la URL firmada o la ruta guardada en Mongo
+    (quita la query de firma ?X-Goog-... y el prefijo del bucket)."""
+    return _RE_URL_PUBLICA_GCS.sub("", str(url or "").split("?")[0])
+
+
 def _subir_adjuntos(archivos: List[UploadFile], consecutivo: str, info: dict) -> List[dict]:
     """Sube todos los adjuntos y devuelve su metadata. Ante un error a mitad de
     tanda revierte los blobs ya subidos para no dejar huérfanos en el bucket."""
@@ -1380,6 +1386,9 @@ class EditarOtroCostoRequest(BaseModel):
     consecutivo: str
     usuario: str
     enviar: bool = False
+    # URLs (firmadas o rutas planas) de adjuntos existentes que el usuario quitó
+    # del formulario; se comparan por ruta de blob al editar.
+    adjuntos_eliminar: Optional[List[str]] = None
     pedido_vulcano_original: Optional[str] = None
     pedidos_normalizados: Optional[List[str]] = None
     pedido_encontrado: Optional[bool] = None
@@ -1752,10 +1761,21 @@ async def editar_solicitud(
     valor_total = _validar_solicitud(datos_servicio, costos, datos_bancarios, conductor, doc.get("pedido_encontrado", True))
     requiere_control = valor_total > LIMITE_COORDINADOR
 
-    # Adjuntos: los existentes se conservan y los nuevos se agregan al array
-    # (tope total de MAX_ADJUNTOS_OC). Validados antes de cualquier mutación.
+    # Adjuntos: los existentes se conservan salvo los que el usuario quitó del
+    # formulario (adjuntos_eliminar, comparados por ruta de blob), y los nuevos
+    # se agregan al array (tope total de MAX_ADJUNTOS_OC). Validado antes de
+    # cualquier mutación.
     archivos = archivos or []
     adjuntos_actuales = doc.get("adjuntos") or []
+    rutas_eliminar = {
+        _ruta_blob_adjunto(u) for u in (req.adjuntos_eliminar or []) if str(u or "").strip()
+    }
+    adjuntos_eliminados = [
+        a for a in adjuntos_actuales if _ruta_blob_adjunto(a.get("url", "")) in rutas_eliminar
+    ]
+    adjuntos_actuales = [
+        a for a in adjuntos_actuales if _ruta_blob_adjunto(a.get("url", "")) not in rutas_eliminar
+    ]
     _validar_adjuntos(archivos, existentes=len(adjuntos_actuales))
 
     set_fields = {
@@ -1796,6 +1816,8 @@ async def editar_solicitud(
     adjuntos_nuevos = []
     if archivos:
         adjuntos_nuevos = await asyncio.to_thread(_subir_adjuntos, archivos, req.consecutivo, info)
+
+    if archivos or adjuntos_eliminados:
         set_fields["adjuntos"] = adjuntos_actuales + adjuntos_nuevos
 
     movimientos = [_nuevo_movimiento(tipo_mov, estado_actual, nuevo_estado, info, motivo, _ip(request))]
@@ -1804,10 +1826,20 @@ async def editar_solicitud(
             "adjuntos", None, None, info,
             f"Se agregaron {len(adjuntos_nuevos)} adjunto(s)", _ip(request),
         ))
+    if adjuntos_eliminados:
+        nombres = ", ".join(str(a.get("nombre", "")) for a in adjuntos_eliminados)
+        movimientos.append(_nuevo_movimiento(
+            "adjuntos", None, None, info,
+            f"Se eliminaron {len(adjuntos_eliminados)} adjunto(s): {nombres}", _ip(request),
+        ))
     col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": estado_actual},
         {"$set": set_fields, "$push": {"historial_movimientos": {"$each": movimientos}}},
     )
+    # Borrado de los blobs eliminados DESPUÉS del update exitoso y best-effort:
+    # si falla, queda un huérfano invisible en el bucket (no un adjunto roto).
+    for a in adjuntos_eliminados:
+        await asyncio.to_thread(_eliminar_blob_oc, a.get("url", ""))
     actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
     # Si la edición envió a aprobación, avisar a COORDINADOR/CONTROL (fire-and-forget).
     if req.enviar and actualizado:

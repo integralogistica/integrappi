@@ -4735,24 +4735,38 @@ BANDEJAS_REVISION = {
 @ruta_vehiculos.get("/obtener-vehiculos-incompletos")
 def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Optional[str] = None,
                                   placa: Optional[str] = None):
-    filtro = {
-        "estadoIntegra": {
-            "$in": BANDEJAS_REVISION.get(bandeja, ["registro_incompleto", "completado_revision",
-                                                    "aprobado", "inactivo", "rechazado",
-                                                    "en_actualizacion"])
-        },
+    # (2026-10-19) DOS modos:
+    #  - LISTA (sin `placa`): la bandeja de /revision → payload LIGERO. La
+    #    fila solo necesita saber si cada documento EXISTE (para el % de
+    #    avance): se excluyen auditoría/historiales/lecturasIA y NO se firman
+    #    rutas (firmar ~2.000 URLs v4 de 136 vehículos eran 3+ s y un payload
+    #    de 7 MB). El panel trae el vehículo completo por `placa=` al abrirse.
+    #  - UNA placa (`placa=`): el panel → documento COMPLETO con TODAS sus
+    #    rutas firmadas (una placa firma ~60 URLs ≈ 0,1 s). Sin filtro de
+    #    estado: la placa restaurada por URL puede estar en cualquier bandeja.
+    consulta_placa = bool(placa and placa.strip())
+    filtro: dict = {
         # Borradores del alta (placa validada, responsable sin vincular): se
         # retoman desde el módulo de alta, no desde las bandejas de revisión.
         "responsable_pendiente": {"$ne": True},
     }
-    # Filtro por placa (2026-10-14): restaurar el panel de UN vehículo en
-    # /revision (?placa= tras un atrás/adelante o F5) NO debe traer la bandeja
-    # completa — cada vehículo firma todas sus rutas de documento y con la
-    # flota creciendo eso era lo que se sentía lento. Sin el param (o vacío)
-    # el filtro queda igual que siempre (compat con el front desplegado).
-    if placa and placa.strip():
+    if consulta_placa:
         filtro["placa"] = placa.strip().upper()
-    vehiculos_raw = list(coleccion_vehiculos.find(filtro))
+    else:
+        filtro["estadoIntegra"] = {
+            "$in": BANDEJAS_REVISION.get(bandeja, ["registro_incompleto", "completado_revision",
+                                                    "aprobado", "inactivo", "rechazado",
+                                                    "en_actualizacion"])
+        }
+    # Proyección (modo LISTA): fuera lo pesado que solo usa el panel (llega
+    # con la consulta individual por placa al abrirlo).
+    proyeccion = None if consulta_placa else {
+        "auditoriaVehiculo": 0, "historialDocumentos": 0,
+        "lecturasIA": 0, "documentosPlanillaSegSocial": 0,
+    }
+    vehiculos_raw = list(
+        coleccion_vehiculos.find(filtro, proyeccion)
+        if proyeccion else coleccion_vehiculos.find(filtro))
 
     if not vehiculos_raw:
         return JSONResponse(
@@ -4780,9 +4794,11 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Opt
         veh["documentos"] = documentos
         vehiculos_final.append(veh)
 
+    # Firma SOLO en modo placa (panel): la bandeja viaja con rutas planas.
+    salida = _firmar_documentos(vehiculos_final) if consulta_placa else vehiculos_final
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Vehículos encontrados", "vehicles": _json_seguro(_firmar_documentos(vehiculos_final))}
+        content={"message": "Vehículos encontrados", "vehicles": _json_seguro(salida)}
     )
 
 

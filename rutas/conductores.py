@@ -351,6 +351,10 @@ class CambioClaveInput(BaseModel):
     perfil: Optional[str] = None
 
 
+class CambiarPerfilInput(BaseModel):
+    perfil: str  # CONDUCTOR | TENEDOR (corrección del rol elegido al registrarse)
+
+
 # ==============================================================================
 # 🛠️ HELPERS
 # ==============================================================================
@@ -754,7 +758,9 @@ async def listar_alta_seguridad():
     """
     cuentas = []
     for doc in coleccion_conductores.find(
-            {"alta_por_seguridad": True},
+            # (2026-10-19) Las cuentas ELIMINADAS (basura desactivada desde
+            # «Cuentas sin vehículo») tampoco hacen ruido aquí.
+            {"alta_por_seguridad": True, "eliminada_por_seguridad": {"$ne": True}},
             {"clave": 0}).sort("alta_seguridad_en", -1).limit(200):
         cuentas.append({
             "id": str(doc.get("_id")),
@@ -878,13 +884,23 @@ async def cuentas_sin_vehiculo():
     idUsuario ni como conductor invitado por idConductor), con su estado de
     verificación de correo — para que Seguridad sepa a quién reenviarle el
     enlace o enviarle un recordatorio. Sin claves JAMÁS.
+
+    (2026-10-19) Los ids vinculados a fichas se sacan en UNA consulta (antes:
+    un count_documents POR cuenta — N+1 que con ~200 cuentas tardaba ~16 s
+    contra Atlas desde una red local).
     """
+    vinculados = set()
+    for veh in coleccion_vehiculos.find(
+            {}, {"idUsuario": 1, "idConductor": 1, "idConductor2": 1}):
+        for campo in ("idUsuario", "idConductor", "idConductor2"):
+            val = str(veh.get(campo) or "").strip()
+            if val and val.lower() not in ("none", "null", "undefined"):
+                vinculados.add(val)
+
     cuentas = []
     for doc in coleccion_conductores.find({"activo": {"$ne": False}}).limit(500):
         cid = str(doc.get("_id"))
-        placas = coleccion_vehiculos.count_documents(
-            {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
-        if placas:
+        if cid in vinculados:
             continue
         fecha = _fecha_creacion_cuenta(doc)
         cuentas.append({
@@ -935,6 +951,78 @@ async def reenviar_verificacion_seguridad(conductor_id: str, background_tasks: B
         (doc.get("nombre") or "").strip())
     return {"mensaje": f"Enlace de verificación reenviado a {doc.get('correo', '')} "
                        f"(vence en {EXPIRA_HORAS_VERIFICACION} horas)."}
+
+
+@ruta_conductores.post("/{conductor_id}/cambiar-perfil", response_model=dict)
+async def cambiar_perfil_cuenta(conductor_id: str, data: CambiarPerfilInput):
+    """
+    (2026-10-19, pedido del usuario) Corrige el PERFIL de una cuenta que se
+    registró con el rol equivocado (p.ej. eligió TENEDOR en el registro y es
+    CONDUCTOR). El perfil se fija al registrarse y NUNCA cambia solo.
+
+    SOLO cuentas SIN ninguna placa inscrita (idUsuario/idConductor/
+    idConductor2): sin fichas ligadas el perfil no tiene dependencias (regla
+    CONDUCTOR=1 placa / TENEDOR=N, invitaciones) y el cambio es seguro. Con
+    placas → 409: hay que revisar las fichas a mano antes.
+    """
+    perfil_nuevo = (data.perfil or "").strip().upper()
+    if perfil_nuevo not in ("CONDUCTOR", "TENEDOR"):
+        raise HTTPException(status_code=400, detail="Perfil no válido: CONDUCTOR o TENEDOR.")
+    doc = _cuenta_por_id(conductor_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+    perfil_actual = (doc.get("perfil") or "CONDUCTOR").upper()
+    if perfil_actual == perfil_nuevo:
+        return {"mensaje": f"{doc.get('correo', '')} ya es {perfil_nuevo}.",
+                "perfil": perfil_nuevo}
+    cid = str(doc["_id"])
+    placas = coleccion_vehiculos.count_documents(
+        {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
+    if placas:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{doc.get('correo', '')} tiene {placas} placa(s) inscrita(s): "
+                    "el perfil no se cambia solo — revisa sus fichas primero."),
+        )
+    coleccion_conductores.update_one(
+        {"_id": doc["_id"]}, {"$set": {"perfil": perfil_nuevo}})
+    return {"mensaje": f"{doc.get('correo', '')} pasó de {perfil_actual} a {perfil_nuevo}.",
+            "perfil": perfil_nuevo}
+
+
+@ruta_conductores.post("/{conductor_id}/eliminar", response_model=dict)
+async def eliminar_cuenta_seguridad(conductor_id: str):
+    """
+    (2026-10-19, pedido del usuario) Saca de circulación una cuenta BASURA
+    (correo evidentemente mal digitado, p.ej. PEREZ.FABIO@90) que solo hace
+    ruido en «Cuentas sin vehículo». DESACTIVACIÓN (activo=False), NO borrado
+    físico: desaparece del listado (ya filtra inactivas), el login la rechaza
+    y queda el registro en BD por auditoría — reversible a mano.
+
+    SOLO cuentas SIN placas inscritas: con fichas ligadas → 409 (la ficha
+    necesita su responsable).
+    """
+    doc = _cuenta_por_id(conductor_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+    if doc.get("activo") is False:
+        return {"mensaje": f"{doc.get('correo', '')} ya estaba desactivada."}
+    cid = str(doc["_id"])
+    placas = coleccion_vehiculos.count_documents(
+        {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
+    if placas:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{doc.get('correo', '')} tiene {placas} placa(s) inscrita(s): "
+                    "no se puede eliminar una cuenta con fichas."),
+        )
+    coleccion_conductores.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"activo": False,
+                  "eliminada_por_seguridad": True,
+                  "eliminada_fecha": datetime.utcnow()}},
+    )
+    return {"mensaje": f"{doc.get('correo', '')} fue desactivada (sin placas ligadas)."}
 
 
 def enviar_correo_recordatorio_vehiculo(destinatario: str, nombre: str):

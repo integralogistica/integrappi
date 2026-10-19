@@ -459,22 +459,60 @@ class FiltroPorBandejaTests(unittest.TestCase):
     def test_placa_vacia_mantiene_el_filtro_completo(self):
         import inspect
         fuente = inspect.getsource(vehiculos.obtener_vehiculos_incompletos)
-        # El filtro por placa es condicional: '' o None no lo activan.
-        self.assertIn('if placa and placa.strip()', fuente)
+        # El modo placa es condicional: '' o None no lo activan.
+        self.assertIn('placa and placa.strip()', fuente)
+
+    # (2026-10-19) Modo LISTA ligero vs modo PLACA completa: la bandeja no
+    # firma rutas ni arrastra auditoría/historiales; la consulta individual
+    # por placa sí (para el panel) y sin filtro de estado (la placa puede
+    # estar en cualquier bandeja, incluida en_revision).
+
+    def test_lista_ligera_sin_firmar_ni_pesados(self):
+        vehiculo = {"_id": "a", "placa": "AAA111", "estadoIntegra": "registro_incompleto",
+                    "soat": "Vehiculos/AAA111/2026-10-19/soat_aaa111.pdf",
+                    "auditoriaVehiculo": [{"x": 1}], "historialDocumentos": [{"ruta": "Vehiculos/old"}],
+                    "lecturasIA": {"soat": {"datos": {}}}, "documentosPlanillaSegSocial": [{"ruta": "Vehiculos/p"}]}
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionFiltro([vehiculo])), \
+             patch.object(vehiculos, "_firmar_documentos") as mock_firmar:
+            r = vehiculos.obtener_vehiculos_incompletos(bandeja="pendientes")
+        data = json.loads(r.body)
+        v = data["vehicles"][0]
+        self.assertEqual(v["soat"], "Vehiculos/AAA111/2026-10-19/soat_aaa111.pdf")  # ruta PLANA
+        for fuera in ("auditoriaVehiculo", "historialDocumentos", "lecturasIA",
+                      "documentosPlanillaSegSocial"):
+            self.assertNotIn(fuera, v)
+        mock_firmar.assert_not_called()  # la bandeja NO firma nada
+
+    def test_placa_completa_firma_y_trae_todo(self):
+        vehiculo = {"_id": "a", "placa": "AAA111", "estadoIntegra": "en_revision",
+                    "soat": "Vehiculos/AAA111/2026-10-19/soat_aaa111.pdf",
+                    "auditoriaVehiculo": [{"x": 1}]}
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionFiltro([vehiculo])), \
+             patch.object(vehiculos, "_firmar_documentos", side_effect=lambda x: x) as mock_firmar:
+            r = vehiculos.obtener_vehiculos_incompletos(placa="aaa111")
+        v = json.loads(r.body)["vehicles"][0]
+        self.assertEqual(v["placa"], "AAA111")
+        self.assertIn("auditoriaVehiculo", v)  # el panel la necesita (Cambios)
+        mock_firmar.assert_called_once()       # el panel SÍ firma todo
+        # Sin filtro de estado: en_revision (fuera del default) igual se trae.
 
 
 class FakeColeccionFiltro:
-    """Stub que aplica el $in de estadoIntegra del filtro (para el test del param)."""
+    """Stub que aplica el $in de estadoIntegra / la placa del filtro (para los
+    tests de los params bandeja/placa) y la proyección de EXCLUSIÓN (2026-10-19,
+    modo lista ligera)."""
 
     def __init__(self, docs):
         self._docs = docs
 
-    def find(self, filtro):
-        estados = filtro.get("estadoIntegra", {}).get("$in")
+    def find(self, filtro, proyeccion=None):
+        estados = (filtro or {}).get("estadoIntegra", {}).get("$in")
         docs = [d for d in self._docs if not estados or d.get("estadoIntegra") in estados]
-        placa = filtro.get("placa")
+        placa = (filtro or {}).get("placa")
         if placa:
-            docs = [d for d in docs if d.get("placa") == placa]
+            docs = [d for d in docs if d.get("placa", "").upper() == placa.upper()]
+        if proyeccion:
+            docs = [{k: v for k, v in d.items() if k not in proyeccion} for d in docs]
         return docs
 
 

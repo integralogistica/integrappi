@@ -148,5 +148,99 @@ class RecordatorioVehiculoTests(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
 
 
+class CambiarPerfilTests(unittest.TestCase):
+    """(2026-10-19) Corrección del PERFIL elegido al registrarse (p.ej. la
+    cuenta se creó como TENEDOR pero la persona es CONDUCTOR): el perfil se
+    fija en el registro y nunca cambia solo — este endpoint lo corrige, pero
+    SOLO mientras la cuenta no tenga placas inscritas (con fichas ligadas hay
+    que revisarlas a mano)."""
+
+    def test_cambia_tenedor_a_conductor_sin_placas(self):
+        doc = _cuenta("EQUIVOCADO@X.COM", perfil="TENEDOR", correo_verificado=True)
+        fake = FakeColeccion([doc])
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
+                             json={"perfil": "conductor"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(doc["perfil"], "CONDUCTOR")       # quedó corregido
+        self.assertIn("CONDUCTOR", r.json()["mensaje"])
+
+    def test_409_con_placas_inscritas_no_toca_el_perfil(self):
+        doc = _cuenta("CONFICHA@X.COM", perfil="TENEDOR")
+        vehiculos_fake = FakeColeccion(
+            [{"_id": "v1", "placa": "ABC123", "idUsuario": str(doc["_id"])}])
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", vehiculos_fake):
+            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
+                             json={"perfil": "CONDUCTOR"})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(doc["perfil"], "TENEDOR")          # intacto
+
+    def test_400_perfil_fuera_de_catalogo(self):
+        # ADMIN/SEGURIDAD/PADRUNO… no son perfiles de portal: se rechazan.
+        doc = _cuenta("X@X.COM")
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
+                             json={"perfil": "ADMIN"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_mismo_perfil_es_idempotente(self):
+        doc = _cuenta("YA@X.COM", perfil="CONDUCTOR")
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
+                             json={"perfil": "CONDUCTOR"})
+        self.assertEqual(r.status_code, 200)
+
+
+class EliminarCuentaTests(unittest.TestCase):
+    """(2026-10-19) Limpieza de cuentas BASURA (correo mal digitado, p.ej.
+    PEREZ.FABIO@90): DESACTIVACIÓN (activo=False + sello), no borrado físico
+    — desaparecen del listado (filtra inactivas) y el login las rechaza.
+    Solo sin placas inscritas."""
+
+    def test_desactiva_y_marca(self):
+        doc = _cuenta("BASURA@90")
+        fake = FakeColeccion([doc])
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r = cliente.post(f"/conductores/{doc['_id']}/eliminar")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(doc["activo"])                     # desactivada
+        self.assertTrue(doc["eliminada_por_seguridad"])     # con sello
+        self.assertIn("eliminada_fecha", doc)
+        # Y ya no aparece en el listado de cuentas sin vehículo.
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r2 = cliente.get("/conductores/sin-vehiculo")
+        self.assertEqual(r2.json()["total"], 0)
+
+    def test_409_con_placas_inscritas(self):
+        doc = _cuenta("CONFICHA@X.COM")
+        vehiculos_fake = FakeColeccion(
+            [{"_id": "v1", "placa": "ABC123", "idUsuario": str(doc["_id"])}])
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", vehiculos_fake):
+            r = cliente.post(f"/conductores/{doc['_id']}/eliminar")
+        self.assertEqual(r.status_code, 409)
+        self.assertTrue(doc.get("activo", True))            # intacta
+
+    def test_idempotente_si_ya_inactiva(self):
+        doc = _cuenta("YA@X.COM", activo=False)
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
+            r = cliente.post(f"/conductores/{doc['_id']}/eliminar")
+        self.assertEqual(r.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()
