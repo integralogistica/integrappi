@@ -4046,7 +4046,8 @@ def _rehabilitar_tras_planilla(placa: str, actor: Optional[str] = None):
 
 
 @ruta_vehiculos.delete("/eliminar-documento")
-async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] = None):
+async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] = None,
+                             url: Optional[str] = None):
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
     if not vehiculo or not vehiculo.get(tipo):
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
@@ -4055,6 +4056,58 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
     # bajar un aprobado a re-revisión: el origen que se recuerda debe ser el
     # original, no el intermedio).
     estado_previo = vehiculo.get("estadoIntegra")
+
+    # Planilla en VARIOS archivos (2026-10-19): el paso 3 y el visor pueden
+    # pedir borrar UN archivo concreto del historial (la EPS o la ARL), no el
+    # espejo (último). Se borran su blob y su entrada; el espejo y el
+    # vencimiento pasan a la entrada más reciente que quede (o se limpian si
+    # no queda ninguna — con el alta por eliminación de siempre).
+    if tipo == "planillaEpsArl" and url:
+        objetivo = _nombre_blob_de_ruta(str(url).split("?")[0])
+        historial = vehiculo.get("documentosPlanillaSegSocial") or []
+        entrada = next(
+            (e for e in historial
+             if _nombre_blob_de_ruta(str(e.get("ruta") or "")) == objetivo),
+            None,
+        )
+        if not entrada:
+            raise HTTPException(status_code=404, detail="Archivo de planilla no encontrado.")
+        eliminar_de_google_storage(entrada["ruta"])
+        restantes = [e for e in historial if e is not entrada]
+        if restantes:
+            operacion_planilla: dict = {
+                "$pull": {"documentosPlanillaSegSocial": {"ruta": entrada["ruta"]}},
+                "$set": {
+                    "planillaEpsArl": restantes[0]["ruta"],
+                    "planillaVencimiento": restantes[0].get("vence"),
+                },
+            }
+        else:
+            operacion_planilla = {
+                "$pull": {"documentosPlanillaSegSocial": {"ruta": entrada["ruta"]}},
+                "$unset": {"planillaEpsArl": "", "planillaVencimiento": ""},
+            }
+        coleccion_vehiculos.update_one({"placa": placa}, operacion_planilla)
+        _registrar_auditoria(
+            placa, "documento_eliminado", actor=editado_por,
+            detalle=ETIQUETAS_DOCUMENTO.get(tipo, tipo) + " (archivo del historial)",
+        )
+        # Mientras quede ALGÚN archivo la planilla sigue completa: NO se
+        # registra cambio de aprobado ni baja a re-revisión (mismo espíritu
+        # de TIPOS_SIN_REVISION para la planilla). Sin archivos restantes sí
+        # corre el flujo de siempre (re-revisión / en_actualizacion).
+        if not restantes:
+            _registrar_cambio_aprobado(
+                vehiculo, editado_por or "", "documentos",
+                [{"campo": tipo, "antes": entrada["ruta"], "despues": "(eliminado)"}],
+            )
+            _mover_a_actualizacion_por_eliminacion(
+                placa, actor=editado_por, estado_previo=estado_previo)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"message": "Archivo de planilla eliminado correctamente",
+                     "gemelos_eliminados": []},
+        )
 
     url_previa = vehiculo[tipo]
     eliminar_de_google_storage(url_previa)

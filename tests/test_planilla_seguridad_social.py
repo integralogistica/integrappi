@@ -56,12 +56,18 @@ class FakeColeccion:
                 continue
             for k, v in (cambio.get("$set") or {}).items():
                 d[k] = v
+            for k in (cambio.get("$unset") or {}):
+                d.pop(k, None)
             for campo, valor in (cambio.get("$push") or {}).items():
                 entradas = valor["$each"] if isinstance(valor, dict) and "$each" in valor else [valor]
                 if campo.endswith(".auditoriaVehiculo") or campo == "auditoriaVehiculo":
                     d.setdefault("auditoriaVehiculo", []).extend(entradas)
                 else:
                     d.setdefault(campo, []).extend(entradas)
+            for campo, cond in (cambio.get("$pull") or {}).items():
+                d[campo] = [e for e in d.get(campo, [])
+                            if not (isinstance(e, dict) and isinstance(cond, dict)
+                                    and all(e.get(k) == v for k, v in cond.items()))]
             return
         if upsert:
             self.documents.append(dict(filtro))
@@ -304,6 +310,77 @@ class HistorialDocumentosTests(unittest.TestCase):
         self.assertIn("historialDocumentos", vehiculos.CLAVES_PROTEGIDAS)
         self.assertIn("historialDocumentos", vehiculos.CAMPOS_DOCUMENTO_PROTEGIDOS)
         self.assertIn("historialDocumentos", vehiculos.CAMPOS_VOLATILES_FIRMA)
+
+
+class EliminarArchivoPlanillaTests(unittest.TestCase):
+    """(2026-10-19, pedido del usuario) El conductor puede AÑADIR más
+    archivos a la planilla desde el paso 3 (EPS y ARL suelen venir en PDFs
+    separados) — el borrado debe poder ser por ARCHIVO: eliminar-documento
+    con url= saca ESA entrada del historial y reasigna espejo/vencimiento a
+    la más reciente restante (o limpia todo si no queda ninguna)."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def _subir_dos(self, fake):
+        """Sube EPS y ARL como archivos separados (misma fecha de vence)."""
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"):
+            r_eps = _subir(self.client, "eps.pdf")
+            r_arl = _subir(self.client, "arl.pdf")
+        self.assertEqual(r_eps.status_code, 200, r_eps.text)
+        self.assertEqual(r_arl.status_code, 200, r_arl.text)
+        return r_eps.json()["ruta"], r_arl.json()["ruta"]
+
+    def _eliminar(self, url):
+        return self.client.delete(
+            "/vehiculos/eliminar-documento",
+            params={"placa": "TEST01", "tipo": "planillaEpsArl", "url": url},
+        )
+
+    def test_borrar_uno_deja_el_otro_y_reasigna_espejo(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        url_eps, url_arl = self._subir_dos(fake)
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage") as mock_del:
+            resp = self._eliminar(url_arl)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_del.assert_called_once_with(url_arl)          # borró EL elegido (no el espejo a ciegas)
+        doc = fake.documents[0]
+        self.assertEqual(doc["planillaEpsArl"], url_eps)   # espejo → la restante
+        rutas = [h["ruta"] for h in doc["documentosPlanillaSegSocial"]]
+        self.assertEqual(rutas, [url_eps])                 # historial: queda la EPS
+        self.assertTrue(doc["planillaVencimiento"])        # sigue habilitado por fecha
+        self.assertEqual(doc["estadoIntegra"], "aprobado") # NO inhabilita si queda un archivo
+
+    def test_borrar_el_ultimo_limpia_todo_e_inhabilita(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        url_eps, url_arl = self._subir_dos(fake)
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "coleccion_disponibilidades", MagicMock()), \
+             patch.object(vehiculos, "eliminar_de_google_storage"), \
+             patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+             patch.object(vehiculos, "_notificar_padrinos"), \
+             patch.object(vehiculos, "_disparar_estudios_seguridad"):
+            r1 = self._eliminar(url_eps)
+            r2 = self._eliminar(url_arl)
+        self.assertEqual(r1.status_code, 200, r1.text)
+        self.assertEqual(r2.status_code, 200, r2.text)
+        doc = fake.documents[0]
+        self.assertNotIn("planillaEpsArl", doc)            # sin espejo
+        self.assertNotIn("planillaVencimiento", doc)       # sin vence stale
+        self.assertEqual(doc["documentosPlanillaSegSocial"], [])
+        self.assertEqual(doc["estadoIntegra"], "en_actualizacion")  # inhabilitado
+
+    def test_url_que_no_esta_en_el_historial_es_404(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        self._subir_dos(fake)
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage") as mock_del:
+            resp = self._eliminar("Vehiculos/TEST01_planillaEpsArl_inexistente.pdf")
+        self.assertEqual(resp.status_code, 404)
+        mock_del.assert_not_called()  # nada se borra del bucket
 
 
 class WasapSeguridadTests(unittest.TestCase):
