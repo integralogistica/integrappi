@@ -80,6 +80,44 @@ class ExtraerTextoPdfTests(unittest.TestCase):
             self.fail(f"_extraer_texto_pdf lanzó {e}")
 
 
+class EsquemaCedulaPPTTests(unittest.TestCase):
+    """(2026-10-19) Venezolanos con PPT (Permiso por Protección Temporal, el
+    documento de Migración Colombia): el esquema de la cédula lo reconoce y
+    aclara que el número válido es el 'No.' corto del frente — NO el 'DNI
+    Nro.' de 15 dígitos (código interno) ni el serial 'E...' del respaldo."""
+
+    def test_esquema_describe_el_ppt(self):
+        esquema = vehiculos.ESQUEMAS_EXTRACCION["cedula"]
+        self.assertIn("tipo_documento", esquema["campos"])
+        self.assertIn("PPT", esquema["campos"]["tipo_documento"])
+        self.assertIn("PPT", esquema["descripcion"])
+        # La advertencia sobre el DNI de 15 dígitos viaja con el campo número.
+        self.assertIn("15", esquema["campos"]["numero"])
+
+    def test_prompt_incluye_tipo_documento(self):
+        instruction, _ = vehiculos._prompt_extraccion("cedula")
+        self.assertIn("tipo_documento", instruction)
+        self.assertIn("Permiso por Protección Temporal", instruction)
+
+    def test_lectura_ppt_pasa_tipo_y_numero(self):
+        """La respuesta del LLM con PPT conserva tipo y número cortos."""
+        from io import BytesIO
+
+        class FakeUpload:
+            def __init__(self, datos: bytes, content_type: str):
+                self.file = BytesIO(datos)
+                self.content_type = content_type
+
+        def fake_llamar(parts, instruction):
+            return '{"tipo_documento": "PPT", "numero": "3333049", "nombres": "JUAN"}'
+
+        with patch.object(vehiculos, "_llamar_gemini", side_effect=fake_llamar):
+            datos = vehiculos.extraer_datos_con_llm(
+                "cedula", [FakeUpload(b"img", "image/jpeg")])
+        self.assertEqual(datos["tipo_documento"], "PPT")
+        self.assertEqual(datos["numero"], "3333049")
+
+
 class GenerarAvisosTests(unittest.TestCase):
     """Avisos de consistencia entre lo leído y el vehículo en curso."""
 

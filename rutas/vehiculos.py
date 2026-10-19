@@ -370,7 +370,18 @@ def eliminar_de_google_storage(ruta: str):
 ESQUEMAS_EXTRACCION = {
     "cedula": {
         "campos": {
-            "numero": "Número de la cédula (solo dígitos)",
+            "tipo_documento": (
+                "Tipo de documento: 'CÉDULA DE CIUDADANÍA', 'CÉDULA DE EXTRANJERÍA', "
+                "'PPT' o 'PASAPORTE'. PPT = Permiso por Protección Temporal: documento "
+                "de identidad COLOMBIANO que Migración Colombia les entrega a los "
+                "venezolanos (nacionalidad VEN) para residir y trabajar en Colombia"
+            ),
+            "numero": (
+                "Número del documento, solo dígitos. OJO con el PPT: es el campo "
+                "'No.' corto del frente (típicamente 6-8 dígitos, ej: 3333049) — NO "
+                "el 'DNI Nro.' de 15 dígitos (código interno) ni el serial 'E...' "
+                "impreso en el respaldo"
+            ),
             "nombres": "Nombres de pila (como aparecen, en MAYÚSCULAS)",
             "apellidos": "Apellidos (como aparecen, en MAYÚSCULAS)",
             "fecha_nacimiento": "Fecha de nacimiento en formato YYYY-MM-DD",
@@ -380,10 +391,12 @@ ESQUEMAS_EXTRACCION = {
             "rh": "Grupo sanguíneo con RH (ej: O+, A-)",
         },
         "descripcion": (
-            "Cédula de Ciudadanía colombiana. Dos formatos posibles: "
-            "(a) azul (posterior a 2020), una sola cara con todos los datos incluidos fecha y lugar de expedición; "
-            "(b) amarilla hologramada (anterior a 2020), los datos de identidad están en el anverso (frente) y la fecha/lugar de expedición en el reverso. "
-            "Puede llegar 1 imagen (frente, o frente de la azul) o 2 imágenes (frente y reverso de la amarilla)."
+            "Documento de identidad. Tres familias posibles: "
+            "(a) Cédula de Ciudadanía colombiana AZUL (posterior a 2020), una sola cara con todos los datos incluidos fecha y lugar de expedición; "
+            "(b) Cédula AMARILLA hologramada (anterior a 2020), los datos de identidad están en el anverso (frente) y la fecha/lugar de expedición en el reverso; "
+            "(c) PPT (Permiso por Protección Temporal) de Migración Colombia para venezolanos: trae escudo de Colombia y la leyenda 'Permiso por Protección Temporal', "
+            "número corto en el campo 'No.', nacionalidad VEN, fecha y lugar de expedición y fecha de vencimiento en el frente, MRZ y serial E... en el respaldo. "
+            "Puede llegar 1 imagen (frente, o frente de la azul) o 2 imágenes (frente y reverso)."
         ),
     },
     "rut": {
@@ -1057,9 +1070,21 @@ def _tiene_remolque(vehiculo: dict) -> bool:
 
 
 def _exento_tecnomecanica(vehiculo: dict) -> bool:
-    """Vehículo de modelo con MENOS de 2 años (incluye modelos del año
-    siguiente que ya vende el comercio): los vehículos nuevos NO requieren
-    revisión tecnomecánica (pedido del usuario 2026-10-07)."""
+    """Vehículos nuevos NO requieren revisión tecnomecánica (pedido del
+    usuario 2026-10-07). La fuente de la verdad es la FECHA DE MATRÍCULA de
+    la tarjeta de propiedad (`vehFechaMatricula`, 2026-10-19): exento si
+    fue matriculado hace MENOS de 2 años. Sin fecha (históricos) se cae al
+    modelo >= año actual - 1, como antes (incluye modelos del año siguiente
+    que ya vende el comercio)."""
+    matricula = str(vehiculo.get("vehFechaMatricula") or "")[:10]
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", matricula):
+        try:
+            fecha = datetime.strptime(matricula, "%Y-%m-%d")
+        except ValueError:
+            fecha = None
+        if fecha:
+            # 730 días ≈ 2 años (los bisiestos sobran/faltan un día: irrelevante).
+            return fecha > datetime.now() - timedelta(days=730)
     modelo = re.sub(r"\D", "", str(vehiculo.get("vehModelo") or ""))[:4]
     if len(modelo) != 4:
         return False
@@ -2645,16 +2670,18 @@ async def subir_documento(
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     _asegurar_editable(vehiculo)
 
-    # Vehículo nuevo (modelo < 2 años): la tecnomecánica NO se requiere y NO
-    # se deja subir (2026-10-07, pedido del usuario — coherente con
-    # _documentos_faltantes, que tampoco la exige).
+    # Vehículo nuevo (matriculado hace < 2 años, 2026-10-19 — antes se medía
+    # por modelo): la tecnomecánica NO se requiere y NO se deja subir
+    # (2026-10-07, pedido del usuario — coherente con _documentos_faltantes).
     if tipo == "revisionTecnomecanica" and _exento_tecnomecanica(vehiculo):
+        matricula = str(vehiculo.get("vehFechaMatricula") or "")[:10]
+        detalle_matricula = f", matriculado el {matricula}" if matricula else ""
         raise HTTPException(
             status_code=400,
             detail=(
                 "Este vehículo es nuevo (modelo "
-                f"{str(vehiculo.get('vehModelo') or '').strip()}) y NO requiere "
-                "Revisión Tecnomecánica — no la subas."
+                f"{str(vehiculo.get('vehModelo') or '').strip()}{detalle_matricula}) "
+                "y NO requiere Revisión Tecnomecánica — no la subas."
             ),
         )
 

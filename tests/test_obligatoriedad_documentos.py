@@ -162,6 +162,38 @@ class DocumentosFaltantesTests(unittest.TestCase):
             v = vehiculo_completo(revisionTecnomecanica=None, vehModelo=modelo)
             self.assertIn("revisionTecnomecanica", vehiculos._documentos_faltantes(v))
 
+    # (2026-10-19) La exención se basa en la FECHA DE MATRÍCULA de la tarjeta
+    # de propiedad (vehFechaMatricula), que ya viaja en la información del
+    # vehículo — el modelo queda solo como fallback de históricos.
+
+    def test_tecnomecanica_exenta_por_fecha_matricula_reciente(self):
+        # Matriculado hace < 2 años → exento AUNQUE el modelo sea viejo
+        # (p.ej. un 2015 que matricularon el año pasado).
+        from datetime import date, timedelta
+        reciente = (date.today() - timedelta(days=200)).isoformat()
+        v = vehiculo_completo(revisionTecnomecanica=None, vehModelo="2015",
+                              vehFechaMatricula=reciente)
+        self.assertEqual(vehiculos._documentos_faltantes(v), [])
+
+    def test_fecha_matricula_vieja_MANDA_sobre_modelo_nuevo(self):
+        # La matrícula es la fuente de la verdad: modelo reciente pero
+        # matriculado hace 2+ años SÍ requiere tecnomecánica.
+        from datetime import date, datetime, timedelta
+        vieja = (date.today() - timedelta(days=800)).isoformat()
+        v = vehiculo_completo(revisionTecnomecanica=None,
+                              vehModelo=str(datetime.now().year),
+                              vehFechaMatricula=vieja)
+        self.assertIn("revisionTecnomecanica", vehiculos._documentos_faltantes(v))
+
+    def test_fecha_matricula_basura_cae_al_modelo(self):
+        # Fecha ilegible/parcial: se ignora y decide el modelo (como antes).
+        from datetime import datetime
+        for basura in ("no-una-fecha", "2026", "2026-13-45", ""):
+            v = vehiculo_completo(revisionTecnomecanica=None,
+                                  vehModelo=str(datetime.now().year),
+                                  vehFechaMatricula=basura)
+            self.assertEqual(vehiculos._documentos_faltantes(v), [], f"basura {basura!r}")
+
     def test_subir_tecnomecanica_RECHAZADA_en_vehiculo_nuevo(self):
         """La exención es completa: un vehículo nuevo ni la requiere NI puede
         subirla (400, nada guardado — pedido del usuario 2026-10-07)."""
