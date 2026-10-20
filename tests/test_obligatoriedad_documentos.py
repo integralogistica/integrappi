@@ -8,6 +8,7 @@ Cubre:
 - eliminar-documento: limpia gemelos con la misma URL.
 """
 import json
+import re
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -685,15 +686,15 @@ class SubirDocumentoReplicarTests(unittest.TestCase):
         # El doc preexistente del fixture queda INTACTO (nada nuevo guardado).
         self.assertEqual(fake.documents[0]["licencia"], "https://x/9")
 
-    def test_certificado_nequi_se_rechaza(self):
-        """Nequi/Daviplata NO son certificación bancaria válida (2026-10-16):
-        rechazo DURO (400) — nada al bucket ni a Mongo, sin escape
-        «adjuntar de todos modos» (es política, no legibilidad)."""
+    def test_certificado_nequi_sube_normal(self):
+        """(2026-10-20) Nequi/Daviplata RE-HABILITADOS (orden del usuario —
+        se rechazaban desde el 2026-10-16): suben y se leen como cualquier
+        banco. El doc preexistente del fixture se REEMPLAZA por el nuevo."""
         for banco in ("Nequi", "DAVI PLATA"):
             with self.subTest(banco=banco):
                 fake = FakeColeccionVehiculos([vehiculo_completo()])
                 with patch.object(vehiculos, "coleccion_vehiculos", fake), \
-                     patch.object(vehiculos, "subir_a_google_storage") as mock_storage, \
+                     patch.object(vehiculos, "subir_a_google_storage", return_value="https://x/n6"), \
                      patch.object(vehiculos, "_llamar_gemini", return_value=(
                          '{"documento_valido": true, "banco": "%s", "tipo_cuenta": "AHORROS",'
                          ' "numero_cuenta": "123", "titular": "PERICO", "documento_titular": "123"}' % banco)):
@@ -702,11 +703,12 @@ class SubirDocumentoReplicarTests(unittest.TestCase):
                         data={"placa": "TEST01", "tipo": "condCertificacionBancaria"},
                         files={"archivo": ("cert.png", b"img", "image/png")},
                     )
-                self.assertEqual(resp.status_code, 400, resp.text)
-                self.assertIn("Nequi", resp.json()["detail"])
-                mock_storage.assert_not_called()
-                # El doc preexistente del fixture queda INTACTO.
-                self.assertEqual(fake.documents[0]["condCertificacionBancaria"], "https://x/12")
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertEqual(fake.documents[0]["condCertificacionBancaria"], "https://x/n6")
+                # La lectura IA quedó persistida con el banco tal cual.
+                lectura = fake.documents[0]["lecturasIA"]["condCertificacionBancaria"]
+                self.assertIn(re.sub(r"[\s]", "", banco).upper(),
+                              re.sub(r"[\s]", "", str(lectura["datos"].get("banco"))).upper())
 
     def test_certificado_banco_tradicional_sube_normal(self):
         """Un banco tradicional (ej. Davivienda) NO lo toca el chequeo —

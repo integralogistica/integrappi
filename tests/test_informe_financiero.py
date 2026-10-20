@@ -235,5 +235,105 @@ class NotificacionFinancierosTests(unittest.TestCase):
         self.assertEqual(asyncio.run(_aprobar("inactivo", "aprobado")), [])
 
 
+class _FakeColeccionVeh:
+    """Falsa colección de vehículos que soporta el filtro $ne del Excel
+    (exclusión de borradores del alta)."""
+
+    def __init__(self, documentos=None):
+        self.documents = list(documentos or [])
+
+    def find(self, query=None, *a, **k):
+        docs = self.documents
+        for campo, esperado in (query or {}).items():
+            if isinstance(esperado, dict) and "$ne" in esperado:
+                docs = [d for d in docs if d.get(campo) != esperado["$ne"]]
+            else:
+                docs = [d for d in docs if d.get(campo) == esperado]
+        return iter(list(docs))
+
+
+class ExcelFinancieroTests(unittest.TestCase):
+    """(2026-10-20) Excel con los datos financieros de los actores de los
+    vehículos APROBADOS — SOLO FINANCIERO/ADMIN, SIN enlaces (solo datos)."""
+
+    def setUp(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        app = FastAPI()
+        app.include_router(vehiculos.ruta_vehiculos)
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def _get(self, usuario="FIN ROSA", vehiculos_docs=None):
+        if vehiculos_docs is None:
+            vehiculos_docs = [_vehiculo()]
+        with patch.object(vehiculos, "coleccion_vehiculos",
+                          _FakeColeccionVeh(vehiculos_docs)), \
+             patch.object(vehiculos, "coleccion_baseusuarios",
+                          FakeColeccion([CUENTA_FINANCIERO, CUENTA_ADMIN, CUENTA_OPERATIVO])):
+            return self.client.get(f"/vehiculos/financiero-excel?usuario={usuario}")
+
+    def _celdas(self, contenido: bytes):
+        import io as _io
+        from openpyxl import load_workbook
+        wb = load_workbook(_io.BytesIO(contenido))
+        ws = wb.active
+        return [list(fila) for fila in ws.iter_rows(values_only=True)]
+
+    def test_financiero_descarga_excel_con_datos(self):
+        r = self._get()
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("spreadsheetml", r.headers["content-type"])
+        self.assertIn("Datos_financieros_flota_", r.headers.get("content-disposition", ""))
+        filas = self._celdas(r.content)
+        encabezados = filas[0]
+        self.assertEqual(encabezados[0], "Placa")
+        self.assertIn("Número de cuenta", encabezados)
+        textos = [str(c) for fila in filas for c in fila if c]
+        # Los datos bancarios de las figuras diligenciadas viajan completos.
+        self.assertIn("BANCO DE BOGOTA", textos)
+        self.assertIn("DAVIVIENDA", textos)
+        self.assertIn("TRANSPORTADORA XYZ", textos)
+        self.assertIn("456", textos)   # nº cuenta conductor
+        self.assertIn("789", textos)   # nº cuenta tenedor
+        # SIN enlaces: ninguna celda contiene una URL.
+        self.assertFalse(any("http" in t or "Vehiculos/" in t for t in textos), textos)
+
+    def test_admin_tambien_descarga(self):
+        self.assertEqual(self._get(usuario="AD SOFI").status_code, 200)
+
+    def test_otro_perfil_403(self):
+        r = self._get(usuario="OP PEDRO")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("FINANCIERO", r.json()["detail"])
+
+    def test_usuario_invalido_401(self):
+        self.assertEqual(self._get(usuario="NADIE").status_code, 401)
+
+    def test_vehiculo_sin_actores_queda_en_la_base(self):
+        vacio = {"placa": "VAC111", "estadoIntegra": "aprobado"}
+        r = self._get(vehiculos_docs=[_vehiculo(), vacio])
+        self.assertEqual(r.status_code, 200)
+        filas = self._celdas(r.content)
+        # El vehículo sin actores tiene su fila (con guiones) y el estado legible.
+        fila_vacia = [f for f in filas if f and f[0] == "VAC111"]
+        self.assertEqual(len(fila_vacia), 1)
+        self.assertEqual(fila_vacia[0][2], "-")
+
+    def test_solo_aprobados_borradores_y_otros_estados_excluidos(self):
+        """(Pedido del usuario 2026-10-20) El Excel baja ÚNICAMENTE los
+        vehículos APROBADOS: borradores del alta y otros estados fuera."""
+        borrador = {"placa": "BOR222", "estadoIntegra": "registro_incompleto",
+                    "responsable_pendiente": True, "condNombres": "FANTASMA"}
+        en_revision = {"placa": "REV333", "estadoIntegra": "completado_revision",
+                       "condNombres": "EN CURSO"}
+        r = self._get(vehiculos_docs=[_vehiculo(), borrador, en_revision])
+        self.assertEqual(r.status_code, 200)
+        textos = [str(c) for fila in self._celdas(r.content) for c in fila if c]
+        self.assertNotIn("BOR222", textos)
+        self.assertNotIn("REV333", textos)
+        # El aprobado del fixture SÍ está.
+        self.assertIn("FIN123", textos)
+
+
 if __name__ == "__main__":
     unittest.main()

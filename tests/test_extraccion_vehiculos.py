@@ -13,7 +13,9 @@ class EsquemasExtraccionTests(unittest.TestCase):
 
     # (2026-10-07) + planilla_seguridad_social: la IA lee la fecha de
     # VENCIMIENTO de la planilla de seguridad social.
-    TIPOS_ESPERADOS = {"cedula", "rut", "certificado_bancario", "licencia", "tarjeta_propiedad", "soat", "planilla_seguridad_social"}
+    # (2026-10-20) + tarjeta_propiedad_remolque: tarjeta de registro de
+    # remolque/semirremolque (medidas en mm, identificación del propietario).
+    TIPOS_ESPERADOS = {"cedula", "rut", "certificado_bancario", "licencia", "tarjeta_propiedad", "tarjeta_propiedad_remolque", "soat", "planilla_seguridad_social"}
 
     def test_tipos_definidos(self):
         self.assertEqual(set(vehiculos.ESQUEMAS_EXTRACCION.keys()), self.TIPOS_ESPERADOS)

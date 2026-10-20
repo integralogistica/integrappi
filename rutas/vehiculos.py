@@ -515,6 +515,45 @@ ESQUEMAS_EXTRACCION = {
         },
         "descripcion": "Planilla o certificado de afiliación/pago de Seguridad Social (EPS y ARL) de un conductor colombiano. PDF o foto.",
     },
+    # Tarjeta de Propiedad del REMOLQUE (2026-10-20, pedido del usuario): se sube
+    # dentro de «Datos del Remolque» del paso 2. Sus medidas vienen impresas en
+    # MILÍMETROS (ej: LARGO TOTAL 13000 mm) pero se guardan en METROS — la
+    # conversión la hace el mapeo del front (4100 → 4.1).
+    "tarjeta_propiedad_remolque": {
+        "campos": {
+            "numero_tarjeta": "Número de la tarjeta de registro (ej: TR03000069374)",
+            "placa": "Placa del remolque o semirremolque, SOLO letras, números y guiones",
+            "marca": "Marca del remolque (ej: AMERICAN TRUCKS SAS)",
+            "ano_modelo": "Año modelo (4 dígitos)",
+            "linea": "Línea o referencia",
+            "clase": "Clase (ej: REMOLQUE, SEMIREMOLQUE)",
+            "tipo_carroceria": "Tipo de carrocería (ej: PLATAFORMA CON ESTACAS DESMONTABLES)",
+            "vin": "Número de identificación (VIN/seriado del remolque), SOLO caracteres alfanuméricos",
+            "numero_ejes": "Número de ejes (entero)",
+            "numero_llantas": "Número de llantas (entero)",
+            "largo_total_mm": "LARGO TOTAL en MILÍMETROS, SOLO dígitos (ej: 13000)",
+            "ancho_total_mm": "ANCHO TOTAL en MILÍMETROS, SOLO dígitos (ej: 4100)",
+            "alto_total_mm": "ALTO TOTAL en MILÍMETROS, SOLO dígitos (ej: 2600)",
+            "pbv_maximo": "Peso bruto vehicular máximo por configuración, SOLO dígitos (null si viene *** o vacío)",
+            "propietario_nombre": "Apellido(s) y nombre(s) del propietario registrado",
+            "propietario_documento": "Número del campo IDENTIFICACIÓN del propietario (ej: C.C. 91221607 → 91221607), SOLO dígitos",
+            "organismo_transito": "Organismo de tránsito expedidor (reverso)",
+            "fecha_expedicion": "Fecha de expedición en formato YYYY-MM-DD (reverso)",
+            "limitacion_propiedad": "Sí/No según tenga limitación a la propiedad (reverso)",
+        },
+        "descripcion": (
+            "Tarjeta de Registro de REMOLQUE o SEMIRREMOLQUE de Colombia "
+            "(registro RUNT, distinta de la tarjeta de propiedad de un vehículo: "
+            "NO tiene cilindraje, motor ni servicio). Tiene DOS caras: el FRENTE "
+            "tiene placa, marca, año modelo, línea, clase, tipo de carrocería, "
+            "número de identificación (VIN), ejes, llantas, las medidas TOTALES "
+            "en milímetros (largo, ancho, alto), el PBV máximo y el PROPIETARIO "
+            "con su IDENTIFICACIÓN (C.C./NIT); el REVERSO tiene el locatario, la "
+            "limitación a la propiedad, el organismo de tránsito expedidor y las "
+            "fechas de registro/expedición/vencimiento. Puede llegar 1 imagen "
+            "(frente) o 2 (frente y reverso)."
+        ),
+    },
 }
 
 
@@ -716,20 +755,9 @@ def extraer_datos_con_llm(tipo_doc: str, archivos: list[UploadFile]) -> dict:
     if not datos:
         raise HTTPException(status_code=422, detail="No se logró leer ningún dato legible. Intenta con una foto más nítida y con buena luz.")
 
-    # (2026-10-16) NEQUI/DAVIPLATA NO se aceptan como certificación bancaria
-    # (pedido del usuario): rechazo DURO, mismo tratamiento que el PDF con
-    # clave (400 → nada al bucket ni a Mongo, sin escape «adjuntar igual»).
-    # Vivir acá cubre las DOS puertas de lectura: la subida del documento
-    # (paso 3 y /revision) y la tarjeta ⚡ del paso 2 (guarda-al-leer).
-    if tipo_doc == "certificado_bancario":
-        banco_norm = re.sub(r"[\s.\-]", "", str(datos.get("banco") or "")).upper()
-        if "NEQUI" in banco_norm or "DAVIPLATA" in banco_norm:
-            raise HTTPException(
-                status_code=400,
-                detail=("No se aceptan certificaciones de Nequi ni Daviplata. "
-                        "Adjunta una certificación bancaria de un banco tradicional "
-                        "(cuenta de ahorros o corriente a nombre del titular)."),
-            )
+    # (2026-10-16) NEQUI/DAVIPLATA se rechazaban como certificación bancaria
+    # (pedido del usuario de esa fecha). (2026-10-20) RE-HABILITADOS por orden
+    # del usuario: vuelven a subirse y leerse como cualquier banco.
     return datos
 
 
@@ -775,6 +803,78 @@ def _generar_avisos(tipo_doc: str, datos: dict, contexto: dict) -> list:
 
     return avisos
 
+
+# ==========================================
+# 2c-2. IDENTIDAD PROPIETARIO ↔ CÉDULA (2026-10-20)
+# ==========================================
+# Pedido del usuario: la IDENTIFICACIÓN del propietario que trae la tarjeta de
+# propiedad (del VEHÍCULO y del REMOLQUE) debe coincidir con el número de la
+# cédula subida de la figura — en CUALQUIER orden de subida. Si difieren, la
+# subida del documento que no coincide se RECHAZA (409, nada al bucket ni a
+# Mongo) con indicación de re-subir el correcto o corregir el otro.
+# Pares: (tipo cédula, tipo tarjeta, rol legible, campo tipo-doc de la figura,
+# etiqueta de la tarjeta). La lectura de la cédula trae el número en `numero`;
+# la de la tarjeta trae la identificación en `propietario_documento`.
+PARES_IDENTIDAD = [
+    ("documentoIdentidadRemolque", "tarjetaRemolque",
+     "dueño del remolque", "RemolDuenoTipoDocumento", "tarjeta de propiedad del remolque"),
+    ("documentoIdentidadPropietario", "tarjetaPropiedad",
+     "propietario", "propTipoDocumento", "tarjeta de propiedad del vehículo"),
+]
+
+
+def _verificar_identidad_propietario(vehiculo: dict, tipo: str, datos: dict):
+    """
+    Compara la identificación leída del documento que se sube contra la lectura
+    IA de su contraparte ya guardada (`lecturasIA`). Retorna un aviso POSITIVO
+    (str) si ambas existen y coinciden; None si no hay nada que comparar.
+    Lanza 409 si existen ambas y NO coinciden. Figura NIT/empresa: sin cédula
+    que comparar → se omite (misma regla de los documentos).
+    """
+    par = next(
+        (p for p in PARES_IDENTIDAD if tipo in (p[0], p[1])),
+        None,
+    )
+    if not par or not datos:
+        return None
+    tipo_cedula, tipo_tarjeta, rol, campo_tipo_doc, etiqueta_tarjeta = par
+
+    if "NIT" in str(vehiculo.get(campo_tipo_doc) or "").upper():
+        return None
+
+    lecturas = vehiculo.get("lecturasIA") or {}
+    sube_cedula = tipo == tipo_cedula
+
+    if sube_cedula:
+        actual = _solo_digitos(datos.get("numero"))
+        contraparte = _solo_digitos(
+            ((lecturas.get(tipo_tarjeta) or {}).get("datos") or {}).get("propietario_documento"))
+    else:
+        actual = _solo_digitos(datos.get("propietario_documento"))
+        contraparte = _solo_digitos(
+            ((lecturas.get(tipo_cedula) or {}).get("datos") or {}).get("numero"))
+
+    if not actual or not contraparte:
+        # Aún no existe la contraparte: la dirección se cubre cuando suba el
+        # segundo documento. Nada que comparar.
+        return None
+
+    if sube_cedula:
+        detalle = (
+            f"El número de la cédula ({actual}) no coincide con la identificación "
+            f"del propietario de la {etiqueta_tarjeta} ya subida ({contraparte}). "
+            f"Vuelve a subir la cédula correcta del {rol}, o corrige la tarjeta."
+        )
+    else:
+        detalle = (
+            f"La identificación del propietario de la {etiqueta_tarjeta} ({actual}) "
+            f"no coincide con la cédula del {rol} ya subida ({contraparte}). "
+            f"Vuelve a subir la tarjeta correcta, o corrige la cédula."
+        )
+    if actual != contraparte:
+        raise HTTPException(status_code=409, detail=detalle)
+    return f"✓ La identificación del propietario de la {etiqueta_tarjeta} coincide con la cédula del {rol} ({actual})."
+
 # ==========================================
 # 2d. EXTRACCIÓN IA AL SUBIR DOCUMENTOS
 # ==========================================
@@ -790,6 +890,10 @@ TIPOS_SUBIDA_LEIBLES = {
     # Cédula del dueño del remolque (2026-10-05): misma lectura que las demás
     # figuras — llena los campos RemolDueno* del paso 2 y entra al estudio.
     "documentoIdentidadRemolque": "cedula",
+    # Tarjeta de Propiedad del REMOLQUE (2026-10-20): se sube dentro de «Datos
+    # del Remolque» del paso 2; llena Remol* (medidas mm→m en el front) y su
+    # lectura alimenta la comparación de identidad vs la cédula del dueño.
+    "tarjetaRemolque": "tarjeta_propiedad_remolque",
     "rutTenedor": "rut",
     "rutPropietario": "rut",
     "condCertificacionBancaria": "certificado_bancario",
@@ -902,7 +1006,8 @@ ETIQUETAS_DOCUMENTO = {
     "tarjetaPropiedadReverso": "Tarjeta de Propiedad (Reverso)",
     "soat": "SOAT",
     "revisionTecnomecanica": "Revisión Tecnomecánica",
-    "tarjetaRemolque": "Tarjeta de Remolque",
+    "tarjetaRemolque": "Tarjeta de Propiedad del Remolque",
+    "tarjetaRemolqueReverso": "Tarjeta de Propiedad del Remolque (Reverso)",
     "polizaResponsabilidad": "Póliza de Responsabilidad Civil",
     "documentoIdentidadConductor": "Documento de Identidad del Conductor",
     "documentoIdentidadConductorReverso": "Documento de Identidad del Conductor (Reverso)",
@@ -942,6 +1047,9 @@ TIPOS_DOS_CARAS_SUBIDA = {
     "documentoIdentidadConductor", "documentoIdentidadPropietario",
     "documentoIdentidadTenedor", "documentoIdentidadRemolque",
     "licencia", "tarjetaPropiedad",
+    # Tarjeta de Propiedad del REMOLQUE (2026-10-20): dos caras como la del
+    # vehículo — el reverso trae organismo de tránsito y fechas.
+    "tarjetaRemolque",
     # SEGUNDO CONDUCTOR (2026-10-14): cédula y licencia del slot 2 también
     # suben reverso (misma regla de dos caras).
     "documentoIdentidadConductor2", "licencia2",
@@ -958,7 +1066,7 @@ TIPOS_SUBIDA_VALIDOS = [
     # frente (+reverso vía `reverso`) igual que las demás cédulas.
     "documentoIdentidadRemolque",
     # Reversos como tipo directo: el paso 3 los sube como ítem propio.
-    "licenciaReverso", "tarjetaPropiedadReverso",
+    "licenciaReverso", "tarjetaPropiedadReverso", "tarjetaRemolqueReverso",
     # (2026-09-28) Hoja de vida física firmada (alta por Seguridad).
     "hojaVidaFisica",
     # SEGUNDO CONDUCTOR (2026-10-14): sus documentos son tipos de subida
@@ -1052,10 +1160,11 @@ def _es_empresa_figura(vehiculo: dict, campo_tipo: str) -> bool:
 
 
 # Datos del remolque guardados en la ficha (los que dispara el checkbox
-# «mi vehículo tiene remolque» del paso 2).
+# «mi vehículo tiene remolque» del paso 2). (2026-10-20) + VIN y PBV máximo
+# (los lee la Tarjeta de Propiedad del Remolque; opcionales en el formulario).
 CAMPOS_REMOLQUE = (
     "RemolPlaca", "RemolModelo", "RemolClase", "RemolTipoCarroceria",
-    "RemolAlto", "RemolLargo", "RemolAncho",
+    "RemolAlto", "RemolLargo", "RemolAncho", "RemolVin", "RemolPbvMax",
     "RemolDuenoNombre", "RemolDuenoDocumento", "RemolDuenoCorreo",
 )
 
@@ -1259,6 +1368,7 @@ ETIQUETAS_CAMPO_AUDITORIA = {
     "RemolPlaca": "Placa Remolque", "RemolModelo": "Modelo Remolque", "RemolClase": "Clase Remolque",
     "RemolTipoCarroceria": "Carrocería Remolque", "RemolAlto": "Alto Remolque",
     "RemolLargo": "Largo Remolque", "RemolAncho": "Ancho Remolque",
+    "RemolVin": "VIN Remolque", "RemolPbvMax": "PBV Máx. Remolque (kg)",
     "RemolDuenoNombre": "Nombre Dueño Remolque", "RemolDuenoDocumento": "Doc. Dueño Remolque",
     "RemolDuenoTipoDocumento": "Tipo Doc. Dueño Remolque", "RemolDuenoCorreo": "Correo Dueño Remolque",
     "referenciasAdicionales": "Referencias Adicionales",
@@ -2269,6 +2379,7 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     # Reversos de documentos de dos caras (mismo blindaje que sus frentes).
     "documentoIdentidadConductorReverso", "documentoIdentidadPropietarioReverso",
     "documentoIdentidadTenedorReverso", "licenciaReverso", "tarjetaPropiedadReverso",
+    "tarjetaRemolqueReverso",
     # Cédula del dueño del remolque (2026-10-05): figura opcional aparte.
     "documentoIdentidadRemolque", "documentoIdentidadRemolqueReverso",
     # Catálogo de ángulos de las fotos (2026-10-14): lo escribe subir-fotos.
@@ -2787,6 +2898,18 @@ async def subir_documento(
             print(f"[lecturaIA] Error inesperado leyendo {tipo} de {placa}: {e}")
             lectura_ia = None
             archivo.file.seek(0)
+
+    # (2026-10-20) Identidad propietario ↔ cédula (pedido del usuario): la
+    # identificación de la tarjeta de propiedad (vehículo o remolque) debe
+    # coincidir con la cédula de la figura ya subida — en cualquier orden.
+    # Mismatch → 409 ANTES de subir nada (nada al bucket ni a Mongo), con
+    # indicación de re-subir el documento correcto o corregir el otro.
+    # Aplica a las DOS puertas de lectura (propia y `lectura_datos` del front
+    # de dos caras). Coincide → aviso ✓ que viaja en los avisos de la lectura.
+    if lectura_ia and lectura_ia.get("datos"):
+        aviso_identidad = _verificar_identidad_propietario(vehiculo, tipo, lectura_ia["datos"])
+        if aviso_identidad:
+            lectura_ia["avisos"] = list(lectura_ia.get("avisos") or []) + [aviso_identidad]
 
     # Historial universal de documentos (2026-10-07, pedido del usuario:
     # "todos los documentos son sujetos a actualización, nada se pierde"):
@@ -4297,7 +4420,13 @@ def exportar_excel_vehiculos():
         ("Veh. SOAT aseguradora", lambda d: _v(d, "vehAseguradoraSoat")),
         ("Veh. Póliza SOAT", lambda d: _v(d, "vehPolizaSoat")),
         ("Veh. Vence SOAT", lambda d: _fecha(d.get("vehVencimientoSoat"))),
-        ("Remolque", lambda d: _v(d, "remolqueMarca") or _v(d, "remMarca")),
+        # (2026-10-20) Remolque: la columna leía campos inexistentes
+        # (remolqueMarca/remMarca — siempre vacía); ahora muestra la placa y
+        # los datos nuevos de la tarjeta de propiedad (VIN, PBV máximo).
+        ("Remolque placa", lambda d: _v(d, "RemolPlaca")),
+        ("Remolque clase", lambda d: _v(d, "RemolClase")),
+        ("Remolque VIN", lambda d: _v(d, "RemolVin")),
+        ("Remolque PBV máx (kg)", lambda d: _v(d, "RemolPbvMax")),
         # Documentos y tracking
         # El total sube a +1 cuando el vehículo tiene remolque (la tarjeta de
         # remolque es obligatoria adicional, fuera de DOCUMENTOS_REQUERIDOS).
@@ -5268,6 +5397,102 @@ def exportar_informe_financiero(placa: str, usuario: str = ""):
         content=contenido,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="Financiero_{placa_limpia}.pdf"'},
+    )
+
+
+@ruta_vehiculos.get("/financiero-excel")
+def exportar_excel_financiero(usuario: str = ""):
+    """
+    (2026-10-20, pedido del usuario) Excel con los datos financieros de los
+    actores de los vehículos APROBADOS (flota en operación; pedido explícito
+    del usuario: SOLO aprobados, una fila por figura con datos). Botón de
+    /EstadoVehiculos para FINANCIERO y ADMIN.
+    SIN enlaces a documentos — solo los DATOS (identidad + cuentas bancarias).
+    """
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    user = _resolver_usuario_flota(usuario)
+    if user["perfil"] not in {"FINANCIERO", "ADMIN"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo FINANCIERO o ADMIN pueden descargar los datos financieros de la flota.",
+        )
+
+    # SOLO aprobados (flota en operación); los borradores del alta tampoco.
+    docs = list(coleccion_vehiculos.find({
+        "estadoIntegra": "aprobado",
+        "responsable_pendiente": {"$ne": True},
+    }))
+    docs.sort(key=lambda d: str(d.get("placa") or ""))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Datos financieros"
+
+    encabezados = [
+        "Placa", "Estado", "Figura", "Nombre", "Documento", "Celular",
+        "Banco", "Tipo de cuenta", "Número de cuenta",
+    ]
+    ws.append(encabezados)
+    for celda in ws[1]:
+        celda.font = Font(bold=True, color="FFFFFF")
+        celda.fill = PatternFill("solid", fgColor="0E6B5C")
+        celda.alignment = Alignment(horizontal="center", vertical="center")
+    ws.freeze_panes = "A2"
+
+    def _v(doc, clave):
+        valor = doc.get(clave)
+        return "" if valor in (None, "null", "undefined") else str(valor).strip()
+
+    filas = 0
+    for veh in docs:
+        placa = _v(veh, "placa")
+        estado = ESTADOS_FLOTA_LEGIBLES.get(veh.get("estadoIntegra"),
+                                            veh.get("estadoIntegra") or "")
+        filas_figura = 0
+        for prefijo, etiqueta, fn_nombre, campo_doc in FIGURAS_FINANCIERAS:
+            nombre = str(fn_nombre(veh) or "").strip()
+            documento = _v(veh, campo_doc)
+            banco = _v(veh, f"{prefijo}Banco")
+            # Solo filas con ALGO que mostrar (identidad o cuenta).
+            if not (nombre or documento or banco):
+                continue
+            ws.append([
+                placa, estado, etiqueta, nombre or "-",
+                documento or "-", _v(veh, f"{prefijo}Celular") or "-",
+                banco or "-", _v(veh, f"{prefijo}TipoCuenta") or "-",
+                _v(veh, f"{prefijo}NumeroCuenta") or "-",
+            ])
+            filas_figura += 1
+            filas += 1
+        # Vehículo sin ningún actor diligenciado: igual queda en la base.
+        if filas_figura == 0:
+            ws.append([placa, estado, "-", "-", "-", "-", "-", "-", "-"])
+            filas += 1
+
+    # Nota de pie (una fila debajo de los datos).
+    ws.append([])
+    ws.append(["Documento de uso interno — contiene datos bancarios personales "
+               "sujetos a tratamiento de datos (Ley 1581 de 2012)."])
+
+    anchos = [10, 16, 13, 34, 16, 13, 22, 14, 20]
+    from openpyxl.utils import get_column_letter
+    for i, ancho in enumerate(anchos, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = ancho
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    hoy = datetime.now(_TZ_BOGOTA).strftime("%Y-%m-%d")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="Datos_financieros_flota_{hoy}.xlsx"',
+            "X-Filas": str(filas),
+        },
     )
 
 
