@@ -982,15 +982,17 @@ class EndpointEstudiosTests(unittest.TestCase):
         """POST .../disparar: botón de /revision — re-dispara SIEMPRE con
         force (re-consulta real, no la caché del proveedor) y manual=True
         (2026-10-07: el disparo MANUAL ignora el switch de disparo
-        automático — antes respondía 200 en silencio con el switch apagado)."""
+        automático — antes respondía 200 en silencio con el switch apagado).
+        (2026-10-21) `usuario` viaja como `disparado_por`: queda sellado en
+        cada estudio para que el historial muestre quién corrió la consulta."""
         fake = FakeColeccion([vehiculo_completo()])
         cliente = cliente_de_prueba()
         with patch.object(vehiculos, "coleccion_vehiculos", fake), \
              patch.object(vehiculos, "_disparar_estudios_seguridad") as disparo:
-            r = cliente.post("/vehiculos/estudios-seguridad/ABC123/disparar")
+            r = cliente.post("/vehiculos/estudios-seguridad/ABC123/disparar?usuario=EDWIN%20ZARATE")
         self.assertEqual(r.status_code, 200)
         disparo.assert_called_once_with("ABC123", re_revision=False, forzar=True,
-                                        manual=True)
+                                        manual=True, disparado_por="EDWIN ZARATE")
 
     def test_disparar_vehiculo_inexistente_404(self):
         cliente = cliente_de_prueba()
@@ -1334,6 +1336,54 @@ class ReintentarEstudioUnicoTests(unittest.TestCase):
         cuerpo = r.json()
         self.assertEqual(cuerpo["estudio"]["estado"], "error")
         self.assertIn("sigue fallando", cuerpo["message"])
+
+
+class SelloOrigenCorridaTests(unittest.TestCase):
+    """(2026-10-21) Cada estudio queda sellado con quién disparó la corrida
+    (`canal`/`disparado_por`) para el historial de /revision. Además valida el
+    fix del NameError latente: la entrada `estudios_consultados` de la
+    auditoría referenciaba `manual` (parámetro inexistente) y NUNCA se escribía.
+    """
+
+    def _correr(self, fake, vehiculo, **kwargs):
+        import asyncio
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_configurado", lambda: True), \
+             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok):
+            asyncio.run(estudios_automaticos.disparar_estudios(
+                vehiculo["placa"], **kwargs))
+        return fake.find_one({"placa": vehiculo["placa"]})
+
+    def test_automatico_sella_canal_sin_actor(self):
+        fake = FakeColeccion([vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            propDocumento="1020304050", tenedDocumento="987654321")])
+        doc = self._correr(fake, fake.documents[0])
+        for e in doc["estudiosSeguridadAuto"]:
+            self.assertEqual(e["canal"], "automatico")
+            self.assertIsNone(e["disparado_por"])
+        # La auditoría de la corrida SÍ se escribe (bug del NameError): via=sistema.
+        entradas = [a for a in doc.get("auditoriaVehiculo", [])
+                    if a.get("accion") == "estudios_consultados"]
+        self.assertEqual(len(entradas), 1)
+        self.assertEqual(entradas[0]["via"], "sistema")
+        self.assertIsNone(entradas[0]["actor"])
+
+    def test_manual_sella_usuario(self):
+        fake = FakeColeccion([vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            propDocumento="1020304050", tenedDocumento="987654321")])
+        doc = self._correr(fake, fake.documents[0], forzar=True,
+                           manual=True, disparado_por="EDWIN ZARATE")
+        for e in doc["estudiosSeguridadAuto"]:
+            self.assertEqual(e["canal"], "manual")
+            self.assertEqual(e["disparado_por"], "EDWIN ZARATE")
+        entradas = [a for a in doc.get("auditoriaVehiculo", [])
+                    if a.get("accion") == "estudios_consultados"]
+        self.assertEqual(len(entradas), 1)
+        self.assertEqual(entradas[0]["via"], "seguridad")
+        self.assertEqual(entradas[0]["actor"], "EDWIN ZARATE")
 
 
 if __name__ == "__main__":

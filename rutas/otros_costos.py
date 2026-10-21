@@ -26,7 +26,7 @@ from typing import List, Literal, Optional
 from uuid import uuid4
 
 from bson import ObjectId
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from google.cloud import storage
 from PIL import Image
@@ -1512,15 +1512,96 @@ async def tipos_cuenta():
 async def clientes():
     """Clientes sugeridos para el campo Cliente del formulario de Otros Costos.
     Auto-siembra la colección `clientes_otros_costos` con el listado por defecto
-    la primera vez (si está vacía); desde entonces es editable directamente en Mongo."""
+    la primera vez (si está vacía); desde entonces es editable directamente en Mongo.
+    (2026-10-21) Los DESHABILITADOS (`activo: false`) NO se ofrecen en el
+    dropdown — se administran desde GestionUsuarios (ver /clientes/completo)."""
     if col_clientes.count_documents({}) == 0:
         col_clientes.insert_many([{"nombre": c} for c in CLIENTES_OTROS_COSTOS_DEFAULT])
         logger.info(
             "[CLIENTES OTROS COSTOS] Colección sembrada con %d clientes por defecto.",
             len(CLIENTES_OTROS_COSTOS_DEFAULT),
         )
-    docs = list(col_clientes.find({}, {"_id": 0, "nombre": 1}))
+    docs = list(col_clientes.find({"activo": {"$ne": False}}, {"_id": 0, "nombre": 1}))
     return [d.get("nombre", "") for d in docs if d.get("nombre")]
+
+
+# ── Administración del catálogo de clientes (GestionUsuarios, 2026-10-21) ─────
+# El formulario de Otros Costos a veces necesita un cliente que no existe en el
+# catálogo. Este apartado permite CREARLO (NIT + nombre) y DESHABILITARLO sin
+# tocar Mongo a mano. Documentos: {nombre, nit?, activo, creado_en?}; los
+# históricos (sembrados o creados antes del cambio) sin `nit`/`activo` se
+# muestran con NIT vacío y como activos.
+
+class ClienteOtroCostoIn(BaseModel):
+    """Alta de un cliente del catálogo. `nombre` obligatorio; `nit` opcional
+    (informativo, como en proveedores_otros_costos)."""
+    nombre: str = Field(..., min_length=1)
+    nit: str = ""
+
+
+class EstadoClienteOtroCostoIn(BaseModel):
+    activo: bool
+
+
+def _sembrar_clientes_si_vacia() -> None:
+    if col_clientes.count_documents({}) == 0:
+        col_clientes.insert_many([{"nombre": c} for c in CLIENTES_OTROS_COSTOS_DEFAULT])
+        logger.info(
+            "[CLIENTES OTROS COSTOS] Colección sembrada con %d clientes por defecto.",
+            len(CLIENTES_OTROS_COSTOS_DEFAULT),
+        )
+
+
+@router.get("/clientes/completo")
+async def clientes_completo():
+    """Catálogo COMPLETO de clientes de Otros Costos (apartado de GestionUsuarios):
+    nombre + NIT + estado, INCLUYENDO los deshabilitados."""
+    _sembrar_clientes_si_vacia()
+    docs = col_clientes.find({}, {"nombre": 1, "nit": 1, "activo": 1}).sort("nombre", 1)
+    return [
+        {
+            "id": str(d["_id"]),
+            "nombre": d.get("nombre", ""),
+            "nit": d.get("nit", ""),
+            "activo": d.get("activo", True),
+        }
+        for d in docs
+    ]
+
+
+@router.post("/clientes/crear", status_code=status.HTTP_201_CREATED)
+async def crear_cliente(data: ClienteOtroCostoIn):
+    """Crea un cliente del catálogo de Otros Costos (NIT + nombre). El nombre es
+    único (case-insensitive); se guarda en mayúsculas como el resto del catálogo."""
+    nombre = re.sub(r"\s+", " ", data.nombre).strip().upper()
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre del cliente es obligatorio.")
+    nit = data.nit.strip()
+    if col_clientes.find_one({"nombre": {"$regex": f"^{re.escape(nombre)}$", "$options": "i"}}):
+        raise HTTPException(status_code=409, detail=f"El cliente «{nombre}» ya existe en el catálogo.")
+    resultado = col_clientes.insert_one({
+        "nombre": nombre,
+        "nit": nit,
+        "activo": True,
+        "creado_en": datetime.now(timezone.utc),
+    })
+    return {"id": str(resultado.inserted_id), "nombre": nombre, "nit": nit, "activo": True}
+
+
+@router.put("/clientes/{id_cliente}/estado")
+async def cambiar_estado_cliente(id_cliente: str, data: EstadoClienteOtroCostoIn):
+    """Habilita/deshabilita un cliente del catálogo. Deshabilitar NO borra nada:
+    el cliente sale del dropdown del formulario, pero los históricos y los
+    alcances de aprobación asignados (`clientes_aprobacion`) siguen válidos."""
+    if not ObjectId.is_valid(id_cliente):
+        raise HTTPException(status_code=400, detail="Identificador de cliente inválido.")
+    resultado = col_clientes.update_one(
+        {"_id": ObjectId(id_cliente)},
+        {"$set": {"activo": data.activo, "actualizado_en": datetime.now(timezone.utc)}},
+    )
+    if resultado.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado.")
+    return {"id": id_cliente, "activo": data.activo}
 
 
 @router.get("/proveedores")

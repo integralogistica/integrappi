@@ -393,17 +393,26 @@ def _actualizar_estudio(placa: str, estudio_id: str, cambios: dict) -> None:
 
 
 async def disparar_estudios(placa: str, re_revision: bool = False,
-                            forzar: bool = False) -> None:
+                            forzar: bool = False, manual: bool = False,
+                            disparado_por: str = None) -> None:
     """
     Escribe el array de estudios (pendiente) en el doc del vehículo y
     lanza la ejecución en background. Fire-and-forget: JAMÁS lanza
     (el llamador la envuelve en try/except de todos modos).
     `forzar=True` → force del proveedor (re-consulta REAL, no su caché por
     cédula: lo usan la renovación por vigencia y el botón Volver a consultar).
+    `manual=True` + `disparado_por` (2026-10-21): acción EXPLÍCITA de un
+    usuario de Seguridad — cada estudio queda sellado con quién lo disparó
+    (`disparado_por`) o si fue automático por la plataforma (`canal`), y el
+    historial de /revision lo muestra. También arregla el NameError latente
+    de la auditoría de corridas (`manual` no existía como parámetro: la
+    entrada `estudios_consultados` JAMÁS se escribía).
     Además sella `estudiosVigencia {desde, vence}` (la corrida vence a los
     ESTUDIOS_VIGENCIA_MESES — la renueva el barrido automático).
     """
     placa = str(placa or "").strip().upper()
+    actor = (disparado_por or "").strip() or None
+    canal = "manual" if manual else "automatico"
     if not placa or placa in _EN_CURSO:
         return
 
@@ -413,6 +422,15 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
             return
 
         sujetos = sujetos_estudio(vehiculo)
+
+        # Sello de origen en cada estudio de la corrida (viaja al historial
+        # cuando la corrida anterior se archiva — _archivar_corrida_anterior
+        # copia los estudios tal cual).
+        def _sellar(estudios: list) -> list:
+            for e in estudios:
+                e["canal"] = canal
+                e["disparado_por"] = actor
+            return estudios
 
         # Re-revisión (aprobado editado): si las cédulas y la placa no
         # cambiaron, se conservan los estudios de la corrida anterior.
@@ -433,7 +451,7 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
                 {"placa": placa},
                 {"$push": {"auditoriaVehiculo": {"$each": [{
                     "fecha": datetime.utcnow(),
-                    "actor": None,
+                    "actor": actor,
                     "via": "seguridad" if manual else "sistema",
                     "accion": "estudios_consultados",
                     "detalle": f"{len(sujetos)} sujeto(s): {quienes}"[:300],
@@ -459,7 +477,7 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
                 e["finalizado_en"] = e["iniciado_en"]
             coleccion_vehiculos.update_one(
                 {"placa": placa},
-                {"$set": {"estudiosSeguridadAuto": estudios,
+                {"$set": {"estudiosSeguridadAuto": _sellar(estudios),
                           "estudiosVigencia": vigencia}})
             return
 
@@ -470,8 +488,8 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
 
         coleccion_vehiculos.update_one(
             {"placa": placa},
-            {"$set": {"estudiosSeguridadAuto": [
-                _estudio_base(s, "pendiente") for s in sujetos],
+            {"$set": {"estudiosSeguridadAuto": _sellar(
+                [_estudio_base(s, "pendiente") for s in sujetos]),
                 "estudiosVigencia": vigencia}})
 
         await _ejecutar_estudios(placa, sujetos)

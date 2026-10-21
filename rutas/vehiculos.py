@@ -1441,7 +1441,8 @@ def _registrar_auditoria(placa: str, accion: str, actor: Optional[str] = None,
 
 def _disparar_estudios_seguridad(placa: str, re_revision: bool = False,
                                  forzar: bool = False,
-                                 manual: bool = False) -> None:
+                                 manual: bool = False,
+                                 disparado_por: str = None) -> None:
     """
     Lanza en background los estudios de seguridad automáticos del
     vehículo (cédulas de conductor/tenedor/propietario deduplicadas +
@@ -1450,6 +1451,9 @@ def _disparar_estudios_seguridad(placa: str, re_revision: bool = False,
     `forzar=True` → force del proveedor (re-consulta real, no su caché).
     `manual=True` → ignora el switch (acción EXPLÍCITA del usuario: botón
     «Volver a consultar» de /revision y módulo de antigüedad).
+    `disparado_por` (2026-10-21) → nombre del usuario de Seguridad que
+    disparó la corrida: se sella en cada estudio (y en la auditoría) para
+    que el historial distinga manual de automático.
     Import local para evitar el ciclo vehiculos ↔ estudios_automaticos.
     SWITCH (2026-10-05): si el disparo automático está APAGADO (switch en
     config_estudios / env ESTUDIOS_AUTO_DISPARAR=false), no se lanza nada
@@ -1464,7 +1468,8 @@ def _disparar_estudios_seguridad(placa: str, re_revision: bool = False,
             return
         asyncio.create_task(
             estudios_automaticos.disparar_estudios(
-                placa, re_revision=re_revision, forzar=forzar))
+                placa, re_revision=re_revision, forzar=forzar,
+                manual=manual, disparado_por=disparado_por))
     except Exception as e:
         print(f"[estudios-auto] No se pudieron disparar los estudios de {placa}: {e}")
 
@@ -4674,11 +4679,14 @@ async def reintentar_estudio(placa: str, estudio_id: str = Form(...)):
 
 
 @ruta_vehiculos.post("/estudios-seguridad/{placa}/disparar")
-async def disparar_estudios_seguridad(placa: str):
+async def disparar_estudios_seguridad(placa: str, usuario: Optional[str] = None):
     """
     Dispara MANUALMENTE los estudios de seguridad automáticos (botón de
     /revision): re-consulta cédulas deduplicadas + placa sin importar la
     corrida anterior (pisa el array). Consume consultas del proveedor.
+    `usuario` (2026-10-21): nombre de quien lo disparó — se sella en cada
+    estudio para que el historial muestre quién corrió la consulta (o si
+    fue automática por la plataforma).
     """
     placa_limpia = placa.strip().upper()
     if not coleccion_vehiculos.find_one({"placa": placa_limpia}, {"_id": 1}):
@@ -4688,7 +4696,7 @@ async def disparar_estudios_seguridad(placa: str):
     # disparo automático NO aplica a una acción explícita del usuario (bug
     # 2026-10-07: con el switch apagado el botón respondía 200 en silencio).
     _disparar_estudios_seguridad(placa_limpia, re_revision=False, forzar=True,
-                                 manual=True)
+                                 manual=True, disparado_por=usuario)
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "message": "Estudios de seguridad disparados; consulte el avance en unos minutos.",
     })
