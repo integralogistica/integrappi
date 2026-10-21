@@ -107,6 +107,11 @@ class FakeColeccionVehiculos:
                 opciones = _re.IGNORECASE if "i" in esperado.get("$options", "") else 0
                 if not _re.search(esperado["$regex"], str(_get_punteado(doc, campo) or ""), opciones):
                     return False
+            elif isinstance(esperado, dict) and "$in" in esperado:
+                # (2026-10-21) Lote de autorizaciones del módulo de antigüedad
+                # consulta cedulas/sujeto_cedula con $in.
+                if _get_punteado(doc, campo) not in esperado["$in"]:
+                    return False
             elif _get_punteado(doc, campo) != esperado:
                 return False
         return True
@@ -598,6 +603,36 @@ class EstudiosAntiguedadTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         placas = [f["placa"] for f in resp.json()["vehiculos"]]
         self.assertEqual(placas, ["PEND"])  # filtro por placa (contiene, i)
+
+    def test_autorizaciones_en_lote(self):
+        """(2026-10-21, perf) Las autorizaciones de datos se resuelven con 2
+        consultas $in (UNA por colección, sobre las cédulas únicas) en vez de
+        una por persona — la causa de la lentitud del módulo con cientos de
+        placas. La regla no cambia: cuenta con aceptación O entrada de sujeto."""
+        fake = FakeColeccionVehiculos(self._dos_placas())
+        conteos = {"conductores": 0, "aceptaciones": 0}
+
+        class Contando(FakeColeccionVehiculos):
+            def __init__(self, documentos, clave):
+                super().__init__(documentos)
+                self._clave = clave
+
+            def find(self, filtro=None, *a, **k):
+                conteos[self._clave] += 1
+                return super().find(filtro, *a, **k)
+
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(conductores, "coleccion_conductores",
+                          Contando([], "conductores")), \
+             patch.object(conductores, "coleccion_aceptaciones",
+                          Contando([{"sujeto_cedula": "222"}], "aceptaciones")):
+            resp = self.client.get("/vehiculos/estudios-antiguedad")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        # UNA consulta por colección (con $in de las cédulas), no una por persona.
+        self.assertEqual(conteos, {"conductores": 1, "aceptaciones": 1})
+        por_placa = {f["placa"]: f for f in resp.json()["vehiculos"]}
+        self.assertFalse(por_placa["PEND"]["sujetos"][0]["autorizado"])
+        self.assertTrue(por_placa["OK"]["sujetos"][0]["autorizado"])
 
 
 if __name__ == "__main__":

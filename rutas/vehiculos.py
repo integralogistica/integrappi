@@ -4773,7 +4773,18 @@ def estudios_por_antiguedad(
     if placa_filtro:
         consulta["placa"] = {"$regex": re.escape(placa_filtro), "$options": "i"}
 
-    for doc in coleccion_vehiculos.find(consulta, proyeccion):
+    # ── PRIMERA PASADA: fechas + sujetos por placa y cédulas persona ÚNICAS ──
+    # (2026-10-21, perf) Antes la autorización de datos se consultaba UNA VEZ
+    # POR PERSONA (`_autorizado_seguro` → find con $regex COLLSCAN sobre
+    # conductores + otra query en aceptaciones): con ~200 placas × 2-3
+    # personas eran CIENTOS de round-trips secuenciales a Atlas — la causa de
+    # la lentitud del módulo. Ahora: 2 consultas con $in sobre las cédulas
+    # únicas (una persona con N placas se evalúa UNA sola vez) y cache en set.
+    docs = list(coleccion_vehiculos.find(consulta, proyeccion))
+    preparados = []            # (doc, ultimo, vigencia, sujetos_estudio)
+    cedulas_persona = []       # valores originales para el $in
+    _vistas = set()
+    for doc in docs:
         # Última fecha de estudio: corrida vigente → vigencia → PDF manual.
         fechas = [e.get("finalizado_en") for e in (doc.get("estudiosSeguridadAuto") or [])
                   if isinstance(e, dict) and e.get("finalizado_en")]
@@ -4788,8 +4799,46 @@ def estudios_por_antiguedad(
                     fechas.append(d["fecha"])
         if not fechas:
             continue  # sin ninguna fecha de estudio → no hay nada que listar
-        ultimo = max(fechas)
+        sujetos_raw = ea.sujetos_estudio(doc)
+        preparados.append((doc, max(fechas), vigencia, sujetos_raw))
+        for s in sujetos_raw:
+            if s["tipo"] == "persona":
+                clave = str(s["cedula"]).strip().upper()
+                if clave and clave not in _vistas:
+                    _vistas.add(clave)
+                    cedulas_persona.append(s["cedula"])
 
+    # ── AUTORIZACIONES EN LOTE (misma regla de conductores._sujeto_ya_
+    #    autorizado: cuenta con aceptacion_politica O entrada como sujeto,
+    #    sin regex) — fallback individual si el lote falla ──
+    autorizadas = None
+    if cedulas_persona:
+        try:
+            from rutas import conductores as _cond
+            autorizadas = set()
+            for cuenta in _cond.coleccion_conductores.find(
+                    {"cedula": {"$in": cedulas_persona}},
+                    {"cedula": 1, "aceptacion_politica": 1}):
+                if cuenta.get("aceptacion_politica"):
+                    autorizadas.add(str(cuenta.get("cedula") or "").strip().upper())
+            for entrada in _cond.coleccion_aceptaciones.find(
+                    {"sujeto_cedula": {"$in": cedulas_persona}},
+                    {"sujeto_cedula": 1}):
+                autorizadas.add(str(entrada.get("sujeto_cedula") or "").strip().upper())
+        except Exception as e:
+            print(f"[estudios-antiguedad] Lote de autorizaciones falló ({e}); "
+                  "fallback por persona")
+            autorizadas = None
+
+    def _autorizado(cedula: str) -> bool:
+        """Best-effort (same política que _autorizado_seguro): si el lote no
+        pudo resolverse, cae a la consulta individual — un fallo de consulta
+        reporta autorizado para no llenar el módulo de falsos pendientes."""
+        if autorizadas is not None:
+            return str(cedula).strip().upper() in autorizadas
+        return _autorizado_seguro(cedula)
+
+    for doc, ultimo, vigencia, sujetos_raw in preparados:
         sujetos = []
         # Correo de contacto por cédula (para el botón «✉️ Enviar autorización»
         # del módulo, prellenado desde el formulario del vehículo).
@@ -4804,16 +4853,15 @@ def estudios_por_antiguedad(
             correo = str(doc.get(campo_correo) or "").strip()
             if ced and correo and ced not in correos_por_ced:
                 correos_por_ced[ced] = correo
-        for s in ea.sujetos_estudio(doc):
+        for s in sujetos_raw:
             if s["tipo"] == "persona":
                 sujetos.append({"tipo": "persona", "documento": s["cedula"],
                                 "roles": s["roles"],
                                 "correo": correos_por_ced.get(s["cedula"], ""),
                                 # Autorización de tratamiento de datos (2026-10-06):
                                 # la persona ya tiene evidencia (cuenta o canal
-                                # vinculo_correo/papel) — best-effort por si la
-                                # colección de aceptaciones falla.
-                                "autorizado": _autorizado_seguro(s["cedula"])})
+                                # vinculo_correo/papel) — resuelta EN LOTE arriba.
+                                "autorizado": _autorizado(s["cedula"])})
             elif s["tipo"] == "empresa":
                 sujetos.append({"tipo": "empresa", "documento": s["nit"],
                                 "roles": s["roles"]})
