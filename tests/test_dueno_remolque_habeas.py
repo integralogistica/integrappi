@@ -634,6 +634,80 @@ class EstudiosAntiguedadTests(unittest.TestCase):
         self.assertFalse(por_placa["PEND"]["sujetos"][0]["autorizado"])
         self.assertTrue(por_placa["OK"]["sujetos"][0]["autorizado"])
 
+    # ── 2026-10-22: huellas dactilares de los conductores + filtro ──
+
+    def _placas_huellas(self):
+        return [
+            vehiculo_completo(placa="CONHUELLA", estadoIntegra="aprobado",
+                              condCedulaCiudadania="777",
+                              estudiosSeguridadAuto=[{"estado": "finalizado",
+                                                      "finalizado_en": datetime(2026, 9, 1)}]),
+            vehiculo_completo(placa="SINHUEL", estadoIntegra="aprobado",
+                              condCedulaCiudadania="888", cond2CedulaCiudadania="999",
+                              estudiosSeguridadAuto=[{"estado": "finalizado",
+                                                      "finalizado_en": datetime(2026, 9, 2)}]),
+        ]
+
+    def test_huellas_por_fila_y_filtro(self):
+        """Fila reporta cuántos conductores (cond + cond2 únicos) tienen
+        registro dactilar en biometria; `solo_sin_huellas` deja SOLO las
+        placas con algún conductor sin huella."""
+        docs = self._placas_huellas()
+        # 777 y 888 con huella; 999 (2º conductor de SINHUEL) sin.
+        biometria = FakeColeccionVehiculos([{"tenedor": "777"}, {"tenedor": "888"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionVehiculos(docs)), \
+             patch.object(vehiculos, "coleccion_biometria", biometria):
+            resp = self.client.get("/vehiculos/estudios-antiguedad")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        cuerpo = resp.json()
+        por_placa = {f["placa"]: f for f in cuerpo["vehiculos"]}
+        self.assertEqual(por_placa["CONHUELLA"]["huellas_total"], 1)
+        self.assertEqual(por_placa["CONHUELLA"]["huellas_registradas"], 1)
+        self.assertEqual(por_placa["SINHUEL"]["huellas_total"], 2)   # cond + cond2
+        self.assertEqual(por_placa["SINHUEL"]["huellas_registradas"], 1)
+        self.assertEqual(cuerpo["sin_huellas"], 1)
+
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionVehiculos(docs)), \
+             patch.object(vehiculos, "coleccion_biometria", biometria):
+            resp = self.client.get("/vehiculos/estudios-antiguedad?solo_sin_huellas=true")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        placas = [f["placa"] for f in resp.json()["vehiculos"]]
+        self.assertEqual(placas, ["SINHUEL"])
+
+    def test_huellas_en_lote_una_consulta(self):
+        """Las huellas se resuelven con UNA consulta $in sobre biometria
+        (mismo patrón de las autorizaciones), no una por conductor."""
+        docs = self._placas_huellas()
+        conteos = {"biometria": 0}
+
+        class Contando(FakeColeccionVehiculos):
+            def find(self, filtro=None, *a, **k):
+                conteos["biometria"] += 1
+                return super().find(filtro, *a, **k)
+
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionVehiculos(docs)), \
+             patch.object(vehiculos, "coleccion_biometria",
+                          Contando([{"tenedor": "777"}, {"tenedor": "888"}])):
+            resp = self.client.get("/vehiculos/estudios-antiguedad")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(conteos["biometria"], 1)
+
+    def test_huellas_fallo_de_consulta_no_asume_faltante(self):
+        """Si biometria no responde, la fila reporta None («sin respuesta») y
+        el filtro solo_sin_huellas NO la incluye (no hay falsos faltantes)."""
+        class Explota(FakeColeccionVehiculos):
+            def find(self, filtro=None, *a, **k):
+                raise RuntimeError("biometria caída")
+
+        docs = self._placas_huellas()
+        with patch.object(vehiculos, "coleccion_vehiculos", FakeColeccionVehiculos(docs)), \
+             patch.object(vehiculos, "coleccion_biometria", Explota()):
+            resp = self.client.get("/vehiculos/estudios-antiguedad?solo_sin_huellas=true")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        cuerpo = resp.json()
+        self.assertEqual(cuerpo["vehiculos"], [])       # nada asumido como faltante
+        self.assertEqual(cuerpo["sin_huellas"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

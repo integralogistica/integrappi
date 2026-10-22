@@ -207,6 +207,9 @@ def _hash_datos_firmados_slot2(vehiculo: dict) -> str:
 coleccion_conductores_cuenta = bd['conductores']
 coleccion_usuarios = bd['usuarios']         # Conductores / Usuarios app
 coleccion_baseusuarios = bd['baseusuarios'] # <--- AQUÍ ESTÁN LOS PERFILES DE SEGURIDAD
+# Huellas dactilares (2026-10-22): el campo `tenedor` guarda la CÉDULA (nombre
+# histórico engañoso — lo llena el lector biométrico por persona).
+coleccion_biometria = bd['biometria']
 
 # Router
 ruta_vehiculos = APIRouter(
@@ -4735,6 +4738,7 @@ def estudios_por_antiguedad(
     placa: Optional[str] = None,
     solo_vencidas: bool = False,
     solo_pendientes: bool = False,
+    solo_sin_huellas: bool = False,
 ):
     """
     Módulo «Estudios por antigüedad» de /revision (2026-10-05, reemplaza la
@@ -4744,10 +4748,12 @@ def estudios_por_antiguedad(
     MANUALMENTE cuál actualizar (botón → /estudios-seguridad/{placa}/disparar).
 
     Los FILTROS los procesa el BACKEND (2026-10-06, pedido del usuario — el
-    front solo pasa los criterios): `placa` (contiene, i), `solo_vencidas`
-    y `solo_pendientes` (solo placas con actores persona SIN autorización de
-    tratamiento de datos). Cada fila reporta además cuántos actores persona
-    faltan por autorizar (`pendientes_autorizacion`).
+    front solo pasa los criterios): `placa` (contiene, i), `solo_vencidas`,
+    `solo_pendientes` (solo placas con actores persona SIN autorización de
+    tratamiento de datos) y `solo_sin_huellas` (2026-10-22: conductor(es)
+    sin registro dactilar). Cada fila reporta además cuántos actores persona
+    faltan por autorizar (`pendientes_autorizacion`) y el estado de las
+    huellas de sus conductores (`huellas_total`/`huellas_registradas`).
     """
     from Funciones import estudios_automaticos as ea
 
@@ -4756,7 +4762,8 @@ def estudios_por_antiguedad(
     placa_filtro = (placa or "").strip().upper()
     proyeccion = {
         "placa": 1, "estadoIntegra": 1,
-        "condCedulaCiudadania": 1, "condNombres": 1, "condApellidos": 1,
+        "condCedulaCiudadania": 1, "cond2CedulaCiudadania": 1,
+        "condNombres": 1, "condApellidos": 1,
         "propDocumento": 1, "propTipoDocumento": 1, "propNombre": 1,
         "tenedDocumento": 1, "tenedTipoDocumento": 1, "tenedNombre": 1,
         "RemolDuenoDocumento": 1, "RemolDuenoTipoDocumento": 1, "RemolDuenoNombre": 1,
@@ -4783,8 +4790,16 @@ def estudios_por_antiguedad(
     docs = list(coleccion_vehiculos.find(consulta, proyeccion))
     preparados = []            # (doc, ultimo, vigencia, sujetos_estudio)
     cedulas_persona = []       # valores originales para el $in
+    cedulas_conductores = []   # (2026-10-22) cond + cond2 únicas, para las huellas
     _vistas = set()
+    _vistas_cond = set()
     for doc in docs:
+        # (2026-10-22) Cédulas de los CONDUCTORES (cond + cond2): contra biometria.
+        for campo in ("condCedulaCiudadania", "cond2CedulaCiudadania"):
+            ced = re.sub(r"\D", "", str(doc.get(campo) or ""))
+            if ced and ced not in _vistas_cond:
+                _vistas_cond.add(ced)
+                cedulas_conductores.append(ced)
         # Última fecha de estudio: corrida vigente → vigencia → PDF manual.
         fechas = [e.get("finalizado_en") for e in (doc.get("estudiosSeguridadAuto") or [])
                   if isinstance(e, dict) and e.get("finalizado_en")]
@@ -4838,6 +4853,22 @@ def estudios_por_antiguedad(
             return str(cedula).strip().upper() in autorizadas
         return _autorizado_seguro(cedula)
 
+    # ── HUELLAS EN LOTE (2026-10-22): UNA consulta $in sobre biometria para
+    #    las cédulas de los conductores. None = consulta fallida → la fila
+    #    reporta «sin respuesta» y el filtro NO la asume como faltante.
+    con_huellas = None
+    if cedulas_conductores:
+        try:
+            con_huellas = {
+                re.sub(r"\D", "", str(d.get("tenedor") or ""))
+                for d in coleccion_biometria.find(
+                    {"tenedor": {"$in": cedulas_conductores}}, {"tenedor": 1})
+                if re.sub(r"\D", "", str(d.get("tenedor") or ""))
+            }
+        except Exception as e:
+            print(f"[estudios-antiguedad] Lote de huellas falló ({e})")
+            con_huellas = None
+
     for doc, ultimo, vigencia, sujetos_raw in preparados:
         sujetos = []
         # Correo de contacto por cédula (para el botón «✉️ Enviar autorización»
@@ -4872,6 +4903,14 @@ def estudios_por_antiguedad(
         personas = [s for s in sujetos if s["tipo"] == "persona"]
         pendientes_aut = sum(1 for s in personas if not s["autorizado"])
         vence = vigencia.get("vence")
+        # Huellas de los conductores de ESTA placa (2026-10-22): cuántas de sus
+        # cédulas únicas tienen registro dactilar. registradas=None → sin
+        # respuesta del registro (no se asume faltante).
+        ceds_cond = [re.sub(r"\D", "", str(doc.get(c) or ""))
+                     for c in ("condCedulaCiudadania", "cond2CedulaCiudadania")]
+        ceds_cond = [c for c in dict.fromkeys(ceds_cond) if c]  # únicas, con orden
+        huellas_reg = (sum(1 for c in ceds_cond if c in con_huellas)
+                       if con_huellas is not None else None)
         fila = {
             "placa": doc.get("placa", ""),
             "estadoIntegra": doc.get("estadoIntegra", ""),
@@ -4885,10 +4924,16 @@ def estudios_por_antiguedad(
             "total_estudios": len(doc.get("estudiosSeguridadAuto") or []),
             "personas": len(personas),
             "pendientes_autorizacion": pendientes_aut,
+            "huellas_total": len(ceds_cond),
+            "huellas_registradas": huellas_reg,
         }
         if solo_vencidas and not fila["vencida"]:
             continue
         if solo_pendientes and pendientes_aut == 0:
+            continue
+        # Sin huella = ALGÚN conductor sin registro (o sin cédula de conductor);
+        # si la consulta falló (None) NO se asume — la fila queda fuera.
+        if solo_sin_huellas and (huellas_reg is None or huellas_reg >= len(ceds_cond)):
             continue
         filas.append(fila)
 
@@ -4899,6 +4944,11 @@ def estudios_por_antiguedad(
         # Placas con al menos un actor persona sin autorización (2026-10-06):
         # alimenta el contador del filtro «solo pendientes» del front.
         "con_pendientes": sum(1 for f in filas if f["pendientes_autorizacion"] > 0),
+        # (2026-10-22) Con algún conductor SIN huellas (contador del filtro).
+        "sin_huellas": sum(
+            1 for f in filas
+            if f["huellas_registradas"] is not None
+            and f["huellas_registradas"] < f["huellas_total"]),
     })
 
 
