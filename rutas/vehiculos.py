@@ -5728,8 +5728,13 @@ def _notificar_financieros_aprobacion(vehiculo: dict) -> None:
     en el cuerpo y ADJUNTOS el informe PDF + las certificaciones bancarias de
     las figuras. Fire-and-forget: jamás tumba la aprobación."""
     try:
-        financieros = list(coleccion_baseusuarios.find(
-            {"perfil": "FINANCIERO", "activo": True}))
+        # Históricos de baseusuarios pueden NO tener el campo `activo` (ausente
+        # = activo, mismo criterio de _enviar_a_perfil en otros_costos.py);
+        # exigirlo estricto dejaba la aprobación SIN destinatarios y sin correo.
+        financieros = list(coleccion_baseusuarios.find({
+            "perfil": "FINANCIERO",
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        }))
         destinatarios = [f["correo"].strip() for f in financieros
                          if (f.get("correo") or "").strip()]
         if not destinatarios:

@@ -30,8 +30,24 @@ class FakeColeccion:
         return None
 
     def find(self, query=None, *a, **k):
-        return iter([d for d in self.documents
-                     if all(d.get(k) == v for k, v in (query or {}).items())])
+        # "$or" (lista de sub-filtros por igualdad) para el lookup de
+        # financieros: {"$or": [{"activo": True}, {"activo": {"$exists": False}}]}
+        or_clauses = (query or {}).get("$or", []) if isinstance(query, dict) else []
+        if or_clauses:
+            query = {k: v for k, v in (query or {}).items() if k != "$or"}
+
+        def _match(d):
+            if not all(d.get(k) == v for k, v in (query or {}).items()):
+                return False
+            if or_clauses:
+                return any(
+                    all(d.get(k) == v if not isinstance(v, dict) or "$exists" not in v
+                        else (k in d) == v["$exists"]
+                        for k, v in cl.items())
+                    for cl in or_clauses)
+            return True
+
+        return iter([d for d in self.documents if _match(d)])
 
     def update_one(self, filtro, cambio, upsert=False):
         for d in self.documents:
@@ -197,6 +213,29 @@ class NotificacionFinancierosTests(unittest.TestCase):
         # La certificación del conductor va adjunta con nombre legible + placa.
         self.assertTrue(any("Bancaria" in n and "Conductor" in n and "FIN123" in n
                             for n in nombres), nombres)
+
+    def test_financiero_historico_sin_campo_activo_si_recibe(self):
+        """(2026-10-22, bug REAL en producción) Los FINANCIERO históricos de
+        baseusuarios NO tienen campo `activo` (ausente = activo, como en todo
+        el sistema). El filtro estricto `activo: True` dejaba CERO
+        destinatarios: aprobaciones silenciosamente sin correo desde 2026-10-16."""
+        enviado = {}
+
+        def _enviar(params):
+            enviado.update(params)
+
+        fake_base = FakeColeccion([
+            # Histórico SIN el campo activo (ZVALLE/JGONZALEZ en producción).
+            {"usuario": "JGONZALEZ", "correo": "jefe@integra.com", "perfil": "FINANCIERO"},
+            # Un inactivo explícito SÍ debe quedar excluido.
+            {"usuario": "VIEJO", "correo": "viejo@integra.com", "perfil": "FINANCIERO", "activo": False},
+        ])
+        with patch.object(vehiculos, "coleccion_baseusuarios", fake_base), \
+             patch.object(vehiculos, "_pdf_informe_financiero", return_value=b"%PDF-informe"), \
+             patch.object(vehiculos, "_descargar_blob", return_value=b"x"), \
+             patch.object(vehiculos.resend.Emails, "send", side_effect=_enviar):
+            vehiculos._notificar_financieros_aprobacion(_vehiculo())
+        self.assertEqual(enviado["to"], ["jefe@integra.com"])
 
     def test_sin_financieros_no_reventar(self):
         with patch.object(vehiculos, "coleccion_baseusuarios", FakeColeccion()), \
