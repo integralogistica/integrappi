@@ -82,25 +82,56 @@ class FakeCol:
     def count_documents(self, filtro=None):
         return sum(1 for d in self.documents if self._match(d, filtro or {}))
 
+    def distinct(self, campo):
+        """Valores únicos de un campo (soporta notación punto, ej: datos_servicio.cliente)."""
+        valores = []
+        for d in self.documents:
+            actual = d
+            for parte in campo.split("."):
+                actual = (actual or {}).get(parte) if isinstance(actual, dict) else None
+            if actual and actual not in valores:
+                valores.append(actual)
+        return valores
+
 
 class ClientesOtrosCostosTests(unittest.TestCase):
 
     def setUp(self):
-        self._original = otros_costos.col_clientes
+        self._original = (otros_costos.col_clientes, otros_costos.col_activos, otros_costos.col_historico)
         # Catálogo con un histórico sin nit/activo (debe verse activo, NIT —)
-        # y uno deshabilitado por el admin.
+        # y uno deshabilitado por el admin. Solicitudes vacías por defecto.
         otros_costos.col_clientes = FakeCol([
             {"_id": "5f1f1f77bcf86cd7994390a1", "nombre": "FRESENIUS KABI"},
             {"_id": "5f1f1f77bcf86cd7994390a2", "nombre": "CONGRUPO", "nit": "900123456", "activo": False},
         ])
+        otros_costos.col_activos = FakeCol([])
+        otros_costos.col_historico = FakeCol([])
 
     def tearDown(self):
-        otros_costos.col_clientes = self._original
+        otros_costos.col_clientes, otros_costos.col_activos, otros_costos.col_historico = self._original
 
     def test_get_clientes_excluye_deshabilitados(self):
         res = asyncio.run(otros_costos.clientes())
         self.assertEqual(res, ["FRESENIUS KABI"])
         # El histórico sin campo `activo` cuenta como activo.
+
+    def test_get_clientes_mergea_clientes_reales_de_solicitudes(self):
+        """El dropdown debe incluir clientes presentes en solicitudes aunque el
+        catálogo no los tenga (2026-10-27, ej: DAVITA COLOMBIA SAS)."""
+        otros_costos.col_activos = FakeCol([
+            {"datos_servicio": {"cliente": "DAVITA COLOMBIA SAS"}},
+            {"datos_servicio": {"cliente": "fresenius kabi"}},   # dedupe case-insensitive
+            {"datos_servicio": {}},                                # sin cliente: se ignora
+        ])
+        otros_costos.col_historico = FakeCol([
+            {"datos_servicio": {"cliente": "LA CALERA COLOMBIA SA"}},
+        ])
+        res = asyncio.run(otros_costos.clientes())
+        self.assertIn("DAVITA COLOMBIA SAS", res)
+        self.assertIn("LA CALERA COLOMBIA SA", res)
+        self.assertEqual(res.count("FRESENIUS KABI"), 1)          # no duplica al catálogo
+        self.assertNotIn("CONGRUPO", res)                         # deshabilitado sigue fuera
+        self.assertEqual(res, sorted(res))                        # orden alfabético
 
     def test_completo_incluye_deshabilitados_con_nit(self):
         res = asyncio.run(otros_costos.clientes_completo())

@@ -1514,7 +1514,10 @@ async def clientes():
     Auto-siembra la colección `clientes_otros_costos` con el listado por defecto
     la primera vez (si está vacía); desde entonces es editable directamente en Mongo.
     (2026-10-21) Los DESHABILITADOS (`activo: false`) NO se ofrecen en el
-    dropdown — se administran desde GestionUsuarios (ver /clientes/completo)."""
+    dropdown — se administran desde GestionUsuarios (ver /clientes/completo).
+    (2026-10-27) Se MERGEAN los clientes reales de las solicitudes (activos +
+    histórico) que falten del catálogo: el dropdown de filtro siempre puede
+    alcanzar todo lo que existe, esté o no registrado en el catálogo."""
     if col_clientes.count_documents({}) == 0:
         col_clientes.insert_many([{"nombre": c} for c in CLIENTES_OTROS_COSTOS_DEFAULT])
         logger.info(
@@ -1522,7 +1525,19 @@ async def clientes():
             len(CLIENTES_OTROS_COSTOS_DEFAULT),
         )
     docs = list(col_clientes.find({"activo": {"$ne": False}}, {"_id": 0, "nombre": 1}))
-    return [d.get("nombre", "") for d in docs if d.get("nombre")]
+    nombres = [d.get("nombre", "").strip() for d in docs if (d.get("nombre") or "").strip()]
+    # (2026-10-27) El dropdown de filtro debe alcanzar TODO lo que existe en
+    # solicitudes, aunque el catálogo no lo tenga registrado (el cliente se
+    # digita libre en el formulario): se mergean los clientes reales de activos
+    # + histórico que falten del catálogo (ej: DAVITA COLOMBIA SAS).
+    reales = set(n.upper() for n in nombres)
+    for col in (col_activos, col_historico):
+        for c in col.distinct("datos_servicio.cliente"):
+            c = (c or "").strip()
+            if c and c.upper() not in reales:
+                reales.add(c.upper())
+                nombres.append(c)
+    return sorted(nombres)
 
 
 # ── Administración del catálogo de clientes (GestionUsuarios, 2026-10-21) ─────
@@ -2424,7 +2439,7 @@ async def exportar_excel(req: ExportarExcelRequest):
 
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
-        "Tipo de Costo", "Proveedor", "OC Proveedor", "Valor",
+        "Tipo de Costo", "Descripción", "Proveedor", "OC Proveedor", "Valor",
         "Valor Despues Retenciones",
         "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
@@ -2455,12 +2470,13 @@ async def exportar_excel(req: ExportarExcelRequest):
         conceptos = [
             {
                 "tipo": (c.get("tipo_costo") or "").strip(),
+                "descripcion": (c.get("descripcion") or "").strip(),
                 "proveedor": (c.get("proveedor") or "").strip(),
                 "oc_proveedor": (c.get("oc_proveedor") or "").strip(),
                 "valor": _a_numero(c.get("valor")),
             }
             for c in costos
-        ] or [{"tipo": "", "proveedor": "", "oc_proveedor": "", "valor": 0}]
+        ] or [{"tipo": "", "descripcion": "", "proveedor": "", "oc_proveedor": "", "valor": 0}]
         for idx, concepto in enumerate(conceptos):
             fila = [
                 d.get("consecutivo", ""),
@@ -2469,6 +2485,7 @@ async def exportar_excel(req: ExportarExcelRequest):
                 ds.get("placa", ""),
                 d.get("manifiesto", ""),
                 concepto["tipo"],
+                concepto["descripcion"],
                 concepto["proveedor"],
                 concepto["oc_proveedor"],
                 concepto["valor"],
