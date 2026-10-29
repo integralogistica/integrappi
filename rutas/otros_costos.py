@@ -2212,10 +2212,20 @@ async def registrar_pago(req: RegistrarPagoRequest, request: Request):
 @router.post("/anular")
 async def anular_solicitud(req: AnularRequest, request: Request):
     info = _resolver_usuario(req.usuario)
-    _requiere(info, {"ADMIN"}, "anular solicitudes")
     doc, col = _doc_por_consecutivo(req.consecutivo)
     if not doc:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
+    # Autorización: ADMIN anula cualquier solicitud (no anulada). OPERATIVO sólo
+    # puede anular SUS PROPIAS solicitudes en borrador o devueltas (2026-10-28).
+    if info["perfil"] == "ADMIN":
+        pass
+    elif info["perfil"] == "OPERATIVO":
+        if doc.get("usuario_registro") != info["usuario"]:
+            raise HTTPException(status_code=403, detail="Como OPERATIVO sólo puedes anular tus propias solicitudes.")
+        if doc.get("estado") not in ("borrador", "devuelto"):
+            raise HTTPException(status_code=403, detail="Como OPERATIVO sólo puedes anular solicitudes en estado Borrador o Devuelta.")
+    else:
+        raise HTTPException(status_code=403, detail="Sólo ADMIN (u OPERATIVO sobre sus borradores/devueltas) puede anular solicitudes.")
     if doc.get("estado") == "anulado":
         raise HTTPException(status_code=409, detail="La solicitud ya está anulada.")
 
