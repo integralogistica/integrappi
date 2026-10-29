@@ -732,6 +732,17 @@ El Excel ahora tiene 2 hojas: la de siempre (una fila por planilla) y la nueva *
 - **Sin `registros_detalle`** (docs viejos): una fila por pedido del campo `codigo_pedido` (separadores `,`/`;`), cliente del doc y reparto equitativo del flete.
 - Fila TOTALES al final, auto-filtro y freeze panes. El request/respuesta no cambian (misma descarga con una hoja más); el frontend no se tocó.
 
+## Actualizaciones Recientes (2026-10-29)
+
+### Histórico de Pedidos — hoja «Detalle por Guía» (3.ª hoja) en el Excel
+
+El Excel de `POST /siscore/historico/exportar-excel` ahora tiene 3 hojas: la nueva **«Detalle por Guía»** baja un nivel más que «Detalle por Pedido» — **UNA FILA POR GUÍA de Siscore** con el costo que tuvo esa guía dentro del vehículo. Columnas: Consecutivo Final, Consecutivo Original, Planilla, Pedido Vulcano (del carro), **Guía**, Cliente, Destinatario, Municipio Destino, Piezas, Peso y **Costo Asignado**.
+
+- **Reparto**: el costo que la hoja 2 asigna a cada carro se reparte entre las guías de ese carro **proporcionalmente a sus piezas** (mismo `_repartir_flete`) → la suma de las guías de un carro es EXACTAMENTE su costo asignado, y la del total el `total_solicitado`. Fila TOTALES al final.
+- **Fuente de las guías**: `registros_detalle` del carro (los originales de una fusión también lo conservan). **Docs viejos sin detalle** (anteriores al 2026-06-19): guías del campo `codigo_pedido` (separadores `,`/`;`) con reparto equitativo. Carro sin guías → una fila `-` que conserva su costo (los totales siempre cuadran).
+- **Refactor**: la derivación de carros de la hoja 2 se extrajo a `_derivar_carros(doc)` (helper local del endpoint), ahora compartida por ambas hojas.
+- Tests: `tests/test_historico_excel_detalle_guia.py` (suma exacta, fallback docs viejos, carro sin guías, coherencia hoja 2 ↔ hoja 3). Sólo backend; el frontend no cambió (misma descarga, una hoja más).
+
 ## Actualizaciones Recientes (2026-09-17)
 
 ### SolicitudVehiculos — ANALISTA vuelve a aprobar PREAPROBADO → APROBADO

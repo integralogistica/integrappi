@@ -76,9 +76,19 @@ class BaseUsuario(BaseModel):
     # Módulo Estudios de Seguridad: solo aplican con perfil SEGURIDAD.
     empresa_id_seguridad: Optional[str] = None  # _id de empresas_seguridad
     rol_seguridad: Optional[str] = None  # CONSULTADOR | ADMIN_EMPRESA
+    # (2026-10-29) Clientes asignables desde el catálogo `clientes_siscore`
+    # (NITs en MAYÚSCULAS). Fuente de verdad de "qué clientes puede ver" —
+    # de aquí se DERIVA el campo `clientes` (portales) vía PORTALES_POR_NIT.
+    clientes_siscore: Optional[List[str]] = None
 
 class ActualizarClientesInput(BaseModel):
     clientes: List[str]
+
+class ActualizarClientesSiscoreInput(BaseModel):
+    """Clientes del catálogo clientes_siscore (NITs) que el usuario puede ver.
+    Asignable a CUALQUIER perfil. [] = ninguno (para perfil CLIENTE significa
+    que aún no tiene tablero asignado)."""
+    clientes_siscore: List[str] = []
 
 class ActualizarClientesAprobacionInput(BaseModel):
     """Alcance de aprobación por cliente en Otros Costos (perfil COORDINADOR/CONTROL).
@@ -136,6 +146,10 @@ def modelo_usuario(u) -> dict:
         "perfil": u["perfil"],
         "usuario": u["usuario"],
         "clientes": u["clientes"] if isinstance(u.get("clientes"), list) else ["KABI"],
+        # (2026-10-29) Clientes asignados del catálogo clientes_siscore (NITs).
+        # None = usuario creado antes del campo (los toggles KABI/MEDICAL_CARE
+        # viejos siguen mandando en `clientes`).
+        "clientes_siscore": u.get("clientes_siscore") if isinstance(u.get("clientes_siscore"), list) else None,
         # Alcance de aprobación por cliente en Otros Costos ([] = TODOS)
         "clientes_aprobacion": u.get("clientes_aprobacion") if isinstance(u.get("clientes_aprobacion"), list) else [],
         # Perfiles adicionales (2026-10-15): p. ej. OPERATIVO que también es Padrino.
@@ -274,6 +288,58 @@ def normalizar_clientes(clientes: Optional[List[str]]) -> List[str]:
     if not clientes_normalizados:
         raise HTTPException(status_code=400, detail="Debe seleccionar al menos un cliente")
     return clientes_normalizados
+
+
+# (2026-10-29) Portales clásicos derivados de los NITs de clientes_siscore.
+# `clientes` (KABI/MEDICAL_CARE) deja de editarse directo en GestionUsuarios:
+# la asignación se hace por NIT y el portal se deriva de aquí.
+PORTALES_POR_NIT = {
+    "900402080": "KABI",        # Fresenius Kabi
+    "901689684": "MEDICAL_CARE" # Fresenius Medical Care
+}
+
+# Perfiles que NUNCA reciben portales clásicos, tengan o no clientes asignados
+# (externos: su único acceso es su portal propio).
+PERFILES_SIN_PORTALES = {"CLIENTE", "CLIENTE_FMC"}
+
+
+def _normalizar_clientes_siscore(nits: List[str]) -> List[str]:
+    """NITs asignados del catálogo `clientes_siscore`: MAYÚSCULAS, strip,
+    dedupe y validación de existencia (422 si alguno no está en el catálogo)."""
+    norm: List[str] = []
+    for nit in nits or []:
+        n = str(nit or "").strip().upper()
+        if n and n not in norm:
+            norm.append(n)
+    if not norm:
+        return []
+    encontrados = {
+        d.get("nit") for d in base_datos["clientes_siscore"].find({"nit": {"$in": norm}}, {"nit": 1})
+    }
+    faltantes = [n for n in norm if n not in encontrados]
+    if faltantes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"NITs no existentes en el catálogo clientes_siscore: {', '.join(faltantes)}",
+        )
+    return norm
+
+
+def _portales_derivados(usuario: dict, nits: List[str]) -> List[str]:
+    """`clientes` (portales) que corresponden a los NITs asignados. Los
+    perfiles externos (CLIENTE/CLIENTE_FMC) no reciben portales clásicos.
+    ADMIN siempre ve todo: todos los portales, tenga o no asignación."""
+    perfil = str(usuario.get("perfil", "")).upper()
+    if perfil in PERFILES_SIN_PORTALES:
+        return []
+    if perfil == "ADMIN":
+        return list(PORTALES_POR_NIT.values())
+    salida = []
+    for n in nits:
+        portal = PORTALES_POR_NIT.get(n)
+        if portal and portal not in salida:
+            salida.append(portal)
+    return salida
 
 
 def _normalizar_clientes_aprobacion(clientes: List[str]) -> List[str]:
@@ -465,18 +531,32 @@ async def crear_baseusuario(data: BaseUsuario):
     if coleccion_usuarios.find_one({"usuario": data.usuario.upper()}):
         raise HTTPException(status_code=400, detail="El usuario ya existe")
 
+    # (2026-10-29) Asignación por NIT (catálogo clientes_siscore): si viene,
+    # valida y DERIVA los portales clásicos (los perfiles externos no reciben).
+    # Si no viene, se usa el comportamiento histórico (clientes directo).
+    perfil_nuevo = data.perfil.upper()
+    nits = _normalizar_clientes_siscore(data.clientes_siscore) if data.clientes_siscore is not None else None
+    if perfil_nuevo in ("CLIENTE_FMC", "CLIENTE"):
+        clientes_val = []
+    elif nits is not None:
+        clientes_val = _portales_derivados({"perfil": perfil_nuevo}, nits)
+    else:
+        clientes_val = normalizar_clientes(data.clientes)
+
     nuevo = {
         "nombre": data.nombre.upper(),
         "correo": data.correo.upper() if data.correo else None,
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
-        "perfil": data.perfil.upper(),
+        "perfil": perfil_nuevo,
         "perfiles_adicionales": _normalizar_perfiles_adicionales(data.perfil, data.perfiles_adicionales),
         "usuario": data.usuario.upper(),
         "clave": crear_hash(data.clave.strip()),
-        "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
+        "clientes": clientes_val,
         **_campos_seguridad(data),
     }
+    if nits is not None:
+        nuevo["clientes_siscore"] = nits
 
     id_insertado = coleccion_usuarios.insert_one(nuevo).inserted_id
     usuario_insertado = coleccion_usuarios.find_one({"_id": id_insertado})
@@ -492,7 +572,7 @@ async def obtener_baseusuarios():
 # (2026-10-14) PADRINO: como Seguridad pero SOLO impersonar placas para
 # cargar documentos/datos — sin autorizar estados ni gestionar conductores
 # (guards en vehiculos.actualizar-estado y conductores.invitar/desvincular).
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'PADRINO', 'SEGURIDAD', 'VISUALIZADOR']
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'PADRINO', 'SEGURIDAD', 'VISUALIZADOR']
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
@@ -530,16 +610,29 @@ async def actualizar_baseusuario(usuario_id: str, data: BaseUsuario):
     except Exception:
         raise HTTPException(status_code=400, detail="ID inválido")
         
+    # (2026-10-29) clientes_siscore: solo se toca si viene explícito (el PUT
+    # completo no debe borrar la asignación de un form que no la envía).
+    perfil_actualiza = data.perfil.upper()
+    nits = _normalizar_clientes_siscore(data.clientes_siscore) if data.clientes_siscore is not None else None
+    if perfil_actualiza in ("CLIENTE_FMC", "CLIENTE"):
+        clientes_val = []
+    elif nits is not None:
+        clientes_val = _portales_derivados({"perfil": perfil_actualiza}, nits)
+    else:
+        clientes_val = normalizar_clientes(data.clientes)
+
     actualiza = {
         "nombre": data.nombre.upper(),
         "correo": data.correo.upper() if data.correo else None,
         "regional": data.regional.upper(),
         "celular": data.celular.upper() if data.celular else None,
-        "perfil": data.perfil.upper(),
+        "perfil": perfil_actualiza,
         "perfiles_adicionales": _normalizar_perfiles_adicionales(data.perfil, data.perfiles_adicionales),
         "usuario": data.usuario.upper(),
-        "clientes": [] if data.perfil.upper() == "CLIENTE_FMC" else normalizar_clientes(data.clientes),
+        "clientes": clientes_val,
     }
+    if nits is not None:
+        actualiza["clientes_siscore"] = nits
     # Seguridad: si es SEGURIDAD setea empresa/rol (validados); si dejó de
     # serlo limpia los campos para no dejar acceso huérfano al portal.
     campos_seg = _campos_seguridad(data)
@@ -615,6 +708,7 @@ async def login_baseusuario(usuario: str = Body(..., embed=True), clave: str = B
             "perfiles_adicionales": encontrado.get("perfiles_adicionales") or [],
             "regional": encontrado["regional"],
             "clientes": encontrado.get("clientes") or ["KABI"],
+            "clientes_siscore": encontrado.get("clientes_siscore") if isinstance(encontrado.get("clientes_siscore"), list) else None,
         }
     }
 
@@ -743,6 +837,37 @@ async def actualizar_clientes_aprobacion_usuario(id: str, data: ActualizarClient
         "mensaje": "Alcance de aprobación actualizado",
         "clientes_aprobacion": clientes,
         "todos": not clientes,
+    }
+
+
+@ruta_baseusuarios.patch("/{id}/clientes-siscore", response_model=dict)
+async def actualizar_clientes_siscore_usuario(id: str, data: ActualizarClientesSiscoreInput):
+    """(2026-10-29) Clientes que el usuario puede ver, tomados del catálogo
+    `clientes_siscore` (NITs). Asignable a CUALQUIER perfil, sin importar el
+    rango. Es la fuente de verdad: el campo `clientes` (portales KABI /
+    MEDICAL_CARE del selector de login) se DERIVA de aquí con PORTALES_POR_NIT
+    (los perfiles externos CLIENTE/CLIENTE_FMC no reciben portales clásicos).
+    [] = sin clientes asignados (perfil CLIENTE sin tablero todavía)."""
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    usuario = coleccion_usuarios.find_one({"_id": oid})
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    nits = _normalizar_clientes_siscore(data.clientes_siscore)
+    portales = _portales_derivados(usuario, nits)
+
+    coleccion_usuarios.update_one(
+        {"_id": oid},
+        {"$set": {"clientes_siscore": nits, "clientes": portales}}
+    )
+    return {
+        "mensaje": "Clientes asignados actualizados",
+        "clientes_siscore": nits,
+        "clientes": portales,
     }
 
 

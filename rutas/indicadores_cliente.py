@@ -39,7 +39,13 @@ from rutas.indicadores_costo_operacion import (
 )
 from rutas.fletes import coleccion_fletes
 from bd.bd_cliente import bd_cliente
-from bd.bd_postgres import consultar_guias
+from bd.bd_postgres import (
+    guias_minimas_cliente,
+    pagina_guias_cliente,
+    buscar_guias_cliente,
+)
+
+import time as _time
 
 import pandas as pd
 from io import BytesIO
@@ -56,21 +62,146 @@ logger = logging.getLogger(__name__)
 # guía: {guia, fecha_cita (string 'YYYY-MM-DD'), actualizado_el}.
 col_citas = bd_cliente["integra"]["citas_kabi"]
 
+# (2026-10-29) Portal «Mis Indicadores» (perfil CLIENTE): usuarios y catálogo
+# de clientes asignables (la asignación vive en baseusuarios.clientes_siscore).
+col_usuarios = bd_cliente["integra"]["baseusuarios"]
+col_clientes_siscore = bd_cliente["integra"]["clientes_siscore"]
+# (2026-10-29) Novedades justificadas OT (gestión en /novedades-ot): una guía
+# justificada sale de su estado TMS y pasa al segmento «justificadas».
+col_novedades_ot = bd_cliente["integra"]["novedades_justificadas_ot"]
+
 # Perfiles autorizados a cargar el Excel de citas.
 PERFILES_CARGA_CITAS = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL"}
 
 # Registro backend de clientes (espejo del clientes.ts del frontend; mantener
 # sincronizado). El filtro de media milla se expresa como $match directo
 # (forma query, no forma expr): por NIT para Kabi, igual que /costo-por-caja.
+# «nit» (2026-10-29): identidad del cliente para el portal de clientes
+# externos (validación de asignación en /guias y /mis-indicadores).
 CLIENTES = {
     "fresenius-kabi": {
         "nombre": "Fresenius Kabi",
         "fuente": "mongo",
+        "nit": NIT_FRESENIUS,
         "match_media_milla": lambda: {"nit_cliente": NIT_FRESENIUS},
+        # (2026-10-29) Informe de guías PG puro: valores EXACTOS de
+        # nombre_cliente en informe_guias_tms (verificados con SELECT
+        # DISTINCT; la igualdad directa en lista permite usar el índice
+        # idx_guias_cliente_fecha). 2026-10-29 (tarde): el tablero UNE los
+        # nombres con los que el TMS registra al grupo Kabi — servicio técnico
+        # llega como 'FK SERVICIO TECNICO' y, en algunos registros viejos,
+        # 'FRESENIUSKABISERVICIOTECNICO' concatenado.
+        "pg_nombres": [
+            "FRESENIUS KABI",
+            "FK SERVICIO TECNICO",
+            "FRESENIUSKABISERVICIOTECNICO",
+        ],
+        # (2026-10-29) Sub-grupos filtrables del informe de guías: el tablero
+        # une los nombres del grupo, y este filtro deja ver uno solo. La
+        # variante concatenada vieja viaja con servicio técnico (es su data).
+        "pg_grupos": [
+            {"etiqueta": "Fresenius Kabi", "nombres": ["FRESENIUS KABI"]},
+            {"etiqueta": "FK Servicio Técnico", "nombres": ["FK SERVICIO TECNICO", "FRESENIUSKABISERVICIOTECNICO"]},
+        ],
     },
     # 'fresenius-medical-care' usará las colecciones de última milla/otros
     # cuando tenga gráficos.
 }
+
+
+def _nombres_por_grupo(cliente: dict, grupo: Optional[str]) -> list:
+    """(2026-10-29) Nombres de informe_guias_tms a consultar: acotados al
+    sub-grupo pedido (``?grupo=``) o todos los ``pg_nombres``. Grupo
+    desconocido → 422 (evita filtrar silenciosamente a nada)."""
+    if not grupo:
+        return cliente["pg_nombres"]
+    for g in cliente.get("pg_grupos") or []:
+        if g["etiqueta"] == grupo:
+            return g["nombres"]
+    validos = [g["etiqueta"] for g in cliente.get("pg_grupos") or []]
+    raise HTTPException(status_code=422, detail=f"Grupo no válido: {grupo}. Válidos: {validos}")
+
+
+def _resolver_usuario(usuario: str) -> dict:
+    """Identidad desde baseusuarios (patrón _resolver_usuario de otros_costos:
+    el backend NO confía en el perfil que envía el frontend).
+    401 si no existe, 403 si está inactivo."""
+    valor = str(usuario or "").strip().upper()
+    doc = col_usuarios.find_one({"usuario": valor})
+    if not doc:
+        raise HTTPException(status_code=401, detail=f"Usuario no encontrado: {usuario}")
+    if not doc.get("activo", True):
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
+    return doc
+
+
+def _verificar_acceso_cliente(usuario: str, cliente_id: str, cliente: dict):
+    """(2026-10-29) Endurecimiento del tablero de clientes externos: si quien
+    consulta tiene perfil CLIENTE, el NIT del cliente debe estar en su
+    asignación ``clientes_siscore`` (gestionada en GestionUsuarios). Los
+    perfiles internos pasan igual que siempre (comportamiento histórico)."""
+    doc = _resolver_usuario(usuario)
+    if str(doc.get("perfil", "")).upper() != "CLIENTE":
+        return
+    asignados = doc.get("clientes_siscore") or []
+    nit = cliente.get("nit")
+    if not nit or nit not in asignados:
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes acceso a los indicadores de este cliente",
+        )
+
+
+@router.get("/mis-indicadores")
+def get_mis_indicadores(usuario: str = Query(..., description="Nombre de usuario (cookie usuarioPedidosCookie)")):
+    """(2026-10-29) Clientes asignados al usuario para el panel «Mis
+    Indicadores» (/indicadores/mis-clientes, perfil CLIENTE): cruza su
+    asignación ``clientes_siscore`` (NITs) contra el catálogo clientes_siscore
+    (nombre) y contra el registro CLIENTES (qué NIT tiene dashboard publicado).
+    Un cliente sin dashboard llega con cliente_id=null → «Próximamente»."""
+    doc = _resolver_usuario(usuario)
+    perfil = str(doc.get("perfil", "")).upper()
+    con_dashboard = {
+        cfg.get("nit"): cid for cid, cfg in CLIENTES.items() if cfg.get("nit")
+    }
+    if perfil == "ADMIN":
+        # ADMIN siempre ve todo: TODOS los dashboards publicados (sin depender
+        # de su asignación clientes_siscore).
+        clientes = [
+            {
+                "nit": nit or "",
+                "entidad": CLIENTES[cid]["nombre"],
+                "razon": CLIENTES[cid]["nombre"],
+                "cliente_id": cid,
+                "disponible": True,
+            }
+            for nit, cid in con_dashboard.items()
+        ]
+        return {"success": True, "data": {"perfil": perfil, "clientes": clientes}}
+
+    nits = doc.get("clientes_siscore") or []
+    catalogo = {
+        c.get("nit"): c
+        for c in col_clientes_siscore.find({"nit": {"$in": nits}}, {"entidad": 1, "razon": 1, "nit": 1})
+    }
+    clientes = []
+    for nit in nits:
+        cat = catalogo.get(nit) or {}
+        cliente_id = con_dashboard.get(nit)
+        clientes.append({
+            "nit": nit,
+            "entidad": cat.get("entidad") or "",
+            "razon": cat.get("razon") or cat.get("entidad") or "",
+            "cliente_id": cliente_id,
+            "disponible": cliente_id is not None,
+        })
+    return {
+        "success": True,
+        "data": {
+            "perfil": perfil,
+            "clientes": clientes,
+        },
+    }
 
 
 @router.get("/{cliente_id}/cajas")
@@ -140,33 +271,13 @@ def get_cajas_cliente(
 
 
 # ── Informe de guías TMS ─────────────────────────────────────────────────────
-# planilla_siscore (Mongo) == guia (PostgreSQL informe_guias_tms). Puede traer
-# VARIAS guías separadas por coma → se explota en una fila por guía.
-
-# Válvulas de seguridad del informe (un año completo son miles de guías).
-# MAX_VEHICULOS viene de indicadores_costo_operacion (8000, compartido).
-# Un año completo de Kabi son ~12-15k guías desde el fix de planillas
-# acumuladas ($addToSet) — 20k cubre todo el histórico (2025-09 → hoy).
-MAX_FILAS = 20000
+# (2026-10-29) PostgreSQL puro: la lógica del informe vive más abajo, en el
+# bloque "Informe de guías PostgreSQL puro" (helpers OT + /guias + /guias/filas).
 
 # Estados reales de informe_guias_tms (verificados 2026-08-20): ENTREGADO,
 # PENDIENTE, "En distribucion", "CON NOVEDAD", "Transito Nacional" + basura
 # ('', '0000-00-00', 'planilla normal'). Solo ENTREGADO cuenta como entregada.
 ESTADO_ENTREGADO = "ENTREGADO"
-
-# Una guía sin registro en el TMS más antigua que esto se marca ANULADA
-# (regla de negocio: planillas anuladas nunca generaron guía real); más
-# reciente = aún no cargada por el bot diario.
-DIAS_ANULADA = 7
-
-
-def _split_planillas(valor) -> List[str]:
-    """'801195758, 801195771' → ['801195758', '801195771'] (trim, sin vacíos)."""
-    if not valor:
-        return []
-    if isinstance(valor, float) and valor.is_integer():
-        valor = int(valor)
-    return [p.strip() for p in str(valor).split(",") if p.strip()]
 
 
 # (_fecha_iso viene importado de indicadores_costo_operacion.)
@@ -285,14 +396,241 @@ def _sumar_dias_habiles(inicio: date, dias: int) -> date:
 
 
 def _mapa_promesa_destinos() -> dict:
-    """{DESTINO_NORMALIZADO: promesa_entrega_dias} desde tarifas origen FUNZA."""
+    """{DESTINO_NORMALIZADO: promesa_entrega_dias} desde tarifas origen FUNZA.
+
+    (2026-10-29) Cache TTL 10 min — antes consultaba Mongo en cada request del
+    informe. Las claves se NORMALIZAN (solo letras/dígitos) para absorber
+    variantes catálogo↔TMS: 'BOGOTA D.C.' ↔ 'BOGOTA, D C' → 'BOGOTADC'."""
+    global _CACHE_PROMESAS
+    ahora = _time.monotonic()
+    ts, mapa = _CACHE_PROMESAS
+    if mapa is not None and ahora - ts < 600:
+        return mapa
     out = {}
     for t in coleccion_fletes.find({"origen": "FUNZA"}, {"destino": 1, "promesa_entrega_dias": 1}):
         dest = (t.get("destino") or "").strip().upper()
         dias = t.get("promesa_entrega_dias") or 0
-        if dest and dias > 0 and dest not in out:
-            out[dest] = int(dias)
+        if dest and dias > 0:
+            out[_normalizar_ciudad(dest)] = int(dias)
+    _CACHE_PROMESAS = (ahora, out)
     return out
+
+
+_CACHE_PROMESAS = (0.0, None)
+
+
+def _normalizar_ciudad(texto: str) -> str:
+    """'BOGOTA, D C'/'BOGOTA D.C.' → 'BOGOTADC' (upper, solo alfanuméricos)."""
+    return re.sub(r"[^A-Z0-9]", "", (texto or "").upper())
+
+
+def _dias_promesa_destino(ciudad: Optional[str], mapa: dict) -> Optional[int]:
+    """Días de promesa para una ciudad del TMS. Match exacto normalizado y, si
+    no hay, prefijo ÚNICO de hasta 4 caracteres extra (cubre 'BOGOTA'→'BOGOTADC'
+    o 'FLORIDABLANCA'→'FLORIDABLANCA'; ambiguos → None, igual que sin promesa)."""
+    if not ciudad:
+        return None
+    n = _normalizar_ciudad(ciudad.split(",")[0])
+    if not n:
+        return None
+    if n in mapa:
+        return mapa[n]
+    candidatos = [d for k, d in mapa.items() if k.startswith(n) and 0 < len(k) - len(n) <= 4]
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+# ── Informe de guías PostgreSQL puro (2026-10-29) ─────────────────────────────
+# Antes: agregación Mongo (media milla, planillas multi-guía) + JOIN por guía
+# contra PG + TODAS las filas al frontend. Ahora: una pasada sobre columnas
+# mínimas de informe_guias_tms → resumen + series OT + página de filas.
+
+# Estados reales del TMS (verificados contra la tabla). Cualquier otro valor
+# ('', '0000-00-00', 'planilla normal', …) → estado null + estado_crudo para
+# diagnóstico/export (antes eran "sin_info" por no estar en el JOIN de Mongo).
+_ESTADOS_TMS = {e.upper(): e for e in (
+    "ENTREGADO", "CON NOVEDAD", "PENDIENTE", "En distribucion", "Transito Nacional",
+)}
+
+
+def _normalizar_estado(crudo: Optional[str]):
+    """valor_tms → (estado_canonico_o_None, estado_crudo)."""
+    t = str(crudo or "").strip()
+    if not t:
+        return None, None
+    return _ESTADOS_TMS.get(t.upper()), t
+
+
+_PATRON_TMS_DIA = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+
+
+def _parse_fecha_tms(texto) -> Optional[date]:
+    """Fecha del TMS en cualquiera de sus formatos: 'D/M/YYYY' (como carga el
+    bot en fecha_cita TEXT) o ISO 'YYYY-MM-DD'. None para basura.
+
+    ⚠️ Bug implícito corregido: _fecha_servible solo acepta ISO, así que las
+    citas 'D/M/YYYY' del TMS JAMÁS servían y el OT caía siempre a citas_kabi
+    o promesa-por-destino. Nunca usar to_date() en SQL: rueda fechas inválidas
+    (31/02) sin error y corrompería promesas silenciosamente."""
+    if not texto:
+        return None
+    t = str(texto).strip()
+    m = _PATRON_TMS_DIA.match(t)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+    return _fecha_servible(t)
+
+
+def _calcular_ot_filas(filas: list) -> None:
+    """Setea EN SITIO fecha_promesa/origen_promesa/dias_habiles/ot sobre filas
+    dicts con {guia, estado, fecha_emision, fecha_entrega, ciudad_destino,
+    fecha_cita}. ÚNICA implementación del OT — la usan la pasada de agregación
+    (series del gráfico) y cada página de la tabla, así nunca divergen.
+
+    Misma lógica del flujo Mongo original: promesa = cita TMS si es servible →
+    cita plan B (citas_kabi) → emisión + promesa del destino (días hábiles).
+    Solo evaluable: ENTREGADO con fecha de entrega."""
+    if not filas:
+        return
+
+    # Plan B citas_kabi: solo para guías SIN cita TMS servible (lectura barata).
+    sin_cita = [f["guia"] for f in filas if not _parse_fecha_tms(f.get("fecha_cita"))]
+    citas_kb = {}
+    if sin_cita:
+        for c in col_citas.find(
+            {"guia": {"$in": sin_cita}}, {"guia": 1, "fecha_cita": 1}
+        ):
+            if c.get("fecha_cita"):
+                citas_kb[c["guia"]] = c["fecha_cita"]
+
+    promesas = _mapa_promesa_destinos()
+
+    for f in filas:
+        f_ot = None
+        f_promesa = None
+        origen = None
+        f_dias = None
+        if f.get("estado") == ESTADO_ENTREGADO and f.get("fecha_entrega"):
+            inicial = _fecha_servible(f.get("fecha_emision"))
+            entrega = _fecha_servible(f["fecha_entrega"])
+            cita = _parse_fecha_tms(f.get("fecha_cita"))
+            if inicial and entrega:
+                if not cita:
+                    cita_kb = citas_kb.get(f["guia"])
+                    if cita_kb:
+                        cita = cita_kb if isinstance(cita_kb, date) else _fecha_servible(str(cita_kb)[:10])
+                if cita:
+                    f_promesa = cita.isoformat()
+                    origen = "CITA"
+                else:
+                    dias = _dias_promesa_destino(f.get("ciudad_destino"), promesas)
+                    if dias:
+                        f_promesa = _sumar_dias_habiles(inicial, dias).isoformat()
+                        origen = "PROMESA"
+                if f_promesa:
+                    f_dias = _dias_habiles_entre(inicial, entrega)
+                    f_ot = 1 if entrega <= _fecha_servible(f_promesa) else 0
+
+        f["fecha_promesa"] = f_promesa
+        f["origen_promesa"] = origen
+        f["dias_habiles"] = f_dias
+        f["ot"] = f_ot
+
+
+def _mapa_novedades_ot() -> dict:
+    """(2026-10-29) Guía → justificación activa (novedades_justificadas_ot).
+    La colección es pequeña (una por guía justificada): se lee completa."""
+    mapa: dict = {}
+    for d in col_novedades_ot.find({}, {"guia": 1, "causal": 1, "justificacion": 1, "creado_por": 1, "actualizado_por": 1, "updated_at": 1}):
+        por = d.get("actualizado_por") or d.get("creado_por") or {}
+        mapa[d["guia"]] = {
+            "causal": d.get("causal"),
+            "justificacion": d.get("justificacion"),
+            "usuario": por.get("usuario"),
+            "nombre": por.get("nombre"),
+            "fecha": por.get("fecha").isoformat() if hasattr(por.get("fecha"), "isoformat") else por.get("fecha"),
+        }
+    return mapa
+
+
+def _adjuntar_novedades(filas: list) -> None:
+    """Marca in situ las filas que tienen justificación activa (f['novedad']).
+    Se llama ANTES de _serie_ot y de la respuesta para que gráfico y tabla
+    vean lo mismo."""
+    if not filas:
+        return
+    mapa = _mapa_novedades_ot()
+    if not mapa:
+        return
+    for f in filas:
+        nov = mapa.get(f.get("guia"))
+        if nov:
+            f["novedad"] = nov
+
+
+def _serie_ot(filas: list, largo: int) -> list:
+    """(2026-10-29, tarde) Buckets del gráfico por FECHA DE EMISIÓN (antes:
+    entrega con fallback emisión — no cuadraba contra el Excel filtrado por
+    F. Emisión). Segmentos = la división REAL de estados del TMS: ENTREGADO se
+    parte en cumplieron/noCumplieron (ot 1/0) y cada estado en curso viaja
+    solo (En distribucion, Transito Nacional, PENDIENTE, CON NOVEDAD); el
+    resto (sin estado servible, o ENTREGADO sin fecha de entrega → no
+    evaluable) cae en sin_info. Una guía con NOVEDAD justificada
+    (f['novedad'], cargo _adjuntar_novedades) GANA a todo: segmento
+    «justificadas» y excluida de los evaluables del % OT (fue excusada)."""
+    buckets: dict = {}
+    for f in filas:
+        clave = (f.get("fecha_emision") or "")[:largo]
+        if not clave:
+            continue
+        b = buckets.setdefault(clave, {
+            "cumplieron": 0, "noCumplieron": 0, "justificadas": 0, "con_novedad": 0,
+            "en_distribucion": 0, "transito": 0, "pendiente": 0, "sin_info": 0,
+        })
+        estado = f.get("estado")
+        if f.get("novedad"):
+            b["justificadas"] += 1
+        elif f.get("ot") == 1:
+            b["cumplieron"] += 1
+        elif f.get("ot") == 0:
+            b["noCumplieron"] += 1
+        elif estado == "CON NOVEDAD":
+            b["con_novedad"] += 1
+        elif estado == "En distribucion":
+            b["en_distribucion"] += 1
+        elif estado == "Transito Nacional":
+            b["transito"] += 1
+        elif estado == "PENDIENTE":
+            b["pendiente"] += 1
+        else:
+            b["sin_info"] += 1
+    out = []
+    for clave in sorted(buckets):
+        b = buckets[clave]
+        out.append({
+            "periodo": clave,
+            "cumplieron": b["cumplieron"],
+            "noCumplieron": b["noCumplieron"],
+            "justificadas": b["justificadas"],
+            "con_novedad": b["con_novedad"],
+            "en_distribucion": b["en_distribucion"],
+            "transito": b["transito"],
+            "pendiente": b["pendiente"],
+            "sin_info": b["sin_info"],
+            "evaluables": b["cumplieron"] + b["noCumplieron"],
+            "total": sum(b.values()),
+        })
+    return out
+
+
+# Cache del payload de /guias (la data cambia 1×/día con el bot; TTL corto
+# para absorber el refresco). POST /citas lo limpia (las citas mueven el OT).
+_CACHE_GUIAS: dict = {}
+_CACHE_TTL = 300
+LIMITE_PAGINA = 200
+LIMITE_EXPORT = 30000
 
 
 @router.get("/{cliente_id}/guias")
@@ -300,238 +638,163 @@ def get_guias_cliente(
     cliente_id: str,
     anio: Optional[List[int]] = Query(None),
     mes: Optional[List[int]] = Query(None),
-    q: Optional[str] = Query(None, description="Trazabilidad: número de guía o consecutivo de vehículo"),
+    grupo: Optional[str] = Query(None, description="(2026-10-29) Sub-grupo del cliente (p. ej. solo FK Servicio Técnico); vacío = todos"),
+    usuario: Optional[str] = Query(None, description="(2026-10-29) Opcional: valida asignación si el consultante es perfil CLIENTE"),
 ):
-    """Informe de guías por cliente: contexto del vehículo (Mongo media milla)
-    + estado/fecha_entrega/fecha_digitalizacion (PostgreSQL informe_guias_tms).
+    """Informe de guías PostgreSQL puro (2026-10-29): TODO sale de
+    ``informe_guias_tms`` (antes Mongo media milla + JOIN por guía).
 
-    Misma base que /cajas (mismo filtro de fecha, NIT antes del dedup por
-    ``consecutivo_vehiculo``), pero en vez de agregar cajas expone por vehículo
-    la ``planilla_siscore`` — que puede traer varias guías separadas por coma —
-    y hace JOIN en Python contra Postgres por ``guia``. Guías sin match en
-    Postgres se devuelven con estado/fechas en None (el frontend pinta «—»).
+    UNA pasada de columnas mínimas (guias_minimas_cliente) → resumen + series
+    OT mensual/diaria (misma función de OT que la tabla) + PRIMERA página de
+    filas (200). Las siguientes páginas: ``/guias/filas``. Cache TTL 5 min.
 
-    Con ``q`` (trazabilidad): SIN filtro de fecha, trae los vehículos que
-    coincidan — por consecutivo de vehículo (regex, case-insensitive) o cuya
-    ``planilla_siscore`` contenga la guía buscada. Así se ve el vehículo en
-    que viajó una guía y el estado de todas sus compañeras de planilla.
+    Población: TODAS las guías del cliente en el TMS del período (antes solo
+    las que viajaron en vehículos registrados en Mongo, con cap 20k).
+    ``grupo`` acota a un sub-conjunto de sus nombres TMS (``pg_grupos``) y el
+    payload informa las etiquetas filtrables en ``grupos``.
     """
     cliente = CLIENTES.get(cliente_id)
     if not cliente:
         raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+    if usuario:
+        _verificar_acceso_cliente(usuario, cliente_id, cliente)
+    nombres = _nombres_por_grupo(cliente, grupo)
 
+    clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "")
+    ahora = _time.monotonic()
+    hit = _CACHE_GUIAS.get(clave)
+    if hit and ahora - hit[0] < _CACHE_TTL:
+        return {"success": True, "data": hit[1], "cache": True}
+
+    t0 = _time.perf_counter()
     try:
-        # ── Modo trazabilidad: match por consecutivo o por guía ──
-        consulta = (q if isinstance(q, str) else "").strip()
-        if consulta:
-            import re as _re
-            rx = _re.escape(consulta)
-            cond_regex = {"$regex": rx, "$options": "i"}
-            match_traza = {
-                "$and": [
-                    cliente["match_media_milla"](),
-                    {"$or": [
-                        {"consecutivo_vehiculo": cond_regex},
-                        {"planilla_siscore": cond_regex},
-                    ]},
-                ]
-            }
-            pipeline = [
-                {"$match": match_traza},
-                {"$sort": {"fecha_creacion": -1}},
-                {"$group": {
-                    "_id": "$consecutivo_vehiculo",
-                    "fecha_creacion": {"$first": "$fecha_creacion"},
-                    "cajas": {"$first": _num("total_cajas_vehiculo")},
-                    "planillas": {"$addToSet": {"$ifNull": ["$planilla_siscore", ""]}},
-                    "destino": {"$first": "$destino"},
-                }},
-                {"$sort": {"fecha_creacion": -1}},
-                {"$limit": MAX_VEHICULOS},
-            ]
-        else:
-            pipeline = [
-                {"$match": _filtro_media_milla(anio or [], mes or [])},
-                {"$match": cliente["match_media_milla"]()},
-                # Orden por fecha desc ANTES del $group: hace determinista el
-                # $first de fecha/cajas (doc más reciente del vehículo).
-                {"$sort": {"fecha_creacion": -1}},
-                {"$group": {
-                    "_id": "$consecutivo_vehiculo",
-                    "fecha_creacion": {"$first": "$fecha_creacion"},
-                    "cajas": {"$first": _num("total_cajas_vehiculo")},
-                    # ⚠️ UN vehículo puede tener VARIOS docs con planilla_siscore
-                    # distintas (178/322 vehículos de enero 2026): con $first se
-                    # perdían ~54 guías del mes. Se acumulan TODAS y se explotan
-                    # abajo (dedup global por guía).
-                    "planillas": {"$addToSet": {"$ifNull": ["$planilla_siscore", ""]}},
-                    # destino crudo; se normaliza (trim/upper) en Python — esta
-                    # versión de Atlas no acepta $ifNull dentro de $trim.
-                    "destino": {"$first": "$destino"},
-                }},
-                {"$sort": {"fecha_creacion": -1}},
-                {"$limit": MAX_VEHICULOS},
-            ]
-        vehiculos = list(col_completados.aggregate(pipeline, allowDiskUse=True))
+        minimas = guias_minimas_cliente(nombres, anio or [], mes or [])
+        for f in minimas:
+            f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
+        _calcular_ot_filas(minimas)
+        _adjuntar_novedades(minimas)
+        t_min = _time.perf_counter() - t0
 
-        # Explotar planilla_siscore (multi-guía por coma y multi-planilla por
-        # vehículo) → una fila por guía, con dedup global: si una guía
-        # apareciera en dos vehículos, gana la primera aparición (los vehículos
-        # ya vienen ordenados fecha desc).
-        filas = []
-        vistas = set()
-        for v in vehiculos:
-            for planilla in v.get("planillas") or [v.get("planilla") or ""]:
-                for guia in _split_planillas(planilla):
-                    if guia in vistas:
-                        continue
-                    vistas.add(guia)
-                    filas.append({
-                        "guia": guia,
-                        "consecutivo_vehiculo": v["_id"],
-                        "fecha_creacion": _fecha_iso(v.get("fecha_creacion")),
-                        "cajas_vehiculo": v.get("cajas") or 0,
-                        "destino": str(v.get("destino") or "").strip().upper(),
-                    })
-
-        # Orden estable compuesto: fecha desc, guía asc.
-        filas.sort(key=lambda f: f["guia"])
-        filas.sort(key=lambda f: f["fecha_creacion"] or "", reverse=True)
-
-        truncada = len(filas) > MAX_FILAS
-        filas = filas[:MAX_FILAS]
-
-        # JOIN con Postgres (degradación elegante: {} → filas sin estado).
-        info = consultar_guias([f["guia"] for f in filas]) if filas else {}
-
-        # Citas plan B (citas_kabi): para guías cuya fecha_cita del TMS no es
-        # servible, se busca la digitada acá (mandan sobre el cálculo por
-        # promesa del destino).
-        citas_kb = {}
-        if filas:
-            for c in col_citas.find(
-                {"guia": {"$in": [f["guia"] for f in filas]}},
-                {"guia": 1, "fecha_cita": 1},
-            ):
-                if c.get("fecha_cita"):
-                    citas_kb[c["guia"]] = c["fecha_cita"]
-        advertencia = None
-        if filas and not info:
-            advertencia = "Estado de guías no disponible en este momento (TMS)"
-
-        entregadas = en_proceso = sin_info = anuladas = 0
-        ot_cumplen = ot_no_cumplen = ot_no_evaluables = 0
+        # Resumen (los ot_* salen de la MISMA pasada — consistencia garantizada).
+        entregadas = sum(1 for f in minimas if f.get("estado") == ESTADO_ENTREGADO)
+        en_proceso = sum(1 for f in minimas if f.get("estado") and f["estado"] != ESTADO_ENTREGADO)
+        sin_info = sum(1 for f in minimas if not f.get("estado"))
         por_estado = {}
-        promesas = _mapa_promesa_destinos()  # {DESTINO: dias} desde tarifas FUNZA
-        # Corte para clasificar "sin info": una guía sin registro en el TMS con
-        # más de DIAS_ANULADA días de creada es ANULADA (nunca llegó a guía
-        # real); más reciente que eso probablemente aún no ha sido cargada por
-        # el bot diario.
-        corte_anulada = (datetime.utcnow() - timedelta(days=DIAS_ANULADA)).date()
-        for f in filas:
-            dato = info.get(f["guia"])
-            estado = (dato or {}).get("estado")
-            if estado:
-                f["estado"] = estado
-                f["fecha_entrega"] = _fecha_iso(dato.get("fecha_entrega"))
-                f["fecha_digitalizacion"] = _fecha_iso(dato.get("fecha_digitalizacion"))
-                # fecha_cita viaja cruda (TEXT en PG: aún puede traer basura).
-                f["fecha_cita"] = dato.get("fecha_cita")
-                f["destinatario"] = dato.get("destinatario")
-                f["fecha_emision"] = _fecha_iso(dato.get("fecha_emision"))
-                por_estado[estado] = por_estado.get(estado, 0) + 1
-                if estado.upper() == ESTADO_ENTREGADO:
-                    entregadas += 1
-                else:
-                    en_proceso += 1
-            else:
-                f["estado"] = None
-                f["fecha_entrega"] = None
-                f["fecha_digitalizacion"] = None
-                f["fecha_cita"] = None
-                f["destinatario"] = None
-                f["fecha_emision"] = None
-                # Regla de negocio: sin registro TMS y antigua → anulada.
-                f_creacion = _fecha_servible(f.get("fecha_creacion"))
-                if f_creacion and f_creacion < corte_anulada:
-                    f["estado"] = "ANULADA"
-                    anuladas += 1
-                else:
-                    sin_info += 1
-
-            # ── On Time ──
-            # Solo guías ENTREGADO con fecha de entrega son evaluables.
-            f_ot = None
-            f_fecha_promesa = None
-            origen_ot = None
-            f_dias_habiles = None
-            if estado and estado.upper() == ESTADO_ENTREGADO and f["fecha_entrega"]:
-                f_inicial = (_fecha_servible(f.get("fecha_emision"))
-                             or _fecha_servible(f.get("fecha_creacion")))
-                entrega = _fecha_servible(f["fecha_entrega"])
-                cita = _fecha_servible(f.get("fecha_cita"))
-                if f_inicial and entrega:
-                    # Fecha promesa: la CITA manda si es servible; si no,
-                    # inicial + promesa del destino (días hábiles). La cita
-                    # puede venir del TMS (PG) o del plan B (citas_kabi).
-                    if not cita:
-                        cita_kb = citas_kb.get(f["guia"])
-                        if cita_kb:
-                            # viene como string 'YYYY-MM-DD' desde citas_kabi
-                            cita = cita_kb if isinstance(cita_kb, date) else _fecha_servible(str(cita_kb)[:10])
-                    if cita:
-                        f_fecha_promesa = cita.isoformat()
-                        origen_ot = "CITA"
-                    else:
-                        dias_promesa = promesas.get((f.get("destino") or "").strip().upper())
-                        if dias_promesa:
-                            f_fecha_promesa = _sumar_dias_habiles(
-                                f_inicial, dias_promesa
-                            ).isoformat()
-                            origen_ot = "PROMESA"
-                    if f_fecha_promesa:
-                        f_dias_habiles = _dias_habiles_entre(f_inicial, entrega)
-                        f_ot = 1 if entrega <= _fecha_servible(f_fecha_promesa) else 0
-
-            f["fecha_promesa"] = f_fecha_promesa
-            f["origen_promesa"] = origen_ot  # 'CITA' | 'PROMESA' | None
-            f["dias_habiles"] = f_dias_habiles
-            f["ot"] = f_ot
-            if f_ot == 1:
-                ot_cumplen += 1
-            elif f_ot == 0:
-                ot_no_cumplen += 1
-            else:
-                ot_no_evaluables += 1
-
+        for f in minimas:
+            if f.get("estado"):
+                por_estado[f["estado"]] = por_estado.get(f["estado"], 0) + 1
+        # OT: las guías con novedad justificada quedan EXCLUIDAS de los
+        # evaluables (fue excusada) — mismo criterio del segmento «justificadas»
+        # de la serie, así tiles y gráfico siempre cuadran.
+        ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not f.get("novedad"))
+        ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0 and not f.get("novedad"))
         ot_evaluables = ot_cumplen + ot_no_cumplen
-        resumen = {
-            "total_vehiculos": len({f["consecutivo_vehiculo"] for f in filas}),
-            "total_guias": len(filas),
-            "entregadas": entregadas,
-            "en_proceso": en_proceso,
-            "sin_info": sin_info,
-            "anuladas": anuladas,
-            "por_estado": dict(sorted(por_estado.items(), key=lambda kv: -kv[1])),
-            "ot_cumplen": ot_cumplen,
-            "ot_no_cumplen": ot_no_cumplen,
-            "ot_no_evaluables": ot_no_evaluables,
-            "ot_pct": round(ot_cumplen / ot_evaluables * 100, 1) if ot_evaluables else None,
-            "truncada": truncada,
-        }
+        ot_justificadas = sum(1 for f in minimas if f.get("novedad"))
+        planillas = {f.get("planilla") for f in minimas if f.get("planilla")}
 
+        pagina, total = pagina_guias_cliente(
+            nombres, anio or [], mes or [], LIMITE_PAGINA, 0
+        )
+        for f in pagina:
+            f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
+        _calcular_ot_filas(pagina)
+        _adjuntar_novedades(pagina)
+
+        payload = {
+            "cliente": cliente["nombre"],
+            "grupos": [g["etiqueta"] for g in cliente.get("pg_grupos") or []],
+            "resumen": {
+                "total_guias": len(minimas),
+                "total_planillas": len(planillas),
+                "entregadas": entregadas,
+                "en_proceso": en_proceso,
+                "sin_info": sin_info,
+                "por_estado": dict(sorted(por_estado.items(), key=lambda kv: -kv[1])),
+                "ot_cumplen": ot_cumplen,
+                "ot_no_cumplen": ot_no_cumplen,
+                "ot_justificadas": ot_justificadas,
+                "ot_no_evaluables": len(minimas) - ot_evaluables - ot_justificadas,
+                "ot_pct": round(ot_cumplen / ot_evaluables * 100, 1) if ot_evaluables else None,
+            },
+            "serie_mensual": _serie_ot(minimas, 7),
+            "serie_diaria": _serie_ot(minimas, 10),
+            "filas": pagina,
+            "paginacion": {
+                "pagina": 1,
+                "limite": LIMITE_PAGINA,
+                "total": total,
+                "hay_mas": total > LIMITE_PAGINA,
+            },
+        }
+        _CACHE_GUIAS[clave] = (ahora, payload)
+        logger.info(
+            f"[indicadores-cliente] guías {cliente_id} n={len(minimas)} "
+            f"agregación={t_min*1000:.0f}ms total={(_time.perf_counter()-t0)*1000:.0f}ms"
+        )
+        return {"success": True, "data": payload}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Sin fuente Mongo a la que degradar (la tabla PG ES la fuente): 503.
+        logger.exception(f"[indicadores-cliente] Error en guías de {cliente_id}")
+        raise HTTPException(status_code=503, detail=f"Informe de guías no disponible: {e}")
+
+
+@router.get("/{cliente_id}/guias/filas")
+def get_guias_filas_cliente(
+    cliente_id: str,
+    anio: Optional[List[int]] = Query(None),
+    mes: Optional[List[int]] = Query(None),
+    q: Optional[str] = Query(None, description="Trazabilidad: guía, planilla o destinatario (parcial, case-insensitive). Ignora año/mes"),
+    pagina: int = Query(1, ge=1),
+    limite: int = Query(LIMITE_PAGINA, ge=1, le=LIMITE_EXPORT),
+    grupo: Optional[str] = Query(None, description="(2026-10-29) Sub-grupo del cliente; mismo contrato que /guias"),
+    usuario: Optional[str] = Query(None, description="(2026-10-29) Opcional: valida asignación si el consultante es perfil CLIENTE"),
+):
+    """Páginas 2..N de la tabla del informe (la 1 viaja en /guias). Con ``q``:
+    ILIKE parcial sobre guía/planilla/destinatario en TODO el histórico del
+    cliente. Con ``limite=30000`` lo usa el Export Excel para traer el rango
+    completo de una vez."""
+    cliente = CLIENTES.get(cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+    if usuario:
+        _verificar_acceso_cliente(usuario, cliente_id, cliente)
+    nombres = _nombres_por_grupo(cliente, grupo)
+
+    offset = (pagina - 1) * limite
+    t0 = _time.perf_counter()
+    try:
+        if q and q.strip():
+            filas, total = buscar_guias_cliente(nombres, q, limite, offset)
+        else:
+            filas, total = pagina_guias_cliente(nombres, anio or [], mes or [], limite, offset)
+        for f in filas:
+            f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
+        _calcular_ot_filas(filas)
+        _adjuntar_novedades(filas)
+        logger.info(
+            f"[indicadores-cliente] guías/filas {cliente_id} pagina={pagina} "
+            f"n={len(filas)} total={total} {(_time.perf_counter()-t0)*1000:.0f}ms"
+        )
         return {
             "success": True,
             "data": {
                 "cliente": cliente["nombre"],
                 "filas": filas,
-                "resumen": resumen,
-                "advertencia": advertencia,
+                "paginacion": {
+                    "pagina": pagina,
+                    "limite": limite,
+                    "total": total,
+                    "hay_mas": offset + len(filas) < total,
+                },
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.exception(f"[indicadores-cliente] Error en guías de {cliente_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[indicadores-cliente] Error en guías/filas de {cliente_id}")
+        raise HTTPException(status_code=503, detail=f"Informe de guías no disponible: {e}")
 
 
 # ── Uso de vehículos por tipo solicitado ─────────────────────────────────────
@@ -742,6 +1005,9 @@ async def cargar_citas(archivo: UploadFile = File(...), perfil: str = Query(""))
                 # resto del lote se aplicó.
                 logger.warning(f"[indicadores-cliente] Lote de citas {i//LOTE + 1} con errores: {e}")
                 cargadas += max(len(lote) - getattr(getattr(e, 'details', {}), 'get', lambda *_: 0)('nWriteErrors', 0), 0)
+
+        # Las citas mueven el OT del informe: fuera la cache de /guias.
+        _CACHE_GUIAS.clear()
 
         return {
             "success": True,

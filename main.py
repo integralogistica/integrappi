@@ -45,6 +45,7 @@ from rutas.disponibilidad import ruta_disponibilidad
 from rutas.conductores import ruta_conductores
 from rutas.otros_costos import router as ruta_otros_costos
 from rutas.cuentas_placa import router as ruta_cuentas_placa
+from rutas.novedades_ot import router as ruta_novedades_ot
 from rutas.sicetac import reanudar_jobs_excel, router as ruta_sicetac
 from rutas.seguridad import router as ruta_seguridad
 from rutas.seguridad_estudios import admin_router as ruta_seguridad_admin, router as ruta_seguridad_estudios
@@ -219,6 +220,7 @@ app.include_router(ruta_disponibilidad)
 app.include_router(ruta_conductores)
 app.include_router(ruta_otros_costos)
 app.include_router(ruta_cuentas_placa)
+app.include_router(ruta_novedades_ot)
 app.include_router(ruta_sicetac)
 app.include_router(ruta_seguridad)
 app.include_router(ruta_seguridad_estudios)

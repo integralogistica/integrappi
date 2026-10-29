@@ -5234,6 +5234,54 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
             cell.border = thin_border
             ws2.column_dimensions[get_column_letter(col_idx)].width = anchos_detalle.get(columna, 16)
 
+        def _derivar_carros(doc):
+            """Carros (planillas originales) de un doc del histórico, con el
+            total_solicitado del vehículo repartido por piezas entre ellos
+            (misma política que _expandir_doc_a_filas): fusión → uno por
+            original en fusion_info.datos_originales; no fusionada → el propio
+            doc. Lleva también registros_detalle y codigo_pedido de cada carro
+            para la hoja "Detalle por Guía"."""
+            cons_final = doc.get("consecutivo", "")
+            fusion_info = doc.get("fusion_info") or {}
+            datos_originales = fusion_info.get("datos_originales") or []
+            if fusion_info.get("es_fusionada") is True and datos_originales:
+                # Fusión: repartir el total entre los carros por piezas.
+                piezas_carros = []
+                for d in datos_originales:
+                    try:
+                        piezas_carros.append(int(round(float(d.get("piezas", 0) or 0))))
+                    except (TypeError, ValueError):
+                        piezas_carros.append(0)
+                reparto_carros = _repartir_flete(doc.get("total_solicitado"), piezas_carros)
+                return [
+                    {
+                        "cons_orig": _consecutivo_original(d, idx, cons_final),
+                        "fecha": d.get("fecha_creacion") or doc.get("fecha_creacion"),
+                        "planilla": d.get("planilla") or doc.get("planilla", ""),
+                        "pedido_vulcano": str(d.get("pedido_vulcano") or "").strip(),
+                        "cliente": d.get("cliente_origen", ""),
+                        "piezas": d.get("piezas", 0),
+                        "peso": d.get("peso_real", 0),
+                        "flete": reparto_carros[idx] if idx < len(reparto_carros) else 0,
+                        "registros": d.get("registros_detalle") or [],
+                        "codigo_pedido": d.get("codigo_pedido", ""),
+                    }
+                    for idx, d in enumerate(datos_originales)
+                ]
+            # Planilla normal: una sola entrada con su propio pedido Vulcano.
+            return [{
+                "cons_orig": cons_final,
+                "fecha": doc.get("fecha_creacion"),
+                "planilla": doc.get("planilla", ""),
+                "pedido_vulcano": str(doc.get("pedido_vulcano") or "").strip(),
+                "cliente": doc.get("cliente_origen", ""),
+                "piezas": doc.get("piezas", 0),
+                "peso": doc.get("peso_real", 0),
+                "flete": doc.get("total_solicitado", 0),
+                "registros": doc.get("registros_detalle") or [],
+                "codigo_pedido": doc.get("codigo_pedido", ""),
+            }]
+
         fila_detalle = 2
         tot_piezas = 0
         tot_peso = 0.0
@@ -5243,45 +5291,7 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                 row_fill_det = even_fill if i % 2 == 0 else None
                 cons_final = doc.get("consecutivo", "")
 
-                fusion_info = doc.get("fusion_info") or {}
-                datos_originales = fusion_info.get("datos_originales") or []
-                if fusion_info.get("es_fusionada") is True and datos_originales:
-                    # Fusión: repartir el total entre los carros por piezas.
-                    piezas_carros = []
-                    for d in datos_originales:
-                        try:
-                            piezas_carros.append(int(round(float(d.get("piezas", 0) or 0))))
-                        except (TypeError, ValueError):
-                            piezas_carros.append(0)
-                    reparto_carros = _repartir_flete(doc.get("total_solicitado"), piezas_carros)
-                    carros = [
-                        {
-                            "cons_orig": _consecutivo_original(d, idx, cons_final),
-                            "fecha": d.get("fecha_creacion") or doc.get("fecha_creacion"),
-                            "planilla": d.get("planilla") or doc.get("planilla", ""),
-                            "pedido_vulcano": str(d.get("pedido_vulcano") or "").strip(),
-                            "cliente": d.get("cliente_origen", ""),
-                            "piezas": d.get("piezas", 0),
-                            "peso": d.get("peso_real", 0),
-                            "flete": reparto_carros[idx] if idx < len(reparto_carros) else 0,
-                        }
-                        for idx, d in enumerate(datos_originales)
-                    ]
-                else:
-                    # Planilla normal: una sola entrada con su propio pedido Vulcano.
-                    pv_raiz = str(doc.get("pedido_vulcano") or "").strip()
-                    carros = [{
-                        "cons_orig": cons_final,
-                        "fecha": doc.get("fecha_creacion"),
-                        "planilla": doc.get("planilla", ""),
-                        "pedido_vulcano": pv_raiz,
-                        "cliente": doc.get("cliente_origen", ""),
-                        "piezas": doc.get("piezas", 0),
-                        "peso": doc.get("peso_real", 0),
-                        "flete": doc.get("total_solicitado", 0),
-                    }]
-
-                for carro in carros:
+                for carro in _derivar_carros(doc):
                     # Un carro normalmente tiene UN pedido Vulcano; si trae varios
                     # (concatenados en docs viejos) se abre una fila por pedido con
                     # el flete repartido equitativamente (piezas/peso sólo en la
@@ -5331,9 +5341,9 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
                 continue
 
         # Fila de totales
+        tot_font = Font(bold=True, color="FFFFFF", size=10)
+        tot_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
         if fila_detalle > 2:
-            tot_font = Font(bold=True, color="FFFFFF", size=10)
-            tot_fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
             ws2.cell(row=fila_detalle, column=1, value="TOTALES")
             ws2.cell(row=fila_detalle, column=7, value=tot_piezas)
             ws2.cell(row=fila_detalle, column=8, value=round(tot_peso, 1))
@@ -5353,6 +5363,146 @@ async def exportar_historico_excel(request: ExportarHistoricoExcelRequest):
         ws2.auto_filter.ref = f"A1:{get_column_letter(len(columnas_detalle))}{max(fila_detalle - 1, 2)}"
         ws2.freeze_panes = "A2"
         logger.info(f"Hoja 'Detalle por Pedido' generada: {fila_detalle - 2} filas")
+
+        # ── Hoja 3: "Detalle por Guía" ───────────────────────────────────────
+        # UNA FILA POR GUÍA de Siscore (un nivel más profundo que la hoja 2):
+        # el flete que la hoja 2 asigna a cada carro se reparte ahora entre
+        # las guías de ese carro proporcionalmente a sus piezas (mismo
+        # _repartir_flete) → la suma de las filas de un carro es EXACTAMENTE
+        # el costo asignado al carro, y la del total el total_solicitado.
+        # Guías desde registros_detalle (una entrada por guía del Excel del
+        # portal, desde 2026-06-19); docs viejos sin detalle → guías del
+        # campo codigo_pedido con reparto equitativo; carro sin guías → una
+        # fila "-" que conserva su costo para que los totales cuadren.
+        ws3 = wb.create_sheet("Detalle por Guía")
+        columnas_guia = [
+            "Consecutivo Final", "Consecutivo Original", "Planilla", "Pedido Vulcano",
+            "Guía", "Cliente", "Destinatario", "Municipio Destino",
+            "Piezas", "Peso (kg)", "Costo Asignado",
+        ]
+        anchos_guia = {
+            "Consecutivo Final": 22, "Consecutivo Original": 22, "Planilla": 14,
+            "Pedido Vulcano": 18, "Guía": 16, "Cliente": 30, "Destinatario": 28,
+            "Municipio Destino": 20, "Piezas": 9, "Peso (kg)": 11, "Costo Asignado": 15,
+        }
+        for col_idx, columna in enumerate(columnas_guia, 1):
+            cell = ws3.cell(row=1, column=col_idx, value=columna)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+            ws3.column_dimensions[get_column_letter(col_idx)].width = anchos_guia.get(columna, 16)
+
+        def _guias_de_carro(carro):
+            """Guías de un carro: registros_detalle si existe (datos propios por
+            guía); si no, las del campo codigo_pedido (guías concatenadas); si
+            tampoco, una fila '-' que conserva el costo del carro."""
+            registros = carro.get("registros") or []
+            guias = []
+            for r in registros:
+                if not isinstance(r, dict):
+                    continue
+                guia = str(r.get("Guia") or r.get("Codigo Pedido") or "").strip()
+                if not guia:
+                    continue
+                guias.append({
+                    "guia": guia,
+                    "cliente": r.get("Cliente Origen") or carro["cliente"] or "",
+                    "nombre": r.get("Nombre", ""),
+                    "destino": r.get("Municipio Destino", ""),
+                    "piezas": r.get("Piezas", 0),
+                    "peso": r.get("Peso Real", 0),
+                })
+            if not guias:
+                for g in str(carro.get("codigo_pedido") or "").replace(";", ",").split(","):
+                    g = g.strip()
+                    if g:
+                        guias.append({
+                            "guia": g, "cliente": carro["cliente"] or "",
+                            "nombre": "", "destino": "", "piezas": 0, "peso": 0,
+                        })
+            if not guias:
+                guias = [{
+                    "guia": "-", "cliente": carro["cliente"] or "",
+                    "nombre": "", "destino": "", "piezas": 0, "peso": 0,
+                }]
+            return guias
+
+        fila_guia = 2
+        tot_piezas_g = 0
+        tot_peso_g = 0.0
+        tot_costo_g = 0
+        for i, doc in enumerate(planillas_db):
+            try:
+                row_fill_g = even_fill if i % 2 == 0 else None
+                cons_final = doc.get("consecutivo", "")
+
+                for carro in _derivar_carros(doc):
+                    guias = _guias_de_carro(carro)
+                    reparto_guias = _repartir_flete(carro["flete"], [g["piezas"] for g in guias])
+
+                    for j, g in enumerate(guias):
+                        piezas_fila_g = int(round(num(g["piezas"])))
+                        peso_fila_g = num(g["peso"])
+                        costo_g = reparto_guias[j] if j < len(reparto_guias) else 0
+                        valores_g = [
+                            cons_final,
+                            carro["cons_orig"],
+                            carro["planilla"],
+                            carro["pedido_vulcano"] or "-",
+                            g["guia"],
+                            g["cliente"],
+                            g["nombre"],
+                            g["destino"],
+                            piezas_fila_g,
+                            peso_fila_g,
+                            costo_g,
+                        ]
+                        for col_idx, valor in enumerate(valores_g, 1):
+                            cell = ws3.cell(row=fila_guia, column=col_idx, value=valor)
+                            cell.border = thin_border
+                            if row_fill_g:
+                                cell.fill = row_fill_g
+                            col_name = columnas_guia[col_idx - 1]
+                            if col_name == "Costo Asignado":
+                                cell.number_format = '$#,##0'
+                                cell.alignment = number_alignment
+                                cell.font = money_font
+                            elif col_name in ("Piezas", "Peso (kg)"):
+                                cell.alignment = number_alignment
+                                if col_name == "Peso (kg)":
+                                    cell.number_format = '#,##0.0'
+                            else:
+                                cell.alignment = data_alignment
+                        tot_piezas_g += piezas_fila_g
+                        tot_peso_g += peso_fila_g
+                        tot_costo_g += int(round(num(costo_g)))
+                        fila_guia += 1
+            except Exception as e:
+                logger.error(f"Error procesando detalle por guía de {doc.get('planilla', '?')}: {str(e)}")
+                continue
+
+        # Fila de totales
+        if fila_guia > 2:
+            ws3.cell(row=fila_guia, column=1, value="TOTALES")
+            ws3.cell(row=fila_guia, column=9, value=tot_piezas_g)
+            ws3.cell(row=fila_guia, column=10, value=round(tot_peso_g, 1))
+            ws3.cell(row=fila_guia, column=11, value=tot_costo_g)
+            for col_idx in range(1, len(columnas_guia) + 1):
+                cell = ws3.cell(row=fila_guia, column=col_idx)
+                cell.font = tot_font
+                cell.fill = tot_fill
+                cell.border = thin_border
+                if col_idx in (9, 10, 11):
+                    cell.alignment = number_alignment
+                    if col_idx == 11:
+                        cell.number_format = '$#,##0'
+                    elif col_idx == 10:
+                        cell.number_format = '#,##0.0'
+
+        ws3.auto_filter.ref = f"A1:{get_column_letter(len(columnas_guia))}{max(fila_guia - 1, 2)}"
+        ws3.freeze_panes = "A2"
+        logger.info(f"Hoja 'Detalle por Guía' generada: {fila_guia - 2} filas")
 
         output = io.BytesIO()
         wb.save(output)
