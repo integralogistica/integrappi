@@ -19,6 +19,7 @@ Perfiles: ADMIN, COORDINADOR, CONTROL y OPERATIVO (cargar, ver, borrar).
 La auditoría la puede consultar ADMIN y CONTROL.
 """
 
+import asyncio
 import io
 import logging
 import re
@@ -29,7 +30,11 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from openpyxl import Workbook, load_workbook
+from pydantic import BaseModel
 from openpyxl.styles import Font, PatternFill
+
+from bson import ObjectId
+from pymongo import UpdateOne
 
 from bd.bd_cliente import bd_cliente
 from rutas.otros_costos import _ahora_utc, _requiere, _resolver_usuario
@@ -212,7 +217,6 @@ async def eliminar(usuario: str = Query(...), id: str = Query(...), request: Req
     se borró — el detalle completo viaja en detalle.documento)."""
     info = _resolver_usuario(usuario)
     _requiere(info, PERFILES_NOVEDADES, "borrar novedades justificadas OT")
-    from bson import ObjectId
     try:
         doc = col_novedades.find_one({"_id": ObjectId(id)})
     except Exception:
@@ -233,6 +237,69 @@ async def auditoria(usuario: str = Query(...), limite: int = Query(200, ge=1, le
     _requiere(info, PERFILES_AUDITORIA, "ver la auditoría de novedades OT")
     docs = col_auditoria.find({}, {"detalle.documento.historial": 0}).sort("fecha", -1).limit(limite)
     return {"registros": [_serializar(d) for d in docs]}
+
+
+# ── Registro manual (una guía, sin Excel) ─────────────────────────────────────
+
+
+class NovedadIN(BaseModel):
+    guia: str
+    causal: str
+    justificacion: str
+
+
+@router.post("/guardar")
+async def guardar(datos: NovedadIN, usuario: str = Query(...)):
+    """Crea o actualiza UNA justificación a mano (2026-10-30). Misma semántica
+    que importar-excel: upsert por guía (si la guía ya tenía justificación se
+    actualiza y el valor previo queda en historial[]), causal contra el
+    catálogo (tolerante), auditoría y limpieza del cache de /guias."""
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_NOVEDADES, "registrar novedades justificadas OT")
+    guia = _validar_guia(datos.guia)
+    validos = _causales_validos()
+    if not validos:
+        raise HTTPException(status_code=503, detail="El catálogo causales_ot está vacío.")
+    causal = _resolver_causal(datos.causal, validos)
+    justificacion = datos.justificacion.strip()
+    if not justificacion:
+        raise HTTPException(status_code=422, detail="La justificación es obligatoria.")
+
+    ahora = _ahora_utc()
+    auditoria = {"usuario": info["usuario"], "nombre": info["nombre"], "perfil": info["perfil"], "fecha": ahora}
+    previo = col_novedades.find_one({"guia": guia}, {"causal": 1, "justificacion": 1})
+    cambio = {
+        "guia": guia,
+        "causal": causal,
+        "justificacion": justificacion,
+        "actualizado_por": auditoria,
+        "updated_at": ahora,
+    }
+    if previo:
+        cambio["historial"] = {
+            "$each": [{
+                "causal": previo.get("causal"),
+                "justificacion": previo.get("justificacion"),
+                "por": auditoria,
+                "fecha": ahora,
+            }],
+            "$slice": -20,
+        }
+    col_novedades.update_one(
+        {"guia": guia},
+        {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}},
+        upsert=True,
+    )
+    _auditar(
+        "actualizacion" if previo else "creacion",
+        info, guia,
+        {"causal": causal, "justificacion": justificacion,
+         **({"previo": {"causal": previo.get("causal"), "justificacion": previo.get("justificacion")}} if previo else {})},
+        ahora,
+    )
+    _limpiar_cache_guias()
+    accion = "actualizada" if previo else "creada"
+    return {"mensaje": f"Justificación de la guía {guia} {accion}.", "accion": accion}
 
 
 # ── Carga Excel ───────────────────────────────────────────────────────────────
@@ -319,39 +386,73 @@ async def importar_excel(usuario: str = Query(...), archivo: UploadFile = File(.
     ahora = _ahora_utc()
     auditoria = {"usuario": info["usuario"], "nombre": info["nombre"], "perfil": info["perfil"], "fecha": ahora}
 
-    for v in validas:
-        guia, causal, justificacion = v["guia"], v["causal"], v["justificacion"]
-        previo = col_novedades.find_one({"guia": guia}, {"causal": 1, "justificacion": 1})
-        cambio = {
-            "guia": guia,
-            "causal": causal,
-            "justificacion": justificacion,
-            "actualizado_por": auditoria,
-            "updated_at": ahora,
+    # Escritura EN LOTE (2026-10-30): antes find_one + update_one + insert_one de
+    # auditoría POR FILA (3 viajes a Mongo × fila — 5.000 filas ≈ 15.000 round
+    # trips secuenciales ≈ minutos, y pymongo bloqueante sobre el event loop
+    # congelaba TODA la API durante la carga). Ahora: previos en UNA consulta
+    # ($in), upserts con bulk_write y auditoría con insert_many (lotes de 1.000)
+    # — mismas ~6-10 operaciones totales, misma semántica (historial, creado_por,
+    # upsert por guía). Corre en hilo (to_thread) para no frenar el event loop.
+    def _aplicar() -> list[dict]:
+        # Previos de todas las guías del archivo en UNA consulta.
+        previos = {
+            d["guia"]: d
+            for d in col_novedades.find(
+                {"guia": {"$in": [v["guia"] for v in validas]}},
+                {"guia": 1, "causal": 1, "justificacion": 1},
+            )
         }
-        if previo:
-            cambio["historial"] = {
-                "$each": [{
-                    "causal": previo.get("causal"),
-                    "justificacion": previo.get("justificacion"),
-                    "por": auditoria,
-                    "fecha": ahora,
-                }],
-                "$slice": -20,  # cap: los últimos 20 cambios por guía
+        ops, docs_auditoria, res = [], [], []
+        for v in validas:
+            guia, causal, justificacion = v["guia"], v["causal"], v["justificacion"]
+            previo = previos.get(guia)
+            cambio = {
+                "guia": guia,
+                "causal": causal,
+                "justificacion": justificacion,
+                "actualizado_por": auditoria,
+                "updated_at": ahora,
             }
-        col_novedades.update_one(
-            {"guia": guia},
-            {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}},
-            upsert=True,
-        )
-        _auditar(
-            "actualizacion" if previo else "creacion",
-            info, guia,
-            {"causal": causal, "justificacion": justificacion,
-             **({"previo": {"causal": previo.get("causal"), "justificacion": previo.get("justificacion")}} if previo else {})},
-            ahora,
-        )
-        resultados.append({"fila": v["fila"], "guia": guia, "accion": "actualizada" if previo else "creada"})
+            if previo:
+                cambio["historial"] = {
+                    "$each": [{
+                        "causal": previo.get("causal"),
+                        "justificacion": previo.get("justificacion"),
+                        "por": auditoria,
+                        "fecha": ahora,
+                    }],
+                    "$slice": -20,  # cap: los últimos 20 cambios por guía
+                }
+            ops.append(UpdateOne(
+                {"guia": guia},
+                {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}},
+                upsert=True,
+            ))
+            docs_auditoria.append({
+                "accion": "actualizacion" if previo else "creacion",
+                "guia": guia,
+                "usuario": info["usuario"],
+                "nombre": info["nombre"],
+                "perfil": info["perfil"],
+                "fecha": ahora,
+                "detalle": {
+                    "causal": causal,
+                    "justificacion": justificacion,
+                    **({"previo": {"causal": previo.get("causal"), "justificacion": previo.get("justificacion")}} if previo else {}),
+                },
+            })
+            res.append({"fila": v["fila"], "guia": guia, "accion": "actualizada" if previo else "creada"})
+        for i in range(0, len(ops), 1000):
+            col_novedades.bulk_write(ops[i:i + 1000], ordered=True)
+        for i in range(0, len(docs_auditoria), 1000):
+            try:
+                col_auditoria.insert_many(docs_auditoria[i:i + 1000], ordered=False)
+            except Exception as e:
+                logger.warning(f"[NOVEDADES_OT] Auditoría por lote falló ({len(docs_auditoria[i:i + 1000])} docs): {e}")
+        return res
+
+    if validas:
+        resultados = await asyncio.to_thread(_aplicar)
 
     if resultados:
         _limpiar_cache_guias()

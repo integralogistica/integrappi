@@ -97,6 +97,40 @@ def _conexion():
                 pass
 
 
+# (2026-10-30) Índice trgm de destinatario: el autocomplete «Cliente final»
+# hace DISTINCT TRIM + ILIKE %q% — sin índice escanea ~100k filas del cliente
+# (0,6-1,2 s). GIN trgm (pg_trgm ya está instalada) lo vuelve index-driven.
+_INDICE_DEST_TRGM_LISTO = False
+_INDICE_DEST_TRGM_LOCK = threading.Lock()
+
+# Caché en memoria de la lista COMPLETA de destinatarios por cliente (TTL 10
+# min) — el autocomplete filtra en memoria, sin tocar la BD por búsqueda.
+_DEST_TODOS_CACHE: dict = {}
+_DEST_CACHE_TTL = 1800.0
+
+
+def _asegurar_indice_destinatario_trgm() -> None:
+    global _INDICE_DEST_TRGM_LISTO
+    if _INDICE_DEST_TRGM_LISTO:
+        return
+    with _INDICE_DEST_TRGM_LOCK:
+        if _INDICE_DEST_TRGM_LISTO:
+            return
+        try:
+            with _conexion() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_guias_destinatario_trgm
+                        ON informe_guias_tms USING gin (destinatario gin_trgm_ops);
+                        """
+                    )
+                conn.commit()
+            _INDICE_DEST_TRGM_LISTO = True
+        except Exception:
+            logger.warning("[bd_postgres] No se pudo crear el índice trgm de destinatario", exc_info=True)
+
+
 # Índice del informe PG-puro (2026-10-29): igualdad por cliente + rango por
 # fecha de emisión. El idx_guias_fecha_cliente existente tiene la fecha como
 # columna leading (sirve para rangos de fecha de TODOS los clientes); este
@@ -169,6 +203,9 @@ _COLUMNAS_PAGINA = f"""
     {_CAST_NUM.format(col='piezas')} AS piezas,
     {_CAST_NUM.format(col='kilos')} AS kilos,
     estado,
+    -- novedad del TMS → novedad_tms (la clave `novedad` queda reservada para
+    -- la novedad JUSTIFICADA que adjunta _adjuntar_novedades en el router)
+    NULLIF(TRIM(novedad), '') AS novedad_tms,
     fecha_emision, fecha_entrega, fecha_digitalizacion,
     fecha_cita
 """
@@ -200,7 +237,8 @@ def guias_minimas_cliente(nombres: list, anios: list, meses: list):
     where, params = _condicion_cliente_fecha(nombres, anios, meses)
     sql = f"""
         SELECT guia, planilla, estado, fecha_emision, fecha_entrega,
-               ciudad_destino, fecha_cita
+               ciudad_destino, NULLIF(TRIM(destinatario), '') AS destinatario,
+               fecha_cita
         FROM informe_guias_tms
         WHERE {where}
         ORDER BY fecha_emision DESC, guia ASC;
@@ -215,12 +253,128 @@ def guias_minimas_cliente(nombres: list, anios: list, meses: list):
         raise  # sin fuente Mongo a la que degradar: que el endpoint responda 503
 
 
-def pagina_guias_cliente(nombres: list, anios: list, meses: list, limite: int, offset: int):
+def guia_tms_placa(guia: str):
+    """(2026-10-30) Placa, ciudad destino y fecha de emisión del TMS de UNA
+    guía en ``informe_guias_tms`` — para la consulta de guía del portal de
+    clientes. None si la guía no está en la tabla (no rompe la consulta SOAP)."""
+    sql = """
+        SELECT NULLIF(TRIM(placa), '') AS placa,
+               NULLIF(TRIM(ciudad_destino), '') AS ciudad_destino,
+               fecha_emision
+        FROM informe_guias_tms
+        WHERE guia = %s
+        LIMIT 1;
+    """
+    try:
+        with _conexion() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, [guia])
+                fila = cur.fetchone()
+                if not fila:
+                    return None
+                if hasattr(fila.get("fecha_emision"), "isoformat"):
+                    fila["fecha_emision"] = fila["fecha_emision"].isoformat()
+                return dict(fila)
+    except Exception:
+        logger.exception("[bd_postgres] Error buscando placa de la guía %s", guia)
+        return None
+
+
+def guias_placa_dia(placa: str, fecha_emision: str, excluir_guia: str):
+    """(2026-10-30) OTRAS guías del mismo vehículo (placa) emitidas el MISMO
+    día — la remesa que viajó junto con la consultada. Solo se sabe en
+    ``informe_guias_tms``. [] ante cualquier error (no rompe la consulta)."""
+    sql = """
+        SELECT guia,
+               NULLIF(TRIM(destinatario), '') AS destinatario,
+               NULLIF(TRIM(ciudad_destino), '') AS ciudad_destino,
+               estado
+        FROM informe_guias_tms
+        WHERE TRIM(placa) = %s
+          AND fecha_emision = %s
+          AND guia <> %s
+        ORDER BY guia;
+    """
+    try:
+        with _conexion() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, [placa, fecha_emision, excluir_guia])
+                return [dict(f) for f in cur.fetchall()]
+    except Exception:
+        logger.exception("[bd_postgres] Error buscando guías de la placa %s", placa)
+        return []
+
+
+_DEST_TODOS_LOCK = threading.Lock()
+
+
+def _cargar_destinatarios(nombres: tuple) -> list:
+    sql = """
+        SELECT DISTINCT TRIM(destinatario) AS destinatario
+        FROM informe_guias_tms
+        WHERE nombre_cliente = ANY(%s) AND NULLIF(TRIM(destinatario), '') IS NOT NULL
+        ORDER BY 1;
+    """
+    try:
+        with _conexion() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, [list(nombres)])
+                return [f["destinatario"] for f in cur.fetchall() if f["destinatario"]]
+    except Exception:
+        logger.exception("[bd_postgres] Error cargando destinatarios del cliente")
+        return []
+
+
+def _destinatarios_todos(nombres: tuple) -> list:
+    """Lista DISTINCT de destinatarios del cliente (v4 stale-while-revalidate):
+    fresca < 30 min se devuelve directo; VENCIDA se devuelve igual y se
+    refresca en un hilo de fondo (el usuario jamás espera la recarga); solo
+    la PRIMERA carga es síncrona (~1,3 s). El autocomplete filtra en
+    memoria (~4 ms por búsqueda; la query por búsqueda era 0,6-1,5 s)."""
+    import time as _t
+    hit = _DEST_TODOS_CACHE.get(nombres)
+    if hit and _t.monotonic() - hit[0] < _DEST_CACHE_TTL:
+        return hit[1]
+    if hit:
+        def _refrescar():
+            with _DEST_TODOS_LOCK:
+                h = _DEST_TODOS_CACHE.get(nombres)
+                if h and _t.monotonic() - h[0] < _DEST_CACHE_TTL:
+                    return  # otro hilo ya refrescó
+                todos = _cargar_destinatarios(nombres)
+                if todos:
+                    _DEST_TODOS_CACHE[nombres] = (_t.monotonic(), todos)
+        threading.Thread(target=_refrescar, daemon=True).start()
+        return hit[1]
+    todos = _cargar_destinatarios(nombres)
+    _DEST_TODOS_CACHE[nombres] = (_t.monotonic(), todos)
+    return todos
+
+
+
+def buscar_destinatarios_cliente(nombres: list, q: str, limite: int = 20):
+    """(2026-10-30) Autocomplete de destinatarios («cliente final»): contiene
+    case-insensitive sobre la lista cacheada — los que EMPIEZAN por el texto
+    primero, luego los que lo contienen. Instantáneo tras la 1ª carga."""
+    ql = q.strip().lower()
+    if not ql:
+        return []
+    todos = _destinatarios_todos(tuple(nombres))
+    empiezan = sorted(d for d in todos if d.lower().startswith(ql))
+    contienen = sorted(d for d in todos if ql in d.lower() and not d.lower().startswith(ql))
+    return (empiezan + contienen)[:limite]
+
+
+def pagina_guias_cliente(nombres: list, anios: list, meses: list, limite: int, offset: int, destinatarios: list | None = None):
     """Página de filas COMPLETAS para la tabla del informe (casts en SQL).
     Devuelve ``(filas, total_del_filtro)`` — el COUNT extra es barato (solo
-    el índice) y da el «Mostrando X de Y» del footer de la tabla."""
+    el índice) y da el «Mostrando X de Y» del footer de la tabla.
+    ``destinatarios`` (2026-10-30): filtro opcional por cliente final."""
     _asegurar_indice_cliente_fecha()
     where, params = _condicion_cliente_fecha(nombres, anios, meses)
+    if destinatarios:
+        where += " AND NULLIF(TRIM(destinatario), '') = ANY(%s)"
+        params = params + [destinatarios]
     sql = f"""
         SELECT{_COLUMNAS_PAGINA}
         FROM informe_guias_tms

@@ -43,6 +43,9 @@ from bd.bd_postgres import (
     guias_minimas_cliente,
     pagina_guias_cliente,
     buscar_guias_cliente,
+    guia_tms_placa,
+    guias_placa_dia,
+    buscar_destinatarios_cliente,
 )
 
 import time as _time
@@ -539,6 +542,44 @@ def _calcular_ot_filas(filas: list) -> None:
         f["ot"] = f_ot
 
 
+def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
+    """(2026-10-30) OT agregado por un campo de la fila (ciudad_destino,
+    destinatario) para las barras horizontales del portal de clientes.
+    Mismo criterio del % OT: justificadas cuentan como cumplidas (numerador
+    y denominador). Devuelve TODOS los grupos con evaluables (sin tope — el
+    usuario hace scroll), ordenados del MÁS cumplido al menos (desempate por
+    volumen)."""
+    grupos: dict = {}
+    for f in filas:
+        clave = (f.get(campo) or "").strip() if isinstance(f.get(campo), str) else ""
+        if not clave:
+            continue
+        g = grupos.setdefault(clave, {"c": 0, "n": 0, "j": 0, "t": 0})
+        g["t"] += 1
+        if f.get("novedad"):
+            g["j"] += 1
+        elif f.get("ot") == 1:
+            g["c"] += 1
+        elif f.get("ot") == 0:
+            g["n"] += 1
+    out = []
+    for clave, g in grupos.items():
+        evaluables = g["c"] + g["n"] + g["j"]
+        if evaluables <= 0:
+            continue
+        out.append({
+            "clave": clave,
+            "cumplieron": g["c"],
+            "no_cumplieron": g["n"],
+            "justificadas": g["j"],
+            "evaluables": evaluables,
+            "total": g["t"],
+            "pct": round((g["c"] + g["j"]) / evaluables * 100, 1),
+        })
+    out.sort(key=lambda x: (-x["pct"], -x["evaluables"], x["clave"]))
+    return out[:top] if top else out
+
+
 def _mapa_novedades_ot() -> dict:
     """(2026-10-29) Guía → justificación activa (novedades_justificadas_ot).
     La colección es pequeña (una por guía justificada): se lee completa."""
@@ -579,7 +620,8 @@ def _serie_ot(filas: list, largo: int) -> list:
     resto (sin estado servible, o ENTREGADO sin fecha de entrega → no
     evaluable) cae en sin_info. Una guía con NOVEDAD justificada
     (f['novedad'], cargo _adjuntar_novedades) GANA a todo: segmento
-    «justificadas» y excluida de los evaluables del % OT (fue excusada)."""
+    «justificadas» — viaja sola en la serie, pero el % OT que deriva el
+    frontend la CUENTA COMO CUMPLIDA (numerador y denominador)."""
     buckets: dict = {}
     for f in filas:
         clave = (f.get("fecha_emision") or "")[:largo]
@@ -632,6 +674,89 @@ _CACHE_TTL = 300
 LIMITE_PAGINA = 200
 LIMITE_EXPORT = 30000
 
+# (2026-10-30) Pestaña «Operación» del portal de clientes: consulta de guía
+# en Siscore por SOAP — MISMO servicio del bot de WhatsApp
+# (Funciones/siscore_ws_tracking.consultar_guia_ws). Devuelve el payload
+# crudo {ok, exists, data{...}, tracking_url}; el frontend lo pinta como
+# tarjeta web (el formato de texto del bot es solo para WA).
+import re as _re_guias
+_GUIA_PATTERN = _re_guias.compile(r"^[A-Za-z0-9\-]{4,30}$")
+
+
+@router.get("/{cliente_id}/consulta-guia")
+async def get_consulta_guia(
+    cliente_id: str,
+    guia: str = Query(..., description="Número de guía a consultar en Siscore"),
+    usuario: Optional[str] = Query(None, description="Opcional: valida asignación si el consultante es perfil CLIENTE"),
+):
+    cliente = CLIENTES.get(cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+    if usuario:
+        _verificar_acceso_cliente(usuario, cliente_id, cliente)
+    g = (guia or "").strip()
+    if not _GUIA_PATTERN.match(g):
+        raise HTTPException(status_code=422, detail="Número de guía inválido.")
+
+    from Funciones.siscore_ws_tracking import consultar_guia_ws
+    try:
+        payload = await consultar_guia_ws(g, timeout_seconds=30.0)
+    except Exception as e:
+        logger.exception(f"[indicadores-cliente] Error consultando guía {g} en Siscore")
+        # Al portal entran clientes externos: mensaje genérico (el detalle
+        # técnico queda en el log del servidor).
+        raise HTTPException(status_code=503, detail="No se pudo consultar la guía en este momento. Intenta de nuevo en unos minutos.")
+    if not payload.get("ok"):
+        logger.warning(f"[indicadores-cliente] Siscore rechazó la consulta de {g}: {payload.get('error')}")
+        raise HTTPException(status_code=502, detail="No se pudo consultar la guía en este momento. Intenta de nuevo en unos minutos.")
+    # (2026-10-30) Placa asociada a la guía según el TMS (informe_guias_tms);
+    # ciudad destino del TMS como refuerzo de la que trae el WS.
+    tms = guia_tms_placa(g) or {}
+    if tms.get("placa"):
+        payload["placa"] = tms["placa"]
+    if tms.get("ciudad_destino"):
+        payload["ciudad_destino_tms"] = tms["ciudad_destino"]
+    # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
+    # remesa que viajó junta) — solo conocible desde el TMS.
+    if tms.get("placa") and tms.get("fecha_emision"):
+        companeras = guias_placa_dia(tms["placa"], tms["fecha_emision"], g)
+        for cp in companeras:
+            cp["estado"], _ = _normalizar_estado(cp.get("estado"))
+        payload["misma_placa"] = companeras
+    # (2026-10-30) ¿La guía tiene novedad JUSTIFICADA registrada?
+    # (novedades_justificadas_ot — las que cargan en /NovedadesOT).
+    nov = col_novedades_ot.find_one(
+        {"guia": g},
+        {"causal": 1, "justificacion": 1, "creado_por": 1, "actualizado_por": 1, "_id": 0},
+    )
+    if nov:
+        por = nov.get("actualizado_por") or nov.get("creado_por") or {}
+        fecha_por = por.get("fecha")
+        payload["justificada"] = {
+            "causal": nov.get("causal"),
+            "justificacion": nov.get("justificacion"),
+            "nombre": por.get("nombre") or por.get("usuario"),
+            "fecha": fecha_por.isoformat()[:10] if hasattr(fecha_por, "isoformat") else fecha_por,
+        }
+    return {"success": True, "data": payload}
+
+
+@router.get("/{cliente_id}/destinatarios")
+def get_destinatarios_cliente(
+    cliente_id: str,
+    q: str = Query(..., min_length=3, description="Texto parcial del destinatario (ILIKE)"),
+    usuario: Optional[str] = Query(None, description="Opcional: valida asignación si el consultante es perfil CLIENTE"),
+):
+    """(2026-10-30) Autocomplete de «cliente final» (destinatario del TMS)
+    para el filtro del dashboard — DISTINCT sobre informe_guias_tms."""
+    cliente = CLIENTES.get(cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+    if usuario:
+        _verificar_acceso_cliente(usuario, cliente_id, cliente)
+    nombres = _nombres_por_grupo(cliente, None)
+    return {"success": True, "data": {"destinatarios": buscar_destinatarios_cliente(nombres, q)}}
+
 
 @router.get("/{cliente_id}/guias")
 def get_guias_cliente(
@@ -640,6 +765,13 @@ def get_guias_cliente(
     mes: Optional[List[int]] = Query(None),
     grupo: Optional[str] = Query(None, description="(2026-10-29) Sub-grupo del cliente (p. ej. solo FK Servicio Técnico); vacío = todos"),
     usuario: Optional[str] = Query(None, description="(2026-10-29) Opcional: valida asignación si el consultante es perfil CLIENTE"),
+    dia: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+                               description="(2026-10-30) Zoom de día del portal: acota TODO el payload "
+                                           "(resumen, series y OT por ciudad/destinatario) a las guías "
+                                           "EMITIDAS ese día (fecha_emision)"),
+    destinatario: Optional[List[str]] = Query(None,
+                               description="(2026-10-30) Filtro por cliente final (destinatario del TMS); "
+                                           "repetir el parámetro para varios"),
 ):
     """Informe de guías PostgreSQL puro (2026-10-29): TODO sale de
     ``informe_guias_tms`` (antes Mongo media milla + JOIN por guía).
@@ -651,7 +783,9 @@ def get_guias_cliente(
     Población: TODAS las guías del cliente en el TMS del período (antes solo
     las que viajaron en vehículos registrados en Mongo, con cap 20k).
     ``grupo`` acota a un sub-conjunto de sus nombres TMS (``pg_grupos``) y el
-    payload informa las etiquetas filtrables en ``grupos``.
+    payload informa las etiquetas filtrables en ``grupos``. ``dia`` (2026-10-30)
+    recorta la pasada en Python por fecha_emision — así el día del zoom del
+    portal recalcula resumen/series/OT-por-campo con los mismos criterios.
     """
     cliente = CLIENTES.get(cliente_id)
     if not cliente:
@@ -660,7 +794,8 @@ def get_guias_cliente(
         _verificar_acceso_cliente(usuario, cliente_id, cliente)
     nombres = _nombres_por_grupo(cliente, grupo)
 
-    clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "")
+    clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "", dia or "",
+             tuple(sorted(destinatario or [])))
     ahora = _time.monotonic()
     hit = _CACHE_GUIAS.get(clave)
     if hit and ahora - hit[0] < _CACHE_TTL:
@@ -669,6 +804,11 @@ def get_guias_cliente(
     t0 = _time.perf_counter()
     try:
         minimas = guias_minimas_cliente(nombres, anio or [], mes or [])
+        if dia:
+            minimas = [f for f in minimas if (f.get("fecha_emision") or "").startswith(dia)]
+        if destinatario:
+            sel_dest = set(destinatario)
+            minimas = [f for f in minimas if f.get("destinatario") in sel_dest]
         for f in minimas:
             f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
         _calcular_ot_filas(minimas)
@@ -683,9 +823,10 @@ def get_guias_cliente(
         for f in minimas:
             if f.get("estado"):
                 por_estado[f["estado"]] = por_estado.get(f["estado"], 0) + 1
-        # OT: las guías con novedad justificada quedan EXCLUIDAS de los
-        # evaluables (fue excusada) — mismo criterio del segmento «justificadas»
-        # de la serie, así tiles y gráfico siempre cuadran.
+        # OT (2026-10-30): las guías con novedad justificada CUENTAN COMO
+        # CUMPLIDAS — van al numerador y al denominador (antes quedaban
+        # excluidas del %). La novedad sigue ganando a su estado TMS, así una
+        # entregada tarde pero justificada también suma como cumplimiento.
         ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not f.get("novedad"))
         ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0 and not f.get("novedad"))
         ot_evaluables = ot_cumplen + ot_no_cumplen
@@ -714,10 +855,16 @@ def get_guias_cliente(
                 "ot_no_cumplen": ot_no_cumplen,
                 "ot_justificadas": ot_justificadas,
                 "ot_no_evaluables": len(minimas) - ot_evaluables - ot_justificadas,
-                "ot_pct": round(ot_cumplen / ot_evaluables * 100, 1) if ot_evaluables else None,
+                "ot_pct": round(
+                    (ot_cumplen + ot_justificadas) / (ot_evaluables + ot_justificadas) * 100, 1
+                ) if (ot_evaluables + ot_justificadas) else None,
             },
             "serie_mensual": _serie_ot(minimas, 7),
             "serie_diaria": _serie_ot(minimas, 10),
+            # (2026-10-30) OT por ciudad destino / destinatario (portal de
+            # clientes): barras horizontales del período filtrado.
+            "ot_por_ciudad": _ot_por_campo(minimas, "ciudad_destino"),
+            "ot_por_destinatario": _ot_por_campo(minimas, "destinatario"),
             "filas": pagina,
             "paginacion": {
                 "pagina": 1,
@@ -750,6 +897,7 @@ def get_guias_filas_cliente(
     limite: int = Query(LIMITE_PAGINA, ge=1, le=LIMITE_EXPORT),
     grupo: Optional[str] = Query(None, description="(2026-10-29) Sub-grupo del cliente; mismo contrato que /guias"),
     usuario: Optional[str] = Query(None, description="(2026-10-29) Opcional: valida asignación si el consultante es perfil CLIENTE"),
+    destinatario: Optional[List[str]] = Query(None, description="(2026-10-30) Filtro por cliente final (destinatario del TMS)"),
 ):
     """Páginas 2..N de la tabla del informe (la 1 viaja en /guias). Con ``q``:
     ILIKE parcial sobre guía/planilla/destinatario en TODO el histórico del
@@ -768,7 +916,7 @@ def get_guias_filas_cliente(
         if q and q.strip():
             filas, total = buscar_guias_cliente(nombres, q, limite, offset)
         else:
-            filas, total = pagina_guias_cliente(nombres, anio or [], mes or [], limite, offset)
+            filas, total = pagina_guias_cliente(nombres, anio or [], mes or [], limite, offset, destinatarios=destinatario)
         for f in filas:
             f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
         _calcular_ot_filas(filas)
