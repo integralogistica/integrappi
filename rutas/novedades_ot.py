@@ -463,6 +463,60 @@ async def importar_excel(usuario: str = Query(...), archivo: UploadFile = File(.
     }
 
 
+# ── Export Excel (toda la base) ───────────────────────────────────────────────
+
+
+@router.get("/exportar")
+async def exportar(usuario: str = Query(...)):
+    """TODA la base de justificaciones en un Excel (.xlsx): Guía/Causal/
+    Justificación + trazabilidad (quién registró/actualizó y cuándo). Un hoja,
+    ordenada por updated_at desc (mismo orden de la lista)."""
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_NOVEDADES, "exportar las novedades justificadas OT")
+
+    def _generar() -> bytes:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Novedades OT"
+        cabeceras = ["GUIA", "CAUSAL", "JUSTIFICACION", "REGISTRADA POR", "CREADA",
+                     "ACTUALIZADA POR", "ACTUALIZADA"]
+        fill = PatternFill(start_color="004d40", end_color="004d40", fill_type="solid")
+        for i, col in enumerate(cabeceras, 1):
+            celda = ws.cell(row=1, column=i, value=col)
+            celda.font = Font(color="FFFFFF", bold=True)
+            celda.fill = fill
+        for i, ancho in enumerate([22, 34, 60, 28, 19, 28, 19], 1):
+            ws.column_dimensions[chr(64 + i)].width = ancho
+
+        def _quien(d: dict, campo: str) -> str:
+            v = d.get(campo) or {}
+            return f"{v.get('nombre') or v.get('usuario') or '—'}".strip()
+
+        def _fecha(v) -> str:
+            return v.strftime("%Y-%m-%d %H:%M") if isinstance(v, datetime) else "—"
+
+        fila = 2
+        for d in col_novedades.find({}, {"_id": 0}).sort("updated_at", -1):
+            ws.cell(row=fila, column=1, value=d.get("guia", ""))
+            ws.cell(row=fila, column=2, value=d.get("causal", ""))
+            ws.cell(row=fila, column=3, value=d.get("justificacion", ""))
+            ws.cell(row=fila, column=4, value=_quien(d, "creado_por"))
+            ws.cell(row=fila, column=5, value=_fecha(d.get("created_at")))
+            ws.cell(row=fila, column=6, value=_quien(d, "actualizado_por"))
+            ws.cell(row=fila, column=7, value=_fecha(d.get("updated_at")))
+            fila += 1
+        salida = io.BytesIO()
+        wb.save(salida)
+        return salida.getvalue()
+
+    contenido = await asyncio.to_thread(_generar)
+    return Response(
+        content=contenido,
+        media_type=MEDIA_TYPE_XLSX,
+        headers={"Content-Disposition": f"attachment; filename=novedades_ot_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"},
+    )
+
+
 # ── Plantilla ─────────────────────────────────────────────────────────────────
 
 
