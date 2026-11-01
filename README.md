@@ -876,3 +876,18 @@ Campo **`oc_proveedor`** (orden de compra del proveedor) por concepto de costo, 
 - **Modelo**: `CostoConcepto.oc_proveedor: str = ""` (normalizado a MAYÚSCULAS). Viaja en el array `costos` → al histórico con el doc completo (`_mover_documento`); se persiste solo en crear/editar vía `model_dump()` (sin cambios adicionales).
 - **Excel histórico** (`/exportar-excel`): columna nueva **«OC Proveedor»** junto a «Proveedor» en la fila por concepto (vacía en docs anteriores al campo).
 - **Frontend** (`OtrosCostosP`): input «OC del proveedor ({PROVEEDOR})» a ancho completo debajo de la fila del concepto, visible sólo con proveedor lleno (mayúsculas, máx 50 car.); columna «OC Proveedor» en la tabla de conceptos del modal de detalle. Docs viejos lo muestran como `-`. Requiere deploy de backend y frontend.
+
+## Actualizaciones Recientes (2026-10-31)
+
+### Indicadores — Rework TOTAL del On Time replicando el Excel operativo real
+
+El % OT deja de ser aproximado: `rutas/indicadores_cliente.py` ahora **replica `calculo real ot.xlsx`** (hoja BASE, 30.201 filas, fórmulas BB..BP). Documentación completa en `INDICADORES.md` §3. Lo esencial del backend:
+
+- **5 tablas del Excel importadas a Mongo `integra`** con `importar_tablas_ot_real.py` (**idempotente** — re-ejecutar cuando el área actualice el Excel): `tiempos_entrega` (188, CARGA), `tiempos_entrega_st` (237, ST: envío directo por DESTINO / recolección por ORIGEN), `correcciones_nombres` (254, clave alfanumérica), `novedades_siscore` (856, guía→MOTIVO del reporte de novedades) y `citas_agendadas` (7.790, CITASACT, VLOOKUP primera aparición).
+- **Motor `_calcular_ot_filas`** (misma función para gráfico Y tabla): tipo_servicio (FK ST / …REC / …DEV / 722… / CARGA) → tipo_st (ST+origen BOGOTA+CST→RECOLECCION, ST+BOGOTA→ENVIO DIRECTO, ST+otro origen→RECOLECCION) → municipio/dpto real con `correcciones_nombres` → ruta URBANO/NACIONAL → días de las tablas (fallback 12/8 DEV/MUESTRA en calendario) → promesa con `_sumar_dias_habiles` (≡WORKDAY; CARGA con novedad EN ACONDICIONAMIENTO cuenta desde `fecha_carga`) → **veredicto contra la entrega ó HOY** (las EN CURSO se juzgan: sin vencer = cumple).
+- **Cita: SOLO `citas_agendadas`** (ni `fecha_cita` del TMS ni `citas_kabi` — traen re-agendadas y divergían ~1.700 veredictos). **Novedad: SOLO `novedades_siscore`** — ⚠️ la columna `novedad` del informe es el último evento ('ENTREGA DIGITALIZADA' en 57k filas) y NO sirve como proxy. `tarifas.promesa_entrega_dias` YA NO se usa.
+- **Novedades justificadas (/NovedadesOT) siguen vigentes**: `_adjuntar_novedades` marca las guías justificadas de `novedades_justificadas_ot` y el segmento «Justificadas» se fusionó con **«Con novedad»** — ambas auto-cumplen: % OT = (cumplieron + conNovedad) / (cumplieron + noCumplieron + conNovedad).
+- **Conciliación** (`conciliar_ot_real.py`): **97,0% match en entregadas** (28.739/29.620) contra el Excel; el 3% restante bloqueado por las columnas del Bot 001 (ciudad/dpto origen, dpto destino, fecha_carga — el lookup `_dias_tabla` degrada a municipio único/prefijo único mientras tanto).
+- **Bot 001 (repo `agentes`, copia local en `AGENTE IA/Bot 001`)**: extendido con `ciudad_origen`/`departamento_origen`/`departamento_destino`/`fecha_carga` (DATE; en `COLUMNAS_FECHA` y `CAMPOS_ACTUALIZAR` para backfill vía ON CONFLICT). PENDIENTE: push al repo + backfill por trozos de ~15 días.
+- `GET /indicadores-cliente/{id}/consulta-guia` corre la MISMA `_calcular_ot_filas` sobre la guía consultada → veredicto OT individual (✔/✘/✔ Justificada/Sin evaluar).
+- Deploy backend + frontend JUNTOS.

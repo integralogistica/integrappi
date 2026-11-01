@@ -1,0 +1,497 @@
+{
+ "fecha": "2026-10-31T15:36:03.511032",
+ "docs": [
+  {
+   "_id": "6a88bc13d384e4d369723ca3",
+   "destino": "AGUACHICA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723ca4",
+   "destino": "AIPE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723caa",
+   "destino": "APARTADO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cab",
+   "destino": "ARAUCA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cad",
+   "destino": "ARJONA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cae",
+   "destino": "ARMENIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cb0",
+   "destino": "BARANOA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cb2",
+   "destino": "BARBOSA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cb4",
+   "destino": "BARRANQUILLA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cbb",
+   "destino": "BUCARAMANGA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cbc",
+   "destino": "BUENAVENTURA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cc1",
+   "destino": "CALI",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cc5",
+   "destino": "CARTAGENA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723ccb",
+   "destino": "CAUCASIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cdd",
+   "destino": "COPACABANA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cde",
+   "destino": "COROZAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723ce4",
+   "destino": "DAGUA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cf3",
+   "destino": "EL ZULIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cf5",
+   "destino": "ESPINAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723cf6",
+   "destino": "ESPINAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d09",
+   "destino": "GALAPA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d0b",
+   "destino": "GARZON",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d10",
+   "destino": "GIRON",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d17",
+   "destino": "GUAMO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d19",
+   "destino": "GUAYABAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d1f",
+   "destino": "IBAGUE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d24",
+   "destino": "ITAGUI",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d25",
+   "destino": "JAMUNDI",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d2a",
+   "destino": "LA CEJA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d35",
+   "destino": "LA PLATA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d3b",
+   "destino": "LOS PATIOS",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d3f",
+   "destino": "MAGANGUE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d40",
+   "destino": "MAICAO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d41",
+   "destino": "MALAGA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d43",
+   "destino": "MANIZALES",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d4e",
+   "destino": "MONTELIBANO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d4f",
+   "destino": "MONTERIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d55",
+   "destino": "NEIVA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d56",
+   "destino": "NEIVA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d64",
+   "destino": "PALMIRA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d69",
+   "destino": "PASTO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d6b",
+   "destino": "PEREIRA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d6f",
+   "destino": "PITAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d70",
+   "destino": "PITALITO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d72",
+   "destino": "PLATO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d73",
+   "destino": "POPAYAN",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d75",
+   "destino": "PUERTO ASIS",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d76",
+   "destino": "PUERTO BERRIO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d7a",
+   "destino": "PUERTO COLOMBIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d80",
+   "destino": "PUERTO TEJADA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d85",
+   "destino": "QUIBDO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d86",
+   "destino": "QUIMBAYA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d8b",
+   "destino": "RICAURTE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d8c",
+   "destino": "RIOHACHA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d8e",
+   "destino": "RIOSUCIO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d96",
+   "destino": "SAMPUES",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723d9f",
+   "destino": "SAN JACINTO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da0",
+   "destino": "SAN JOSE DEL GUAVIARE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da1",
+   "destino": "SAN JOSE DEL GUAVIARE",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da2",
+   "destino": "SAN JUAN DEL CESAR",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da4",
+   "destino": "SAN MARCOS",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da7",
+   "destino": "SANTA MARTA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723da8",
+   "destino": "SANTA MARTA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dac",
+   "destino": "SARAVENA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723db1",
+   "destino": "SINCELEJO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723db3",
+   "destino": "SOATA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dbc",
+   "destino": "SUPIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dc3",
+   "destino": "TERUEL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dcb",
+   "destino": "TUMACO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dcc",
+   "destino": "TUNJA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dcd",
+   "destino": "TUNJA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dce",
+   "destino": "TURBACO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dd2",
+   "destino": "URIBIA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dd4",
+   "destino": "VALLEDUPAR",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dd6",
+   "destino": "VELEZ",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723ddd",
+   "destino": "VILLAVICENCIO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723dde",
+   "destino": "VILLAVICENCIO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723de2",
+   "destino": "YOPAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723de3",
+   "destino": "YOPAL",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6a88bc13d384e4d369723de4",
+   "destino": "YUMBO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 2
+  },
+  {
+   "_id": "6a88bc13d384e4d369723de5",
+   "destino": "ZAMBRANO",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 1
+  },
+  {
+   "_id": "6adfd8132496281cd0384d52",
+   "destino": "PLANETA RICA",
+   "tipo": "NACIONAL",
+   "promesa_entrega_dias": 3
+  }
+ ]
+}

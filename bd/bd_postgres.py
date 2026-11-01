@@ -196,6 +196,15 @@ CASE WHEN TRIM({col}) ~ '^[0-9]+(\\.[0-9]+)?$' THEN TRIM({col})::numeric ELSE NU
 
 _COLUMNAS_PAGINA = f"""
     guia,
+    -- (2026-10-31) Cliente TMS (Kabi vs FK Servicio Técnico) para el Excel
+    NULLIF(TRIM(nombre_cliente), '') AS nombre_cliente,
+    -- (2026-10-31) Origen/destino completos + fecha de carga: la lógica OT
+    -- real (calculo real ot.xlsx) los necesita (ST por recolección usa la
+    -- ciudad ORIGEN; EN ACONDICIONAMIENTO cuenta desde la fecha de carga).
+    NULLIF(TRIM(ciudad_origen), '') AS ciudad_origen,
+    NULLIF(TRIM(departamento_origen), '') AS departamento_origen,
+    NULLIF(TRIM(departamento_destino), '') AS departamento_destino,
+    fecha_carga,
     NULLIF(TRIM(planilla), '') AS planilla,
     NULLIF(TRIM(ciudad_destino), '') AS ciudad_destino,
     NULLIF(TRIM(destinatario), '') AS destinatario,
@@ -220,7 +229,7 @@ def _normalizar_fila(fila: dict) -> dict:
     # planilla '0' = el TMS no le asignó planilla
     if out.get("planilla") == "0":
         out["planilla"] = None
-    for k in ("fecha_emision", "fecha_entrega", "fecha_digitalizacion"):
+    for k in ("fecha_emision", "fecha_entrega", "fecha_digitalizacion", "fecha_carga"):
         v = out.get(k)
         out[k] = v.isoformat() if v is not None else None
     for k in ("piezas", "kilos"):
@@ -236,7 +245,13 @@ def guias_minimas_cliente(nombres: list, anios: list, meses: list):
     _asegurar_indice_cliente_fecha()
     where, params = _condicion_cliente_fecha(nombres, anios, meses)
     sql = f"""
-        SELECT guia, planilla, estado, fecha_emision, fecha_entrega,
+        SELECT guia, NULLIF(TRIM(nombre_cliente), '') AS nombre_cliente,
+               NULLIF(TRIM(ciudad_origen), '') AS ciudad_origen,
+               NULLIF(TRIM(departamento_origen), '') AS departamento_origen,
+               NULLIF(TRIM(departamento_destino), '') AS departamento_destino,
+               fecha_carga,
+               NULLIF(TRIM(novedad), '') AS novedad_tms,
+               planilla, estado, fecha_emision, fecha_entrega,
                ciudad_destino, NULLIF(TRIM(destinatario), '') AS destinatario,
                fecha_cita
         FROM informe_guias_tms
@@ -254,13 +269,24 @@ def guias_minimas_cliente(nombres: list, anios: list, meses: list):
 
 
 def guia_tms_placa(guia: str):
-    """(2026-10-30) Placa, ciudad destino y fecha de emisión del TMS de UNA
-    guía en ``informe_guias_tms`` — para la consulta de guía del portal de
-    clientes. None si la guía no está en la tabla (no rompe la consulta SOAP)."""
+    """(2026-10-30) Placa, ciudad destino, fechas y estado del TMS de UNA guía
+    en ``informe_guias_tms`` — para la consulta de guía del portal de clientes
+    (2026-10-31: también estado/fecha_entrega/fecha_cita para calcular su OT).
+    None si la guía no está en la tabla (no rompe la consulta SOAP)."""
     sql = """
         SELECT NULLIF(TRIM(placa), '') AS placa,
                NULLIF(TRIM(ciudad_destino), '') AS ciudad_destino,
-               fecha_emision
+               fecha_emision,
+               NULLIF(TRIM(estado), '') AS estado,
+               fecha_entrega,
+               fecha_cita,
+               NULLIF(TRIM(nombre_cliente), '') AS nombre_cliente,
+               NULLIF(TRIM(destinatario), '') AS destinatario,
+               NULLIF(TRIM(ciudad_origen), '') AS ciudad_origen,
+               NULLIF(TRIM(departamento_origen), '') AS departamento_origen,
+               NULLIF(TRIM(departamento_destino), '') AS departamento_destino,
+               fecha_carga,
+               NULLIF(TRIM(novedad), '') AS novedad_tms
         FROM informe_guias_tms
         WHERE guia = %s
         LIMIT 1;
@@ -272,8 +298,9 @@ def guia_tms_placa(guia: str):
                 fila = cur.fetchone()
                 if not fila:
                     return None
-                if hasattr(fila.get("fecha_emision"), "isoformat"):
-                    fila["fecha_emision"] = fila["fecha_emision"].isoformat()
+                for campo in ("fecha_emision", "fecha_entrega", "fecha_cita", "fecha_carga"):
+                    if hasattr(fila.get(campo), "isoformat"):
+                        fila[campo] = fila[campo].isoformat()
                 return dict(fila)
     except Exception:
         logger.exception("[bd_postgres] Error buscando placa de la guía %s", guia)

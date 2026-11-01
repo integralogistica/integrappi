@@ -18,6 +18,7 @@ from typing import List, Optional
 from datetime import date, datetime, timedelta
 import logging
 import re
+import unicodedata
 
 # Reutiliza helpers/pipelines de Costo de Operación (misma BD, mismas reglas):
 # - _filtro_media_milla / _anios_media_milla → filtro y años de pedidos_completados
@@ -37,7 +38,6 @@ from rutas.indicadores_costo_operacion import (
     _categoria_por_kilos,
     _fecha_iso,
 )
-from rutas.fletes import coleccion_fletes
 from bd.bd_cliente import bd_cliente
 from bd.bd_postgres import (
     guias_minimas_cliente,
@@ -398,48 +398,132 @@ def _sumar_dias_habiles(inicio: date, dias: int) -> date:
     return d
 
 
-def _mapa_promesa_destinos() -> dict:
-    """{DESTINO_NORMALIZADO: promesa_entrega_dias} desde tarifas origen FUNZA.
+# ── (2026-10-31) Tablas de promesa del Excel REAL (calculo real ot.xlsx) ──
+# Colecciones Mongo `tiempos_entrega` (CARGA, por municipio), `tiempos_entrega_st`
+# (servicio técnico, envío directo por destino / recolección por origen) y
+# `correcciones_nombres` (ciudades/dptos mal escritos en Siscore). Reemplazan
+# a tarifas.promesa_entrega_dias como fuente de días del OT.
 
-    (2026-10-29) Cache TTL 10 min — antes consultaba Mongo en cada request del
-    informe. Las claves se NORMALIZAN (solo letras/dígitos) para absorber
-    variantes catálogo↔TMS: 'BOGOTA D.C.' ↔ 'BOGOTA, D C' → 'BOGOTADC'."""
-    global _CACHE_PROMESAS
+def _norm_nombre(texto) -> str:
+    """Normalización de la importación: Ñ→N, sin acentos, espacios colapsados,
+    upper — ' BOGOTA,  D.C. ' → 'BOGOTA, D.C.' (las correcciones ya traen la
+    forma buena)."""
+    t = unicodedata.normalize("NFD", str(texto or "").upper().replace("Ñ", "N"))
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _cache_tabla(nombre_cache: str, coleccion, builder):
+    """Lee una colección de tablas con cache TTL 10 min (patrón _CACHE_PROMESAS)."""
     ahora = _time.monotonic()
-    ts, mapa = _CACHE_PROMESAS
-    if mapa is not None and ahora - ts < 600:
-        return mapa
-    out = {}
-    for t in coleccion_fletes.find({"origen": "FUNZA"}, {"destino": 1, "promesa_entrega_dias": 1}):
-        dest = (t.get("destino") or "").strip().upper()
-        dias = t.get("promesa_entrega_dias") or 0
-        if dest and dias > 0:
-            out[_normalizar_ciudad(dest)] = int(dias)
-    _CACHE_PROMESAS = (ahora, out)
-    return out
+    ts, val = _CACHE_TABLAS.get(nombre_cache, (0.0, None))
+    if val is not None and ahora - ts < 600:
+        return val
+    val = builder(coleccion)
+    _CACHE_TABLAS[nombre_cache] = (ahora, val)
+    return val
 
 
-_CACHE_PROMESAS = (0.0, None)
+_CACHE_TABLAS: dict = {}
 
 
-def _normalizar_ciudad(texto: str) -> str:
-    """'BOGOTA, D C'/'BOGOTA D.C.' → 'BOGOTADC' (upper, solo alfanuméricos)."""
-    return re.sub(r"[^A-Z0-9]", "", (texto or "").upper())
+def _mapa_correcciones() -> dict:
+    """{nombre_mal (solo alfanumérico): nombre_bueno} — la clave alfanumérica
+    absorbe 'BOGOTA, D C' ≡ 'BOGOTA, D.C.' ≡ 'BOGOTA D.C.'."""
+    return _cache_tabla("correcciones", bd_cliente["integra"]["correcciones_nombres"], lambda c: {
+        re.sub(r"[^A-Z0-9]", "", d["error"]): d["correccion"]
+        for d in c.find({}, {"_id": 0, "error": 1, "correccion": 1})
+    })
 
 
-def _dias_promesa_destino(ciudad: Optional[str], mapa: dict) -> Optional[int]:
-    """Días de promesa para una ciudad del TMS. Match exacto normalizado y, si
-    no hay, prefijo ÚNICO de hasta 4 caracteres extra (cubre 'BOGOTA'→'BOGOTADC'
-    o 'FLORIDABLANCA'→'FLORIDABLANCA'; ambiguos → None, igual que sin promesa)."""
-    if not ciudad:
-        return None
-    n = _normalizar_ciudad(ciudad.split(",")[0])
-    if not n:
-        return None
-    if n in mapa:
-        return mapa[n]
-    candidatos = [d for k, d in mapa.items() if k.startswith(n) and 0 < len(k) - len(n) <= 4]
-    return candidatos[0] if len(candidatos) == 1 else None
+def _mapa_citas_agendadas() -> dict:
+    """{guia: fecha_cita ISO} de CITASACT del Excel real (`citas_agendadas`) —
+    la fuente EXACTA de la fórmula BN (VLOOKUP por guía, primera aparición).
+    Es más rica que fecha_cita del TMS y que citas_kabi (tiene re-agendadas)."""
+    return _cache_tabla("citas_agendadas", bd_cliente["integra"]["citas_agendadas"], lambda c: {
+        d["guia"]: d["fecha_cita"] for d in c.find({}, {"_id": 0, "guia": 1, "fecha_cita": 1})
+    })
+
+
+def _mapa_novedades_siscore() -> dict:
+    """{guia: MOTIVO} del reporte de novedades de Siscore (`novedades_siscore`,
+    importado del Excel real — 856 guías). Es la fuente de la fórmula BP: VLOOKUP
+    por guía → MOTIVO; «SIN NOVEDAD» si no está. ⚠️ NO sirve la columna `novedad`
+    del informe (es el último evento: 'ENTREGA DIGITALIZADA' en casi todas)."""
+    return _cache_tabla("novedades_siscore", bd_cliente["integra"]["novedades_siscore"], lambda c: {
+        d["guia"]: d["motivo"] for d in c.find({}, {"_id": 0, "guia": 1, "motivo": 1})
+    })
+
+
+def _mapa_tiempos_carga() -> dict:
+    """Tablas de CARGA: {'par': {(municipio, dpto): días 2026}, 'mun':
+    {municipio: días cuando es único o todos los dptos coinciden}} — el índice
+    por municipio cubre mientras el bot no cargue departamento_destino."""
+    def builder(c):
+        par, mun = {}, {}
+        for d in c.find({}, {"_id": 0, "municipio": 1, "departamento": 1, "dias_2026": 1}):
+            par[(d["municipio"], d["departamento"])] = d["dias_2026"]
+            mun.setdefault(d["municipio"], set()).add(d["dias_2026"])
+        return {"par": par, "mun": {m: next(iter(s)) for m, s in mun.items() if len(s) == 1}}
+    return _cache_tabla("tiempos_carga", bd_cliente["integra"]["tiempos_entrega"], builder)
+
+
+def _mapa_tiempos_st() -> dict:
+    """Tablas ST: {'par': {(tipo, municipio, dpto): días}, 'mun': {(tipo,
+    municipio): días único}}. La clave ENVIO DIRECTO se mira por el DESTINO y
+    RECOLECCION por el ORIGEN (regla Trayecto del Excel); la importación ya
+    las trae precalculadas."""
+    def builder(c):
+        par, mun = {}, {}
+        for d in c.find({}, {"_id": 0, "tipo": 1, "municipio": 1, "departamento": 1,
+                             "dias_envio": 1, "dias_recoleccion": 1}):
+            dias = d["dias_envio"] if d["tipo"] == "ENVIO DIRECTO" else d["dias_recoleccion"]
+            par[(d["tipo"], d["municipio"], d["departamento"])] = dias
+            mun.setdefault((d["tipo"], d["municipio"]), set()).add(dias)
+        return {"par": par, "mun": {k: next(iter(s)) for k, s in mun.items() if len(s) == 1}}
+    return _cache_tabla("tiempos_st", bd_cliente["integra"]["tiempos_entrega_st"], builder)
+
+
+def _dias_tabla(tabla: dict, clave_par: tuple, vista_mun: dict, municipio: str) -> Optional[int]:
+    """Lookup con degradación: (municipio, dpto) exacto → municipio único →
+    prefijo único de municipio ('BOGOTA'→'BOGOTA DC'). None si ambiguo.
+    `vista_mun` es el índice por municipio YA filtrado por tipo (ST) o el
+    completo (CARGA)."""
+    d = tabla["par"].get(clave_par)
+    if d is not None:
+        return d
+    if municipio in vista_mun:
+        return vista_mun[municipio]
+    # Prefijo único en cualquiera de los dos sentidos (≤4 chars de diferencia)
+    cands = {v for k, v in vista_mun.items()
+             if (k.startswith(municipio) or municipio.startswith(k))
+             and 0 < abs(len(k) - len(municipio)) <= 4}
+    return cands.pop() if len(cands) == 1 else None
+
+
+def _ciudad_y_dpto(fila: dict, usar_origen: bool) -> tuple:
+    """(municipio, dpto) reales de la fila, con la tabla de CORRECCIONES.
+    Columnas explícitas si el bot ya las cargó; si no, se parte ciudad_destino
+    'CIUDAD - DEPARTAMENTO' (formato que trae el informe). Las correcciones se
+    casan por clave ALFANUMÉRICA ('BOGOTA, D C' ≡ 'BOGOTA, D.C.' → 'BOGOTA DC')."""
+    if usar_origen:
+        ciudad = fila.get("ciudad_origen")
+        dpto = fila.get("departamento_origen")
+    else:
+        ciudad = fila.get("ciudad_destino")
+        dpto = fila.get("departamento_destino")
+    if not dpto and ciudad:
+        partes = re.split(r"\s+-\s+", str(ciudad), maxsplit=1)
+        if len(partes) == 2:
+            ciudad, dpto = partes
+    corr = _mapa_correcciones()
+
+    def aplicar(x):
+        n = _norm_nombre(x)
+        alnum = re.sub(r"[^A-Z0-9]", "", n)
+        return corr.get(alnum, n) if alnum else n
+
+    return aplicar(ciudad), aplicar(dpto)
 
 
 # ── Informe de guías PostgreSQL puro (2026-10-29) ─────────────────────────────
@@ -487,68 +571,160 @@ def _parse_fecha_tms(texto) -> Optional[date]:
 
 
 def _calcular_ot_filas(filas: list) -> None:
-    """Setea EN SITIO fecha_promesa/origen_promesa/dias_habiles/ot sobre filas
-    dicts con {guia, estado, fecha_emision, fecha_entrega, ciudad_destino,
-    fecha_cita}. ÚNICA implementación del OT — la usan la pasada de agregación
-    (series del gráfico) y cada página de la tabla, así nunca divergen.
+    """(2026-10-31) REWORK TOTAL: réplica de la lógica del Excel operativo real
+    (`calculo real ot.xlsx`, hoja BASE — fórmulas CUMPLIMIENTO OT/FECHA PROMESA/
+    DIAS PROMESA/CITA). ÚNICA implementación del OT — la usan la pasada de
+    agregación (series del gráfico), cada página de la tabla y la consulta de
+    guía, así nunca divergen.
 
-    Misma lógica del flujo Mongo original: promesa = cita TMS si es servible →
-    cita plan B (citas_kabi) → emisión + promesa del destino (días hábiles).
-    Solo evaluable: ENTREGADO con fecha de entrega."""
+    Setea EN SITIO: tipo_servicio, tipo_st, ruta, fecha_promesa, origen_promesa
+    (CITA|TARIFA|FALLBACK|null), dias_promesa, dias_habiles, cumple_novedad, ot.
+
+    Diferencias clave vs la versión anterior:
+    - Las guías SIN entregar SÍ se juzgan: la referencia pasa a ser HOY (una
+      guía en curso cuenta como CUMPLE mientras su cita/promesa no venza).
+    - Días de promesa desde las tablas del Excel (tiempos_entrega /
+      tiempos_entrega_st), con fallback NACIONAL 12 / URBANO 8.
+    - Cualquier novedad del TMS (≠ 'CITA RECHAZADA POR TIEMPOS DE TRANSITO')
+      auto-cumple («Cumple con novedad»); CITA RECHAZADA compara la PROMESA.
+    - Con cita se compara la CITA; sin cita la PROMESA; sin promesa evaluable
+      (p. ej. estado CON NOVEDAD sin novedad en el texto) → ot null."""
     if not filas:
         return
+    hoy = date.today()
 
-    # Plan B citas_kabi: solo para guías SIN cita TMS servible (lectura barata).
-    sin_cita = [f["guia"] for f in filas if not _parse_fecha_tms(f.get("fecha_cita"))]
-    citas_kb = {}
-    if sin_cita:
-        for c in col_citas.find(
-            {"guia": {"$in": sin_cita}}, {"guia": 1, "fecha_cita": 1}
-        ):
-            if c.get("fecha_cita"):
-                citas_kb[c["guia"]] = c["fecha_cita"]
+    # (2026-10-31) CITASACT del Excel real (citas_agendadas): fuente EXACTA de
+    # la fórmula BN — GANA sobre el TMS (trae re-agendadas que el TMS no refleja).
+    citas_act = _mapa_citas_agendadas()
 
-    promesas = _mapa_promesa_destinos()
+    tiempos_carga = _mapa_tiempos_carga()
+    tiempos_st = _mapa_tiempos_st()
+    novedades_siscore = _mapa_novedades_siscore()
 
     for f in filas:
-        f_ot = None
+        # ── 1. TIPO DE SERVICIO (fórmula BB del Excel) ──
+        guia = str(f.get("guia") or "").strip().upper()
+        nombre = str(f.get("nombre_cliente") or "").strip().upper()
+        if nombre == "FK SERVICIO TECNICO":
+            tipo = "SERVICIO TECNICO"
+        elif guia.endswith("REC"):
+            tipo = "RECOLECCION"
+        elif guia.endswith("DEV"):
+            tipo = "DEVOLUCION"
+        elif guia.startswith("722"):
+            tipo = "MUESTRA DE CALIDAD"
+        else:
+            tipo = "CARGA"
+
+        # ── 2. TIPO DE SERVICIO ST (fórmula BC) ──
+        ciudad_origen = str(f.get("ciudad_origen") or "").strip()
+        origen_bogota = _norm_nombre(re.split(r"\s+-\s+|,", ciudad_origen)[0]) == "BOGOTA"
+        if tipo == "SERVICIO TECNICO":
+            dest_norm = _norm_nombre(f.get("destinatario"))
+            if not ciudad_origen and dest_norm == "CENTRO DE SERVICIO TECNICO":
+                # PROVISIONAL sin origen cargado: por fórmula, CST solo es
+                # RECOLECCION con origen BOGOTA — el municipio de la clave es
+                # el origen (BOGOTA), que sí conocemos.
+                tipo_st = "RECOLECCION"
+            elif not ciudad_origen:
+                # PROVISIONAL: casi todo el ST sale de Bogotá; se asume ENVIO
+                # DIRECTO (clave de días por DESTINO). Se corrige cuando el bot
+                # cargue el origen.
+                tipo_st = "ENVIO DIRECTO"
+            elif origen_bogota and dest_norm == "CENTRO DE SERVICIO TECNICO":
+                tipo_st = "RECOLECCION"
+            elif origen_bogota:
+                tipo_st = "ENVIO DIRECTO"
+            else:
+                tipo_st = "RECOLECCION"
+        else:
+            tipo_st = "NO ES ST"
+
+        # ── 3-4. MUNICIPIO/DEPARTAMENTO REAL + RUTA (fórmulas BD/BE/BH) ──
+        # ENVIO DIRECTO→destino; RECOLECCION→ORIGEN; CARGA→destino; DEV/MUESTRA→origen.
+        usar_origen = tipo_st == "RECOLECCION" or tipo in ("DEVOLUCION", "MUESTRA DE CALIDAD")
+        municipio, dpto = _ciudad_y_dpto(f, usar_origen)
+        if usar_origen and not municipio and tipo == "SERVICIO TECNICO":
+            # PROVISIONAL sin origen: la recolección CST sale de BOGOTA por
+            # fórmula — clave de días por origen BOGOTA.
+            municipio = "BOGOTA"
+        ruta = "URBANO" if dpto in ("BOGOTA DC", "CUNDINAMARCA") else "NACIONAL"
+
+        # ── 5. DIAS PROMESA (fórmula BI) ──
+        # Novedad = MOTIVO del reporte de Siscore (fórmula BP); NO el texto
+        # `novedad` del informe (último evento, casi siempre ENTREGA DIGITALIZADA).
+        novedad_txt = novedades_siscore.get(guia) or ""
+        f_dias = None
+        if tipo == "SERVICIO TECNICO":
+            vista_st = {k[1]: v for k, v in tiempos_st["mun"].items() if k[0] == tipo_st}
+            f_dias = _dias_tabla(tiempos_st, (tipo_st, municipio, dpto), vista_st, municipio)
+        elif f.get("estado") == "CON NOVEDAD":
+            f_dias = None  # NO APLICA
+        elif tipo == "CARGA":
+            f_dias = _dias_tabla(tiempos_carga, (municipio, dpto), tiempos_carga["mun"], municipio)
+        else:  # DEVOLUCION / MUESTRA DE CALIDAD → fallback calendario
+            f_dias = 12 if ruta == "NACIONAL" else 8
+
+        # ── 6. FECHA PROMESA (fórmula BJ: WORKDAY = días hábiles con festivos;
+        #    fallback 12/8 en CALENDARIO) ──
+        inicial = _fecha_servible(f.get("fecha_emision"))
         f_promesa = None
         origen = None
-        f_dias = None
-        if f.get("estado") == ESTADO_ENTREGADO and f.get("fecha_entrega"):
-            inicial = _fecha_servible(f.get("fecha_emision"))
-            entrega = _fecha_servible(f["fecha_entrega"])
-            cita = _parse_fecha_tms(f.get("fecha_cita"))
-            if inicial and entrega:
-                if not cita:
-                    cita_kb = citas_kb.get(f["guia"])
-                    if cita_kb:
-                        cita = cita_kb if isinstance(cita_kb, date) else _fecha_servible(str(cita_kb)[:10])
-                if cita:
-                    f_promesa = cita.isoformat()
-                    origen = "CITA"
-                else:
-                    dias = _dias_promesa_destino(f.get("ciudad_destino"), promesas)
-                    if dias:
-                        f_promesa = _sumar_dias_habiles(inicial, dias).isoformat()
-                        origen = "PROMESA"
-                if f_promesa:
-                    f_dias = _dias_habiles_entre(inicial, entrega)
-                    f_ot = 1 if entrega <= _fecha_servible(f_promesa) else 0
+        if inicial:
+            if tipo in ("CARGA", "SERVICIO TECNICO"):
+                base = inicial
+                if tipo == "CARGA" and novedad_txt == "EN ACONDICIONAMIENTO":
+                    f_carga = _fecha_servible(f.get("fecha_carga"))
+                    if f_carga:
+                        base = f_carga
+                if f_dias is not None:
+                    f_promesa = _sumar_dias_habiles(base, f_dias)
+                    origen = "TARIFA"
+            else:  # DEV/MUESTRA: emisión + 12/8 calendario (fórmula BJ)
+                f_promesa = inicial + timedelta(days=f_dias or 0)
+                origen = "FALLBACK"
 
-        f["fecha_promesa"] = f_promesa
+        # ── 7. CITA — SOLO citas_agendadas (CITASACT del Excel, fórmula BN).
+        #     Ni el TMS fecha_cita ni citas_kabi: traen valores distintos
+        #     (re-agendadas) que hacen divergir el veredicto del Excel real.
+        #     Guías nuevas sin entrada → sin cita → se compara la PROMESA. ──
+        cita = _fecha_servible(citas_act.get(guia))
+
+        # ── 8. CUMPLIMIENTO OT (fórmula BK): referencia = entrega ó HOY ──
+        entrega = _fecha_servible(f.get("fecha_entrega"))
+        referencia = entrega or hoy
+        f_cumple_nov = False
+        f_ot = None
+        if novedad_txt == "CITA RECHAZADA POR TIEMPOS DE TRANSITO":
+            f_ot = (1 if f_promesa >= referencia else 0) if f_promesa else None
+        elif novedad_txt:
+            f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»
+        elif f_promesa is None:
+            f_ot = None  # NO APLICA
+        elif cita:
+            f_ot = 1 if cita >= referencia else 0
+            origen = "CITA"  # se juzgó la cita, no la promesa
+        else:
+            f_ot = 1 if f_promesa >= referencia else 0
+
+        f["tipo_servicio"] = tipo
+        f["tipo_st"] = tipo_st
+        f["ruta"] = ruta
+        f["dias_promesa"] = f_dias
+        f["fecha_promesa"] = f_promesa.isoformat() if f_promesa else None
         f["origen_promesa"] = origen
-        f["dias_habiles"] = f_dias
+        f["dias_habiles"] = _dias_habiles_entre(inicial, entrega) if inicial and entrega else None
+        f["cumple_novedad"] = f_cumple_nov
         f["ot"] = f_ot
 
 
 def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
     """(2026-10-30) OT agregado por un campo de la fila (ciudad_destino,
     destinatario) para las barras horizontales del portal de clientes.
-    Mismo criterio del % OT: justificadas cuentan como cumplidas (numerador
-    y denominador). Devuelve TODOS los grupos con evaluables (sin tope — el
-    usuario hace scroll), ordenados del MÁS cumplido al menos (desempate por
-    volumen)."""
+    (2026-10-31) Mismo criterio del % OT nuevo: «con novedad» (TMS o manual)
+    cuentan como cumplidas (numerador y denominador). Devuelve TODOS los
+    grupos con evaluables (sin tope — el usuario hace scroll), ordenados del
+    MÁS cumplido al menos (desempate por volumen)."""
     grupos: dict = {}
     for f in filas:
         clave = (f.get(campo) or "").strip() if isinstance(f.get(campo), str) else ""
@@ -556,7 +732,7 @@ def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
             continue
         g = grupos.setdefault(clave, {"c": 0, "n": 0, "j": 0, "t": 0})
         g["t"] += 1
-        if f.get("novedad"):
+        if f.get("novedad") or f.get("cumple_novedad"):
             g["j"] += 1
         elif f.get("ot") == 1:
             g["c"] += 1
@@ -571,7 +747,7 @@ def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
             "clave": clave,
             "cumplieron": g["c"],
             "no_cumplieron": g["n"],
-            "justificadas": g["j"],
+            "con_novedad": g["j"],
             "evaluables": evaluables,
             "total": g["t"],
             "pct": round((g["c"] + g["j"]) / evaluables * 100, 1),
@@ -612,42 +788,28 @@ def _adjuntar_novedades(filas: list) -> None:
 
 
 def _serie_ot(filas: list, largo: int) -> list:
-    """(2026-10-29, tarde) Buckets del gráfico por FECHA DE EMISIÓN (antes:
-    entrega con fallback emisión — no cuadraba contra el Excel filtrado por
-    F. Emisión). Segmentos = la división REAL de estados del TMS: ENTREGADO se
-    parte en cumplieron/noCumplieron (ot 1/0) y cada estado en curso viaja
-    solo (En distribucion, Transito Nacional, PENDIENTE, CON NOVEDAD); el
-    resto (sin estado servible, o ENTREGADO sin fecha de entrega → no
-    evaluable) cae en sin_info. Una guía con NOVEDAD justificada
-    (f['novedad'], cargo _adjuntar_novedades) GANA a todo: segmento
-    «justificadas» — viaja sola en la serie, pero el % OT que deriva el
-    frontend la CUENTA COMO CUMPLIDA (numerador y denominador)."""
+    """(2026-10-31) Buckets del gráfico por FECHA DE EMISIÓN con los 4
+    segmentos de VEREDICTO del Excel real: Cumplieron / No cumplieron (incluye
+    guías en curso ya VENCIDAS: el veredicto compara contra HOY) / Con novedad
+    (auto-cumplen: novedad del TMS o justificada manual de /NovedadesOT) /
+    No aplica (sin promesa evaluable). El % OT = (cumplieron + conNovedad) /
+    (cumplieron + noCumplieron + conNovedad)."""
     buckets: dict = {}
     for f in filas:
         clave = (f.get("fecha_emision") or "")[:largo]
         if not clave:
             continue
         b = buckets.setdefault(clave, {
-            "cumplieron": 0, "noCumplieron": 0, "justificadas": 0, "con_novedad": 0,
-            "en_distribucion": 0, "transito": 0, "pendiente": 0, "sin_info": 0,
+            "cumplieron": 0, "noCumplieron": 0, "conNovedad": 0, "noAplica": 0,
         })
-        estado = f.get("estado")
-        if f.get("novedad"):
-            b["justificadas"] += 1
+        if f.get("novedad") or f.get("cumple_novedad"):
+            b["conNovedad"] += 1
         elif f.get("ot") == 1:
             b["cumplieron"] += 1
         elif f.get("ot") == 0:
             b["noCumplieron"] += 1
-        elif estado == "CON NOVEDAD":
-            b["con_novedad"] += 1
-        elif estado == "En distribucion":
-            b["en_distribucion"] += 1
-        elif estado == "Transito Nacional":
-            b["transito"] += 1
-        elif estado == "PENDIENTE":
-            b["pendiente"] += 1
         else:
-            b["sin_info"] += 1
+            b["noAplica"] += 1
     out = []
     for clave in sorted(buckets):
         b = buckets[clave]
@@ -655,13 +817,9 @@ def _serie_ot(filas: list, largo: int) -> list:
             "periodo": clave,
             "cumplieron": b["cumplieron"],
             "noCumplieron": b["noCumplieron"],
-            "justificadas": b["justificadas"],
-            "con_novedad": b["con_novedad"],
-            "en_distribucion": b["en_distribucion"],
-            "transito": b["transito"],
-            "pendiente": b["pendiente"],
-            "sin_info": b["sin_info"],
-            "evaluables": b["cumplieron"] + b["noCumplieron"],
+            "conNovedad": b["conNovedad"],
+            "noAplica": b["noAplica"],
+            "evaluables": b["cumplieron"] + b["noCumplieron"] + b["conNovedad"],
             "total": sum(b.values()),
         })
     return out
@@ -716,6 +874,41 @@ async def get_consulta_guia(
         payload["placa"] = tms["placa"]
     if tms.get("ciudad_destino"):
         payload["ciudad_destino_tms"] = tms["ciudad_destino"]
+    # (2026-10-31) ¿Cumplió la guía el OT? MISMA función del informe
+    # (_calcular_ot_filas) sobre la fila del TMS — el veredicto no puede
+    # divergir del que ven en el gráfico/tabla. Viaja aparte de
+    # `justificada` (Mongo); el frontend prioriza la justificación si
+    # rescata una no cumplida.
+    if tms.get("fecha_emision"):
+        fila_ot = {
+            "guia": g,
+            "estado": tms.get("estado"),
+            "nombre_cliente": tms.get("nombre_cliente"),
+            "destinatario": tms.get("destinatario"),
+            "ciudad_origen": tms.get("ciudad_origen"),
+            "departamento_origen": tms.get("departamento_origen"),
+            "departamento_destino": tms.get("departamento_destino"),
+            "fecha_carga": tms.get("fecha_carga"),
+            "novedad_tms": tms.get("novedad_tms"),
+            "fecha_emision": tms.get("fecha_emision"),
+            "fecha_entrega": tms.get("fecha_entrega"),
+            "fecha_cita": tms.get("fecha_cita"),
+            "ciudad_destino": tms.get("ciudad_destino"),
+        }
+        fila_ot["estado"], _ = _normalizar_estado(fila_ot["estado"])
+        _calcular_ot_filas([fila_ot])
+        payload["ot"] = {
+            "ot": fila_ot.get("ot"),
+            "cumple_novedad": fila_ot.get("cumple_novedad"),
+            "tipo_servicio": fila_ot.get("tipo_servicio"),
+            "ruta": fila_ot.get("ruta"),
+            "fecha_emision": fila_ot.get("fecha_emision"),
+            "fecha_entrega": fila_ot.get("fecha_entrega"),
+            "fecha_promesa": fila_ot.get("fecha_promesa"),
+            "origen_promesa": fila_ot.get("origen_promesa"),
+            "dias_habiles": fila_ot.get("dias_habiles"),
+            "entregada": fila_ot.get("estado") == ESTADO_ENTREGADO,
+        }
     # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
     # remesa que viajó junta) — solo conocible desde el TMS.
     if tms.get("placa") and tms.get("fecha_emision"):
@@ -823,15 +1016,27 @@ def get_guias_cliente(
         for f in minimas:
             if f.get("estado"):
                 por_estado[f["estado"]] = por_estado.get(f["estado"], 0) + 1
-        # OT (2026-10-30): las guías con novedad justificada CUENTAN COMO
-        # CUMPLIDAS — van al numerador y al denominador (antes quedaban
-        # excluidas del %). La novedad sigue ganando a su estado TMS, así una
-        # entregada tarde pero justificada también suma como cumplimiento.
-        ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not f.get("novedad"))
-        ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0 and not f.get("novedad"))
-        ot_evaluables = ot_cumplen + ot_no_cumplen
-        ot_justificadas = sum(1 for f in minimas if f.get("novedad"))
+        # OT (2026-10-31, lógica del Excel real): «con novedad» (TMS o
+        # justificada manual) auto-cumplen — numerador y denominador; las guías
+        # en curso SÍ se juzgan (contra HOY), así que pueden ser cumplidas o
+        # vencidas; No aplica = sin promesa evaluable (fuera del %).
+        con_novedad = sum(1 for f in minimas if f.get("novedad") or f.get("cumple_novedad"))
+        ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not (f.get("novedad") or f.get("cumple_novedad")))
+        ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0)
+        ot_evaluables = ot_cumplen + ot_no_cumplen + con_novedad
+        ot_justificadas = con_novedad
         planillas = {f.get("planilla") for f in minimas if f.get("planilla")}
+        # (2026-10-31) Cards de la pestaña Operación del portal: destinatarios
+        # y ciudades ATENDIDOS = distintos sobre las guías ENTREGADAS (no sirve
+        # len(ot_por_*): esos grupos excluyen a los sin evaluables).
+        dest_atendidos = {
+            f.get("destinatario") for f in minimas
+            if f.get("estado") == ESTADO_ENTREGADO and f.get("destinatario")
+        }
+        ciudades_atendidas = {
+            f.get("ciudad_destino") for f in minimas
+            if f.get("estado") == ESTADO_ENTREGADO and f.get("ciudad_destino")
+        }
 
         pagina, total = pagina_guias_cliente(
             nombres, anio or [], mes or [], LIMITE_PAGINA, 0
@@ -854,10 +1059,13 @@ def get_guias_cliente(
                 "ot_cumplen": ot_cumplen,
                 "ot_no_cumplen": ot_no_cumplen,
                 "ot_justificadas": ot_justificadas,
-                "ot_no_evaluables": len(minimas) - ot_evaluables - ot_justificadas,
+                "ot_con_novedad": con_novedad,
+                "ot_no_evaluables": len(minimas) - ot_evaluables,
+                "destinatarios_atendidos": len(dest_atendidos),
+                "ciudades_atendidas": len(ciudades_atendidas),
                 "ot_pct": round(
-                    (ot_cumplen + ot_justificadas) / (ot_evaluables + ot_justificadas) * 100, 1
-                ) if (ot_evaluables + ot_justificadas) else None,
+                    (ot_cumplen + con_novedad) / ot_evaluables * 100, 1
+                ) if ot_evaluables else None,
             },
             "serie_mensual": _serie_ot(minimas, 7),
             "serie_diaria": _serie_ot(minimas, 10),
