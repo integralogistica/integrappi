@@ -1022,7 +1022,10 @@ def get_guias_cliente(
         # vencidas; No aplica = sin promesa evaluable (fuera del %).
         con_novedad = sum(1 for f in minimas if f.get("novedad") or f.get("cumple_novedad"))
         ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not (f.get("novedad") or f.get("cumple_novedad")))
-        ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0)
+        # Mismo criterio if/elif de _serie_ot: una guía con novedad va SOLO a
+        # con_novedad — si no, entra también aquí y el denominador del
+        # ot_pct del tacómetro se infla (97,0 vs 97,3 del gráfico vs meta).
+        ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0 and not (f.get("novedad") or f.get("cumple_novedad")))
         ot_evaluables = ot_cumplen + ot_no_cumplen + con_novedad
         ot_justificadas = con_novedad
         planillas = {f.get("planilla") for f in minimas if f.get("planilla")}
