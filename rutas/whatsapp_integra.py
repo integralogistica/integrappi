@@ -1568,7 +1568,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             set_state_with_ts(numero, "CLIENTE_PROCESSING", ctxp)
 
             # Respuesta inmediata (NO bloquea webhook)
-            await enviar_texto(numero, "🔎 Consultando Siscore, un momento…")
+            await enviar_texto(numero, "🔎 Consultando Guía, un momento…")
             log_whatsapp_event(
                 phone=numero,
                 direction="OUT",
