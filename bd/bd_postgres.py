@@ -194,6 +194,20 @@ _CAST_NUM = """
 CASE WHEN TRIM({col}) ~ '^[0-9]+(\\.[0-9]+)?$' THEN TRIM({col})::numeric ELSE NULL END
 """
 
+# Tipo de servicio (fórmula BB del Excel real ot.xlsx — MISMA regla que
+# _calcular_ot_filas del router): FK Servicio Técnico por nombre de cliente,
+# sufijo REC/DEV de la guía, prefijo 722 de muestra; resto CARGA. En SQL para
+# poder filtrar la paginación de /guias/filas por un tipo sin columna física.
+_TIPO_SERVICIO_SQL = """
+CASE
+    WHEN NULLIF(TRIM(UPPER(nombre_cliente)), '') = 'FK SERVICIO TECNICO' THEN 'SERVICIO TECNICO'
+    WHEN UPPER(RIGHT(TRIM(guia), 3)) = 'REC' THEN 'RECOLECCION'
+    WHEN UPPER(RIGHT(TRIM(guia), 3)) = 'DEV' THEN 'DEVOLUCION'
+    WHEN UPPER(LEFT(TRIM(guia), 3)) = '722' THEN 'MUESTRA DE CALIDAD'
+    ELSE 'CARGA'
+END
+"""
+
 _COLUMNAS_PAGINA = f"""
     guia,
     -- (2026-10-31) Cliente TMS (Kabi vs FK Servicio Técnico) para el Excel
@@ -392,16 +406,22 @@ def buscar_destinatarios_cliente(nombres: list, q: str, limite: int = 20):
     return (empiezan + contienen)[:limite]
 
 
-def pagina_guias_cliente(nombres: list, anios: list, meses: list, limite: int, offset: int, destinatarios: list | None = None):
+def pagina_guias_cliente(nombres: list, anios: list, meses: list, limite: int, offset: int,
+                         destinatarios: list | None = None, tipos_servicio: list | None = None):
     """Página de filas COMPLETAS para la tabla del informe (casts en SQL).
     Devuelve ``(filas, total_del_filtro)`` — el COUNT extra es barato (solo
     el índice) y da el «Mostrando X de Y» del footer de la tabla.
-    ``destinatarios`` (2026-10-30): filtro opcional por cliente final."""
+    ``destinatarios`` (2026-10-30): filtro opcional por cliente final.
+    ``tipos_servicio`` (2026-11-03): filtro opcional por tipo de servicio
+    (CASE en SQL, misma fórmula BB del Excel que _calcular_ot_filas)."""
     _asegurar_indice_cliente_fecha()
     where, params = _condicion_cliente_fecha(nombres, anios, meses)
     if destinatarios:
         where += " AND NULLIF(TRIM(destinatario), '') = ANY(%s)"
         params = params + [destinatarios]
+    if tipos_servicio:
+        where += f" AND ({_TIPO_SERVICIO_SQL}) = ANY(%s)"
+        params = params + [tipos_servicio]
     sql = f"""
         SELECT{_COLUMNAS_PAGINA}
         FROM informe_guias_tms

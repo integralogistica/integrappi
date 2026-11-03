@@ -58,6 +58,12 @@ router = APIRouter(
     prefix="/indicadores-cliente",
     tags=["Indicadores Cliente"],
 )
+
+# (2026-11-03) Tipos de servicio del Excel real (fórmula BB) — valores que
+# acepta el filtro ?tipo_servicio= de /guias y /guias/filas.
+TIPOS_SERVICIO_OT = {
+    "CARGA", "SERVICIO TECNICO", "RECOLECCION", "DEVOLUCION", "MUESTRA DE CALIDAD",
+}
 logger = logging.getLogger(__name__)
 
 # Citas "plan B" (colección citas_kabi): cuando fecha_cita del TMS (Postgres)
@@ -965,6 +971,10 @@ def get_guias_cliente(
     destinatario: Optional[List[str]] = Query(None,
                                description="(2026-10-30) Filtro por cliente final (destinatario del TMS); "
                                            "repetir el parámetro para varios"),
+    tipo_servicio: Optional[List[str]] = Query(None,
+                               description="(2026-11-03) Filtro por tipo de servicio (fórmula BB del Excel "
+                                           "OT real): CARGA, SERVICIO TECNICO, RECOLECCION, DEVOLUCION, "
+                                           "MUESTRA DE CALIDAD; repetir el parámetro para varios"),
 ):
     """Informe de guías PostgreSQL puro (2026-10-29): TODO sale de
     ``informe_guias_tms`` (antes Mongo media milla + JOIN por guía).
@@ -986,9 +996,13 @@ def get_guias_cliente(
     if usuario:
         _verificar_acceso_cliente(usuario, cliente_id, cliente)
     nombres = _nombres_por_grupo(cliente, grupo)
+    if tipo_servicio:
+        invalidos = {t for t in tipo_servicio if t not in TIPOS_SERVICIO_OT}
+        if invalidos:
+            raise HTTPException(status_code=422, detail=f"Tipo de servicio desconocido: {', '.join(sorted(invalidos))}")
 
     clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "", dia or "",
-             tuple(sorted(destinatario or [])))
+             tuple(sorted(destinatario or [])), tuple(sorted(tipo_servicio or [])))
     ahora = _time.monotonic()
     hit = _CACHE_GUIAS.get(clave)
     if hit and ahora - hit[0] < _CACHE_TTL:
@@ -1006,6 +1020,12 @@ def get_guias_cliente(
             f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
         _calcular_ot_filas(minimas)
         _adjuntar_novedades(minimas)
+        # (2026-11-03) Filtro por tipo de servicio: va DESPUÉS de calcular el
+        # OT porque el tipo se deriva ahí (fórmula BB). Recalcula TODO el
+        # payload (resumen, series, OT por ciudad/destinatario) sobre el subconjunto.
+        if tipo_servicio:
+            sel_tipos = set(tipo_servicio)
+            minimas = [f for f in minimas if f.get("tipo_servicio") in sel_tipos]
         t_min = _time.perf_counter() - t0
 
         # Resumen (los ot_* salen de la MISMA pasada — consistencia garantizada).
@@ -1042,7 +1062,8 @@ def get_guias_cliente(
         }
 
         pagina, total = pagina_guias_cliente(
-            nombres, anio or [], mes or [], LIMITE_PAGINA, 0
+            nombres, anio or [], mes or [], LIMITE_PAGINA, 0,
+            tipos_servicio=tipo_servicio,
         )
         for f in pagina:
             f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
@@ -1109,6 +1130,7 @@ def get_guias_filas_cliente(
     grupo: Optional[str] = Query(None, description="(2026-10-29) Sub-grupo del cliente; mismo contrato que /guias"),
     usuario: Optional[str] = Query(None, description="(2026-10-29) Opcional: valida asignación si el consultante es perfil CLIENTE"),
     destinatario: Optional[List[str]] = Query(None, description="(2026-10-30) Filtro por cliente final (destinatario del TMS)"),
+    tipo_servicio: Optional[List[str]] = Query(None, description="(2026-11-03) Filtro por tipo de servicio (fórmula BB del Excel OT)"),
 ):
     """Páginas 2..N de la tabla del informe (la 1 viaja en /guias). Con ``q``:
     ILIKE parcial sobre guía/planilla/destinatario en TODO el histórico del
@@ -1120,6 +1142,10 @@ def get_guias_filas_cliente(
     if usuario:
         _verificar_acceso_cliente(usuario, cliente_id, cliente)
     nombres = _nombres_por_grupo(cliente, grupo)
+    if tipo_servicio:
+        invalidos = {t for t in tipo_servicio if t not in TIPOS_SERVICIO_OT}
+        if invalidos:
+            raise HTTPException(status_code=422, detail=f"Tipo de servicio desconocido: {', '.join(sorted(invalidos))}")
 
     offset = (pagina - 1) * limite
     t0 = _time.perf_counter()
@@ -1127,7 +1153,8 @@ def get_guias_filas_cliente(
         if q and q.strip():
             filas, total = buscar_guias_cliente(nombres, q, limite, offset)
         else:
-            filas, total = pagina_guias_cliente(nombres, anio or [], mes or [], limite, offset, destinatarios=destinatario)
+            filas, total = pagina_guias_cliente(nombres, anio or [], mes or [], limite, offset,
+                                                destinatarios=destinatario, tipos_servicio=tipo_servicio)
         for f in filas:
             f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
         _calcular_ot_filas(filas)
