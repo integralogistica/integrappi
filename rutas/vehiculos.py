@@ -129,7 +129,37 @@ CAMPOS_CONDUCTOR_2 = frozenset({
     # tienen gemelos con propietario/tenedor/conductor 1).
     "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
     "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
+    # Planilla de Seguridad Social PROPIA del 2º conductor (2026-11-05,
+    # pedido del usuario): multi-archivo con vencimiento, espejo de
+    # `planillaEpsArl` — solo el ESPEJO entra al hash (el vencimiento y el
+    # historial son bookkeeping, misma convención del slot 1:
+    # `planillaVencimiento` no participa en ningún hash).
+    "cond2PlanillaSegSocial",
 })
+
+# Metadatos de la planilla del 2º conductor (bookkeeping, fuera del hash):
+# espejo de la última subida (`cond2PlanillaSegSocial`), su vencimiento y el
+# historial multi-archivo — espejo escalar de (planillaEpsArl,
+# planillaVencimiento, documentosPlanillaSegSocial).
+CAMPOS_PLANILLA_CONDUCTOR_2 = {
+    "espejo": "cond2PlanillaSegSocial",
+    "vencimiento": "cond2PlanillaVencimiento",
+    "historial": "cond2DocumentosPlanilla",
+}
+
+# Tipos con semántica de PLANILLA DE SEGURIDAD SOCIAL (multi-archivo, fecha de
+# vencimiento obligatoria ≤31 días, historial acumulativo y exención de
+# re-revisión): la del VEHÍCULO y la PROPIA del 2º conductor (2026-11-05).
+# subir-documento/eliminar-documento ramifican por este mapa — una planilla
+# nueva solo se registra aquí.
+PLANILLAS_SEGURIDAD_SOCIAL = {
+    "planillaEpsArl": {
+        "espejo": "planillaEpsArl",
+        "vencimiento": "planillaVencimiento",
+        "historial": "documentosPlanillaSegSocial",
+    },
+    "cond2PlanillaSegSocial": CAMPOS_PLANILLA_CONDUCTOR_2,
+}
 
 # Campos EXCLUIDOS del hash de datos firmados: bookkeeping interno, estado
 # administrativo o la propia evidencia. Todo lo demás (datos del formulario y
@@ -912,12 +942,18 @@ TIPOS_SUBIDA_LEIBLES = {
     "documentoIdentidadConductor2": "cedula",
     "licencia2": "licencia",
     "cond2CertificacionBancaria": "certificado_bancario",
+    # Planilla PROPIA del 2º conductor (2026-11-05): mismo esquema que la del
+    # vehículo (lee fecha de vencimiento/eps/arl/titular); en la práctica el
+    # front siempre manda fecha digitada → salta la lectura (igual que
+    # planillaEpsArl).
+    "cond2PlanillaSegSocial": "planilla_seguridad_social",
 }
 
 # Tipos leíbles que pertenecen al SEGUNDO conductor: la IA valida contra SU
 # cédula (cond2CedulaCiudadania) y no contra la del conductor 1.
 TIPOS_LEIBLES_CONDUCTOR2 = {
     "documentoIdentidadConductor2", "licencia2", "cond2CertificacionBancaria",
+    "cond2PlanillaSegSocial",
 }
 
 
@@ -992,10 +1028,13 @@ ANGULOS_FOTO_VEHICULO = ["frontal", "lateral_izq", "lateral_der", "posterior"]
 # Documentos del SEGUNDO CONDUCTOR (2026-10-14): se exigen SOLO cuando el
 # slot 2 está VINCULADO (`idConductor2`) — el 2º conductor es opcional y un
 # vehículo con un solo conductor no debe exigir nada de él. Sin gemelos: es
-# otra persona, ningún documento de otra figura lo cubre.
+# otra persona, ningún documento de otra figura lo cubre. Incluye su
+# Planilla de Seguridad Social PROPIA (2026-11-05, pedido del usuario): es
+# multi-archivo; el campo exigido es el ESPEJO de la última subida.
 DOCUMENTOS_REQUERIDOS_CONDUCTOR2 = (
     "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
     "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
+    "cond2PlanillaSegSocial",
 )
 ETIQUETAS_FOTO_VEHICULO = {
     "frontal": "Foto Frontal del Vehículo",
@@ -1038,6 +1077,9 @@ ETIQUETAS_DOCUMENTO = {
     "licencia2Reverso": "Licencia de Conducción del Conductor 2 (Reverso)",
     "cond2Foto": "Foto del Conductor 2",
     "cond2CertificacionBancaria": "Certificación Bancaria del Conductor 2",
+    # Planilla PROPIA del 2º conductor (2026-11-05): multi-archivo con
+    # vencimiento (el semáforo VENCIDA avisa, NO inhabilita el vehículo).
+    "cond2PlanillaSegSocial": "Planilla de Seguridad Social del Conductor 2",
     # Ángulos de foto exigidos (2026-10-14): los devuelve _documentos_faltantes
     # y así el gate de «Finalizar» los lista con nombre legible.
     **ETIQUETAS_FOTO_VEHICULO,
@@ -1077,19 +1119,22 @@ TIPOS_SUBIDA_VALIDOS = [
     # en la subida del frente, igual que el slot 1).
     "documentoIdentidadConductor2", "licencia2", "licencia2Reverso",
     "cond2Foto", "cond2CertificacionBancaria",
+    # Planilla PROPIA del 2º conductor (2026-11-05): multi-archivo con
+    # vencimiento, espejo de la del vehículo.
+    "cond2PlanillaSegSocial",
 ]
 
 # Campos que SEGURIDAD puede RECORTAR en /revision (2026-10-07, pedido del
 # usuario: fotos tomadas muy lejos que muestran cosas de sobra): documentos
 # de UNA imagen, frente o reverso. FUERA: `firmaUrl` (el hash de la firma
-# electrónica se calcula sobre la ruta), `fotos` (array) y `planillaEpsArl`
-# (espejo del historial `documentosPlanillaSegSocial` — recortarla los
-# desincronizaría).
+# electrónica se calcula sobre la ruta), `fotos` (array) y las PLANILLAS
+# (`planillaEpsArl`/`cond2PlanillaSegSocial` son espejos de su historial —
+# recortarlas los desincronizaría).
 CAMPOS_RECORTABLES = (
     set(TIPOS_SUBIDA_VALIDOS)
     | {f"{t}Reverso" for t in TIPOS_DOS_CARAS_SUBIDA}
     | {"fotoconductorseguridad"}
-) - {"planillaEpsArl"}
+) - {"planillaEpsArl", "cond2PlanillaSegSocial"}
 
 
 def _solo_digitos(valor) -> str:
@@ -1247,6 +1292,18 @@ def _documentos_faltantes(vehiculo: dict) -> list:
     # pide).
     if _tiene_remolque(vehiculo) and not _doc_lleno(vehiculo, "tarjetaRemolque"):
         faltantes.append("tarjetaRemolque")
+    # Cédula del Dueño del Remolque (2026-11-05, pedido del usuario): con
+    # remolque declarado es OBLIGATORIA (frente + reverso) — la Tarjeta ya se
+    # exige y sin la cédula no hay verificación de identidad entre ambas (409
+    # de PARES_IDENTIDAD) ni identidad para el estudio de seguridad. Figura
+    # EMPRESA (NIT): la cédula no existe → no se exige (misma regla de
+    # propietario/tenedor).
+    if (_tiene_remolque(vehiculo)
+            and not _es_empresa_figura(vehiculo, "RemolDuenoTipoDocumento")):
+        if not _doc_lleno(vehiculo, "documentoIdentidadRemolque"):
+            faltantes.append("documentoIdentidadRemolque")
+        if not _doc_lleno(vehiculo, "documentoIdentidadRemolqueReverso"):
+            faltantes.append("documentoIdentidadRemolqueReverso")
     # FOTOS del vehículo por ÁNGULO (2026-10-14, pedido del usuario): se
     # exigen las 4 — frontal, lateral izquierda, lateral derecha y posterior.
     # `fotosVehiculo` las cataloga; un histórico con fotos sin catalogar
@@ -2348,6 +2405,8 @@ CLAVES_PROTEGIDAS = {
     # Historial de planillas de seguridad social (2026-10-07): lo escribe
     # subir-documento (acumulación mensual), jamás el front.
     "documentosPlanillaSegSocial",
+    # Historial de planillas del 2º conductor (2026-11-05): igual, server-side.
+    "cond2DocumentosPlanilla",
     # Historial universal de documentos (2026-10-07): lo escriben
     # subir-documento/reutilizar-documento, jamás el front.
     "historialDocumentos",
@@ -2393,10 +2452,12 @@ CAMPOS_DOCUMENTO_PROTEGIDOS = {
     # Catálogo de ángulos de las fotos (2026-10-14): lo escribe subir-fotos.
     "fotosVehiculo",
     # SEGUNDO CONDUCTOR (2026-10-14): sus documentos y su imagen de firma
-    # (mismo blindaje que los del slot 1).
+    # (mismo blindaje que los del slot 1). La planilla propia (2026-11-05)
+    # lleva además su vencimiento y su historial multi-archivo.
     "documentoIdentidadConductor2", "documentoIdentidadConductor2Reverso",
     "licencia2", "licencia2Reverso", "cond2Foto", "cond2CertificacionBancaria",
     "firmaUrl2",
+    "cond2PlanillaSegSocial", "cond2PlanillaVencimiento", "cond2DocumentosPlanilla",
 }
 
 # Referencias laborales adicionales (2026-08-31): la #1 son los campos planos
@@ -2860,7 +2921,7 @@ async def subir_documento(
     # lectura queda solo como fallback cuando no viene fecha manual, y sus
     # datos (eps/arl) no se consumen en ningún formulario del front.
     saltar_lectura = (
-        tipo == "planillaEpsArl" and str(fecha_vencimiento or "").strip()
+        tipo in PLANILLAS_SEGURIDAD_SOCIAL and str(fecha_vencimiento or "").strip()
     )
     lectura_ia = None
     esquema_ia = TIPOS_SUBIDA_LEIBLES.get(tipo)
@@ -2931,12 +2992,14 @@ async def subir_documento(
             if h.get("tipo") == tipo_doc and bool(h.get("reverso")) == es_reverso)
         return f"_v{previas + 1}" if previas else ""
 
-    # Planilla de Seguridad Social: la fecha de VENCIMIENTO es OBLIGATORIA
-    # (2026-10-07) — gana la digitada, cae a la leída por la IA, sin ninguna no
-    # se sube NADA (ni bucket ni Mongo). Con ella el vehículo queda
-    # inhabilitado de la bolsa al vencer.
+    # Planilla de Seguridad Social (la del VEHÍCULO y la del 2º conductor,
+    # 2026-11-05): la fecha de VENCIMIENTO es OBLIGATORIA (2026-10-07) — gana
+    # la digitada, cae a la leída por la IA, sin ninguna no se sube NADA (ni
+    # bucket ni Mongo). Con ella el vehículo queda inhabilitado de la bolsa
+    # al vencer (solo la del vehículo; la del 2º es aviso).
+    campos_planilla = PLANILLAS_SEGURIDAD_SOCIAL.get(tipo)
     fecha_planilla = None
-    if tipo == "planillaEpsArl":
+    if campos_planilla:
         fecha_planilla, _origen_fecha = _fecha_vencimiento_planilla(
             fecha_vencimiento,
             (lectura_ia or {}).get("datos", {}).get("fecha_vencimiento"))
@@ -2947,7 +3010,7 @@ async def subir_documento(
 
     set_inicial = {tipo: url_archivo}
     if fecha_planilla:
-        set_inicial["planillaVencimiento"] = fecha_planilla
+        set_inicial[campos_planilla["vencimiento"]] = fecha_planilla
     set_inicial.update({g: url_archivo for g in gemelos})
 
     # Reverso (solo docs de dos caras): se guarda con su propio campo y URL.
@@ -2968,10 +3031,10 @@ async def subir_documento(
         set_inicial[f"{tipo}Reverso"] = url_reverso
         set_inicial.update({f"{g}Reverso": url_reverso for g in gemelos})
 
-    # Planilla de Seguridad Social (2026-10-07): se ACTUALIZA MENSUALMENTE →
-    # cada carga ACUMULA en `documentosPlanillaSegSocial` (nada se reemplaza,
-    # mismo patrón de los PDFs de estudio) y `planillaEpsArl` queda como
-    # espejo de la ÚLTIMA (compat: gate de documentos, paso 3 del conductor
+    # Planillas de Seguridad Social (2026-10-07; 2º conductor 2026-11-05): se
+    # ACTUALIZAN MENSUALMENTE → cada carga ACUMULA en su historial (nada se
+    # reemplaza, mismo patrón de los PDFs de estudio) y el campo espejo queda
+    # apuntando a la ÚLTIMA (compat: gate de documentos, paso 3 del conductor
     # e históricos). Además, TODA subida de CUALQUIER documento entra al
     # `historialDocumentos` universal (ver _sufijo_version arriba).
     fecha_carga = datetime.utcnow()
@@ -2998,8 +3061,8 @@ async def subir_documento(
             "$each": entradas_historial, "$position": 0, "$slice": -200,
         }
     }
-    if tipo == "planillaEpsArl":
-        pushes["documentosPlanillaSegSocial"] = {
+    if campos_planilla:
+        pushes[campos_planilla["historial"]] = {
             "$each": [{
                 "ruta": url_archivo,
                 "fecha": fecha_carga,
@@ -3020,9 +3083,10 @@ async def subir_documento(
     # EXCEPCIONES: documentos que son ADJUNTOS de actualización periódica, no
     # datos del conductor — NO sacan un aprobado de la bolsa:
     #  - Hoja de Vida FÍSICA (2026-10-01): la sube Seguridad (casos históricos).
-    #  - Planilla de Seguridad Social (2026-10-07): se renueva CADA MES —
-    #    bajar el vehículo a re-revisión por subirla lo inhabilitaba sin razón.
-    TIPOS_SIN_REVISION = {"hojaVidaFisica", "planillaEpsArl"}
+    #  - Planillas de Seguridad Social (2026-10-07): se renuevan CADA MES —
+    #    bajar el vehículo a re-revisión por subirlas lo inhabilitaba sin
+    #    razón (incluye la del 2º conductor, 2026-11-05).
+    TIPOS_SIN_REVISION = {"hojaVidaFisica"} | set(PLANILLAS_SEGURIDAD_SOCIAL)
     if tipo not in TIPOS_SIN_REVISION:
         campos_diff = [{"campo": tipo, "antes": vehiculo.get(tipo) or "(ninguno)", "despues": url_archivo}]
         campos_diff += [
@@ -3039,8 +3103,9 @@ async def subir_documento(
 
     # (2026-10-14) La planilla es el documento que se elimina/re-sube sin
     # generar re-revisión: si el vehículo estaba inhabilitado en
-    # en_actualizacion POR eliminarla y ya no falta nada, se rehabilita solo.
-    if tipo == "planillaEpsArl":
+    # en_actualizacion POR eliminarla y ya no falta nada, se rehabilita solo
+    # (también la del 2º conductor, 2026-11-05).
+    if campos_planilla:
         _rehabilitar_tras_planilla(placa, editado_por)
 
     if lectura_ia:
@@ -4215,14 +4280,16 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
     # original, no el intermedio).
     estado_previo = vehiculo.get("estadoIntegra")
 
-    # Planilla en VARIOS archivos (2026-10-19): el paso 3 y el visor pueden
-    # pedir borrar UN archivo concreto del historial (la EPS o la ARL), no el
-    # espejo (último). Se borran su blob y su entrada; el espejo y el
-    # vencimiento pasan a la entrada más reciente que quede (o se limpian si
-    # no queda ninguna — con el alta por eliminación de siempre).
-    if tipo == "planillaEpsArl" and url:
+    # Planilla en VARIOS archivos (2026-10-19; 2º conductor 2026-11-05): el
+    # paso 3 y el visor pueden pedir borrar UN archivo concreto del historial
+    # (la EPS o la ARL), no el espejo (último). Se borran su blob y su
+    # entrada; el espejo y el vencimiento pasan a la entrada más reciente que
+    # quede (o se limpian si no queda ninguna — con el alta por eliminación
+    # de siempre). Los campos se derivan del mapa PLANILLAS_SEGURIDAD_SOCIAL.
+    campos_planilla = PLANILLAS_SEGURIDAD_SOCIAL.get(tipo)
+    if campos_planilla and url:
         objetivo = _nombre_blob_de_ruta(str(url).split("?")[0])
-        historial = vehiculo.get("documentosPlanillaSegSocial") or []
+        historial = vehiculo.get(campos_planilla["historial"]) or []
         entrada = next(
             (e for e in historial
              if _nombre_blob_de_ruta(str(e.get("ruta") or "")) == objetivo),
@@ -4234,16 +4301,16 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
         restantes = [e for e in historial if e is not entrada]
         if restantes:
             operacion_planilla: dict = {
-                "$pull": {"documentosPlanillaSegSocial": {"ruta": entrada["ruta"]}},
+                "$pull": {campos_planilla["historial"]: {"ruta": entrada["ruta"]}},
                 "$set": {
-                    "planillaEpsArl": restantes[0]["ruta"],
-                    "planillaVencimiento": restantes[0].get("vence"),
+                    campos_planilla["espejo"]: restantes[0]["ruta"],
+                    campos_planilla["vencimiento"]: restantes[0].get("vence"),
                 },
             }
         else:
             operacion_planilla = {
-                "$pull": {"documentosPlanillaSegSocial": {"ruta": entrada["ruta"]}},
-                "$unset": {"planillaEpsArl": "", "planillaVencimiento": ""},
+                "$pull": {campos_planilla["historial"]: {"ruta": entrada["ruta"]}},
+                "$unset": {campos_planilla["espejo"]: "", campos_planilla["vencimiento"]: ""},
             }
         coleccion_vehiculos.update_one({"placa": placa}, operacion_planilla)
         _registrar_auditoria(
@@ -4285,13 +4352,13 @@ async def eliminar_documento(placa: str, tipo: str, editado_por: Optional[str] =
         unset_campos[g] = None
 
     operacion: dict = {"$unset": unset_campos}
-    # Planilla de Seguridad Social (2026-10-14, caso QVK730): su entrada del
-    # historial apunta a un blob recién borrado y el vencimiento dejó de
-    # aplicar — sin esto el bloque de /revision la seguía listando como
-    # VENCIDA para siempre pese a NO existir.
-    if tipo == "planillaEpsArl":
-        operacion["$pull"] = {"documentosPlanillaSegSocial": {"ruta": url_previa}}
-        unset_campos["planillaVencimiento"] = None
+    # Planilla de Seguridad Social (2026-10-14 caso QVK730; 2º conductor
+    # 2026-11-05): su entrada del historial apunta a un blob recién borrado y
+    # el vencimiento dejó de aplicar — sin esto el bloque de /revision la
+    # seguía listando como VENCIDA para siempre pese a NO existir.
+    if campos_planilla:
+        operacion["$pull"] = {campos_planilla["historial"]: {"ruta": url_previa}}
+        unset_campos[campos_planilla["vencimiento"]] = None
     coleccion_vehiculos.update_one({"placa": placa}, operacion)
 
     campos_diff = [{"campo": tipo, "antes": url_previa, "despues": "(eliminado)"}]
@@ -4437,10 +4504,21 @@ def exportar_excel_vehiculos():
         ("Remolque PBV máx (kg)", lambda d: _v(d, "RemolPbvMax")),
         # Documentos y tracking
         # El total sube a +1 cuando el vehículo tiene remolque (la tarjeta de
-        # remolque es obligatoria adicional, fuera de DOCUMENTOS_REQUERIDOS).
+        # remolque es obligatoria adicional, fuera de DOCUMENTOS_REQUERIDOS) y
+        # a +7 cuando hay 2º conductor vinculado (sus docs exigidos entran al
+        # gate de _documentos_faltantes — incluye su planilla, 2026-11-05).
         ("Docs. cargados", lambda d: (
             lambda total: f"{total - len(_documentos_faltantes(d))}/{total}"
-        )(len(DOCUMENTOS_REQUERIDOS) + (1 if _tiene_remolque(d) else 0))),
+        )(
+            len(DOCUMENTOS_REQUERIDOS)
+            # Remolque declarado: Tarjeta del remolque + cédula del dueño
+            # (frente y reverso; figura empresa NIT sin cédula — 2026-11-05).
+            + (1 if _tiene_remolque(d) else 0)
+            + (2 if _tiene_remolque(d)
+               and not _es_empresa_figura(d, "RemolDuenoTipoDocumento") else 0)
+            # Segundo conductor vinculado: sus documentos exigidos.
+            + (len(DOCUMENTOS_REQUERIDOS_CONDUCTOR2) if d.get("idConductor2") else 0)
+        )),
         ("Fotos", lambda d: len(d.get("fotos") or [])),
         ("Estudios vigencia vence", lambda d: _fecha((d.get("estudiosVigencia") or {}).get("vence"))),
         ("Última corrida", lambda d: _resumen_ultima_corrida(d)),
@@ -4998,6 +5076,7 @@ def obtener_vehiculos_incompletos(id_usuario: Optional[str] = None, bandeja: Opt
     proyeccion = None if consulta_placa else {
         "auditoriaVehiculo": 0, "historialDocumentos": 0,
         "lecturasIA": 0, "documentosPlanillaSegSocial": 0,
+        "cond2DocumentosPlanilla": 0,
     }
     vehiculos_raw = list(
         coleccion_vehiculos.find(filtro, proyeccion)

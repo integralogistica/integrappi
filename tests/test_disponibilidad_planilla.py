@@ -184,6 +184,20 @@ class PlanillaVencidaDisponibilidadTests(unittest.TestCase):
         self.assertTrue(por_placa["ABC123"]["planillaVencida"])
         self.assertFalse(por_placa["XYZ987"]["planillaVencida"])
 
+    def test_planilla_del_conductor2_vencida_NO_bloquea(self):
+        """Planilla PROPIA del 2º conductor (2026-11-05, decisión del usuario):
+        VENCIDA avisa en la ficha de /revision pero NO inhabilita el vehículo —
+        el check-in sigue gobernado SOLO por la planilla del vehículo."""
+        fake_disp = FakeDisp([])
+        veh = _vehiculo(EN_10_DIAS)  # planilla del VEHÍCULO vigente
+        veh["idConductor2"] = "cond-2"
+        veh["cond2PlanillaVencimiento"] = AYER  # la del 2º, vencida
+        fake_veh = FakeVeh([veh])
+        with patch.object(disponibilidad, "coleccion_disponibilidades", fake_disp), \
+             patch.object(disponibilidad, "coleccion_vehiculos", fake_veh):
+            resp = self._checkin()
+        self.assertEqual(resp.status_code, 200, resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()

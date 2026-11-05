@@ -430,5 +430,118 @@ class WasapSeguridadTests(unittest.TestCase):
             vehiculos.enviar_notificacion_seguridad("TEST01", "PEDRO")  # no debe lanzar
 
 
+class PlanillaConductor2Tests(unittest.TestCase):
+    """Planilla de Seguridad Social PROPIA del 2º conductor (2026-11-05,
+    pedido del usuario): espejo completo de la del vehículo — multi-archivo
+    con historial `cond2DocumentosPlanilla`, espejo `cond2PlanillaSegSocial`
+    (el doc EXIGIDO por el gate) y vencimiento `cond2PlanillaVencimiento`
+    (VENCIDA avisa en la ficha pero NO inhabilita el vehículo: decisión del
+    usuario — el check-in sigue gobernado SOLO por la planilla del vehículo)."""
+
+    def setUp(self):
+        self.client = cliente_de_prueba()
+
+    def _subir(self, fake, nombre="planilla_cond2.pdf", fecha="__default__"):
+        from datetime import date, timedelta
+        if fecha == "__default__":
+            fecha = (date.today() + timedelta(days=10)).isoformat()
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"):
+            return self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "cond2PlanillaSegSocial",
+                      "extraer": "false", "fecha_vencimiento": fecha},
+                files={"archivo": (nombre, b"pdf", "application/pdf")},
+            )
+
+    def _eliminar(self, url):
+        return self.client.delete(
+            "/vehiculos/eliminar-documento",
+            params={"placa": "TEST01", "tipo": "cond2PlanillaSegSocial", "url": url},
+        )
+
+    def test_subidas_acumulan_y_el_espejo_es_la_ultima(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado",
+                               "idConductor2": "cond-2"}])
+        r1 = self._subir(fake, "eps_cond2.pdf")
+        r2 = self._subir(fake, "arl_cond2.pdf")
+        self.assertEqual(r1.status_code, 200, r1.text)
+        self.assertEqual(r2.status_code, 200, r2.text)
+        doc = fake.documents[0]
+        historial = doc["cond2DocumentosPlanilla"]
+        self.assertEqual(len(historial), 2)          # ACUMULA (EPS + ARL separadas)
+        self.assertEqual(doc["cond2PlanillaSegSocial"], r2.json()["ruta"])  # espejo = última
+        self.assertTrue(doc["cond2PlanillaVencimiento"])                    # vence de la última
+        # No toca la planilla del VEHÍCULO ni la del slot 1.
+        self.assertNotIn("documentosPlanillaSegSocial", doc)
+        self.assertNotIn("planillaVencimiento", doc)
+
+    def test_sin_fecha_es_400(self):
+        fake = FakeColeccion([{"placa": "TEST01", "idConductor2": "cond-2"}])
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "subir_a_google_storage",
+                          side_effect=lambda a, n: f"Vehiculos/{n}"):
+            resp = self.client.put(
+                "/vehiculos/subir-documento",
+                data={"placa": "TEST01", "tipo": "cond2PlanillaSegSocial", "extraer": "false"},
+                files={"archivo": ("p.pdf", b"pdf", "application/pdf")},
+            )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_subir_no_baja_un_aprobado(self):
+        """Como la del vehículo: se renueva cada mes, NO saca al aprobado de
+        la bolsa."""
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        resp = self._subir(fake)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(fake.documents[0]["estadoIntegra"], "aprobado")
+        self.assertNotIn("historialCambios", fake.documents[0])
+
+    def test_borrar_un_archivo_reasigna_espejo(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        r1 = self._subir(fake, "eps_cond2.pdf")
+        r2 = self._subir(fake, "arl_cond2.pdf")
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "eliminar_de_google_storage") as mock_del:
+            resp = self._eliminar(r2.json()["ruta"])
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_del.assert_called_once_with(r2.json()["ruta"])
+        doc = fake.documents[0]
+        self.assertEqual(doc["cond2PlanillaSegSocial"], r1.json()["ruta"])  # espejo → la restante
+        self.assertEqual([h["ruta"] for h in doc["cond2DocumentosPlanilla"]],
+                         [r1.json()["ruta"]])
+        self.assertEqual(doc["estadoIntegra"], "aprobado")  # queda un archivo: no inhabilita
+
+    def test_borrar_el_ultimo_limpia_y_baja_a_actualizacion(self):
+        fake = FakeColeccion([{"placa": "TEST01", "estadoIntegra": "aprobado"}])
+        r1 = self._subir(fake, "eps_cond2.pdf")
+        r2 = self._subir(fake, "arl_cond2.pdf")
+        with patch.object(vehiculos, "coleccion_vehiculos", fake), \
+             patch.object(vehiculos, "coleccion_disponibilidades", MagicMock()), \
+             patch.object(vehiculos, "eliminar_de_google_storage"), \
+             patch.object(vehiculos, "enviar_notificacion_seguridad"), \
+             patch.object(vehiculos, "_notificar_padrinos"), \
+             patch.object(vehiculos, "_disparar_estudios_seguridad"):
+            self._eliminar(r1.json()["ruta"])
+            self._eliminar(r2.json()["ruta"])
+        doc = fake.documents[0]
+        self.assertNotIn("cond2PlanillaSegSocial", doc)
+        self.assertNotIn("cond2PlanillaVencimiento", doc)
+        self.assertEqual(doc["cond2DocumentosPlanilla"], [])
+        self.assertEqual(doc["estadoIntegra"], "en_actualizacion")  # doc exigido fuera
+
+    def test_campos_blindados_y_en_gate(self):
+        # Blindaje contra actualizar-informacion y el front.
+        self.assertIn("cond2DocumentosPlanilla", vehiculos.CLAVES_PROTEGIDAS)
+        for campo in ("cond2PlanillaSegSocial", "cond2PlanillaVencimiento",
+                      "cond2DocumentosPlanilla"):
+            self.assertIn(campo, vehiculos.CAMPOS_DOCUMENTO_PROTEGIDOS)
+        # Doc exigido SOLO con slot 2 vinculado.
+        self.assertIn("cond2PlanillaSegSocial", vehiculos.DOCUMENTOS_REQUERIDOS_CONDUCTOR2)
+        # NO recortable (espejo del historial, igual que planillaEpsArl).
+        self.assertNotIn("cond2PlanillaSegSocial", vehiculos.CAMPOS_RECORTABLES)
+
+
 if __name__ == "__main__":
     unittest.main()

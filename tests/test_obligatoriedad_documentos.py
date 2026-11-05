@@ -276,8 +276,13 @@ class DocumentosFaltantesTests(unittest.TestCase):
         Remolque pasa a ser OBLIGATORIA (2026-10-06, pedido del usuario)."""
         v = vehiculo_completo(tarjetaRemolque=None, RemolPlaca="RMT123")
         self.assertIn("tarjetaRemolque", vehiculos._documentos_faltantes(v))
-        # Con la tarjeta cargada, no hay faltante.
-        v2 = vehiculo_completo(RemolPlaca="RMT123", RemolAlto="4")
+        # Con la tarjeta cargada, no hay faltante (la cédula del dueño acompaña
+        # desde 2026-11-05: se incluye para que el [] sea del caso completo).
+        v2 = vehiculo_completo(
+            RemolPlaca="RMT123", RemolAlto="4",
+            documentoIdentidadRemolque="https://x/19",
+            documentoIdentidadRemolqueReverso="https://x/19r",
+        )
         self.assertEqual(vehiculos._documentos_faltantes(v2), [])
         # Cualquier dato del remolque dispara la exigencia (no solo la placa).
         v3 = vehiculo_completo(tarjetaRemolque=None, RemolDuenoDocumento="55444333")
@@ -285,6 +290,37 @@ class DocumentosFaltantesTests(unittest.TestCase):
         # Basura no cuenta como remolque declarado.
         v4 = vehiculo_completo(tarjetaRemolque=None, RemolPlaca="null")
         self.assertEqual(vehiculos._documentos_faltantes(v4), [])
+
+    def test_cedula_dueno_remolque_obligatoria_con_remolque(self):
+        """Con remolque declarado, la cédula del dueño (frente + reverso) es
+        OBLIGATORIA (2026-11-05, pedido del usuario): la tarjeta del remolque
+        ya se exige y sin la cédula no hay verificación de identidad (409 de
+        PARES_IDENTIDAD) ni identidad para el estudio de seguridad."""
+        v = vehiculo_completo(RemolPlaca="RMT123")
+        faltantes = vehiculos._documentos_faltantes(v)
+        self.assertIn("documentoIdentidadRemolque", faltantes)
+        self.assertIn("documentoIdentidadRemolqueReverso", faltantes)
+        # Con la cédula completa (frente + reverso), no hay faltante.
+        v2 = vehiculo_completo(
+            RemolPlaca="RMT123",
+            documentoIdentidadRemolque="https://x/19",
+            documentoIdentidadRemolqueReverso="https://x/19r",
+        )
+        self.assertEqual(vehiculos._documentos_faltantes(v2), [])
+        # El frente SOLO no satisface: el reverso sigue faltando (misma regla
+        # de las demás cédulas, 2026-08-27).
+        v3 = vehiculo_completo(RemolPlaca="RMT123",
+                               documentoIdentidadRemolque="https://x/19")
+        self.assertIn("documentoIdentidadRemolqueReverso",
+                      vehiculos._documentos_faltantes(v3))
+        # Dueño EMPRESA (NIT): la cédula no existe → no se exige.
+        v4 = vehiculo_completo(RemolPlaca="RMT123",
+                               RemolDuenoTipoDocumento="NIT")
+        self.assertEqual(vehiculos._documentos_faltantes(v4), [])
+        # Sin remolque declarado no se exige.
+        v5 = vehiculo_completo(documentoIdentidadRemolque=None,
+                               documentoIdentidadRemolqueReverso=None)
+        self.assertEqual(vehiculos._documentos_faltantes(v5), [])
 
     def test_poliza_rc_y_cert_bancaria_propietario_opcionales(self):
         # 2026-08-31: dejan de exigirse; siguen cargables pero no bloquean.

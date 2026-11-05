@@ -6,7 +6,8 @@ Cubre:
   vinculacion directa de cuenta activa, solicitante de Seguridad).
 - aceptar-invitacion derivando el slot por correo (links viejos sin slot).
 - desvincular-conductor por slot (limpia vinculación + firma, conserva cond2*).
-- _documentos_faltantes: los 6 docs del 2º SOLO si idConductor2 vinculado.
+- _documentos_faltantes: los 7 docs del 2º (incluye su planilla propia,
+  2026-11-05) SOLO si idConductor2 vinculado.
 - Firma por slot: llenar cond2* NO rompe el hash del slot 1; verificar slot 2.
 - sujetos_estudio: rol conductor2 + dedup con el conductor 1.
 """
@@ -398,7 +399,7 @@ class GateConductor2Tests(unittest.TestCase):
         faltantes = vehiculos._documentos_faltantes(_vehiculo_docs_completos())
         self.assertEqual(faltantes, [])
 
-    def test_con_conductor2_exige_los_seis(self):
+    def test_con_conductor2_exige_los_siete(self):
         doc = _vehiculo_docs_completos()
         doc["idConductor2"] = "cond-2"
         faltantes = vehiculos._documentos_faltantes(doc)
@@ -406,6 +407,8 @@ class GateConductor2Tests(unittest.TestCase):
             sorted(faltantes),
             sorted(vehiculos.DOCUMENTOS_REQUERIDOS_CONDUCTOR2),
         )
+        # La planilla PROPIA del 2º conductor está en el gate (2026-11-05).
+        self.assertIn("cond2PlanillaSegSocial", faltantes)
 
     def test_docs_del_conductor2_completos_pasan(self):
         doc = _vehiculo_docs_completos()

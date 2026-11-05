@@ -173,9 +173,10 @@ def get_mis_indicadores(usuario: str = Query(..., description="Nombre de usuario
     con_dashboard = {
         cfg.get("nit"): cid for cid, cfg in CLIENTES.items() if cfg.get("nit")
     }
-    if perfil == "ADMIN":
+    if perfil in ("ADMIN", "VISUALIZADOR"):
         # ADMIN siempre ve todo: TODOS los dashboards publicados (sin depender
-        # de su asignación clientes_siscore).
+        # de su asignación clientes_siscore). VISUALIZADOR (2026-11-05) igual:
+        # es solo lectura interno y no maneja asignación clientes_siscore.
         clientes = [
             {
                 "nit": nit or "",
@@ -975,6 +976,10 @@ def get_guias_cliente(
                                description="(2026-11-03) Filtro por tipo de servicio (fórmula BB del Excel "
                                            "OT real): CARGA, SERVICIO TECNICO, RECOLECCION, DEVOLUCION, "
                                            "MUESTRA DE CALIDAD; repetir el parámetro para varios"),
+    sin_filas: bool = Query(False,
+                               description="(2026-11-05) No adjuntar la 1ª página de filas (~148KB): la usa "
+                                           "el portal externo, que no renderiza la tabla del informe. "
+                                           "filas=[] y paginacion.total = guías del filtro"),
 ):
     """Informe de guías PostgreSQL puro (2026-10-29): TODO sale de
     ``informe_guias_tms`` (antes Mongo media milla + JOIN por guía).
@@ -1002,7 +1007,7 @@ def get_guias_cliente(
             raise HTTPException(status_code=422, detail=f"Tipo de servicio desconocido: {', '.join(sorted(invalidos))}")
 
     clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "", dia or "",
-             tuple(sorted(destinatario or [])), tuple(sorted(tipo_servicio or [])))
+             tuple(sorted(destinatario or [])), tuple(sorted(tipo_servicio or [])), sin_filas)
     ahora = _time.monotonic()
     hit = _CACHE_GUIAS.get(clave)
     if hit and ahora - hit[0] < _CACHE_TTL:
@@ -1061,14 +1066,20 @@ def get_guias_cliente(
             if f.get("estado") == ESTADO_ENTREGADO and f.get("ciudad_destino")
         }
 
-        pagina, total = pagina_guias_cliente(
-            nombres, anio or [], mes or [], LIMITE_PAGINA, 0,
-            tipos_servicio=tipo_servicio,
-        )
-        for f in pagina:
-            f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
-        _calcular_ot_filas(pagina)
-        _adjuntar_novedades(pagina)
+        # (2026-11-05) sin_filas: sin la 1ª página (el portal externo no
+        # renderiza la tabla — sus exports traen las filas por /guias/filas).
+        # Ahorra ~148KB de payload Y el segundo cálculo de OT de la página.
+        if sin_filas:
+            pagina, total = [], len(minimas)
+        else:
+            pagina, total = pagina_guias_cliente(
+                nombres, anio or [], mes or [], LIMITE_PAGINA, 0,
+                tipos_servicio=tipo_servicio,
+            )
+            for f in pagina:
+                f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
+            _calcular_ot_filas(pagina)
+            _adjuntar_novedades(pagina)
 
         payload = {
             "cliente": cliente["nombre"],
@@ -1095,8 +1106,11 @@ def get_guias_cliente(
             "serie_diaria": _serie_ot(minimas, 10),
             # (2026-10-30) OT por ciudad destino / destinatario (portal de
             # clientes): barras horizontales del período filtrado.
+            # (2026-11-05) Destinatarios con TOP 100: el año Kabi trae ~1.350
+            # (180KB — la mitad del payload) y nadie hace scroll más allá de
+            # unos decenas; ciudades van completas (pocas, ~15KB).
             "ot_por_ciudad": _ot_por_campo(minimas, "ciudad_destino"),
-            "ot_por_destinatario": _ot_por_campo(minimas, "destinatario"),
+            "ot_por_destinatario": _ot_por_campo(minimas, "destinatario", top=100),
             "filas": pagina,
             "paginacion": {
                 "pagina": 1,
