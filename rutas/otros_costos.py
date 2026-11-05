@@ -182,6 +182,7 @@ col_clientes = db["clientes_otros_costos"]                 # catálogo de client
 col_causales = db["causales_otros_costos"]                 # catálogo de tipos de costo (formulario)
 col_proveedores = db["proveedores_otros_costos"]           # catálogo de proveedores (formulario)
 col_bancos = db["bancos_otros_costos"]                     # catálogo de bancos: nombre + código
+col_aforadores = db["aforadores_otros_costos"]             # (2026-11-04) catálogo de aforadores (auto-alimentado por uso)
 
 # Índices (idempotentes al importar, igual patrón que siscore_consultas.py).
 # `consecutivo` unique en activos → anti-colisión en la generación del consecutivo.
@@ -207,6 +208,11 @@ for _col in (col_activos, col_historico, col_anulados):
         _col.create_index([("created_at", -1)], name=f"idx_oc_created_{_col.name}")
     except Exception:
         pass
+# (2026-11-04) Catálogo de aforadores: unique por nombre (anti-duplicados).
+try:
+    col_aforadores.create_index([("nombre", 1)], unique=True, name="idx_oc_aforadores_nombre")
+except Exception as _e:
+    logger.warning(f"[OTROS_COSTOS] No se pudo crear índice unique 'nombre' en aforadores: {_e}")
 
 
 # ── Utilidades de tiempo ──────────────────────────────────────────────────────
@@ -1081,6 +1087,30 @@ def _subir_adjuntos(archivos: List[UploadFile], consecutivo: str, info: dict) ->
 
 
 # ── Validaciones (spec §8) ────────────────────────────────────────────────────
+def _registrar_aforadores(costos: List["CostoConcepto"]):
+    """(2026-11-04) Alimenta el catálogo `aforadores_otros_costos`: cada nombre
+    de aforador usado en una solicitud queda disponible para el autocompletar
+    del formulario. Upsert idempotente; best-effort (un fallo NO bloquea el
+    guardado de la solicitud, sólo queda en log)."""
+    try:
+        ahora = _ahora_utc()
+        for c in costos:
+            nombre = (c.aforador or "").strip()
+            if not nombre:
+                continue
+            col_aforadores.update_one(
+                {"nombre": nombre},
+                {
+                    "$setOnInsert": {"nombre": nombre, "creado_en": ahora},
+                    "$set": {"ultimo_uso": ahora},
+                    "$inc": {"usos": 1},
+                },
+                upsert=True,
+            )
+    except Exception as e:
+        logger.warning(f"[OTROS_COSTOS] No se pudo registrar aforador(es) en el catálogo: {e}")
+
+
 def _validar_solicitud(
     datos_servicio: "DatosServicio",
     costos: List["CostoConcepto"],
@@ -1112,6 +1142,12 @@ def _validar_solicitud(
             raise HTTPException(
                 status_code=422,
                 detail="El proveedor es obligatorio en los conceptos de CARGUE y DESCARGUE.",
+            )
+        # (2026-11-04) Aforador (concepto AFORO): campos opcionales; teléfono 7-15 dígitos.
+        if (c.telefono_aforador or "") and not (7 <= len(c.telefono_aforador) <= 15):
+            raise HTTPException(
+                status_code=422,
+                detail="El teléfono del aforador debe tener entre 7 y 15 dígitos.",
             )
         valor_total += _a_numero(c.valor)
 
@@ -1303,11 +1339,18 @@ class CostoConcepto(BaseModel):
     valor: float = 0
     proveedor: str = ""  # opcional por concepto; OBLIGATORIO en CARGUE/DESCARGUE (catálogo `proveedores_otros_costos`)
     oc_proveedor: str = ""  # orden de compra del proveedor; opcional, sólo aplica cuando hay proveedor
+    aforador: str = ""  # (2026-11-04) nombre del aforador; opcional, sólo para AFORO (en ese tipo NO se usa proveedor)
+    telefono_aforador: str = ""  # (2026-11-04) teléfono del aforador; opcional, sólo dígitos (7-15)
 
-    @field_validator("descripcion", "proveedor", "oc_proveedor", mode="before")
+    @field_validator("descripcion", "proveedor", "oc_proveedor", "aforador", mode="before")
     @classmethod
     def _upper(cls, v):
         return _norm_upper(v)
+
+    @field_validator("telefono_aforador", mode="before")
+    @classmethod
+    def _digitos_tel(cls, v):
+        return _norm_digitos(v)
 
 
 class DatosServicio(BaseModel):
@@ -1636,6 +1679,16 @@ async def proveedores():
     return [d.get("nombre", "") for d in docs if d.get("nombre")]
 
 
+@router.get("/aforadores")
+async def aforadores():
+    """(2026-11-04) Nombres de aforadores usados en solicitudes, para el
+    autocompletar del campo «Aforador» (concepto AFORO). El catálogo se
+    auto-alimenta al crear/editar solicitudes; orden: más usados primero.
+    Editable directo en Mongo (documentos `{nombre, usos, ultimo_uso}`)."""
+    docs = list(col_aforadores.find({}, {"_id": 0, "nombre": 1}).sort([("usos", -1), ("nombre", 1)]))
+    return [d.get("nombre", "") for d in docs if d.get("nombre")]
+
+
 @router.get("/mi-alcance")
 async def mi_alcance(usuario: str = Query(...)):
     """Alcance de aprobación por cliente del usuario que consulta (para el chip
@@ -1759,6 +1812,8 @@ async def crear_solicitud(
     requiere_control = valor_total > LIMITE_COORDINADOR
     ahora = _ahora_utc()
     estado = "pendiente_aprobacion" if req.enviar else "borrador"
+    # (2026-11-04) Los aforadores usados alimentan el catálogo del autocompletar.
+    _registrar_aforadores(req.costos)
 
     obs_creacion = f"Solicitud creada con {len(archivos)} adjunto(s)" if archivos else "Solicitud creada"
     doc = {
@@ -1856,6 +1911,10 @@ async def editar_solicitud(
 
     valor_total = _validar_solicitud(datos_servicio, costos, datos_bancarios, conductor, doc.get("pedido_encontrado", True))
     requiere_control = valor_total > LIMITE_COORDINADOR
+    # (2026-11-04) Sólo si la edición trajo costos (evita inflar `usos` en
+    # ediciones que no tocan conceptos).
+    if req.costos is not None:
+        _registrar_aforadores(costos)
 
     # Adjuntos: los existentes se conservan salvo los que el usuario quitó del
     # formulario (adjuntos_eliminar, comparados por ruta de blob), y los nuevos
@@ -2449,7 +2508,8 @@ async def exportar_excel(req: ExportarExcelRequest):
 
     columnas = [
         "Consecutivo", "Pedido Vulcano", "Cliente", "Placa", "Manifiesto",
-        "Tipo de Costo", "Descripción", "Proveedor", "OC Proveedor", "Valor",
+        "Tipo de Costo", "Descripción", "Proveedor", "OC Proveedor",
+        "Aforador", "Teléfono Aforador", "Valor",
         "Valor Despues Retenciones",
         "Usuario Creación", "Usuario Aprobación",
         "Rol Aprobación", "Usuario Pago", "Estado Final", "Fecha Creación",
@@ -2483,10 +2543,12 @@ async def exportar_excel(req: ExportarExcelRequest):
                 "descripcion": (c.get("descripcion") or "").strip(),
                 "proveedor": (c.get("proveedor") or "").strip(),
                 "oc_proveedor": (c.get("oc_proveedor") or "").strip(),
+                "aforador": (c.get("aforador") or "").strip(),
+                "telefono_aforador": (c.get("telefono_aforador") or "").strip(),
                 "valor": _a_numero(c.get("valor")),
             }
             for c in costos
-        ] or [{"tipo": "", "descripcion": "", "proveedor": "", "oc_proveedor": "", "valor": 0}]
+        ] or [{"tipo": "", "descripcion": "", "proveedor": "", "oc_proveedor": "", "aforador": "", "telefono_aforador": "", "valor": 0}]
         for idx, concepto in enumerate(conceptos):
             fila = [
                 d.get("consecutivo", ""),
@@ -2498,6 +2560,8 @@ async def exportar_excel(req: ExportarExcelRequest):
                 concepto["descripcion"],
                 concepto["proveedor"],
                 concepto["oc_proveedor"],
+                concepto["aforador"],
+                concepto["telefono_aforador"],
                 concepto["valor"],
                 d.get("valor_despues_retenciones") if idx == 0 else None,
                 (d.get("creado_por", {}) or {}).get("usuario", ""),

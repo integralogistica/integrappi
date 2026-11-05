@@ -61,7 +61,8 @@ class ExcelOtrosCostosTests(unittest.TestCase):
                 "consecutivo": "MEDELLIN-OC-0001",
                 "datos_servicio": {"cliente": "FRESENIUS KABI", "placa": "ABC123"},
                 "costos": [
-                    {"tipo_costo": "AFORO", "descripcion": "Aforo en patios", "valor": 50000},
+                    {"tipo_costo": "AFORO", "descripcion": "Aforo en patios", "valor": 50000,
+                     "aforador": "JUAN PEREZ", "telefono_aforador": "3101234567"},
                     {"tipo_costo": "DESCARGUE", "descripcion": "Descargue nocturno", "valor": 80000},
                 ],
                 "created_at": "2026-10-20T10:00:00",
@@ -104,6 +105,20 @@ class ExcelOtrosCostosTests(unittest.TestCase):
         self.assertEqual(ws.cell(row=3, column=col_desc).value, "Aforo en patios")
         self.assertEqual(ws.cell(row=4, column=col_tipo).value, "DESCARGUE")
         self.assertEqual(ws.cell(row=4, column=col_desc).value, "Descargue nocturno")
+
+    def test_columnas_aforador(self):
+        """(2026-11-04) Aforador y teléfono del aforador salen en el Excel junto
+        a Proveedor/OC Proveedor; vacíos para conceptos que no los tienen."""
+        ws, headers = self._hoja()
+        self.assertIn("Aforador", headers)
+        self.assertIn("Teléfono Aforador", headers)
+        col_af = headers.index("Aforador") + 1
+        col_tel = headers.index("Teléfono Aforador") + 1
+        # Fila del AFORO (fila 3): datos del aforador; fila del DESCARGUE (4): vacíos.
+        self.assertEqual(ws.cell(row=3, column=col_af).value, "JUAN PEREZ")
+        self.assertEqual(ws.cell(row=3, column=col_tel).value, "3101234567")
+        self.assertEqual(ws.cell(row=4, column=col_af).value or "", "")
+        self.assertEqual(ws.cell(row=4, column=col_tel).value or "", "")
 
 
 if __name__ == "__main__":
