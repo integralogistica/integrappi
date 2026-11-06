@@ -865,7 +865,12 @@ async def get_consulta_guia(
 
     from Funciones.siscore_ws_tracking import consultar_guia_ws
     try:
-        payload = await consultar_guia_ws(g, timeout_seconds=30.0)
+        # (2026-11-06) El WS de Siscore está respondiendo la consulta real
+        # (token válido) en 40-90s — con 30s daba ReadTimeout y el bot de WA
+        # "funcionaba lento" porque espera más. Timeout holgado + 1 SOLO
+        # intento: reintentar una consulta de 40s solo multiplica la espera
+        # (antes: 3×30s ≈ 95s → 503 garantizado).
+        payload = await consultar_guia_ws(g, timeout_seconds=90.0, max_intentos=1)
     except Exception as e:
         logger.exception(f"[indicadores-cliente] Error consultando guía {g} en Siscore")
         # Al portal entran clientes externos: mensaje genérico (el detalle

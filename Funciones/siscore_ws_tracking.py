@@ -153,7 +153,7 @@ async def _probar_proxy_si_aplica(proxy_url: Optional[str]) -> None:
         print("❌ PROXY_TEST ERROR:", repr(e), flush=True)
 
 
-async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dict[str, Any]:
+async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0, max_intentos: int = 3) -> Dict[str, Any]:
     if not SISCORE_SOAP_TOKEN:
         raise RuntimeError("Falta SISCORE_SOAP_TOKEN en variables de entorno.")
 
@@ -192,9 +192,12 @@ async def consultar_guia_ws(num_guia: str, timeout_seconds: float = 20.0) -> Dic
         print(f"➡️ DEST_IPS: {', '.join(ips)}", flush=True)
 
     # ✅ Test rápido del proxy (para diagnóstico). Si no lo quieres, bórralo.
-    await _probar_proxy_si_aplica(proxy_url)
+    # (2026-11-06) DESACTIVADO en el flujo: sumaba una llamada extra ANTES de
+    # cada consulta (hasta 20s con el WS lento de Siscore). Queda disponible
+    # para ejecutar a mano si se diagnostica el proxy.
+    # await _probar_proxy_si_aplica(proxy_url)
 
-    max_intentos = 3
+    max_intentos = max(1, int(max_intentos))
     last_err: Optional[str] = None
     text: Optional[str] = None
 
