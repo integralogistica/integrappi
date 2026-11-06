@@ -918,8 +918,10 @@ async def get_consulta_guia(
         }
     # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
     # remesa que viajó junta) — solo conocible desde el TMS.
+    # (2026-11-05) SOLO las del cliente del dashboard (pg_nombres): el vehículo
+    # comparte viaje entre clientes y el portal no debe descubrir guías ajenas.
     if tms.get("placa") and tms.get("fecha_emision"):
-        companeras = guias_placa_dia(tms["placa"], tms["fecha_emision"], g)
+        companeras = guias_placa_dia(tms["placa"], tms["fecha_emision"], g, cliente.get("pg_nombres"))
         for cp in companeras:
             cp["estado"], _ = _normalizar_estado(cp.get("estado"))
         payload["misma_placa"] = companeras

@@ -321,11 +321,21 @@ def guia_tms_placa(guia: str):
         return None
 
 
-def guias_placa_dia(placa: str, fecha_emision: str, excluir_guia: str):
+def guias_placa_dia(placa: str, fecha_emision: str, excluir_guia: str, nombres_cliente: list | None = None):
     """(2026-10-30) OTRAS guías del mismo vehículo (placa) emitidas el MISMO
     día — la remesa que viajó junto con la consultada. Solo se sabe en
-    ``informe_guias_tms``. [] ante cualquier error (no rompe la consulta)."""
-    sql = """
+    ``informe_guias_tms``. [] ante cualquier error (no rompe la consulta).
+
+    (2026-11-05) ``nombres_cliente``: lista de ``nombre_cliente`` del TMS —
+    si viene, SOLO se listan las guías de ese cliente. El vehículo comparte
+    viaje entre clientes (p. ej. Kabi + Medical Care) y el portal externo no
+    debe descubrir guías ajenas: sin el filtro, «Otras guías del vehículo»
+    revelaba números de guía de otros clientes que luego se pueden consultar."""
+    filtro_nombres = "AND nombre_cliente = ANY(%s)" if nombres_cliente else ""
+    params: list = [placa, fecha_emision, excluir_guia]
+    if nombres_cliente:
+        params.append(list(nombres_cliente))
+    sql = f"""
         SELECT guia,
                NULLIF(TRIM(destinatario), '') AS destinatario,
                NULLIF(TRIM(ciudad_destino), '') AS ciudad_destino,
@@ -334,12 +344,13 @@ def guias_placa_dia(placa: str, fecha_emision: str, excluir_guia: str):
         WHERE TRIM(placa) = %s
           AND fecha_emision = %s
           AND guia <> %s
+          {filtro_nombres}
         ORDER BY guia;
     """
     try:
         with _conexion() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, [placa, fecha_emision, excluir_guia])
+                cur.execute(sql, params)
                 return [dict(f) for f in cur.fetchall()]
     except Exception:
         logger.exception("[bd_postgres] Error buscando guías de la placa %s", placa)
