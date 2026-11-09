@@ -71,6 +71,12 @@ logger = logging.getLogger(__name__)
 # guía: {guia, fecha_cita (string 'YYYY-MM-DD'), actualizado_el}.
 col_citas = bd_cliente["integra"]["citas_kabi"]
 
+# (2026-11-09) Citas de Entrega registradas a MANO en /CitasEntrega: la fecha
+# GANA sobre citas_agendadas en el veredicto OT (ver _mapa_citas_entrega) y en
+# /consulta-guia viaja el bloque `cita_entrega` (fecha, franja, quién la
+# asignó y re-agendas previas) para la Trazabilidad del portal.
+col_citas_entrega = bd_cliente["integra"]["citas_entrega"]
+
 # (2026-10-29) Portal «Mis Indicadores» (perfil CLIENTE): usuarios y catálogo
 # de clientes asignables (la asignación vive en baseusuarios.clientes_siscore).
 col_usuarios = bd_cliente["integra"]["baseusuarios"]
@@ -452,6 +458,18 @@ def _mapa_citas_agendadas() -> dict:
     })
 
 
+def _mapa_citas_entrega() -> dict:
+    """{guia: fecha ISO} de las citas de entrega registradas a MANO en
+    /CitasEntrega (`citas_entrega`: fecha + franja horaria del cliente) —
+    GANA sobre citas_agendadas (fórmula BN) cuando existe; borrada la manual,
+    el OT vuelve a citas_agendadas. La franja horaria NO participa: el OT
+    compara dates. El router citas_entrega.py invalida esta entrada de cache
+    en cada escritura (ver _limpiar_caches_ot ahí)."""
+    return _cache_tabla("citas_entrega", bd_cliente["integra"]["citas_entrega"], lambda c: {
+        d["guia"]: d["fecha"] for d in c.find({}, {"_id": 0, "guia": 1, "fecha": 1})
+    })
+
+
 def _mapa_novedades_siscore() -> dict:
     """{guia: MOTIVO} del reporte de novedades de Siscore (`novedades_siscore`,
     importado del Excel real — 856 guías). Es la fuente de la fórmula BP: VLOOKUP
@@ -585,7 +603,8 @@ def _calcular_ot_filas(filas: list) -> None:
     guía, así nunca divergen.
 
     Setea EN SITIO: tipo_servicio, tipo_st, ruta, fecha_promesa, origen_promesa
-    (CITA|TARIFA|FALLBACK|null), dias_promesa, dias_habiles, cumple_novedad, ot.
+    (CITA|TARIFA|FALLBACK|null), cita_entrega (fecha manual de /CitasEntrega o
+    null), dias_promesa, dias_habiles, cumple_novedad, ot.
 
     Diferencias clave vs la versión anterior:
     - Las guías SIN entregar SÍ se juzgan: la referencia pasa a ser HOY (una
@@ -595,7 +614,9 @@ def _calcular_ot_filas(filas: list) -> None:
     - Cualquier novedad del TMS (≠ 'CITA RECHAZADA POR TIEMPOS DE TRANSITO')
       auto-cumple («Cumple con novedad»); CITA RECHAZADA compara la PROMESA.
     - Con cita se compara la CITA; sin cita la PROMESA; sin promesa evaluable
-      (p. ej. estado CON NOVEDAD sin novedad en el texto) → ot null."""
+      (p. ej. estado CON NOVEDAD sin novedad en el texto) → ot null.
+    - (2026-11-09) La CITA MANUAL de /CitasEntrega (`citas_entrega`) GANA sobre
+      citas_agendadas; borrada la manual, vuelve a citas_agendadas."""
     if not filas:
         return
     hoy = date.today()
@@ -603,6 +624,8 @@ def _calcular_ot_filas(filas: list) -> None:
     # (2026-10-31) CITASACT del Excel real (citas_agendadas): fuente EXACTA de
     # la fórmula BN — GANA sobre el TMS (trae re-agendadas que el TMS no refleja).
     citas_act = _mapa_citas_agendadas()
+    # (2026-11-09) Cita manual de /CitasEntrega: GANA sobre citas_agendadas.
+    citas_man = _mapa_citas_entrega()
 
     tiempos_carga = _mapa_tiempos_carga()
     tiempos_st = _mapa_tiempos_st()
@@ -691,11 +714,14 @@ def _calcular_ot_filas(filas: list) -> None:
                 f_promesa = inicial + timedelta(days=f_dias or 0)
                 origen = "FALLBACK"
 
-        # ── 7. CITA — SOLO citas_agendadas (CITASACT del Excel, fórmula BN).
-        #     Ni el TMS fecha_cita ni citas_kabi: traen valores distintos
-        #     (re-agendadas) que hacen divergir el veredicto del Excel real.
-        #     Guías nuevas sin entrada → sin cita → se compara la PROMESA. ──
-        cita = _fecha_servible(citas_act.get(guia))
+        # ── 7. CITA — la MANUAL de /CitasEntrega GANA (2026-11-09: fecha +
+        #     franja registrada por el operativo); si no hay, CITASACT del
+        #     Excel (citas_agendadas, fórmula BN). Ni el TMS fecha_cita ni
+        #     citas_kabi: traen valores distintos (re-agendadas) que hacen
+        #     divergir el veredicto del Excel real. Guías nuevas sin entrada
+        #     → sin cita → se compara la PROMESA. ──
+        cita_manual = _fecha_servible(citas_man.get(guia))
+        cita = cita_manual or _fecha_servible(citas_act.get(guia))
 
         # ── 8. CUMPLIMIENTO OT (fórmula BK): referencia = entrega ó HOY ──
         entrega = _fecha_servible(f.get("fecha_entrega"))
@@ -720,6 +746,11 @@ def _calcular_ot_filas(filas: list) -> None:
         f["dias_promesa"] = f_dias
         f["fecha_promesa"] = f_promesa.isoformat() if f_promesa else None
         f["origen_promesa"] = origen
+        # (2026-11-09) Fecha de la cita manual de /CitasEntrega cuando existe
+        # (aditivo — el veredicto de arriba ya la tuvo en cuenta) y la cita
+        # con la que SE JUZGÓ la guía (manual o agendada), para trazabilidad.
+        f["cita_entrega"] = cita_manual.isoformat() if cita_manual else None
+        f["fecha_cita_usada"] = cita.isoformat() if cita else None
         f["dias_habiles"] = _dias_habiles_entre(inicial, entrega) if inicial and entrega else None
         f["cumple_novedad"] = f_cumple_nov
         f["ot"] = f_ot
@@ -848,6 +879,15 @@ import re as _re_guias
 _GUIA_PATTERN = _re_guias.compile(r"^[A-Za-z0-9\-]{4,30}$")
 
 
+def _guia_ya_entregada(payload: dict) -> bool:
+    """(2026-11-09) ¿La guía ya se entregó según el WS de Siscore? Mismo
+    criterio del frontend (``index.tsx``: Estado con 'ENTREGA') más
+    'DIGITALIZADA' (entrega con soporte gráfico). No se usa ``ot.entregada``
+    porque depende de que la guía exista en el TMS con fecha de emisión."""
+    estado = str((payload.get("data") or {}).get("Estado") or "").upper()
+    return "ENTREGA" in estado or "DIGITALIZADA" in estado
+
+
 @router.get("/{cliente_id}/consulta-guia")
 async def get_consulta_guia(
     cliente_id: str,
@@ -918,6 +958,10 @@ async def get_consulta_guia(
             "fecha_entrega": fila_ot.get("fecha_entrega"),
             "fecha_promesa": fila_ot.get("fecha_promesa"),
             "origen_promesa": fila_ot.get("origen_promesa"),
+            # (2026-11-09) La CITA con la que se juzgó (manual de /CitasEntrega
+            # o agendada) y si fue manual — la Trazabilidad del portal la muestra.
+            "fecha_cita_usada": fila_ot.get("fecha_cita_usada"),
+            "cita_manual": bool(fila_ot.get("cita_entrega")),
             "dias_habiles": fila_ot.get("dias_habiles"),
             "entregada": fila_ot.get("estado") == ESTADO_ENTREGADO,
         }
@@ -930,6 +974,20 @@ async def get_consulta_guia(
         for cp in companeras:
             cp["estado"], _ = _normalizar_estado(cp.get("estado"))
         payload["misma_placa"] = companeras
+    # (2026-11-09) ¿Dónde está el VEHÍCULO? — solo para guías NO entregadas:
+    # última posición GPS de la placa según Monitor (Mayasoft, api monitor.pdf).
+    # Mismo criterio de "entregada" que el frontend (Estado con ENTREGA o
+    # DIGITALIZADA). Un fallo de Monitor JAMÁS rompe la consulta (que ya
+    # tardó 40-90s en el SOAP): queda en log y el panel no aparece.
+    if tms.get("placa") and not _guia_ya_entregada(payload):
+        try:
+            from Funciones.monitor_ws import consultar_vehiculo_monitor
+            payload["vehiculo"] = await consultar_vehiculo_monitor(tms["placa"])
+        except Exception:
+            logger.warning(
+                "[indicadores-cliente] Error consultando ubicación en Monitor de la placa %s (guía %s)",
+                tms.get("placa"), g, exc_info=True,
+            )
     # (2026-10-30) ¿La guía tiene novedad JUSTIFICADA registrada?
     # (novedades_justificadas_ot — las que cargan en /NovedadesOT).
     nov = col_novedades_ot.find_one(
@@ -944,6 +1002,42 @@ async def get_consulta_guia(
             "justificacion": nov.get("justificacion"),
             "nombre": por.get("nombre") or por.get("usuario"),
             "fecha": fecha_por.isoformat()[:10] if hasattr(fecha_por, "isoformat") else fecha_por,
+        }
+    # (2026-11-09) ¿Tiene CITA DE ENTREGA registrada a mano (/CitasEntrega)?
+    # La fecha vigente es la que se usó para el veredicto OT de arriba; las
+    # re-agendas anteriores viajan en `anteriores[]` (con quién las asignó)
+    # para que el cliente vea la trazabilidad completa de la cita.
+    cita_doc = col_citas_entrega.find_one(
+        {"guia": g},
+        {"fecha": 1, "hora_inicio": 1, "hora_fin": 1, "creado_por": 1,
+         "actualizado_por": 1, "updated_at": 1, "historial": 1, "_id": 0},
+    )
+    if cita_doc:
+        por = cita_doc.get("actualizado_por") or cita_doc.get("creado_por") or {}
+        anteriores = []
+        # Últimas 10, de la MÁS RECIENTE a la más antigua (el array es
+        # append-order: se toma la cola y se invierte). Cada entrada es el
+        # CAMBIO completo {previo, nuevo, por, fecha_cambio}; las entradas
+        # viejas (planas: solo el valor anterior) se normalizan a previo.
+        for h in (cita_doc.get("historial") or [])[-10:][::-1]:
+            if not isinstance(h, dict):
+                continue
+            quien = h.get("por") or {}
+            f_cambio = quien.get("fecha") or h.get("fecha_cambio")
+            previo = h.get("previo") or {k: h.get(k) for k in ("fecha", "hora_inicio", "hora_fin")}
+            anteriores.append({
+                "previo": previo,
+                "nuevo": h.get("nuevo"),
+                "nombre": quien.get("nombre") or quien.get("usuario"),
+                "cambiada": f_cambio.isoformat()[:10] if hasattr(f_cambio, "isoformat") else f_cambio,
+            })
+        payload["cita_entrega"] = {
+            "fecha": cita_doc.get("fecha"),
+            "hora_inicio": cita_doc.get("hora_inicio"),
+            "hora_fin": cita_doc.get("hora_fin"),
+            "nombre": por.get("nombre") or por.get("usuario"),
+            "fecha_asignada": cita_doc.get("updated_at").isoformat()[:10] if hasattr(cita_doc.get("updated_at"), "isoformat") else cita_doc.get("updated_at"),
+            "anteriores": anteriores,
         }
     return {"success": True, "data": payload}
 

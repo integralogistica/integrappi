@@ -275,21 +275,22 @@ async def guardar(datos: NovedadIN, usuario: str = Query(...)):
         "actualizado_por": auditoria,
         "updated_at": ahora,
     }
+    # ⚠️ El append al historial va en $push — $each NO es válido dentro de
+    # $set (Mongo guarda el dict literal y el historial deja de ser lista).
+    update: dict = {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}}
     if previo:
-        cambio["historial"] = {
-            "$each": [{
-                "causal": previo.get("causal"),
-                "justificacion": previo.get("justificacion"),
-                "por": auditoria,
-                "fecha": ahora,
-            }],
-            "$slice": -20,
+        update["$push"] = {
+            "historial": {
+                "$each": [{
+                    "causal": previo.get("causal"),
+                    "justificacion": previo.get("justificacion"),
+                    "por": auditoria,
+                    "fecha": ahora,
+                }],
+                "$slice": -20,
+            },
         }
-    col_novedades.update_one(
-        {"guia": guia},
-        {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}},
-        upsert=True,
-    )
+    col_novedades.update_one({"guia": guia}, update, upsert=True)
     _auditar(
         "actualizacion" if previo else "creacion",
         info, guia,
@@ -413,21 +414,21 @@ async def importar_excel(usuario: str = Query(...), archivo: UploadFile = File(.
                 "actualizado_por": auditoria,
                 "updated_at": ahora,
             }
+            # ⚠️ historial por $push (no $set — ver comentario de /guardar).
+            update: dict = {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}}
             if previo:
-                cambio["historial"] = {
-                    "$each": [{
-                        "causal": previo.get("causal"),
-                        "justificacion": previo.get("justificacion"),
-                        "por": auditoria,
-                        "fecha": ahora,
-                    }],
-                    "$slice": -20,  # cap: los últimos 20 cambios por guía
+                update["$push"] = {
+                    "historial": {
+                        "$each": [{
+                            "causal": previo.get("causal"),
+                            "justificacion": previo.get("justificacion"),
+                            "por": auditoria,
+                            "fecha": ahora,
+                        }],
+                        "$slice": -20,  # cap: los últimos 20 cambios por guía
+                    },
                 }
-            ops.append(UpdateOne(
-                {"guia": guia},
-                {"$set": cambio, "$setOnInsert": {"creado_por": auditoria, "created_at": ahora}},
-                upsert=True,
-            ))
+            ops.append(UpdateOne({"guia": guia}, update, upsert=True))
             docs_auditoria.append({
                 "accion": "actualizacion" if previo else "creacion",
                 "guia": guia,

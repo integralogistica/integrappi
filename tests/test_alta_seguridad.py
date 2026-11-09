@@ -42,6 +42,9 @@ class _CursorFake(list):
     def limit(self, _n):
         return self
 
+    def skip(self, n):
+        return _CursorFake(self[n:])
+
 
 def _match_documento(d, filtro):
     """Match genérico: igualdad, $regex (con $options i) y $or (para /buscar)."""

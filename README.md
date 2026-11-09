@@ -877,6 +877,80 @@ Campo **`oc_proveedor`** (orden de compra del proveedor) por concepto de costo, 
 - **Excel histórico** (`/exportar-excel`): columna nueva **«OC Proveedor»** junto a «Proveedor» en la fila por concepto (vacía en docs anteriores al campo).
 - **Frontend** (`OtrosCostosP`): input «OC del proveedor ({PROVEEDOR})» a ancho completo debajo de la fila del concepto, visible sólo con proveedor lleno (mayúsculas, máx 50 car.); columna «OC Proveedor» en la tabla de conceptos del modal de detalle. Docs viejos lo muestran como `-`. Requiere deploy de backend y frontend.
 
+## Actualizaciones Recientes (2026-11-09)
+
+### Nuevo módulo: Citas de Entrega (`rutas/citas_entrega.py`)
+
+Registro MANUAL de la cita de entrega de una guía — **fecha + franja horaria**
+(hora inicio/fin en la que el cliente puede recibir) — desde `/CitasEntrega`
+(menú hamburguesa, `Paginas/CitasEntregaP`). La fecha registrada **GANA sobre
+`citas_agendadas`** en el veredicto OT de `_calcular_ot_filas`
+(`indicadores_cliente.py`): nueva función `_mapa_citas_entrega` con
+precedencia manual → agendada; borrada la manual, el OT vuelve a la agendada.
+La franja horaria NO participa del cálculo (el OT compara dates). La fila del
+OT lleva los campos aditivos `cita_entrega` (fecha manual) y
+`fecha_cita_usada` (la cita con la que SE juzgó); `origen_promesa` sigue
+siendo «CITA» (el frontend compara ese literal).
+
+- **Re-agendas**: una guía puede tener VARIAS fechas de cita — subir la misma
+  guía con una fecha nueva (mismo archivo o carga posterior) deja la NUEVA
+  vigente y la anterior en `historial[]` con quién la asignó; **siempre la
+  última es la que usa el OT**. Filas idénticas al estado actual → `sin_cambio`
+  (no escriben). El módulo muestra badge «🔁 N» y la tabla de cambios en el
+  modal (más reciente primero); `/consulta-guia` (Trazabilidad del portal)
+  devuelve `payload.cita_entrega` {fecha, franja, nombre de quién la asignó,
+  anteriores[] (más reciente primero)} y `payload.ot.fecha_cita_usada`/
+  `cita_manual`.
+
+**Colecciones** (base `integra`, una-colección-un-propósito): `citas_entrega`
+(UNA por guía, índice unique; `{guia, fecha 'YYYY-MM-DD', hora_inicio,
+hora_fin 'HH:MM', creado_por, actualizado_por, historial[] cap 20}`),
+`citas_eliminadas` (las BORRADAS con el doc completo + `eliminada_por`/
+`eliminada_el` — auditoría de quién borró qué; patrón anulados_otros_costos)
+y `auditoria_citas_entrega` (append-only, el borrado guarda el doc completo).
+
+**Endpoints** (prefix `/citas-entrega`, perfiles ADMIN/COORDINADOR/CONTROL/
+OPERATIVO vía `_resolver_usuario` de otros_costos): `GET /` (paginado + q),
+`POST /guardar` (upsert por guía; cada entrada de `historial[]` es el CAMBIO
+completo {previo, nuevo, por, fecha_cambio}), `DELETE /eliminar` (mueve el doc
+completo a `citas_eliminadas`), `GET /eliminadas` (auditoría, ADMIN/CONTROL),
+`POST /importar-excel`
+(**todo-o-nada**: fecha **dd/mm/aaaa** plana (o ISO o celda datetime), horas
+HH:MM con 'H:MM' normalizado, franja inicio ≤ fin; UNA fila inválida → 422
+con `errores[]` y NO se guarda nada; escritura bulk_write lotes 1000 en
+`asyncio.to_thread`), `GET /exportar`, `GET /plantilla` (público; columna
+«FECHA (DD/MM/AAAA)» con celda de fecha real DD/MM/YYYY — sin fila de nota,
+que rompería el todo-o-nada al subir la plantilla sin limpiar),
+`GET /auditoria` (ADMIN/CONTROL).
+
+⚠️ Cada escritura limpia **DOS caches** (`_limpiar_caches_ot`):
+`_CACHE_GUIAS` (TTL 300 s) y la entrada `citas_entrega` de `_CACHE_TABLAS`
+(TTL 600 s) — sin la segunda, el cambio del OT tarda hasta 10 min en verse.
+
+⚠️ **Trampa Mongo ($each en $set)**: el append al `historial` NO puede ir como
+`{'$each': [...]}` dentro de `$set` — Mongo guarda el dict literal y el campo
+deja de ser lista (el frontend no muestra nada, sin error). Bug detectado y
+corregido el mismo día en `citas_entrega.py` **y en `novedades_ot.py`** (que
+lo tenía latente): el historial se reescribe COMPLETO por `$set` con la lista
+saneada por `_historial_lista` (recupera las entradas de los dicts corruptos
+→ cada guardado AUTO-REPARA el doc; además `reparar_historial_citas.py`
+arregla todos los docs de una vez, idempotente).
+
+Tests: `tests/test_citas_entrega_ot.py` (15: precedencia, fallback,
+None-safe, re-agendas, auto-reparación, eliminadas+permisos, plantilla
+dd/mm/aaaa, Excel todo-o-nada). Dep backend + frontend JUNTOS.
+
+## Actualizaciones Recientes (2026-11-09, 2.ª tanda)
+
+### Ubicación del vehículo (API Monitor/Mayasoft) en la Trazabilidad del portal
+
+`GET /indicadores-cliente/{id}/consulta-guia` ahora adjunta **`payload["vehiculo"]`** — la última posición GPS del vehículo de la placa de la guía según la **API Monitor de Mayasoft** (contrato `api monitor.pdf`, DD-EST-02) — **SOLO cuando la guía NO está entregada** (mismo criterio del frontend: `Estado` con `ENTREGA` o `DIGITALIZADA`, helper `_guia_ya_entregada`). El panel «🚛 Ubicación del vehículo» del portal (Trazabilidad) pinta ubicación textual, velocidad/estado GPS, reporte GPS, ETA y **mapa embebido** de Google Maps.
+
+- **`Funciones/monitor_ws.py` (nuevo)**: cliente httpx async, contrato **no lanza** (`consultar_vehiculo_monitor(placa, transport=None)` → `{ok, existe, vehiculo{...}}`). Login POST form-urlencoded con **token cacheado** (`asyncio.Lock` + `time.monotonic`, TTL configurable); re-login + 1 reintento ante 401/403. De la lista de manifiestos por placa elige el **vigente** (`delivered != "Finalizado"`, más reciente; si todos finalizados, el último). Devuelve saneado (`placa, manifiesto, estado_viaje, conductor, ubicacion, lat, lng, fecha_reporte_gps, velocidad, estado_gps, eta_fecha, eta_distancia_km`) — nunca el historial `location[]` completo. `trust_env=False`, sin proxy. `transport=` inyectable para tests (patrón `RNDCClient`).
+- **Degración total**: sin `MONITOR_*` en env → `{ok: False, sin_credenciales}` (solo log); cualquier fallo de Monitor queda en `logger.warning` y **NO rompe la consulta de la guía** (que ya tardó 40-90s en el SOAP).
+- **Env vars**: `MONITOR_BASE_URL` (default `https://integra.mayasoft.ai` — ⚠️ el PDF muestra `monitorpiloto`/`monitorqa` en los ejemplos pero el ambiente real de Integra es `integra`; probado 2026-11-09 con usuario `INTEGRA`), `MONITOR_USER`, `MONITOR_PASSWORD`, `MONITOR_TIMEOUT_S` (20), `MONITOR_TOKEN_TTL_S` (1500), `MONITOR_AUTH_SCHEME` (vacío = token tal cual en el header — así funciona en `integra.mayasoft.ai`). Sonda de prueba: `python scripts/probar_monitor.py <placa|guía>` (resuelve guía→placa en el TMS como el portal).
+- Tests: `tests/test_monitor_ws.py` (12: cache de token, re-login 401, selección de manifiesto, saneado, sin credenciales, endpoint — guía entregada no consulta, fallo no rompe). Suite: 955 OK. Dep backend + frontend JUNTOS.
+
 ## Actualizaciones Recientes (2026-10-31)
 
 ### Indicadores — Rework TOTAL del On Time replicando el Excel operativo real
