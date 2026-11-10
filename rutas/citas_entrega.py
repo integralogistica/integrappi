@@ -187,6 +187,7 @@ def _limpiar_caches_ot() -> None:
     try:
         from rutas import indicadores_cliente as ic
         ic._CACHE_GUIAS.clear()
+        ic._CACHE_PENDIENTES.clear()  # (2026-11-10) /pendientes usa las citas como límite
         ic._CACHE_TABLAS.pop("citas_entrega", None)
     except Exception as e:
         logger.warning(f"[CITAS_ENTREGA] No se pudieron limpiar los caches OT: {e}")

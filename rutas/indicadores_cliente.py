@@ -84,6 +84,11 @@ col_clientes_siscore = bd_cliente["integra"]["clientes_siscore"]
 # (2026-10-29) Novedades justificadas OT (gestión en /novedades-ot): una guía
 # justificada sale de su estado TMS y pasa al segmento «justificadas».
 col_novedades_ot = bd_cliente["integra"]["novedades_justificadas_ot"]
+# (2026-11-10) Guías ANULADAS detectadas al consultar el WS de Siscore EN
+# VIVO: ⚠️ el informe del TMS NUNCA trae 'ANULADA' (deja el último estado,
+# p. ej. 'Transito Nacional' — caso 801232571). Una guía registrada acá
+# auto-cumple como «Con novedad» en el OT, igual que si el informe lo dijera.
+col_guias_anuladas = bd_cliente["integra"]["guias_anuladas"]
 
 # Perfiles autorizados a cargar el Excel de citas.
 PERFILES_CARGA_CITAS = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL"}
@@ -482,6 +487,17 @@ def _mapa_novedades_siscore() -> dict:
     })
 
 
+def _mapa_guias_anuladas() -> dict:
+    """{guia (MAYÚSCULAS): detectada_el} de las guías anuladas según el WS de
+    Siscore en vivo (``guias_anuladas``): las detecta ``/consulta-guia`` al
+    consultarlas en la Trazabilidad — el informe del TMS nunca trae 'ANULADA'
+    (caso 801232571, quedó 'Transito Nacional'). En el OT cuentan igual que
+    un estado ANULADA del informe: «Con novedad» que auto-cumple."""
+    return _cache_tabla("guias_anuladas", col_guias_anuladas, lambda c: {
+        str(d["guia"]).upper(): d.get("detectada_el") for d in c.find({}, {"_id": 0, "guia": 1})
+    })
+
+
 def _mapa_tiempos_carga() -> dict:
     """Tablas de CARGA: {'par': {(municipio, dpto): días 2026}, 'mun':
     {municipio: días cuando es único o todos los dptos coinciden}} — el índice
@@ -561,8 +577,12 @@ def _ciudad_y_dpto(fila: dict, usar_origen: bool) -> tuple:
 # Estados reales del TMS (verificados contra la tabla). Cualquier otro valor
 # ('', '0000-00-00', 'planilla normal', …) → estado null + estado_crudo para
 # diagnóstico/export (antes eran "sin_info" por no estar en el JOIN de Mongo).
+# (2026-11-10) ANULADA entra al catálogo: el servicio se canceló — en el OT
+# auto-cumple como «Con novedad» (ver _calcular_ot_filas) y deja de caer a
+# Pendientes/sin_info. Caso 801232571.
 _ESTADOS_TMS = {e.upper(): e for e in (
     "ENTREGADO", "CON NOVEDAD", "PENDIENTE", "En distribucion", "Transito Nacional",
+    "ANULADA",
 )}
 
 
@@ -606,11 +626,14 @@ def _calcular_ot_filas(filas: list) -> None:
 
     Setea EN SITIO: tipo_servicio, tipo_st, ruta, fecha_promesa, origen_promesa
     (CITA|TARIFA|FALLBACK|null), cita_entrega (fecha manual de /CitasEntrega o
-    null), dias_promesa, dias_habiles, cumple_novedad, ot.
+    null), dias_promesa, dias_habiles, cumple_novedad, ot, ot_pendiente,
+    ot_pendiente_vencida.
 
     Diferencias clave vs la versión anterior:
-    - Las guías SIN entregar SÍ se juzgan: la referencia pasa a ser HOY (una
-      guía en curso cuenta como CUMPLE mientras su cita/promesa no venza).
+    - (2026-11-10) Las guías SIN entregar NO se juzgan contra HOY: van al
+      segmento «Pendientes» (ot_pendiente) y quedan FUERA del % OT; se marca
+      ot_pendiente_vencida cuando su cita/promesa ya pasó sin entrega. Las en
+      curso CON novedad siguen auto-cumpliendo («Con novedad»).
     - Días de promesa desde las tablas del Excel (tiempos_entrega /
       tiempos_entrega_st), con fallback NACIONAL 12 / URBANO 8.
     - Cualquier novedad del TMS (≠ 'CITA RECHAZADA POR TIEMPOS DE TRANSITO')
@@ -632,6 +655,9 @@ def _calcular_ot_filas(filas: list) -> None:
     tiempos_carga = _mapa_tiempos_carga()
     tiempos_st = _mapa_tiempos_st()
     novedades_siscore = _mapa_novedades_siscore()
+    # (2026-11-10) Anuladas detectadas por el WS de Siscore en vivo (el
+    # informe del TMS nunca trae 'ANULADA').
+    anuladas_siscore = _mapa_guias_anuladas()
 
     for f in filas:
         # ── 1. TIPO DE SERVICIO (fórmula BB del Excel) ──
@@ -725,12 +751,31 @@ def _calcular_ot_filas(filas: list) -> None:
         cita_manual = _fecha_servible(citas_man.get(guia))
         cita = cita_manual or _fecha_servible(citas_act.get(guia))
 
-        # ── 8. CUMPLIMIENTO OT (fórmula BK): referencia = entrega ó HOY ──
+        # ── 8. CUMPLIMIENTO OT (fórmula BK): referencia = entrega. (2026-11-10)
+        # Las guías EN CURSO (sin fecha de entrega) ya NO se juzgan contra
+        # HOY: van a «Pendientes» (ot_pendiente) y quedan fuera del % OT;
+        # ot_pendiente_vencida distingue las que ya pasaron su cita/promesa
+        # (segmento «Pendientes vencidas»). Las en curso CON novedad de
+        # Siscore/justificada siguen auto-cumpliendo («Con novedad») — la
+        # precedencia la resuelven los consumidores (chequean novedad antes
+        # que ot_pendiente). ──
         entrega = _fecha_servible(f.get("fecha_entrega"))
         referencia = entrega or hoy
         f_cumple_nov = False
         f_ot = None
-        if novedad_txt == "CITA RECHAZADA POR TIEMPOS DE TRANSITO":
+        # (2026-11-10) ANULADA: el servicio se canceló — no es un
+        # incumplimiento del transporte. Auto-cumple como «Con novedad»
+        # (segmento morado: cuenta como cumplida en el % OT) y NO es
+        # pendiente aunque no tenga entrega. Llega del estado del informe O
+        # de guias_anuladas (detectadas por el WS de Siscore en vivo — el
+        # informe NUNCA trae 'ANULADA'; caso 801232571 'Transito Nacional').
+        anulada = (
+            str(f.get("estado") or "").strip().upper() == "ANULADA"
+            or guia in anuladas_siscore
+        )
+        if anulada:
+            f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»: anulada
+        elif novedad_txt == "CITA RECHAZADA POR TIEMPOS DE TRANSITO":
             f_ot = (1 if f_promesa >= referencia else 0) if f_promesa else None
         elif novedad_txt:
             f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»
@@ -739,8 +784,24 @@ def _calcular_ot_filas(filas: list) -> None:
         elif cita:
             f_ot = 1 if cita >= referencia else 0
             origen = "CITA"  # se juzgó la cita, no la promesa
+            # (2026-11-10) La «F. Promesa» de la fila es la fecha con la que SE
+            # JUZGÓ: si ganó la cita, ES la cita (antes viajaba la promesa de
+            # TARIFA con el sello «cita» → el detalle decía 06/11 cuando la
+            # cita real era 09/11 y la Trazabilidad — que usa fecha_cita_usada
+            # — decía 09/11). También hace coherente el «Días vs Promesa» del
+            # export (entrega − cita) con el veredicto. La promesa de tarifa
+            # queda accesible por dias_promesa (los días del destino).
+            f_promesa = cita
         else:
             f_ot = 1 if f_promesa >= referencia else 0
+        if entrega is None and not anulada:
+            ref_pend = cita or f_promesa
+            f_ot = None
+            f["ot_pendiente"] = True
+            f["ot_pendiente_vencida"] = bool(ref_pend and ref_pend < hoy)
+        else:
+            f["ot_pendiente"] = False
+            f["ot_pendiente_vencida"] = False
 
         f["tipo_servicio"] = tipo
         f["tipo_st"] = tipo_st
@@ -756,6 +817,9 @@ def _calcular_ot_filas(filas: list) -> None:
         f["dias_habiles"] = _dias_habiles_entre(inicial, entrega) if inicial and entrega else None
         f["cumple_novedad"] = f_cumple_nov
         f["ot"] = f_ot
+        # (2026-11-10) Marca de anulada (estado del informe O WS en vivo) —
+        # viaja en la fila para chips/Excel del frontend.
+        f["anulada"] = bool(anulada)
 
 
 def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
@@ -828,11 +892,13 @@ def _adjuntar_novedades(filas: list) -> None:
 
 
 def _serie_ot(filas: list, largo: int) -> list:
-    """(2026-10-31) Buckets del gráfico por FECHA DE EMISIÓN con los 4
-    segmentos de VEREDICTO del Excel real: Cumplieron / No cumplieron (incluye
-    guías en curso ya VENCIDAS: el veredicto compara contra HOY) / Con novedad
-    (auto-cumplen: novedad del TMS o justificada manual de /NovedadesOT) /
-    No aplica (sin promesa evaluable). El % OT = (cumplieron + conNovedad) /
+    """(2026-10-31) Buckets del gráfico por FECHA DE EMISIÓN con los
+    segmentos de VEREDICTO del Excel real: Cumplieron / No cumplieron /
+    Con novedad (auto-cumplen: novedad del TMS o justificada manual de
+    /NovedadesOT) / No aplica (sin promesa evaluable). (2026-11-10) + DOS
+    segmentos de guías EN CURSO (sin fecha de entrega), ambos FUERA del %:
+    Pendientes (aún dentro de la cita/promesa) y Pendientes vencidas (ya pasó
+    su cita/promesa sin entrega). El % OT = (cumplieron + conNovedad) /
     (cumplieron + noCumplieron + conNovedad)."""
     buckets: dict = {}
     for f in filas:
@@ -840,10 +906,16 @@ def _serie_ot(filas: list, largo: int) -> list:
         if not clave:
             continue
         b = buckets.setdefault(clave, {
-            "cumplieron": 0, "noCumplieron": 0, "conNovedad": 0, "noAplica": 0,
+            "cumplieron": 0, "noCumplieron": 0, "conNovedad": 0,
+            "pendientes": 0, "pendientesVencidas": 0, "noAplica": 0,
         })
         if f.get("novedad") or f.get("cumple_novedad"):
             b["conNovedad"] += 1
+        elif f.get("ot_pendiente"):
+            if f.get("ot_pendiente_vencida"):
+                b["pendientesVencidas"] += 1
+            else:
+                b["pendientes"] += 1
         elif f.get("ot") == 1:
             b["cumplieron"] += 1
         elif f.get("ot") == 0:
@@ -858,6 +930,8 @@ def _serie_ot(filas: list, largo: int) -> list:
             "cumplieron": b["cumplieron"],
             "noCumplieron": b["noCumplieron"],
             "conNovedad": b["conNovedad"],
+            "pendientes": b["pendientes"],
+            "pendientesVencidas": b["pendientesVencidas"],
             "noAplica": b["noAplica"],
             "evaluables": b["cumplieron"] + b["noCumplieron"] + b["conNovedad"],
             "total": sum(b.values()),
@@ -928,6 +1002,30 @@ async def get_consulta_guia(
         payload["placa"] = tms["placa"]
     if tms.get("ciudad_destino"):
         payload["ciudad_destino_tms"] = tms["ciudad_destino"]
+    # (2026-11-10) ⚠️ El informe del TMS NUNCA trae 'ANULADA' (deja el último
+    # estado, p. ej. 'Transito Nacional' — caso 801232571): si el WS EN VIVO
+    # dice que la guía fue anulada, se persiste en `guias_anuladas` para que
+    # el OT la trate como «Con novedad» (auto-cumple) en TODO el dashboard,
+    # no solo en esta consulta. Solo escribe la PRIMERA vez; limpia los
+    # caches para que el efecto sea inmediato.
+    estado_ws = str((payload.get("data") or {}).get("Estado") or "").upper()
+    if "ANULADA" in estado_ws:
+        try:
+            if not col_guias_anuladas.find_one({"guia": g.upper()}):
+                col_guias_anuladas.insert_one({
+                    "guia": g.upper(),
+                    "estado_siscore": estado_ws,
+                    "detectada_el": datetime.now().isoformat(timespec="seconds"),
+                    "detectada_por": usuario,
+                })
+                _CACHE_TABLAS.pop("guias_anuladas", None)
+                _CACHE_GUIAS.clear()
+                _CACHE_PENDIENTES.clear()
+                logger.info(
+                    f"[indicadores-cliente] Guía {g} ANULADA según el WS — pasa a «Con novedad» en el OT"
+                )
+        except Exception:
+            logger.warning(f"[indicadores-cliente] No se pudo persistir la anulación de {g}", exc_info=True)
     # (2026-10-31) ¿Cumplió la guía el OT? MISMA función del informe
     # (_calcular_ot_filas) sobre la fila del TMS — el veredicto no puede
     # divergir del que ven en el gráfico/tabla. Viaja aparte de
@@ -966,6 +1064,15 @@ async def get_consulta_guia(
             "cita_manual": bool(fila_ot.get("cita_entrega")),
             "dias_habiles": fila_ot.get("dias_habiles"),
             "entregada": fila_ot.get("estado") == ESTADO_ENTREGADO,
+            # (2026-11-10) Guía EN CURSO (sin fecha de entrega): segmento
+            # «Pendientes»/«Pendientes vencidas» — fuera del % OT; `ot` viaja
+            # None para las en curso.
+            "pendiente": bool(fila_ot.get("ot_pendiente")),
+            "pendiente_vencida": bool(fila_ot.get("ot_pendiente_vencida")),
+            # (2026-11-10) Guía ANULADA (estado del informe O detectada por
+            # el WS en vivo): auto-cumple como «Con novedad» — la Trazabilidad
+            # lo muestra con su propio chip (no «Con novedad»).
+            "anulada": bool(fila_ot.get("anulada")),
         }
     # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
     # remesa que viajó junta) — solo conocible desde el TMS.
@@ -981,7 +1088,9 @@ async def get_consulta_guia(
     # Mismo criterio de "entregada" que el frontend (Estado con ENTREGA o
     # DIGITALIZADA). Un fallo de Monitor JAMÁS rompe la consulta (que ya
     # tardó 40-90s en el SOAP): queda en log y el panel no aparece.
-    if tms.get("placa") and not _guia_ya_entregada(payload):
+    # (2026-11-10) Las ANULADAS tampoco: el servicio se canceló, no hay viaje
+    # que seguir.
+    if tms.get("placa") and not _guia_ya_entregada(payload) and not payload.get("ot", {}).get("anulada"):
         try:
             from Funciones.monitor_ws import consultar_vehiculo_monitor
             payload["vehiculo"] = await consultar_vehiculo_monitor(tms["placa"])
@@ -1138,22 +1247,41 @@ def get_guias_cliente(
 
         # Resumen (los ot_* salen de la MISMA pasada — consistencia garantizada).
         entregadas = sum(1 for f in minimas if f.get("estado") == ESTADO_ENTREGADO)
-        en_proceso = sum(1 for f in minimas if f.get("estado") and f["estado"] != ESTADO_ENTREGADO)
+        # (2026-11-10) ANULADA no está "en proceso": es un servicio cancelado
+        # (queda visible en por_estado y auto-cumple como «Con novedad») —
+        # cuenta el estado del informe O la marca del WS en vivo.
+        en_proceso = sum(
+            1 for f in minimas
+            if f.get("estado") and f["estado"] != ESTADO_ENTREGADO
+            and not f.get("anulada")
+        )
         sin_info = sum(1 for f in minimas if not f.get("estado"))
         por_estado = {}
         for f in minimas:
             if f.get("estado"):
                 por_estado[f["estado"]] = por_estado.get(f["estado"], 0) + 1
         # OT (2026-10-31, lógica del Excel real): «con novedad» (TMS o
-        # justificada manual) auto-cumplen — numerador y denominador; las guías
-        # en curso SÍ se juzgan (contra HOY), así que pueden ser cumplidas o
-        # vencidas; No aplica = sin promesa evaluable (fuera del %).
+        # justificada manual) auto-cumplen — numerador y denominador; No
+        # aplica = sin promesa evaluable (fuera del %). (2026-11-10) Las
+        # guías EN CURSO (sin fecha de entrega) van a Pendientes /
+        # Pendientes vencidas y quedan FUERA del % (antes se juzgaban contra
+        # HOY; las vencidas contaban como No cumplieron).
         con_novedad = sum(1 for f in minimas if f.get("novedad") or f.get("cumple_novedad"))
         ot_cumplen = sum(1 for f in minimas if f.get("ot") == 1 and not (f.get("novedad") or f.get("cumple_novedad")))
         # Mismo criterio if/elif de _serie_ot: una guía con novedad va SOLO a
         # con_novedad — si no, entra también aquí y el denominador del
         # ot_pct del tacómetro se infla (97,0 vs 97,3 del gráfico vs meta).
         ot_no_cumplen = sum(1 for f in minimas if f.get("ot") == 0 and not (f.get("novedad") or f.get("cumple_novedad")))
+        ot_pendientes = sum(
+            1 for f in minimas
+            if f.get("ot_pendiente") and not f.get("ot_pendiente_vencida")
+            and not (f.get("novedad") or f.get("cumple_novedad"))
+        )
+        ot_pendientes_vencidas = sum(
+            1 for f in minimas
+            if f.get("ot_pendiente") and f.get("ot_pendiente_vencida")
+            and not (f.get("novedad") or f.get("cumple_novedad"))
+        )
         ot_evaluables = ot_cumplen + ot_no_cumplen + con_novedad
         ot_justificadas = con_novedad
         planillas = {f.get("planilla") for f in minimas if f.get("planilla")}
@@ -1198,6 +1326,8 @@ def get_guias_cliente(
                 "ot_no_cumplen": ot_no_cumplen,
                 "ot_justificadas": ot_justificadas,
                 "ot_con_novedad": con_novedad,
+                "ot_pendientes": ot_pendientes,
+                "ot_pendientes_vencidas": ot_pendientes_vencidas,
                 "ot_no_evaluables": len(minimas) - ot_evaluables,
                 "destinatarios_atendidos": len(dest_atendidos),
                 "ciudades_atendidas": len(ciudades_atendidas),
@@ -1234,6 +1364,132 @@ def get_guias_cliente(
         # Sin fuente Mongo a la que degradar (la tabla PG ES la fuente): 503.
         logger.exception(f"[indicadores-cliente] Error en guías de {cliente_id}")
         raise HTTPException(status_code=503, detail=f"Informe de guías no disponible: {e}")
+
+
+# (2026-11-10) Cache del endpoint /pendientes (pestaña Operación del portal):
+# misma vida que _CACHE_GUIAS y también lo limpia _limpiar_caches_ot (una
+# escritura de citas/novedades puede mover una guía de segmento).
+_CACHE_PENDIENTES: dict = {}
+
+
+def _fila_pendiente(f: dict, hoy: date) -> dict:
+    """Fila de /pendientes: la guía en curso + su LÍMITE (la cita con la que se
+    juzga — manual o agendada — y si no hay, la fecha promesa) y los días
+    calendario desde/hasta ese límite (>0 retraso, <0 aún en plazo)."""
+    limite = f.get("fecha_cita_usada") or f.get("fecha_promesa")
+    dias = None
+    if limite:
+        try:
+            dias = (hoy - date.fromisoformat(str(limite)[:10])).days
+        except ValueError:
+            dias = None
+    return {
+        "guia": f.get("guia"),
+        "nombre_cliente": f.get("nombre_cliente"),
+        "planilla": f.get("planilla"),
+        "destinatario": f.get("destinatario"),
+        "ciudad_destino": f.get("ciudad_destino"),
+        "estado": f.get("estado"),
+        "estado_crudo": f.get("estado_crudo"),
+        "tipo_servicio": f.get("tipo_servicio"),
+        "fecha_emision": f.get("fecha_emision"),
+        "fecha_cita_tms": f.get("fecha_cita"),
+        "fecha_cita_usada": f.get("fecha_cita_usada"),
+        "fecha_promesa": f.get("fecha_promesa"),
+        "origen_limite": "CITA" if f.get("fecha_cita_usada") else ("PROMESA" if f.get("fecha_promesa") else None),
+        "dias_vs_limite": dias,
+    }
+
+
+@router.get("/{cliente_id}/pendientes")
+def get_pendientes_cliente(
+    cliente_id: str,
+    anio: Optional[List[int]] = Query(None, description="(2026-11-10) Mismos filtros que /guias"),
+    mes: Optional[List[int]] = Query(None),
+    grupo: Optional[str] = Query(None, description="(2026-11-10) Sub-grupo del cliente (p. ej. solo FK Servicio Técnico); vacío = todos"),
+    usuario: Optional[str] = Query(None, description="(2026-11-10) Opcional: valida asignación si el consultante es perfil CLIENTE"),
+    destinatario: Optional[List[str]] = Query(None, description="(2026-11-10) Filtro por cliente final (destinatario del TMS)"),
+    tipo_servicio: Optional[List[str]] = Query(None, description="(2026-11-10) Filtro por tipo de servicio (fórmula BB del Excel OT)"),
+):
+    """(2026-11-10) Guías EN CURSO del cliente para la pestaña Operación del
+    portal: las de los segmentos «Pendientes», «Pendientes vencidas» y «No
+    aplica» (sin cita ni promesa evaluable) del OT, cada una con sus días vs
+    el límite (la CITA con la que se juzga — manual de /CitasEntrega o
+    agendada — y si no hay, la fecha PROMESA). RESPETA los
+    mismos filtros del dashboard que /guias (año, mes, grupo, destinatario y
+    tipo de servicio — el portal externo arranca con CARGA por defecto); sin
+    filtros = TODO el histórico. Las en curso CON novedad (reporte Siscore o
+    justificada) quedan fuera: su segmento es «Con novedad», igual que en el
+    gráfico. Orden: vencidas de la MÁS atrasada a la menos; en curso de la
+    que vence primero a la que vence después; No aplica de la más reciente a
+    la más vieja. Cache TTL 300 s (lo limpian las
+    escrituras de citas/novedades)."""
+    cliente = CLIENTES.get(cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail=f"Cliente no registrado: {cliente_id}")
+    if usuario:
+        _verificar_acceso_cliente(usuario, cliente_id, cliente)
+    nombres = _nombres_por_grupo(cliente, grupo)
+    if tipo_servicio:
+        invalidos = {t for t in tipo_servicio if t not in TIPOS_SERVICIO_OT}
+        if invalidos:
+            raise HTTPException(status_code=422, detail=f"Tipo de servicio desconocido: {', '.join(sorted(invalidos))}")
+
+    clave = (cliente_id, tuple(sorted(anio or [])), tuple(sorted(mes or [])), grupo or "",
+             tuple(sorted(destinatario or [])), tuple(sorted(tipo_servicio or [])))
+    ahora = _time.monotonic()
+    hit = _CACHE_PENDIENTES.get(clave)
+    if hit and ahora - hit[0] < _CACHE_TTL:
+        return {"success": True, "data": hit[1], "cache": True}
+
+    try:
+        # Misma pasada de /guias: SQL por año/mes/grupo, destinatario en
+        # Python y el OT con la misma función (de ahí salen los flags
+        # ot_pendiente*); tipo de servicio DESPUÉS del OT (se deriva ahí).
+        minimas = guias_minimas_cliente(nombres, anio or [], mes or [])
+        if destinatario:
+            sel_dest = set(destinatario)
+            minimas = [f for f in minimas if f.get("destinatario") in sel_dest]
+        for f in minimas:
+            f["estado"], f["estado_crudo"] = _normalizar_estado(f.get("estado"))
+        _calcular_ot_filas(minimas)
+        _adjuntar_novedades(minimas)
+        if tipo_servicio:
+            sel_tipos = set(tipo_servicio)
+            minimas = [f for f in minimas if f.get("tipo_servicio") in sel_tipos]
+        hoy = date.today()
+        vencidas, en_curso, no_aplica = [], [], []
+        for f in minimas:
+            if f.get("novedad") or f.get("cumple_novedad") or f.get("anulada"):
+                continue  # segmento «Con novedad» (auto-cumple)
+            if f.get("ot_pendiente"):
+                fila = _fila_pendiente(f, hoy)
+                (vencidas if f.get("ot_pendiente_vencida") else en_curso).append(fila)
+            elif f.get("ot") is None:
+                # (2026-11-10, tarde) «No aplica»: sin cita ni promesa evaluable
+                # (fuera del % OT) — la pestaña Operación la muestra con su
+                # propia card/tabla bajo demanda.
+                no_aplica.append(_fila_pendiente(f, hoy))
+        # Vencidas: la MÁS atrasada primero (sin días al final); en curso: la
+        # que vence primero arriba (sin límite evaluable al final); No aplica:
+        # la más reciente primero.
+        vencidas.sort(key=lambda r: -(r["dias_vs_limite"] if r["dias_vs_limite"] is not None else -10**6))
+        en_curso.sort(key=lambda r: r["dias_vs_limite"] if r["dias_vs_limite"] is not None else 10**6)
+        no_aplica.sort(key=lambda r: r["fecha_emision"] or "", reverse=True)
+        payload = {
+            "cliente": cliente["nombre"],
+            "vencidas": vencidas,
+            "pendientes": en_curso,
+            "no_aplica": no_aplica,
+            "generado": hoy.isoformat(),
+        }
+        _CACHE_PENDIENTES[clave] = (ahora, payload)
+        return {"success": True, "data": payload}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[indicadores-cliente] Error en pendientes de {cliente_id}")
+        raise HTTPException(status_code=503, detail=f"Pendientes no disponibles: {e}")
 
 
 @router.get("/{cliente_id}/guias/filas")
@@ -1511,6 +1767,7 @@ async def cargar_citas(archivo: UploadFile = File(...), perfil: str = Query(""))
 
         # Las citas mueven el OT del informe: fuera la cache de /guias.
         _CACHE_GUIAS.clear()
+        _CACHE_PENDIENTES.clear()
 
         return {
             "success": True,

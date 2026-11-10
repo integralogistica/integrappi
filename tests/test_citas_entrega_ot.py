@@ -112,6 +112,7 @@ class PrecedenciaCitaOTTests(unittest.TestCase):
         with patch.object(indicadores_cliente, "_mapa_citas_agendadas", lambda: agendadas), \
              patch.object(indicadores_cliente, "_mapa_citas_entrega", lambda: manuales), \
              patch.object(indicadores_cliente, "_mapa_novedades_siscore", lambda: {}), \
+             patch.object(indicadores_cliente, "_mapa_guias_anuladas", lambda: {}), \
              patch.object(indicadores_cliente, "_mapa_tiempos_carga",
                           lambda: {"par": {}, "mun": {"BOGOTA DC": 1}}), \
              patch.object(indicadores_cliente, "_mapa_tiempos_st", lambda: {"par": {}, "mun": {}}), \
@@ -128,6 +129,16 @@ class PrecedenciaCitaOTTests(unittest.TestCase):
         self.assertEqual(fila["origen_promesa"], "CITA")
         self.assertEqual(fila["cita_entrega"], "2026-11-15")
         self.assertEqual(fila["fecha_cita_usada"], "2026-11-15")  # la cita del veredicto
+
+    def test_fecha_promesa_es_la_cita_cuando_gana_la_cita(self):
+        """(2026-11-10, regresión 801232391) Con origen CITA, la «F. Promesa»
+        de la fila ES la cita con la que se juzgó (antes viajaba la promesa de
+        TARIFA con el sello «cita» → el detalle decía 06/11 cuando la cita
+        real era 09/11 y la Trazabilidad decía 09/11)."""
+        fila = self._calcular(agendadas={"999123": "2026-11-15"}, manuales={})
+        self.assertEqual(fila["origen_promesa"], "CITA")
+        self.assertEqual(fila["fecha_promesa"], "2026-11-15")  # la CITA, no la de tarifa
+        self.assertEqual(fila["fecha_promesa"], fila["fecha_cita_usada"])
 
     def test_sin_manual_cae_a_citas_agendadas(self):
         """Sin manual, el veredicto es el de siempre (agendada vencida → no cumple)."""

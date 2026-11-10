@@ -877,6 +877,34 @@ Campo **`oc_proveedor`** (orden de compra del proveedor) por concepto de costo, 
 - **Excel histórico** (`/exportar-excel`): columna nueva **«OC Proveedor»** junto a «Proveedor» en la fila por concepto (vacía en docs anteriores al campo).
 - **Frontend** (`OtrosCostosP`): input «OC del proveedor ({PROVEEDOR})» a ancho completo debajo de la fila del concepto, visible sólo con proveedor lleno (mayúsculas, máx 50 car.); columna «OC Proveedor» en la tabla de conceptos del modal de detalle. Docs viejos lo muestran como `-`. Requiere deploy de backend y frontend.
 
+## Actualizaciones Recientes (2026-11-10)
+
+### Indicadores — segmento «Pendientes»: guías en curso FUERA del % OT
+
+Cambio de criterio en `_calcular_ot_filas` (`rutas/indicadores_cliente.py`): las guías
+**EN CURSO (sin fecha de entrega) ya NO se juzgan contra HOY** (antes: sin vencer →
+Cumplieron, vencidas → No cumplieron). Ahora van a DOS segmentos nuevos —
+**Pendientes** (aún dentro de cita/promesa) y **Pendientes vencidas** (ya pasó sin
+entrega) — y quedan **excluidas del % OT**. Las en curso CON novedad (reporte de
+Siscore o justificación de /NovedadesOT) siguen auto-cumpliendo («Con novedad») —
+la precedencia la resuelven los consumidores (novedad > pendiente > ot).
+
+- **Campos por fila**: `ot_pendiente` (bool), `ot_pendiente_vencida` (bool, vs
+  `cita or fecha_promesa` < HOY) y `ot = None` para las en curso.
+- **`_serie_ot`**: buckets con claves nuevas `pendientes` / `pendientesVencidas`;
+  `evaluables` (= cumplieron + noCumplieron + conNovedad) NO las incluye.
+- **Resumen de `/guias`**: `ot_pendientes` y `ot_pendientes_vencidas`; el `ot_pct`
+  no cambia de fórmula (los pendientes ya no aportan ot 1/0).
+- **`/consulta-guia`**: `payload.ot` agrega `pendiente` / `pendiente_vencida`.
+- `_ot_por_campo` sin cambios (las pendientes ya no entran a evaluables).
+- ⚠️ El % OT de períodos con guías en curso **diverge deliberadamente del Excel
+  del área** (las entregadas siguen cuadrando al 97%).
+- **Frontend** (`DashboardCliente`): `SEGMENTOS_OT` pasa a 6 segmentos (ámbar
+  `#F59E0B` / naranja `#EA580C`), chips «🕒 Pend.»/«🕒 Venc.» en las tablas,
+  Excel con Cumplió = PENDIENTE / PENDIENTE (VENCIDA) sin «Días vs Promesa», y
+  chip «🕒 Pendiente (vencida)» en la Trazabilidad.
+- **Tests**: `tests/test_ot_pendientes.py` (5). Dep backend + frontend JUNTOS.
+
 ## Actualizaciones Recientes (2026-11-09)
 
 ### Nuevo módulo: Citas de Entrega (`rutas/citas_entrega.py`)
@@ -965,3 +993,23 @@ El % OT deja de ser aproximado: `rutas/indicadores_cliente.py` ahora **replica `
 - **Bot 001 (repo `agentes`, copia local en `AGENTE IA/Bot 001`)**: extendido con `ciudad_origen`/`departamento_origen`/`departamento_destino`/`fecha_carga` (DATE; en `COLUMNAS_FECHA` y `CAMPOS_ACTUALIZAR` para backfill vía ON CONFLICT). PENDIENTE: push al repo + backfill por trozos de ~15 días.
 - `GET /indicadores-cliente/{id}/consulta-guia` corre la MISMA `_calcular_ot_filas` sobre la guía consultada → veredicto OT individual (✔/✘/✔ Justificada/Sin evaluar).
 - Deploy backend + frontend JUNTOS.
+
+## Actualizaciones Recientes (2026-11-10)
+
+### ANALISTA entra al portal «Mis Indicadores»
+
+El perfil **ANALISTA** ahora ve los indicadores del portal de clientes externos (`/indicadores/mis-clientes`), con el mismo tratamiento que VISUALIZADOR (2026-11-05): `/mis-indicadores` le devuelve **TODOS los dashboards publicados**, sin depender de la asignación `clientes_siscore` (`indicadores_cliente.py`: `perfil in ("ADMIN", "VISUALIZADOR", "ANALISTA")`). `_verificar_acceso_cliente` no lo restringe (solo aplica a perfil CLIENTE), así que `/guias?usuario=` le responde igual que a un interno. Cambio espejo en el frontend (tarjeta del menú `/indicadores` + gate de `PanelMisClientes` — ver `integrapp-next/README.md` 2026-11-10). Dep backend + frontend JUNTOS.
+
+### Endpoint `/pendientes` — guías en curso con días vs la cita/promesa
+
+`GET /indicadores-cliente/{cliente_id}/pendientes?grupo=&usuario=` (2026-11-10): TODAS las guías EN CURSO del cliente (segmentos «Pendientes»/«Pendientes vencidas» del OT, sin filtro de período) para las tablas de la pestaña Operación del portal. Misma pasada que `/guias` (`guias_minimas_cliente` + `_calcular_ot_filas`); las en curso con novedad quedan fuera (su segmento es «Con novedad»). Cada fila lleva el **límite** con el que se juzga (`fecha_cita_usada` — manual de /CitasEntrega o agendada — y si no, `fecha_promesa`) y **`dias_vs_limite`** = días calendario HOY − límite. Orden: vencidas de la más atrasada a la menos, en curso de la que vence primero a la que vence después. Cache `_CACHE_PENDIENTES` (TTL 300 s) que **también limpian** las escrituras de citas (`citas_entrega.py`, `/citas` plan B) y novedades (`novedades_ot.py`) — una cita nueva mueve una guía de segmento. Helper `_fila_pendiente` + tests en `tests/test_ot_pendientes.py`.
+
+### FIX: `fecha_promesa` es la CITA cuando el veredicto se juega por cita (801232391)
+
+En `_calcular_ot_filas`, el branch `elif cita:` ponía `origen_promesa='CITA'` pero dejaba en `fecha_promesa` la **promesa de TARIFA** → el detalle/informe mostraba «F. Promesa 06/11 cita» mientras la Trazabilidad (que usa `fecha_cita_usada`) mostraba la cita real 09/11. Fix: `f_promesa = cita` en ese branch — la «F. Promesa» de la fila es ahora **la fecha con la que SE JUZGÓ**, así informe, modal del día, Excel («Días vs Promesa» = entrega − cita) y Trazabilidad muestran la misma fecha. Los días del destino siguen en `dias_promesa`. Test de regresión: `test_fecha_promesa_es_la_cita_cuando_gana_la_cita` (`tests/test_citas_entrega_ot.py`). Dep solo backend.
+
+### ANULADAS auto-cumplen como «Con novedad» (caso 801232571)
+
+Las guías con estado **ANULADA** del TMS entraron a `_ESTADOS_TMS` y en `_calcular_ot_filas` **auto-cumplen** (`ot=1` + `cumple_novedad`, rama `anulada` primera en el veredicto): el servicio se canceló, no es un incumplimiento del transporte. Antes: `estado=null` (contaban en «sin info» del resumen) y, al no tener entrega, caían al segmento **Pendientes vencidas**. Ahora van a **«Con novedad»** (cuentan como cumplidas en el % OT, igual que una justificada), NO son pendientes (tampoco en `/pendientes`), salen de `en_proceso` del resumen y `/consulta-guia` viaja `ot.anulada` — la Trazabilidad pinta chip morado «⊘ Anulada» propio y el panel 🚛 de Monitor NO consulta anuladas. Espejo frontend: chip «⊘ Anul.» en el OT del informe y del detalle del día, «SÍ (anulada)» en el Cumplió de los Excel (`tests/test_ot_pendientes.py::test_anulada_auto_cumple_como_novedad`).
+
+**⚠️ Segunda parte (mismo día): el informe del TMS NUNCA trae 'ANULADA'** — verificado contra la tabla (estados reales: ENTREGADO/CON NOVEDAD/PENDIENTE/En distribucion/Transito Nacional/vacío); la 801232571 quedó «Transito Nacional» y por eso seguía en Pendientes vencidas aunque la Trazabilidad dijera ANULADA (esa viene del WS de Siscore en vivo, otra fuente). Fix: colección **`guias_anuladas`** + mapa `_mapa_guias_anuladas` (TTL 600 s) — `/consulta-guia` **persiste** cada guía que el WS reporta anulada (primera vez, con quién/detección; limpia `_CACHE_GUIAS`, `_CACHE_PENDIENTES` y la entrada del mapa) y `_calcular_ot_filas` la trata como anulada (fila con `anulada: true`, `ot.anulada` en la consulta). Detección orgánica: una anulada entra al sistema la primera vez que alguien la consulta en la Trazabilidad (sembrada a mano la 801232571). Test: `test_anulada_detectada_por_ws_though_informe_dice_transito`.

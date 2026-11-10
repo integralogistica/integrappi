@@ -137,8 +137,9 @@ def _auditar(accion: str, info: dict, guia: str, detalle: dict, ahora: datetime)
 def _limpiar_cache_guias() -> None:
     """Las justificaciones cambian el payload de /guias → cache fuera."""
     try:
-        from rutas.indicadores_cliente import _CACHE_GUIAS
+        from rutas.indicadores_cliente import _CACHE_GUIAS, _CACHE_PENDIENTES
         _CACHE_GUIAS.clear()
+        _CACHE_PENDIENTES.clear()  # (2026-11-10) novedad saca una guía de pendientes
     except Exception as e:
         logger.warning(f"[NOVEDADES_OT] No se pudo limpiar el cache de /guias: {e}")
 
