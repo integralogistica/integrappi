@@ -179,10 +179,12 @@ def get_mis_indicadores(usuario: str = Query(..., description="Nombre de usuario
     con_dashboard = {
         cfg.get("nit"): cid for cid, cfg in CLIENTES.items() if cfg.get("nit")
     }
-    if perfil in ("ADMIN", "VISUALIZADOR"):
+    if perfil in ("ADMIN", "VISUALIZADOR", "ANALISTA"):
         # ADMIN siempre ve todo: TODOS los dashboards publicados (sin depender
         # de su asignación clientes_siscore). VISUALIZADOR (2026-11-05) igual:
         # es solo lectura interno y no maneja asignación clientes_siscore.
+        # ANALISTA (2026-11-10) mismo tratamiento: ve los indicadores del
+        # portal cliente sin asignación.
         clientes = [
             {
                 "nit": nit or "",
