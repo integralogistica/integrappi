@@ -144,9 +144,16 @@ def _seleccionar_manifiesto(manifiestos: list) -> Optional[Dict[str, Any]]:
     return en_curso[0] if en_curso else ordenados[0]
 
 
-def _saneado(doc: Dict[str, Any], placa: str) -> Dict[str, Any]:
+def _saneado(doc: Dict[str, Any], placa: str, guias: Optional[set] = None) -> Dict[str, Any]:
     """Payload mínimo para el portal — NUNCA el historial location[] completo
-    (peso) ni news/zones (no pedidas)."""
+    (peso) ni news/zones (no pedidas).
+
+    (2026-11-11) ``coincide_guia``: con ``guias`` (las guías Siscore que viaja
+    buscando el portal), True si AL MENOS UNA aparece en el
+    ``clientreferencenumber`` de las remesas del manifiesto (texto con guías
+    separadas por coma, p. ej. "801233381, 801233382"); False = el manifiesto
+    vigente de la placa NO declara esas guías (otro viaje/cliente). None si no
+    se pidió validación."""
     ultimo = None
     locs = doc.get("location") or []
     if isinstance(locs, list) and locs:
@@ -156,7 +163,7 @@ def _saneado(doc: Dict[str, Any], placa: str) -> Dict[str, Any]:
         velocidad = int(float(str(ultimo.get("velocity")).strip())) if ultimo and str(ultimo.get("velocity") or "").strip() else None
     except (TypeError, ValueError):
         velocidad = None
-    return {
+    out = {
         "placa": str(doc.get("licenceplate") or placa or "").strip(),
         "manifiesto": str(doc.get("manifest") or "").strip(),
         "estado_viaje": str(doc.get("delivered") or "").strip(),
@@ -170,12 +177,37 @@ def _saneado(doc: Dict[str, Any], placa: str) -> Dict[str, Any]:
         "eta_fecha": str(doc.get("etadate") or "").strip(),
         "eta_distancia_km": _kilometros(doc.get("etadistance")),
     }
+    if guias is not None:
+        out["coincide_guia"] = bool(_guias_manifiesto(doc) & {str(g).strip().upper() for g in guias})
+    return out
+
+
+def _guias_manifiesto(doc: Dict[str, Any]) -> set:
+    """Guías Siscore declaradas en las remesas del manifiesto: cada remesa
+    lleva ``clientreferencenumber`` como TEXTO con varias guías separadas por
+    coma (p. ej. "801233381, 801233382"; vacío cuando el cliente del monitoreo
+    no lo reporta). Se parsea tolerante: coma/salto, espacios, minúsculas."""
+    guias: set = set()
+    for rem in doc.get("remittances") or []:
+        if not isinstance(rem, dict):
+            continue
+        for token in str(rem.get("clientreferencenumber") or "").replace("\n", ",").split(","):
+            token = token.strip().upper()
+            if token:
+                guias.add(token)
+    return guias
 
 
 async def consultar_vehiculo_monitor(
-    placa: str, transport: Optional[httpx.AsyncBaseTransport] = None
+    placa: str,
+    guias: Optional[set] = None,
+    transport: Optional[httpx.AsyncBaseTransport] = None,
 ) -> Dict[str, Any]:
     """Última posición GPS del vehículo de una placa según Monitor.
+
+    ``guias`` (2026-11-11): guías Siscore de la consulta (la guía + las
+    compañeras del vehículo) — agrega ``vehiculo.coincide_guia`` para que el
+    portal valide que el manifiesto vigente ES el viaje de esas guías.
 
     Devuelve (nunca lanza):
       {"ok": True, "existe": True,  "vehiculo": {...}}   → hay posición
@@ -192,7 +224,10 @@ async def consultar_vehiculo_monitor(
 
     timeout = httpx.Timeout(MONITOR_TIMEOUT_S, connect=min(10.0, MONITOR_TIMEOUT_S))
     url = f"{MONITOR_BASE_URL}{_CONSULTA_PATH}"
-    params = {"licensePlate": placa, "lists": "location"}
+    # (2026-11-11) remittances: sin la lista de remesas no hay
+    # clientreferencenumber con qué validar que el manifiesto es el viaje
+    # de las guías consultadas (ver _guias_manifiesto).
+    params = {"licensePlate": placa, "lists": "location,remittances"}
 
     for intento in (1, 2):  # 2º intento solo si el token cacheado expiró a medias (401/403)
         try:
@@ -214,7 +249,7 @@ async def consultar_vehiculo_monitor(
             doc = _seleccionar_manifiesto(manifiestos)
             if not doc:
                 return {"ok": True, "existe": False}
-            return {"ok": True, "existe": True, "vehiculo": _saneado(doc, placa)}
+            return {"ok": True, "existe": True, "vehiculo": _saneado(doc, placa, guias=guias)}
         except Exception as e:
             logger.warning("[monitor_ws] Error consultando placa %s: %s", placa, e)
             return {"ok": False, "error": str(e)}

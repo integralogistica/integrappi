@@ -184,12 +184,13 @@ def get_mis_indicadores(usuario: str = Query(..., description="Nombre de usuario
     con_dashboard = {
         cfg.get("nit"): cid for cid, cfg in CLIENTES.items() if cfg.get("nit")
     }
-    if perfil in ("ADMIN", "VISUALIZADOR", "ANALISTA"):
+    if perfil in ("ADMIN", "VISUALIZADOR", "ANALISTA", "OPERATIVO"):
         # ADMIN siempre ve todo: TODOS los dashboards publicados (sin depender
         # de su asignación clientes_siscore). VISUALIZADOR (2026-11-05) igual:
         # es solo lectura interno y no maneja asignación clientes_siscore.
         # ANALISTA (2026-11-10) mismo tratamiento: ve los indicadores del
-        # portal cliente sin asignación.
+        # portal cliente sin asignación. OPERATIVO (2026-11-11) igual: sigue
+        # las guías desde la Trazabilidad (citas/novedades) sin asignación.
         clientes = [
             {
                 "nit": nit or "",
@@ -555,10 +556,16 @@ def _ciudad_y_dpto(fila: dict, usar_origen: bool) -> tuple:
     else:
         ciudad = fila.get("ciudad_destino")
         dpto = fila.get("departamento_destino")
-    if not dpto and ciudad:
+    # (2026-11-11, fix 801226889) ciudad_destino SIEMPRE viene
+    # 'CIUDAD - DEPARTAMENTO' — el split se hace SIEMPRE (antes solo cuando
+    # faltaba el dpto): con departamento_destino ya cargado por el bot, el
+    # municipio quedaba 'BUCARAMANGA - SANTANDER' y el lookup de días de
+    # tiempos_entrega fallaba → guía entregada sin promesa → «No aplica».
+    if ciudad:
         partes = re.split(r"\s+-\s+", str(ciudad), maxsplit=1)
         if len(partes) == 2:
-            ciudad, dpto = partes
+            ciudad = partes[0]
+            dpto = dpto or partes[1]
     corr = _mapa_correcciones()
 
     def aplicar(x):
@@ -773,15 +780,40 @@ def _calcular_ot_filas(filas: list) -> None:
             str(f.get("estado") or "").strip().upper() == "ANULADA"
             or guia in anuladas_siscore
         )
+        # (2026-11-11) DEVOLUCIÓN TOTAL: la novedad del informe TMS dice que
+        # la carga se devolvió COMPLETA al remitente — no hubo entrega que
+        # cumplir (caso 801216689, 'CON NOVEDAD' + 'DEVOLUCION TOTAL' sin
+        # fecha_entrega, caía a «Pendientes vencidas»). Mismo trato que la
+        # ANULADA: auto-cumple como «Con novedad» y no es pendiente. ⚠️ Se
+        # detecta por SUBCADENA sobre novedad_tms: además del literal existen
+        # variantes tipo 'SE HACE LA DEVOLUCION TOTAL POR MOTIVO DE ORDEN VE'.
+        # 'DEVOLUCION DIGITALIZADA' NO entra (es la devolución ya surtida,
+        # con su fecha de entrega).
+        devolucion_total = "DEVOLUCION TOTAL" in str(f.get("novedad_tms") or "").upper()
+        # (2026-11-11, decisión del usuario — matiz del mismo día) Las
+        # novedades del informe REPROGRAMADO / REHUSADO se resuelven por la
+        # ENTREGA: con fecha de entrega → «Cumple con novedad» (el caso ya
+        # cerró); sin entrega → «Pendientes» (sigue en curso, fuera del %).
+        reprogramado = "REPROGRAMADO" in str(f.get("novedad_tms") or "").upper()
+        rehusado = "REHUSADO" in str(f.get("novedad_tms") or "").upper()
         if anulada:
             f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»: anulada
+        elif devolucion_total:
+            f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»: devolución total
+        elif (rehusado or reprogramado) and entrega is not None:
+            # «Cumple con novedad»: rehusado/reprogramado ya CON entrega
+            # (cerró). Sin entrega caen abajo a «Pendientes».
+            f_ot, f_cumple_nov = 1, True
         elif novedad_txt == "CITA RECHAZADA POR TIEMPOS DE TRANSITO":
             f_ot = (1 if f_promesa >= referencia else 0) if f_promesa else None
         elif novedad_txt:
             f_ot, f_cumple_nov = 1, True  # «Cumple con novedad»
-        elif f_promesa is None:
-            f_ot = None  # NO APLICA
         elif cita:
+            # (2026-11-11, fix 801226437) La CITA se consulta ANTES del
+            # «sin promesa → No aplica»: hay guías con cita cuyo destino no
+            # está en tiempos_entrega ('DISFARMA CEDI BOGOTÁ' — nombre de
+            # sitio, no municipio) y el No aplica adelantado desperdiciaba la
+            # cita (regla documentada: con cita se compara la CITA).
             f_ot = 1 if cita >= referencia else 0
             origen = "CITA"  # se juzgó la cita, no la promesa
             # (2026-11-10) La «F. Promesa» de la fila es la fecha con la que SE
@@ -792,9 +824,15 @@ def _calcular_ot_filas(filas: list) -> None:
             # export (entrega − cita) con el veredicto. La promesa de tarifa
             # queda accesible por dias_promesa (los días del destino).
             f_promesa = cita
+        elif f_promesa is None:
+            f_ot = None  # NO APLICA
         else:
             f_ot = 1 if f_promesa >= referencia else 0
-        if entrega is None and not anulada:
+        # (2026-11-11) La DEVOLUCIÓN TOTAL tampoco es pendiente (no hubo
+        # entrega que esperar — la carga volvió al remitente). Los
+        # rehusados/reprogramados SIN entrega sí: quedan «Pendientes»
+        # (el caso no ha cerrado).
+        if entrega is None and not anulada and not devolucion_total:
             ref_pend = cita or f_promesa
             f_ot = None
             f["ot_pendiente"] = True
@@ -820,6 +858,8 @@ def _calcular_ot_filas(filas: list) -> None:
         # (2026-11-10) Marca de anulada (estado del informe O WS en vivo) —
         # viaja en la fila para chips/Excel del frontend.
         f["anulada"] = bool(anulada)
+        # (2026-11-11) Marca de devolución total (novedad del informe TMS).
+        f["devolucion_total"] = bool(devolucion_total)
 
 
 def _ot_por_campo(filas: list, campo: str, top: int | None = None) -> list:
@@ -1073,6 +1113,9 @@ async def get_consulta_guia(
             # el WS en vivo): auto-cumple como «Con novedad» — la Trazabilidad
             # lo muestra con su propio chip (no «Con novedad»).
             "anulada": bool(fila_ot.get("anulada")),
+            # (2026-11-11) DEVOLUCIÓN TOTAL (novedad del informe TMS): mismo
+            # trato — auto-cumple con chip propio.
+            "devolucion_total": bool(fila_ot.get("devolucion_total")),
         }
     # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
     # remesa que viajó junta) — solo conocible desde el TMS.
@@ -1089,11 +1132,28 @@ async def get_consulta_guia(
     # DIGITALIZADA). Un fallo de Monitor JAMÁS rompe la consulta (que ya
     # tardó 40-90s en el SOAP): queda en log y el panel no aparece.
     # (2026-11-10) Las ANULADAS tampoco: el servicio se canceló, no hay viaje
-    # que seguir.
-    if tms.get("placa") and not _guia_ya_entregada(payload) and not payload.get("ot", {}).get("anulada"):
+    # que seguir. (2026-11-11) La DEVOLUCIÓN TOTAL igual: la carga volvió al
+    # remitente, seguir el vehículo no aporta.
+    if (
+        tms.get("placa")
+        and not _guia_ya_entregada(payload)
+        and not payload.get("ot", {}).get("anulada")
+        and not payload.get("ot", {}).get("devolucion_total")
+    ):
         try:
             from Funciones.monitor_ws import consultar_vehiculo_monitor
-            payload["vehiculo"] = await consultar_vehiculo_monitor(tms["placa"])
+            # (2026-11-11) Guías del viaje para validar el manifiesto: la
+            # consultada + las compañeras del mismo vehículo/día (misma_placa,
+            # calculado arriba). Monitor cruza contra el
+            # clientreferencenumber de las remesas → coincide_guia en el
+            # payload: sin coincidencia, el manifiesto vigente de la placa es
+            # OTRO viaje (p. ej. de otro cliente) y el portal no debe mostrar
+            # esa posición como si llevara estas guías.
+            guias_viaje = {g.upper()}
+            for cp in payload.get("misma_placa") or []:
+                if cp.get("guia"):
+                    guias_viaje.add(str(cp["guia"]).strip().upper())
+            payload["vehiculo"] = await consultar_vehiculo_monitor(tms["placa"], guias=guias_viaje)
         except Exception:
             logger.warning(
                 "[indicadores-cliente] Error consultando ubicación en Monitor de la placa %s (guía %s)",
@@ -1250,10 +1310,13 @@ def get_guias_cliente(
         # (2026-11-10) ANULADA no está "en proceso": es un servicio cancelado
         # (queda visible en por_estado y auto-cumple como «Con novedad») —
         # cuenta el estado del informe O la marca del WS en vivo.
+        # (2026-11-11) La DEVOLUCIÓN TOTAL tampoco: la carga volvió al
+        # remitente, no hay viaje en curso.
         en_proceso = sum(
             1 for f in minimas
             if f.get("estado") and f["estado"] != ESTADO_ENTREGADO
             and not f.get("anulada")
+            and not f.get("devolucion_total")
         )
         sin_info = sum(1 for f in minimas if not f.get("estado"))
         por_estado = {}
@@ -1460,7 +1523,7 @@ def get_pendientes_cliente(
         hoy = date.today()
         vencidas, en_curso, no_aplica = [], [], []
         for f in minimas:
-            if f.get("novedad") or f.get("cumple_novedad") or f.get("anulada"):
+            if f.get("novedad") or f.get("cumple_novedad") or f.get("anulada") or f.get("devolucion_total"):
                 continue  # segmento «Con novedad» (auto-cumple)
             if f.get("ot_pendiente"):
                 fila = _fila_pendiente(f, hoy)

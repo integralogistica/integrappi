@@ -42,7 +42,7 @@ from rutas.otros_costos import _ahora_utc, _requiere, _resolver_usuario
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/novedades-ot", tags=["Novedades Justificadas OT"])
 
-PERFILES_NOVEDADES = {"ADMIN", "COORDINADOR", "CONTROL", "OPERATIVO"}
+PERFILES_NOVEDADES = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL", "OPERATIVO"}
 PERFILES_AUDITORIA = {"ADMIN", "CONTROL"}
 
 db = bd_cliente["integra"]

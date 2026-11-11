@@ -129,6 +129,163 @@ class CalcularOTPendientesTests(unittest.TestCase):
         self.assertEqual(bucket["conNovedad"], 1)
         self.assertEqual(bucket["pendientesVencidas"], 0)
 
+    def test_devolucion_total_auto_cumple_como_novedad(self):
+        """(2026-11-11, caso 801216689) La novedad del informe TMS dice
+        'DEVOLUCION TOTAL' (la carga volvió completa al remitente) y la guía
+        queda sin entrega: NO va a Pendientes vencidas — auto-cumple como
+        «Con novedad», igual que la anulada."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="DEVOLUCION TOTAL",
+            fecha_emision="2026-06-17", fecha_entrega=None,
+        ))
+        self.assertTrue(fila["devolucion_total"])
+        self.assertTrue(fila["cumple_novedad"])
+        self.assertEqual(fila["ot"], 1)
+        self.assertFalse(fila["ot_pendiente"])  # antes: vencida
+        bucket = indicadores_cliente._serie_ot([fila], 7)[0]
+        self.assertEqual(bucket["conNovedad"], 1)
+        self.assertEqual(bucket["pendientes"], 0)
+        self.assertEqual(bucket["pendientesVencidas"], 0)
+        self.assertEqual(bucket["evaluables"], 1)
+
+    def test_devolucion_total_variante_larga_tambien_cumple(self):
+        """La subcadena cubre variantes reales del TMS tipo 'SE HACE LA
+        DEVOLUCION TOTAL POR MOTIVO DE ORDEN VE'."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD",
+            novedad_tms="SE HACE LA DEVOLUCION TOTAL POR MOTIVO DE ORDEN VE",
+            fecha_emision="2026-06-17", fecha_entrega=None,
+        ))
+        self.assertTrue(fila["devolucion_total"])
+        self.assertEqual(fila["ot"], 1)
+
+    def test_devolucion_digitalizada_NO_auto_cumple(self):
+        """'DEVOLUCION DIGITALIZADA' es la devolución ya surtida (con entrega):
+        no es una devolución total en curso y NO dispara el auto-cumple."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="DEVOLUCION DIGITALIZADA",
+            fecha_emision=date.today().isoformat(), fecha_entrega=None,
+        ))
+        self.assertFalse(fila["devolucion_total"])
+        # estado CON NOVEDAD sin reporte → sin promesa evaluable → pendiente
+        # en curso (comportamiento de siempre, no cambia).
+        self.assertTrue(fila["ot_pendiente"])
+
+    def test_reprogramado_ENTREGADA_cumple_con_novedad(self):
+        """(2026-11-11, caso 801221448, regla FINAL del usuario) Novedad TMS
+        'REPROGRAMADO' CON fecha de entrega → «Cumple con novedad» (el caso
+        cerró); SIN entrega → «Pendientes». Antes la entregada caía a
+        «No aplica» por CON NOVEDAD sin reporte de Siscore."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="REPROGRAMADO",
+            fecha_emision="2026-07-30", fecha_entrega="2026-08-05",
+        ))
+        self.assertTrue(fila["cumple_novedad"])
+        self.assertEqual(fila["ot"], 1)
+        self.assertFalse(fila["ot_pendiente"])
+        bucket = indicadores_cliente._serie_ot([fila], 7)[0]
+        self.assertEqual(bucket["conNovedad"], 1)
+        self.assertEqual(bucket["evaluables"], 1)
+
+    def test_reprogramado_en_curso_es_pendiente(self):
+        """REPROGRAMADO sin entrega → «Pendientes» (el caso no ha cerrado)."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="REPROGRAMADO",
+            fecha_emision=date.today().isoformat(), fecha_entrega=None,
+        ))
+        self.assertTrue(fila["ot_pendiente"])
+        self.assertFalse(fila["cumple_novedad"])
+        self.assertIsNone(fila["ot"])
+
+    def test_rehusado_cumple_con_novedad(self):
+        """(2026-11-11, regla final) REHUSADO CON entrega → auto-cumple como
+        «Con novedad» (antes caía a «No aplica» por CON NOVEDAD sin reporte
+        de Siscore)."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="REHUSADO",
+            fecha_emision="2026-07-30", fecha_entrega="2026-08-05",
+        ))
+        self.assertTrue(fila["cumple_novedad"])
+        self.assertEqual(fila["ot"], 1)
+        bucket = indicadores_cliente._serie_ot([fila], 7)[0]
+        self.assertEqual(bucket["conNovedad"], 1)
+        self.assertEqual(bucket["evaluables"], 1)
+
+    def test_rehusado_EN_CURSO_es_pendiente(self):
+        """(regla final) REHUSADO sin entrega → «Pendientes», NO cumple."""
+        fila = self._calcular(_fila_ot(
+            estado="CON NOVEDAD", novedad_tms="REHUSADO",
+            fecha_emision=date.today().isoformat(), fecha_entrega=None,
+        ))
+        self.assertTrue(fila["ot_pendiente"])
+        self.assertFalse(fila["cumple_novedad"])
+
+    def test_cita_gana_antes_del_no_aplica(self):
+        """(2026-11-11, fix 801226437) Guía CON cita cuyo destino NO está en
+        tiempos_entrega (p. ej. 'DISFARMA CEDI BOGOTÁ'): antes el «sin
+        promesa → No aplica» se evaluaba antes que la cita y la desperdiciaba.
+        Ahora la cita decide el veredicto aunque no haya promesa de tarifa."""
+        with patch.object(indicadores_cliente, "_mapa_citas_agendadas",
+                          lambda: {"999123": "2026-11-10"}), \
+             patch.object(indicadores_cliente, "_ciudad_y_dpto",
+                          lambda f, usar_origen: ("SITIO QUE NO ESTA EN LA TABLA", "CUNDINAMARCA")):
+            fila = _fila_ot(fecha_emision="2026-11-05", fecha_entrega="2026-11-10")
+            indicadores_cliente._calcular_ot_filas([fila])
+        self.assertEqual(fila["ot"], 1)  # entrega 10/11 == cita 10/11
+        self.assertEqual(fila["origen_promesa"], "CITA")
+        self.assertEqual(fila["fecha_promesa"], "2026-11-10")  # ES la cita
+        # y una entrega TARDE con cita se juzga contra la cita, no No aplica
+        with patch.object(indicadores_cliente, "_mapa_citas_agendadas",
+                          lambda: {"999123": "2026-11-10"}), \
+             patch.object(indicadores_cliente, "_ciudad_y_dpto",
+                          lambda f, usar_origen: ("SITIO QUE NO ESTA EN LA TABLA", "CUNDINAMARCA")):
+            fila2 = _fila_ot(fecha_emision="2026-11-05", fecha_entrega="2026-11-13")
+            indicadores_cliente._calcular_ot_filas([fila2])
+        self.assertEqual(fila2["ot"], 0)
+
+    def test_sin_cita_y_sin_promesa_sigue_siendo_no_aplica(self):
+        """Sin cita NI destino en la tabla → No aplica (comportamiento que el
+        fix NO toca)."""
+        with patch.object(indicadores_cliente, "_ciudad_y_dpto",
+                          lambda f, usar_origen: ("SITIO QUE NO ESTA EN LA TABLA", "CUNDINAMARCA")):
+            fila = _fila_ot(fecha_emision="2026-11-05", fecha_entrega="2026-11-10")
+            indicadores_cliente._calcular_ot_filas([fila])
+        self.assertIsNone(fila["ot"])
+        self.assertFalse(fila["ot_pendiente"])
+
+
+class CiudadYDptoTests(unittest.TestCase):
+    """(2026-11-11, fix 801226889) _ciudad_y_dpto: ciudad_destino viene
+    SIEMPRE 'CIUDAD - DEPARTAMENTO' — el split debe hacerse aunque el dpto ya
+    esté cargado (si no, municipio quedaba 'BUCARAMANGA - SANTANDER' y el
+    lookup de días de tiempos_entrega fallaba → «No aplica»)."""
+
+    def _calcular_ciudad(self, fila):
+        with patch.object(indicadores_cliente, "_mapa_correcciones", lambda: {}):
+            return indicadores_cliente._ciudad_y_dpto(fila, usar_origen=False)
+
+    def test_con_dpto_cargado_la_ciudad_se_parte(self):
+        mun, dpto = self._calcular_ciudad({
+            "ciudad_destino": "BUCARAMANGA - SANTANDER",
+            "departamento_destino": "SANTANDER",
+        })
+        self.assertEqual(mun, "BUCARAMANGA")
+        self.assertEqual(dpto, "SANTANDER")
+
+    def test_sin_dpto_el_split_lo_aporta(self):
+        mun, dpto = self._calcular_ciudad({"ciudad_destino": "BUCARAMANGA - SANTANDER"})
+        self.assertEqual(mun, "BUCARAMANGA")
+        self.assertEqual(dpto, "SANTANDER")
+
+    def test_dpto_de_columna_gana_al_del_split(self):
+        # columna explícita distinta al sufijo: se queda la de la columna
+        mun, dpto = self._calcular_ciudad({
+            "ciudad_destino": "BUCARAMANGA - SANTANDER",
+            "departamento_destino": "NORTE DE SANTANDER",
+        })
+        self.assertEqual(mun, "BUCARAMANGA")
+        self.assertEqual(dpto, "NORTE DE SANTANDER")
+
 
 class SerieOTPendientesTests(unittest.TestCase):
     """Buckets del gráfico: pendientes/pendientesVencidas separadas y FUERA de

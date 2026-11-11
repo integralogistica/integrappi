@@ -2199,11 +2199,14 @@ async def rechazar_solicitud(req: AccionConObservacionRequest, request: Request)
     return {"mensaje": "Solicitud rechazada", "estado": "rechazado"}
 
 
-def _mover_documento(doc: dict, col_destino) -> None:
-    """Mueve el doc de col_activos a col_destino (patrón delete-first + insert idempotente)."""
+def _mover_documento(doc: dict, col_destino, col_origen=None) -> None:
+    """Mueve el doc de col_origen (default: col_activos) a col_destino
+    (patrón delete-first + insert idempotente)."""
+    if col_origen is None:
+        col_origen = col_activos
     col_destino.delete_one({"_id": doc["_id"]})
     col_destino.insert_one(doc)
-    col_activos.delete_one({"_id": doc["_id"]})
+    col_origen.delete_one({"_id": doc["_id"]})
 
 
 @router.post("/registrar-pago")
@@ -2875,7 +2878,7 @@ async def devolver_del_historico(req: DevolverDelHistoricoRequest, request: Requ
         },
     )
     doc_devuelto = col_historico.find_one({"consecutivo": req.consecutivo})
-    _mover_documento(doc_devuelto, col_activos)   # histórico → activos (inverso de _mover_documento)
+    _mover_documento(doc_devuelto, col_activos, col_origen=col_historico)  # histórico → activos
     # Avisar al creador que su solicitud volvió para corrección (fire-and-forget).
     doc_notificar = col_activos.find_one({"consecutivo": req.consecutivo})
     if doc_notificar:

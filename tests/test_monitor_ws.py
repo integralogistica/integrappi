@@ -96,6 +96,9 @@ class MonitorWsUnitTests(unittest.TestCase):
 
         def consulta(request):
             self.assertIn("licensePlate=TRN399", str(request.url))
+            # (2026-11-11) la consulta pide remittances además de location:
+            # sin ellas no hay clientreferencenumber con qué validar el viaje
+            self.assertIn("lists=location%2Cremittances", str(request.url))
             self.assertEqual(request.headers["Authorization"], "TOK1")
             return httpx.Response(200, json=[_manifiesto()])
 
@@ -117,7 +120,47 @@ class MonitorWsUnitTests(unittest.TestCase):
         self.assertEqual(v["estado_gps"], "moving")
         self.assertEqual(v["eta_distancia_km"], 852)
         self.assertNotIn("location", v)  # saneado: nunca el historial completo
+        self.assertNotIn("coincide_guia", v)  # sin guias → sin validación
         self.assertEqual(len(llamadas), 3)  # login + 2 consultas
+
+    def test_valida_guias_contra_clientreferencenumber(self):
+        """(2026-11-11) coincide_guia: True si ALGUNA de las guías del viaje
+        aparece en el clientreferencenumber de las remesas (texto separado por
+        coma); False si el manifiesto declara otras guías o nada."""
+
+        def login(request):
+            return httpx.Response(200, json={"token": "T"})
+
+        def manifiesto_con(remesas):
+            return httpx.Response(200, json=[_manifiesto(remittances=remesas)])
+
+        transport, _ = self._transport({
+            "login": login,
+            "consulta": lambda request: manifiesto_con([
+                {"number": "00257278", "clientreferencenumber": "801233381, 801233382"},
+                {"number": "00257279", "clientreferencenumber": ""},
+            ]),
+        })
+        import asyncio
+
+        # La guía consultada está en la remesa (entre varias, por coma)
+        r = asyncio.run(monitor_ws.consultar_vehiculo_monitor("TRN399", guias={"801233382"}, transport=transport))
+        self.assertTrue(r["vehiculo"]["coincide_guia"])
+        # Coincide una COMPAÑERA del vehículo, no la consultada
+        r = asyncio.run(monitor_ws.consultar_vehiculo_monitor("TRN399", guias={"999123", "801233381"}, transport=transport))
+        self.assertTrue(r["vehiculo"]["coincide_guia"])
+        # El manifiesto declara OTRAS guías → sin coincidencia
+        r = asyncio.run(monitor_ws.consultar_vehiculo_monitor("TRN399", guias={"801216689"}, transport=transport))
+        self.assertFalse(r["vehiculo"]["coincide_guia"])
+
+        # Todas las remesas con clientreferencenumber VACÍO (p. ej. clientes
+        # que no lo reportan) → sin coincidencia: el viaje no es declarado
+        transport2, _ = self._transport({
+            "login": login,
+            "consulta": lambda request: manifiesto_con([{"number": "1", "clientreferencenumber": ""}]),
+        })
+        r = asyncio.run(monitor_ws.consultar_vehiculo_monitor("TRN399", guias={"801233381"}, transport=transport2))
+        self.assertFalse(r["vehiculo"]["coincide_guia"])
 
     def test_relogin_ante_401(self):
         estados = {"login": 0, "consulta": 0}

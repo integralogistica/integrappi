@@ -46,7 +46,7 @@ from rutas.indicadores_cliente import _fecha_servible
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/citas-entrega", tags=["Citas de Entrega"])
 
-PERFILES_CITAS = {"ADMIN", "COORDINADOR", "CONTROL", "OPERATIVO"}
+PERFILES_CITAS = {"ADMIN", "ANALISTA", "COORDINADOR", "CONTROL", "OPERATIVO"}
 PERFILES_AUDITORIA = {"ADMIN", "CONTROL"}
 
 db = bd_cliente["integra"]
