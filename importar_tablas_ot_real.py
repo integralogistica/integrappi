@@ -2,6 +2,14 @@
 # (`calculo real ot.xlsx`) a Mongo base `integra`. Idempotente (delete+insert):
 # re-ejecutar cuando el área actualice el Excel.
 #
+# ⚠️ (2026-11-12) DEPRECATED — NO EJECUTAR. El Excel fue ELIMINADO del repo y
+# **Mongo es la fuente de verdad** de las 5 tablas: los cambios van DIRECTO en
+# las colecciones (ej. PUERTO CONCORDIA/META/3 días agregado a tiempos_entrega,
+# caso guía 801233225). Este script hace DELETE+INSERT: si consiguiera un Excel
+# viejo y se ejecutara, BORRARÍA toda edición manual. Queda solo como referencia
+# de cómo se cargaron originalmente las tablas (respaldo histórico en git:
+# `calculo real ot.xlsx` en el historial del repo).
+#
 #   tiempos_entrega      ← hoja TIEMPOS DE ENTREGA (CARGA, 189 municipios)
 #   tiempos_entrega_st   ← hoja TIEMPOS DE ENTREGA ST (envío directo/recolección)
 #   correcciones_nombres ← hoja CORRECCIONES (ciudades/dptos mal escritos)
