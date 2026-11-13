@@ -1018,23 +1018,33 @@ de anuladas en `guias_anuladas`) se extrajo a **`Funciones/trazabilidad_guia.py`
   por el bot también limpia los caches del OT del portal. Timeout del SOAP
   60s→**90s + 1 intento** (mismo fix 2026-11-06 del portal: el WS responde en
   40-90s). Si el enriquecimiento falla, degrada al formato viejo de solo WS.
-- **Mensaje WA** (`formatear_trazabilidad_guia` en `Funciones/siscore_ws_format.py`):
-  mismo look del mensaje actual + placa, 🎯 veredicto OT (misma semántica de
-  chips del portal: anulada > devolución total > justificada/con novedad >
-  pendiente/vencida > cumplió/no cumplió), 📅 cita de entrega (franja +
-  re-agendas), 🚧 novedad justificada, 🚛 vehículo en curso (ubicación,
-  velocidad, reporte GPS, ETA + link a Google Maps; nada si el manifiesto está
-  Finalizado o si `coincide_guia=false` — el bot es de cara a CLIENTES, misma
-  regla que el perfil CLIENTE del portal: sin coincidencia el manifiesto
-  vigente es OTRO viaje y la posición no es de esta guía; el aviso «carro sin
-  planillar» es solo para perfiles internos del portal — ni cuando el
-  manifiesto no reporta NINGUNA posición GPS (caso 801233636/NNM001: despacho
-  vigente en Monitor pero rastreador sin transmitir — un bloque con solo el
-  conductor no responde «¿dónde está mi guía?»; el portal sí muestra los
-  chips del despacho porque tiene UI para ello),
-  otras guías del vehículo y 🖼️ link de evidencia digitalizada (reemplaza al
-  tracking genérico). Acotes para el límite de 4096 caracteres de WhatsApp:
-  últimos 6 movimientos («…y N más»), 6 compañeras, justificación a 120 car.
+- **Mensaje WA** (`formatear_trazabilidad_guia` en `Funciones/siscore_ws_format.py`;
+  **rediseño UX 2026-11-13 misma tarde**): estructura por secciones priorizando
+  lo que el cliente necesita — 📦 *Seguimiento de envío* + estado amigable con
+  descripción (🚚 En distribución / ✅ Entregado / 🚛 En tránsito / 🕒 Pendiente /
+  ⊘ Anulada / ⚠️ Con novedad / 📦 En acondicionamiento — match por subcadena
+  normalizada sin tildes) → 📍 Origen y destino (y Recibió si hay) → 🕒
+  *Ubicación y llegada estimada* (ubicación ACORTADA a 3 componentes de la
+  dirección geocodificada de Monitor + velocidad, ETA, km restantes, reporte
+  GPS y link a Google Maps; **ETA ya pasada** (vs `_ahora_colombia()`, naive)
+  → «pendiente de actualización», nunca una llegada futura que ya ocurrió;
+  0 km/h se muestra tal cual = detenido) → ✅ *Cumplimiento de entrega*
+  (lenguaje de cliente: Entregado a tiempo / Entregado fuera de tiempo
+  (+«(justificada)») / Dentro del plazo / Plazo de entrega vencido / Con
+  novedad — cuenta como cumplida / Cumplimiento por confirmar; «Fecha
+  compromiso» = cita usada si se juzgó por CITA, si no la promesa; NUNCA
+  presenta como entrega confirmada un envío que solo está en plazo) + 📅
+  cita de entrega con franja → 📋 *Detalles del envío* (cliente, servicio,
+  piezas, vehículo, conductor, fechas) → 📜 *Historial de movimientos*
+  (últimos 6 con icono por tipo, «…y N más»). **El enlace «Seguimiento en
+  línea» SOLO se muestra con la guía ENTREGADA** (regla del usuario: se
+  valida el estado ACTUAL real — `_guia_entregada_estado`, normaliza
+  tildes/mayúsculas/espacios, ENTREGA/DIGITALIZADA — no el historial; la
+  evidencia digitalizada sigue reemplazándolo como en el portal; el GPS es
+  independiente). Reglas de visibilidad del bloque GPS intactas: nada si
+  Monitor falló, manifiesto Finalizado, `coincide_guia=false` (bot de cara a
+  clientes) o sin NINGUNA posición (caso 801233636/NNM001). Acotes 4096
+  chars: 6 movimientos, 6 compañeras, justificación 120, ubicación 80.
 - **Evidencia digitalizada**: la URL pública del PNG de Siscore (día de
   EMISIÓN) la computa ahora el BACKEND (`url_evidencia_guia`, espejo del
   armado que hacía el frontend) y viaja como `payload.evidencia_url`.

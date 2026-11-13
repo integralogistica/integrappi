@@ -38,7 +38,7 @@ def _ws(estado: str = "EN DISTRIBUCION", movimientos: int = 0) -> dict:
                 {"FecMov": f"2026-11-1{i} 0{i}:00:00", "DetalleMov": f"MOV {i}"} for i in range(movimientos)
             ],
         },
-        "tracking_url": "https://ejemplo/tracking",
+        "tracking_url": "https://integra.appsiscore.com/app/app-cliente/cons_publica.php?GUIA=801233440",
     }
 
 
@@ -239,118 +239,221 @@ class EnriquecerTests(unittest.TestCase):
 
 
 class FormatearTrazabilidadTests(unittest.TestCase):
-
-    def test_payload_plano_degrada_al_formato_viejo(self):
-        p = _ws("EN DISTRIBUCION")
-        self.assertEqual(formatear_trazabilidad_guia(p), formatear_respuesta_guia(p))
+    """Mensaje WA rediseñado (2026-11-13): secciones + enlace de seguimiento
+    SOLO con la guía ENTREGADA (escenarios de validación de la spec)."""
 
     def test_error_degrada(self):
         p = {"ok": False, "error": "timeout"}
         self.assertEqual(formatear_trazabilidad_guia(p), formatear_respuesta_guia(p))
 
-    def _enriquecido(self, **extra):
-        p = _ws("EN DISTRIBUCION", movimientos=10)
+    def test_guia_inexistente_degrada(self):
+        p = {"ok": True, "exists": False, "guia": "123", "not_found": True}
+        self.assertEqual(formatear_trazabilidad_guia(p), formatear_respuesta_guia(p))
+
+    def _payload(self, estado="EN DISTRIBUCION", movimientos=10, **extra):
+        p = _ws(estado, movimientos=movimientos)
+        p["data"].update({
+            "Nombre_cliente": "FRESENIUS KABI", "Servicio": "CARGA", "NumPie": 66,
+            "NomRem": "FRESENIUS KABI", "CiuRem": "FUNZA",
+            "NomDes": "CLINICA BELO HORIZONTE", "CiuDes": "NEIVA",
+        })
         p.update({
-            "placa": "SPW261",
-            "ot": {"ot": 1, "origen_promesa": "CITA", "fecha_cita_usada": "2026-11-12",
-                   "fecha_promesa": "2026-11-12", "fecha_entrega": "2026-11-11"},
-            "cita_entrega": {"fecha": "2026-11-12", "hora_inicio": "08:00",
-                             "hora_fin": "12:00", "anteriores": []},
+            "placa": "JTZ665",
+            "ot": {"ot": None, "pendiente": True, "origen_promesa": "TARIFA",
+                   "fecha_promesa": "2026-11-17"},
             "evidencia_url": None,
         })
         p.update(extra)
         return p
 
-    def test_bloques_del_mensaje(self):
-        p = self._enriquecido()
+    # ── Escenario 2: EN DISTRIBUCIÓN → sin enlace, con GPS ──
+    def test_en_distribucion_sin_enlace_con_gps(self):
+        p = self._payload("EN DISTRIBUCION")
         p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
-            "ubicacion": "Vía Funza", "estado_viaje": "En curso", "lat": 4.71, "lng": -74.15,
-            "velocidad": 45, "eta_fecha": "2026-11-13 18:00:00", "eta_distancia_km": 12,
+            "ubicacion": "Calle 51, Manchester, Bello, Valle de Aburrá, Antioquia, RAP del Agua y la Montaña, 051053, Colombia",
+            "estado_viaje": "En ruta", "lat": 6.33, "lng": -75.55, "velocidad": 45,
+            "eta_fecha": "2099-01-15 10:03:00", "eta_distancia_km": 5,
+            "fecha_reporte_gps": "2099-01-15 09:36:00", "coincide_guia": True,
+            "conductor": "JUAN DAVID CORNELIO URIZA",
         }}
-        p["misma_placa"] = [{"guia": "801233381", "estado": "ENTREGADO"}]
         msg = formatear_trazabilidad_guia(p)
-        for esperado in (
-            "*Guía:* 801233440",
-            "*Placa:* SPW261",
-            "*On Time:* ✔ Cumplió — entrega 11 nov 2026 ≤ cita 12 nov 2026",
-            "*Cita de entrega:* 12 nov 2026 · 08:00–12:00",
-            "*Vehículo en curso*",
-            "45 km/h",
-            "⏱ Llegada estimada: 13 nov 2026 18:00 (12 km)",
-            "maps.google.com/?q=4.71,-74.15",
-            "*Otras guías del vehículo:* 801233381 (ENTREGADO)",
-            "…y 4 movimientos más",
-        ):
-            self.assertIn(esperado, msg, esperado)
+        self.assertIn("📦 *Seguimiento de envío*", msg)
+        self.assertIn("Guía #801233440", msg)
+        self.assertIn("🚚 *EN DISTRIBUCIÓN*", msg)
+        self.assertIn("📍 *Origen y destino*", msg)
+        self.assertIn("• Origen: FRESENIUS KABI, FUNZA", msg)
+        self.assertIn("• Destino: CLINICA BELO HORIZONTE — NEIVA", msg)
+        # GPS: ubicación ACORTADA (3 componentes), ETA, distancia, GPS, mapa
+        self.assertIn("• Ubicación: Calle 51, Manchester, Bello · 45 km/h", msg)
+        self.assertNotIn("Valle de Aburrá", msg)
+        self.assertIn("• Llegada estimada: 15 ene · 10:03 a. m.", msg)
+        self.assertIn("• Distancia restante: 5 km", msg)
+        self.assertIn("• Última actualización GPS: 15 ene · 9:36 a. m.", msg)
+        self.assertIn("https://maps.google.com/?q=6.33,-75.55", msg)
+        # cumplimiento en curso dentro del plazo + compromiso
+        self.assertIn("• Fecha compromiso: 17 nov 2026", msg)
+        self.assertIn("• Estado: Dentro del plazo de entrega", msg)
+        # detalles
+        self.assertIn("• Vehículo: JTZ665", msg)
+        self.assertIn("• Conductor: JUAN DAVID CORNELIO URIZA", msg)
+        # historial acotado
+        self.assertIn("…y 4 movimientos más", msg)
+        # ⚠️ REGLA: sin enlace de seguimiento (no está entregada)
+        self.assertNotIn("Seguimiento en línea", msg)
+        self.assertNotIn("cons_publica", msg)
         self.assertLessEqual(len(msg), 4096)
 
-    def test_chip_ot_orden_y_variantes(self):
-        casos = [
-            ({"anulada": True}, "⊘ Guía anulada"),
-            ({"devolucion_total": True}, "↩ Devolución total"),
-            ({"cumple_novedad": True}, "✔ Con novedad"),
-            ({"ot": 0}, "✘ No cumplió"),
-        ]
-        for campos, chip in casos:
-            p = self._enriquecido()
-            p["ot"] = {"origen_promesa": "TARIFA", "fecha_promesa": "2026-11-12", **campos}
-            msg = formatear_trazabilidad_guia(p)
-            self.assertIn(chip, msg, chip)
-
-    def test_chip_pendiente_vencida(self):
-        p = self._enriquecido()
-        p["ot"] = {"ot": None, "pendiente": True, "pendiente_vencida": True,
-                   "origen_promesa": "CITA", "fecha_cita_usada": "2026-11-12"}
+    # ── Escenario 1: ENTREGADA → enlace de seguimiento ──
+    def test_entregada_muestra_enlace(self):
+        p = self._payload("ENTREGA DIGITALIZADA")
+        p["ot"] = {"ot": 1, "entregada": True, "fecha_entrega": "2026-11-12",
+                   "fecha_promesa": "2026-11-17", "origen_promesa": "TARIFA"}
         msg = formatear_trazabilidad_guia(p)
-        self.assertIn("🕒 Pendiente (vencida) — cita 12 nov 2026 ya venció", msg)
+        self.assertIn("✅ *ENTREGADO*", msg)
+        self.assertIn("🔗 *Seguimiento en línea:*", msg)
+        self.assertIn("cons_publica.php?GUIA=801233440", msg)
+        self.assertIn("• Estado: Entregado a tiempo", msg)
+        # entregada no lleva GPS (el enriquecimiento no lo adjunta)
+        self.assertNotIn("Ubicación y llegada estimada", msg)
 
-    def test_justificada_rescata_no_cumplida(self):
-        p = self._enriquecido()
-        p["ot"] = {"ot": 0, "origen_promesa": "TARIFA"}
-        p["justificada"] = {"causal": "DERRUMBE", "justificacion": "vía cerrada"}
+    def test_entregada_mayusculas_tildes_espacios_cuenta(self):
+        """La comparación del estado normaliza tildes/mayúsculas/espacios."""
+        p = self._payload("  Entregado ")
         msg = formatear_trazabilidad_guia(p)
-        self.assertIn("✔ Justificada — DERRUMBE", msg)
-        self.assertIn("🚧 *Novedad:* DERRUMBE — vía cerrada", msg)
+        self.assertIn("🔗 *Seguimiento en línea:*", msg)
 
-    def test_vehiculo_finalizado_no_aparece(self):
-        p = self._enriquecido()
-        p["vehiculo"] = {"ok": True, "existe": True,
-                         "vehiculo": {"ubicacion": "Patio", "estado_viaje": "Finalizado"}}
-        msg = formatear_trazabilidad_guia(p)
-        self.assertNotIn("Vehículo en curso", msg)
-
-    def test_evidencia_reemplaza_tracking(self):
-        p = self._enriquecido()
+    def test_entregada_digitalizada_prefiere_evidencia(self):
+        p = self._payload("ENTREGA DIGITALIZADA")
         p["evidencia_url"] = "https://integra.appsiscore.com/app/t/t/imagenes/2026/11/10/801233440.png"
         msg = formatear_trazabilidad_guia(p)
         self.assertIn("🖼️ *Evidencia de entrega digitalizada:*", msg)
         self.assertNotIn("Seguimiento en línea", msg)
 
+    # ── Escenario 3: EN TRÁNSITO → sin enlace ──
+    def test_en_transito_sin_enlace(self):
+        msg = formatear_trazabilidad_guia(self._payload("TRANSITO NACIONAL"))
+        self.assertIn("🚛 *EN TRÁNSITO*", msg)
+        self.assertNotIn("Seguimiento en línea", msg)
+
+    def test_pendiente_sin_enlace(self):
+        msg = formatear_trazabilidad_guia(self._payload("PENDIENTE"))
+        self.assertIn("🕒 *PENDIENTE*", msg)
+        self.assertNotIn("Seguimiento en línea", msg)
+
+    # ── Escenario 4: sin GPS → sin campos vacíos ──
+    def test_sin_gps_sin_campos_vacios(self):
+        msg = formatear_trazabilidad_guia(self._payload("EN DISTRIBUCION"))
+        self.assertNotIn("Ubicación y llegada estimada", msg)
+        self.assertNotIn("Conductor:", msg)
+        self.assertNotIn("• Ubicación: -", msg)
+
+    # ── Escenario 5: ETA vencida → pendiente de actualización ──
+    def test_eta_vencida_pendiente_de_actualizacion(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
+            "ubicacion": "Vía Neiva", "estado_viaje": "En ruta",
+            "eta_fecha": "2020-01-15 10:03:00", "eta_distancia_km": 2,
+            "coincide_guia": True,
+        }}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("• Llegada estimada: pendiente de actualización", msg)
+        self.assertNotIn("10:03 a. m.", msg)
+
+    def test_km0_se_muestra_tal_cual(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
+            "ubicacion": "Km 45 Autopista", "estado_viaje": "En ruta",
+            "velocidad": 0, "coincide_guia": True,
+        }}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("Km 45 Autopista · 0 km/h", msg)
+
+    # ── Escenario 6: entregada fuera de plazo ──
+    def test_entregada_fuera_de_tiempo(self):
+        p = self._payload("ENTREGADO")
+        p["ot"] = {"ot": 0, "entregada": True, "fecha_entrega": "2026-11-20",
+                   "fecha_promesa": "2026-11-17", "origen_promesa": "TARIFA"}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("• Estado: Entregado fuera de tiempo", msg)
+        self.assertIn("🔗 *Seguimiento en línea:*", msg)
+
+    def test_cumplimiento_por_confirmar_sin_ot(self):
+        p = self._payload("EN DISTRIBUCION")
+        p.pop("ot")
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("• Estado: Cumplimiento por confirmar", msg)
+        self.assertNotIn("Fecha compromiso", msg)
+
+    def test_plazo_vencido_en_curso(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["ot"] = {"ot": None, "pendiente": True, "pendiente_vencida": True,
+                   "origen_promesa": "CITA", "fecha_cita_usada": "2026-11-06"}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("• Estado: Plazo de entrega vencido", msg)
+        self.assertIn("• Fecha compromiso: 06 nov 2026", msg)
+
+    def test_anulada(self):
+        p = self._payload("ANULADA")
+        p["ot"] = {"anulada": True}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("⊘ *ANULADA*", msg)
+        self.assertIn("Guía anulada — no cuenta como incumplimiento", msg)
+
+    def test_justificada_rescata_fuera_de_tiempo(self):
+        p = self._payload("ENTREGADO")
+        p["ot"] = {"ot": 0, "entregada": True, "fecha_entrega": "2026-11-20",
+                   "fecha_promesa": "2026-11-17", "origen_promesa": "TARIFA"}
+        p["justificada"] = {"causal": "DERRUMBE", "justificacion": "vía cerrada"}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("Entregado fuera de tiempo (justificada)", msg)
+        self.assertIn("• Novedad: DERRUMBE — vía cerrada", msg)
+
+    def test_cita_de_entrega_con_franja(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["cita_entrega"] = {"fecha": "2026-11-13", "hora_inicio": "08:00", "hora_fin": "12:00"}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("• Cita de entrega: 13 nov 2026 · 08:00–12:00", msg)
+
     def test_coincide_guia_false_NO_muestra_vehiculo(self):
         """El bot es de cara a CLIENTES: sin coincidencia de guías en el
-        manifiesto, NADA de Monitor (igual que el perfil CLIENTE del portal;
-        el aviso «carro sin planillar» es solo para perfiles internos)."""
-        p = self._enriquecido()
+        manifiesto, NADA de Monitor (igual que el perfil CLIENTE del portal)."""
+        p = self._payload("EN DISTRIBUCION")
         p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
             "ubicacion": "Vía Funza", "estado_viaje": "En curso", "coincide_guia": False}}
         msg = formatear_trazabilidad_guia(p)
-        self.assertNotIn("Vehículo en curso", msg)
+        self.assertNotIn("Ubicación y llegada estimada", msg)
         self.assertNotIn("Vía Funza", msg)
-        self.assertNotIn("planillar", msg)
+
+    def test_manifiesto_finalizado_no_muestra_vehiculo(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["vehiculo"] = {"ok": True, "existe": True,
+                         "vehiculo": {"ubicacion": "Patio", "estado_viaje": "Finalizado"}}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertNotIn("Ubicación y llegada estimada", msg)
 
     def test_manifiesto_sin_gps_NO_muestra_bloque_huerfano(self):
         """(caso 801233636 / NNM001) Manifiesto vigente CON la guía pero sin
-        NINGUNA posición GPS: el bloque no se publica — el título solo con
-        nada debajo confunde (el portal muestra los chips, el texto plano
-        del bot no tiene chips)."""
-        p = self._enriquecido()
+        NINGUNA posición GPS: el bloque no se publica."""
+        p = self._payload("EN DISTRIBUCION")
         p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
             "placa": "NNM001", "manifiesto": "00153625", "estado_viaje": "En ruta",
             "conductor": "YONATAN OCHOA OCHOA", "ubicacion": "", "lat": None,
             "lng": None, "velocidad": None, "fecha_reporte_gps": "", "eta_fecha": "",
             "coincide_guia": True}}
         msg = formatear_trazabilidad_guia(p)
-        self.assertNotIn("Vehículo en curso", msg)
+        self.assertNotIn("Ubicación y llegada estimada", msg)
+
+    def test_otras_guias_del_vehiculo(self):
+        p = self._payload("EN DISTRIBUCION")
+        p["misma_placa"] = [{"guia": "801233381", "estado": "ENTREGADO"}]
+        msg = formatear_trazabilidad_guia(p)
+        self.assertIn("🚛 *Otras guías del vehículo:* 801233381 (ENTREGADO)", msg)
+
+    def test_menu_final_siempre(self):
+        for estado in ("ENTREGADO", "EN DISTRIBUCION", "PENDIENTE", "ANULADA"):
+            msg = formatear_trazabilidad_guia(self._payload(estado))
+            self.assertIn("1️⃣ Consultar otra guía", msg, estado)
+            self.assertIn("2️⃣ Volver al menú principal", msg, estado)
 
 
 if __name__ == "__main__":

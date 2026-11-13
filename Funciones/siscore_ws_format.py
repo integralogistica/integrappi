@@ -1,6 +1,7 @@
 # Funciones/siscore_ws_format.py
+import unicodedata
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 MESES_ES = {
     1: "ene", 2: "feb", 3: "mar", 4: "abr",
@@ -186,80 +187,186 @@ def formatear_respuesta_guia(payload: Dict[str, Any]) -> str:
     return "\n".join(lineas)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# (2026-11-13) Trazabilidad ENRIQUECIDA — mismo payload del portal
-# (Funciones/trazabilidad_guia.enriquecer_consulta_guia): agrega veredicto
-# OT, cita de entrega, ubicación del vehículo (Monitor), novedad justificada,
-# otras guías del vehículo y link de evidencia digitalizada.
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# (2026-11-13) Trazabilidad ENRIQUECIDA — mensaje del bot de WhatsApp.
+# Rediseño UX (misma fecha): estructura por secciones priorizando lo que el
+# cliente necesita (estado → origen/destino → ubicación/ETA → cumplimiento →
+# detalles → historial). El payload es el del helper
+# Funciones/trazabilidad_guia.enriquecer_consulta_guia, pero degrada sola con
+# un payload solo-WS.
+# =============================================================================
 
 # WhatsApp corta los mensajes a 4096 caracteres: los bloques variables van
 # acotados para que el mensaje completo siempre quepa en un solo envío.
-_MAX_MOV_ENRIQUECIDO = 6
+_MAX_MOV = 6
 _MAX_COMPANERAS = 6
 _MAX_JUSTIFICACION = 120
+_MAX_UBICACION = 80
 
 
-def _bloque_ot_wa(payload: Dict[str, Any]) -> List[str]:
-    """Veredicto On Time — MISMA semántica de chips de la Trazabilidad del
-    portal (index.tsx): anulada > devolución total > con novedad (incluida la
-    justificada que rescata) > pendiente/vencida > cumplió/no cumplió."""
-    ot = payload.get("ot")
-    if not ot:
-        return []
-    just = payload.get("justificada") or {}
-    con_novedad = ot.get("cumple_novedad") or just
-    por_cita = ot.get("origen_promesa") == "CITA"
-    fecha_ref = (ot.get("fecha_cita_usada") or ot.get("fecha_promesa")) if por_cita else ot.get("fecha_promesa")
-    lbl = "cita" if por_cita else "promesa"
-    fmt_ref = _fmt_fecha_amigable(fecha_ref)
-    f_entrega = _fmt_fecha_amigable(ot.get("fecha_entrega"))
+def _sin_tildes(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
-    if ot.get("anulada"):
-        chip = "⊘ Guía anulada — cuenta como cumplida"
-    elif ot.get("devolucion_total"):
-        chip = "↩ Devolución total — cuenta como cumplida"
-    elif just and ot.get("ot") == 0:
-        chip = f"✔ Justificada — {just.get('causal') or 'novedad'}"
-    elif con_novedad:
-        chip = "✔ Con novedad — cuenta como cumplida"
-    elif ot.get("pendiente"):
-        vencida = ot.get("pendiente_vencida")
-        chip = "🕒 Pendiente (vencida)" if vencida else "🕒 Pendiente"
-        if fecha_ref:
-            chip += f" — {lbl} {fmt_ref}" + (" ya venció" if vencida else " aún no vence")
-    elif ot.get("ot") == 1:
-        chip = f"✔ Cumplió — entrega {f_entrega} ≤ {lbl} {fmt_ref}"
-    elif ot.get("ot") == 0:
-        chip = f"✘ No cumplió — entrega {f_entrega} > {lbl} {fmt_ref}"
-    elif ot.get("entregada"):
-        chip = "— Sin evaluar (entregada sin promesa evaluable)"
+
+def _norm_txt(v: Any) -> str:
+    """Normaliza para comparar estados: SIN tildes, MAYÚSCULAS, espacios
+    colapsados (regla del enlace de seguimiento: la comparación del estado
+    debe tolerar mayúsculas/minúsculas/tildes/espacios)."""
+    return " ".join(_sin_tildes(str(v or "")).upper().split())
+
+
+def _ahora_colombia() -> datetime:
+    """Ahora en hora de Colombia (UTC−5 fijo, sin horario de verano) — para
+    saber si una ETA ya pasó (las fechas de Monitor son hora local CO).
+    NAIVE a propósito: se compara contra los parses de _parse_dt (naive)."""
+    return datetime.now(timezone(timedelta(hours=-5))).replace(tzinfo=None)
+
+
+def _parse_dt(v: Any) -> Optional[datetime]:
+    """Parsea 'YYYY-MM-DD HH:MM[:SS]' / ISO (formatos de Monitor). None si no."""
+    s = " ".join(str(v or "").strip().split())
+    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, f)
+        except Exception:
+            pass
+    return None
+
+
+def _hora12(dt: datetime) -> str:
+    h24, m = dt.hour, dt.minute
+    if h24 < 12:
+        suf, h = "a. m.", h24
     else:
-        chip = "— Sin evaluar (en curso sin promesa evaluable)"
-    return [f"🎯 *On Time:* {chip}"]
+        suf, h = "p. m.", h24 - 12 if h24 > 12 else 12
+    if h == 0:
+        h = 12
+    return f"{h}:{m:02d} {suf}"
 
 
-def _bloque_vehiculo_wa(payload: Dict[str, Any]) -> List[str]:
-    """Ubicación del vehículo en curso (API Monitor). Mismo criterio del
-    portal: nada si Monitor falló, la placa no existe o el manifiesto está
-    Finalizado (la posición sería de un viaje que ya terminó). El bot es de
-    cara a CLIENTES → igual que el perfil CLIENTE del portal, con
-    ``coincide_guia=false`` NO se muestra NADA de Monitor (el manifiesto
-    vigente de la placa es otro viaje y la posición no es de esta guía; el
-    aviso «carro sin planillar» es solo para perfiles internos del portal)."""
+def _dt12(dt: datetime) -> str:
+    """'13 nov · 10:03 a. m.' — fecha corta + hora 12h legible."""
+    return f"{dt.day:02d} {MESES_ES[dt.month]} · {_hora12(dt)}"
+
+
+def _estado_amigable(estado: Any):
+    """(icono, texto, descripción) del estado actual — lenguaje de cliente.
+    Match por SUBCADENA normalizada (los estados reales llegan 'ENTREGA
+    DIGITALIZADA', 'En Ruta a Centro Logistico', 'Transito Nacional'...)."""
+    n = _norm_txt(estado)
+    if "ANULADA" in n:
+        return "⊘", "Anulada", "El envío fue anulado."
+    if "ENTREGA" in n or "DIGITALIZADA" in n:
+        return "✅", "Entregado", "El envío fue entregado al destinatario."
+    if "DISTRIBUCION" in n:
+        return "🚚", "En distribución", "Tu envío está en ruta hacia el destinatario."
+    if "TRANSITO" in n or "RUTA" in n:
+        return "🚛", "En tránsito", "El envío está en tránsito hacia su destino."
+    if "PENDIENTE" in n:
+        return "🕒", "Pendiente", "El envío aún no ha sido despachado."
+    if "NOVEDAD" in n:
+        return "⚠️", "Con novedad", "El envío presenta una novedad en curso."
+    if "ACONDICIONAMIENTO" in n or "STAGE" in n:
+        return "📦", "En acondicionamiento", "El envío está en proceso de acondicionamiento."
+    texto = str(estado or "").strip() or "Sin estado"
+    return "ℹ️", texto.capitalize(), ""
+
+
+def _guia_entregada_estado(payload: Dict[str, Any]) -> bool:
+    """¿La guía está ENTREGADA según su estado ACTUAL? (regla del enlace de
+    seguimiento: se valida contra el estado real, no el historial — y con
+    normalización de tildes/mayúsculas/espacios)."""
+    n = _norm_txt((payload.get("data") or {}).get("Estado"))
+    return "ENTREGA" in n or "DIGITALIZADA" in n
+
+
+def _acortar_ubicacion(texto: Any) -> str:
+    """Ubicación corta y comprensible: las direcciones de Monitor son
+    geocodificadas larguísimas ('Calle 51, Manchester, Bello, Valle de
+    Aburrá, Antioquia, RAP del Agua y la Montaña, 051053, Colombia') — se
+    toman los primeros componentes significativos, UNA sola línea."""
+    partes = [p.strip() for p in str(texto or "").split(",") if p.strip()]
+    corto = ", ".join(partes[:3])
+    if len(corto) > _MAX_UBICACION:
+        corto = corto[: _MAX_UBICACION - 1] + "…"
+    return corto or "-"
+
+
+def _icono_mov(txt: str) -> str:
+    n = _norm_txt(txt)
+    if "ENTREGA" in n or "DIGITALIZADA" in n:
+        return "✅"
+    if "DISTRIBUCION" in n:
+        return "🚚"
+    if "TRANSITO" in n or "RUTA" in n:
+        return "🚛"
+    if "CARG" in n or "DESCARG" in n or "PLANILL" in n:
+        return "📦"
+    return ""
+
+
+def _bloque_cumplimiento_wa(payload: Dict[str, Any]) -> List[str]:
+    """✅ Cumplimiento de entrega — indicador On Time en lenguaje de cliente.
+    Mismos datos del veredicto OT del portal (``payload.ot``, misma
+    ``_calcular_ot_filas``); NUNCA presenta como entrega confirmada un envío
+    que solo está dentro del plazo."""
+    ot = payload.get("ot") or {}
+    just = payload.get("justificada") or {}
+    lineas = ["✅ *Cumplimiento de entrega*"]
+    if not ot:
+        lineas.append("• Estado: Cumplimiento por confirmar")
+        return lineas
+    por_cita = ot.get("origen_promesa") == "CITA"
+    compromiso = (ot.get("fecha_cita_usada") or ot.get("fecha_promesa")) if por_cita else ot.get("fecha_promesa")
+    if compromiso:
+        lineas.append(f"• Fecha compromiso: {_fmt_fecha_amigable(compromiso)}")
+    entregado = bool(ot.get("fecha_entrega")) or bool(ot.get("entregada")) or _guia_entregada_estado(payload)
+    con_novedad = bool(ot.get("cumple_novedad")) or bool(just)
+    if ot.get("anulada"):
+        estado = "Guía anulada — no cuenta como incumplimiento"
+    elif ot.get("devolucion_total"):
+        estado = "Devolución total — no cuenta como incumplimiento"
+    elif entregado and ot.get("ot") == 1:
+        estado = "Entregado a tiempo" + (" (con novedad)" if con_novedad else "")
+    elif entregado and ot.get("ot") == 0:
+        estado = "Entregado fuera de tiempo" + (" (justificada)" if just else "")
+    elif entregado:
+        # Entregada pero sin promesa evaluable → no se puede calcular.
+        estado = "Cumplimiento por confirmar"
+    elif ot.get("pendiente"):
+        estado = "Plazo de entrega vencido" if ot.get("pendiente_vencida") else "Dentro del plazo de entrega"
+    elif con_novedad:
+        estado = "Con novedad — cuenta como cumplida"
+    else:
+        estado = "Cumplimiento por confirmar"
+    lineas.append(f"• Estado: {estado}")
+    if just.get("causal") or just.get("justificacion"):
+        det = str(just.get("justificacion") or "").strip()
+        if len(det) > _MAX_JUSTIFICACION:
+            det = det[: _MAX_JUSTIFICACION - 1] + "…"
+        linea = f"• Novedad: {just.get('causal') or '-'}"
+        if det:
+            linea += f" — {det}"
+        lineas.append(linea)
+    return lineas
+
+
+def _bloque_gps_wa(payload: Dict[str, Any]) -> List[str]:
+    """🕒 Ubicación y llegada estimada — solo guías en curso. Mismas reglas de
+    visibilidad del portal: nada si Monitor falló, la placa no tiene
+    despacho, el manifiesto está Finalizado, ``coincide_guia=false`` (bot de
+    cara a clientes) o si NO hay NINGÚN dato de posición (despacho sin GPS).
+    ETA ya pasada → 'pendiente de actualización' (no se promete una llegada
+    futura que ya ocurrió); los 0 km/h se muestran tal cual (vehículo
+    detenido, no una falla)."""
     veh = payload.get("vehiculo") or {}
-    v = veh.get("vehiculo") if (veh.get("ok") and veh.get("existe")) else None
+    v = (veh.get("vehiculo") if (veh.get("ok") and veh.get("existe")) else None) or None
     if not v:
         return []
-    if str(v.get("estado_viaje") or "").strip().lower() == "finalizado":
+    if _norm_txt(v.get("estado_viaje")) == "FINALIZADO":
         return []
     if v.get("coincide_guia") is False:
         return []
-    # (2026-11-13, caso 801233636/NNM001) Hay manifiestos vigentes que NO
-    # reportan NINGUNA posición GPS (el despacho existe en Monitor pero el
-    # rastreador no transmite): sin algún dato de POSICIÓN (ubicación,
-    # velocidad, reporte GPS, ETA o coordenadas) el bloque no se publica —
-    # un título con solo el conductor no responde «¿dónde está mi guía?».
     hay_posicion = bool(
         v.get("ubicacion") or v.get("velocidad") is not None
         or v.get("fecha_reporte_gps") or v.get("eta_fecha")
@@ -267,140 +374,137 @@ def _bloque_vehiculo_wa(payload: Dict[str, Any]) -> List[str]:
     )
     if not hay_posicion:
         return []
-    lineas = ["\n🚛 *Vehículo en curso*"]
+    lineas = ["🕒 *Ubicación y llegada estimada*"]
     if v.get("ubicacion"):
-        lineas.append(f"📍 {v['ubicacion']}")
-    extras = []
-    if v.get("velocidad") is not None:
-        extras.append(f"{v['velocidad']} km/h")
-    if v.get("conductor"):
-        extras.append(str(v["conductor"]))
-    if extras:
-        lineas.append(" · ".join(extras))
-    gps = _fmt_fecha_hora_amigable(v.get("fecha_reporte_gps"))
-    if v.get("fecha_reporte_gps") and gps != "-":
-        lineas.append(f"🕒 Reporte GPS: {gps}")
-    if v.get("eta_fecha"):
-        eta = _fmt_fecha_hora_amigable(v["eta_fecha"])
-        km = f" ({v['eta_distancia_km']} km)" if v.get("eta_distancia_km") is not None else ""
-        lineas.append(f"⏱ Llegada estimada: {eta}{km}")
+        ubi = _acortar_ubicacion(v["ubicacion"])
+        if v.get("velocidad") is not None:
+            ubi += f" · {v['velocidad']} km/h"
+        lineas.append(f"• Ubicación: {ubi}")
+    eta = _parse_dt(v.get("eta_fecha"))
+    if eta is not None:
+        if eta < _ahora_colombia():
+            lineas.append("• Llegada estimada: pendiente de actualización")
+        else:
+            lineas.append(f"• Llegada estimada: {_dt12(eta)}")
+        if v.get("eta_distancia_km") is not None:
+            lineas.append(f"• Distancia restante: {v['eta_distancia_km']} km")
+    gps = _parse_dt(v.get("fecha_reporte_gps"))
+    if gps is not None:
+        lineas.append(f"• Última actualización GPS: {_dt12(gps)}")
     if v.get("lat") is not None and v.get("lng") is not None:
-        lineas.append(f"🗺️ https://maps.google.com/?q={v['lat']},{v['lng']}")
+        lineas.append(f"• https://maps.google.com/?q={v['lat']},{v['lng']}")
     return lineas
 
 
 def formatear_trazabilidad_guia(payload: Dict[str, Any]) -> str:
     """Mensaje de WhatsApp para la consulta de guía ENRIQUECIDA (helper
-    trazabilidad_guia). Degrada sola: si el payload no pasó por el
-    enriquecimiento (o la guía no existe / falló), produce exactamente lo
-    mismo que ``formatear_respuesta_guia``."""
-    enriquecido = bool(payload) and payload.get("ok") and payload.get("exists") \
-        and not payload.get("not_found") and (
-            payload.get("ot") or payload.get("placa") or payload.get("vehiculo")
-            or payload.get("cita_entrega") or payload.get("justificada")
-            or payload.get("misma_placa") or payload.get("evidencia_url")
-        )
-    if not enriquecido:
+    trazabilidad_guia). Estructura por secciones (2026-11-13): estado →
+    origen/destino → ubicación/ETA → cumplimiento → detalles → historial →
+    enlace (SOLO entregadas). Errores / guía inexistente → mismo formato de
+    siempre (formatear_respuesta_guia)."""
+    if not payload or not payload.get("ok") or not payload.get("exists") or payload.get("not_found"):
         return formatear_respuesta_guia(payload)
 
     data = payload.get("data") or {}
     guia = _txt(payload.get("guia"))
-    tracking_url = _txt(payload.get("tracking_url"), "")
+    icono_estado, texto_estado, desc_estado = _estado_amigable(data.get("Estado"))
 
-    cliente = _val(data.get("Nombre_cliente"))
-    servicio = _val(data.get("Servicio"))
-    num_piezas = _val(data.get("NumPie"))
-    envio = _fmt_fecha_amigable(data.get("FecEnv"))
-    estado = _txt(data.get("Estado"), "-")
-    fecha_est = _fmt_fecha_amigable(data.get("FecEst"))
+    lineas: List[str] = ["📦 *Seguimiento de envío*", f"Guía #{guia}", ""]
+    lineas.append(f"{icono_estado} *{texto_estado.upper()}*")
+    if desc_estado:
+        lineas.append(desc_estado)
 
+    # ── Origen y destino ──
     nom_rem, ciu_rem = _val(data.get("NomRem")), _val(data.get("CiuRem"))
     nom_des, ciu_des = _val(data.get("NomDes")), _val(data.get("CiuDes"))
-    quien_recibe = _val(data.get("quienrecibe"))
+    if nom_rem or ciu_rem or nom_des or ciu_des:
+        lineas.append("\n📍 *Origen y destino*")
+        if nom_rem or ciu_rem:
+            origen = f"{nom_rem}, {ciu_rem}" if (nom_rem and ciu_rem) else (nom_rem or ciu_rem)
+            lineas.append(f"• Origen: {origen}")
+        if nom_des or ciu_des:
+            destino = f"{nom_des} — {ciu_des}" if (nom_des and ciu_des) else (nom_des or ciu_des)
+            lineas.append(f"• Destino: {destino}")
+        quien_recibe = _val(data.get("quienrecibe"))
+        if quien_recibe:
+            lineas.append(f"• Recibió: {quien_recibe}")
 
-    lineas: List[str] = ["📦 *Trazabilidad de guía*\n"]
-    lineas.append(f"🔢 *Guía:* {guia}")
-    if cliente:
-        lineas.append(f"🏢 *Cliente:* {cliente}")
-    if servicio:
-        lineas.append(f"🚚 *Servicio:* {servicio}")
-    if num_piezas:
-        lineas.append(f"📦 *Piezas:* {num_piezas}")
-    if _val(payload.get("placa")):
-        lineas.append(f"🚛 *Placa:* {payload['placa']}")
-    lineas.append(f"📅 *Fecha envío:* {envio}")
-    lineas.append(f"✅ *Estado:* {estado}")
-    lineas.append(f"🗓️ *Fecha estado:* {fecha_est}")
+    # ── Ubicación y llegada estimada (solo en curso) ──
+    gps = _bloque_gps_wa(payload)
+    if gps:
+        lineas.append("")
+        lineas.extend(gps)
 
-    # Veredicto OT (misma regla del informe/portal)
-    lineas.extend(_bloque_ot_wa(payload))
-
-    # Cita de entrega registrada a mano (/CitasEntrega) — la fecha con la que
-    # se juega el OT cuando hay cita.
+    # ── Cumplimiento de entrega (On Time) ──
+    lineas.append("")
+    lineas.extend(_bloque_cumplimiento_wa(payload))
     cita = payload.get("cita_entrega") or {}
     if cita.get("fecha"):
         franja = ""
         if cita.get("hora_inicio"):
             franja = f" · {cita['hora_inicio']}–{cita.get('hora_fin') or ''}"
-        reagendas = len(cita.get("anteriores") or [])
-        sufijo = f" (re-agendada {reagendas} veces)" if reagendas > 1 else ""
-        lineas.append(f"📅 *Cita de entrega:* {_fmt_fecha_amigable(cita['fecha'])}{franja}{sufijo}")
+        lineas.append(f"• Cita de entrega: {_fmt_fecha_amigable(cita['fecha'])}{franja}")
 
-    # Origen / destino
-    if nom_rem or ciu_rem:
-        origen = nom_rem or ""
-        if ciu_rem:
-            origen = f"{origen} ({ciu_rem})" if origen else ciu_rem
-        lineas.append(f"\n📤 *Origen:* {origen}")
-    if nom_des or ciu_des:
-        destino = nom_des or ""
-        if ciu_des:
-            destino = f"{destino} — {ciu_des}" if destino else ciu_des
-        lineas.append(f"📥 *Destino:* {destino}")
-    if quien_recibe:
-        lineas.append(f"🖊️ *Recibió:* {quien_recibe}")
+    # ── Detalles del envío ──
+    detalles = []
+    if _val(data.get("Nombre_cliente")):
+        detalles.append(f"• Cliente: {data['Nombre_cliente']}")
+    if _val(data.get("Servicio")):
+        detalles.append(f"• Servicio: {data['Servicio']}")
+    if _val(data.get("NumPie")):
+        detalles.append(f"• Piezas: {data['NumPie']}")
+    if _val(payload.get("placa")):
+        detalles.append(f"• Vehículo: {payload['placa']}")
+    veh = (payload.get("vehiculo") or {}).get("vehiculo") or {}
+    if veh.get("conductor"):
+        detalles.append(f"• Conductor: {veh['conductor']}")
+    if _val(data.get("FecEnv")):
+        detalles.append(f"• Fecha de envío: {_fmt_fecha_amigable(data['FecEnv'])}")
+    ot = payload.get("ot") or {}
+    if ot.get("fecha_entrega"):
+        detalles.append(f"• Fecha de entrega: {_fmt_fecha_amigable(ot['fecha_entrega'])}")
+    if detalles:
+        lineas.append("\n📋 *Detalles del envío*")
+        lineas.extend(detalles)
 
-    # Novedad justificada (/NovedadesOT)
-    just = payload.get("justificada") or {}
-    if just.get("causal") or just.get("justificacion"):
-        det = str(just.get("justificacion") or "").strip()
-        if len(det) > _MAX_JUSTIFICACION:
-            det = det[:_MAX_JUSTIFICACION - 1] + "…"
-        linea = f"🚧 *Novedad:* {just.get('causal') or '-'}"
-        if det:
-            linea += f" — {det}"
-        lineas.append(linea)
-
-    # Ubicación del vehículo (Monitor) — solo guías en curso
-    lineas.extend(_bloque_vehiculo_wa(payload))
-
-    # Movimientos (últimos N para que el mensaje quepa entero)
+    # ── Historial de movimientos ──
     movimientos: List[Dict[str, Any]] = data.get("Movimientos") or []
-    lineas_mov = []
-    for m in movimientos[:_MAX_MOV_ENRIQUECIDO]:
+    lineas.append("\n📜 *Historial de movimientos*")
+    filas_mov = []
+    for m in movimientos[:_MAX_MOV]:
         detalle = str(m.get("DetalleMov") or "").strip()
         tipo = str(m.get("Tipo_Movimiento") or "").strip()
-        nom = detalle or tipo
-        if nom:
-            lineas_mov.append(f"· {nom} — {_fmt_fecha_hora_amigable(m.get('FecMov'))}")
-    if len(movimientos) > _MAX_MOV_ENRIQUECIDO:
-        lineas_mov.append(f"· …y {len(movimientos) - _MAX_MOV_ENRIQUECIDO} movimientos más")
-    lineas.append(f"\n🧾 *Movimientos:*\n" + ("\n".join(lineas_mov) if lineas_mov else "· Sin movimientos registrados"))
+        nombre = detalle or tipo
+        if not nombre:
+            continue
+        dt = _parse_dt(m.get("FecMov"))
+        cuando = _dt12(dt) if dt else _fmt_fecha_hora_amigable(m.get("FecMov"))
+        icono = _icono_mov(nombre)
+        filas_mov.append(f"- {icono} {cuando} — {nombre}" if icono else f"- {cuando} — {nombre}")
+    if not filas_mov:
+        filas_mov = ["- Sin movimientos registrados"]
+    if len(movimientos) > _MAX_MOV:
+        filas_mov.append(f"- …y {len(movimientos) - _MAX_MOV} movimientos más")
+    lineas.extend(filas_mov)
 
-    # Otras guías del mismo vehículo ese día
+    # ── Enlace de seguimiento: SOLO cuando el estado ACTUAL es ENTREGADO
+    # (regla 2026-11-13: en distribución/tránsito/pendiente NO se muestra; se
+    # compara el estado real normalizado, no el historial). La evidencia
+    # digitalizada (que solo existe en entregadas) reemplaza al tracking
+    # genérico, igual que en el portal. El mapa GPS es independiente. ──
+    if _guia_entregada_estado(payload):
+        if payload.get("evidencia_url"):
+            lineas.append(f"\n🖼️ *Evidencia de entrega digitalizada:*\n{payload['evidencia_url']}")
+        elif _txt(payload.get("tracking_url"), ""):
+            lineas.append(f"\n🔗 *Seguimiento en línea:*\n{payload['tracking_url']}")
+
+    # ── Otras guías del mismo vehículo ese día ──
     companeras = payload.get("misma_placa") or []
     if companeras:
         textos = [f"{cp.get('guia')} ({_txt(cp.get('estado'), '-')})" for cp in companeras[:_MAX_COMPANERAS]]
         if len(companeras) > _MAX_COMPANERAS:
             textos.append(f"…y {len(companeras) - _MAX_COMPANERAS} más")
         lineas.append("\n🚛 *Otras guías del vehículo:* " + " · ".join(textos))
-
-    # Evidencia digitalizada (reemplaza al tracking genérico, como en el
-    # portal) o link de seguimiento normal.
-    if payload.get("evidencia_url"):
-        lineas.append(f"\n🖼️ *Evidencia de entrega digitalizada:*\n{payload['evidencia_url']}")
-    elif tracking_url:
-        lineas.append(f"\n🔗 *Seguimiento en línea:*\n{tracking_url}")
 
     lineas.append("\n¿Qué deseas hacer ahora?\n1️⃣ Consultar otra guía\n2️⃣ Volver al menú principal")
     return "\n".join(lineas)
