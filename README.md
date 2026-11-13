@@ -994,6 +994,16 @@ El % OT deja de ser aproximado: `rutas/indicadores_cliente.py` ahora **replica `
 - `GET /indicadores-cliente/{id}/consulta-guia` corre la MISMA `_calcular_ot_filas` sobre la guía consultada → veredicto OT individual (✔/✘/✔ Justificada/Sin evaluar).
 - Deploy backend + frontend JUNTOS.
 
+## Actualizaciones Recientes (2026-11-12)
+
+### HOY en hora de Colombia en toda la lógica OT (fix 801233440)
+
+El servidor de Render corre en **UTC**: después de las 7 pm colombianas (UTC−5)
+`date.today()` ya devolvía el día SIGUIENTE. Efecto (caso 801233440, cita 11-nov,
+consultada la noche del 12-nov): `/pendientes` reportaba `dias_vs_limite: 2` (13−11
+en UTC) en vez de 1, y `_calcular_ot_filas` podía marcar guías «Pendientes vencidas»
+un día antes. Fix: helper **`_hoy_colombia()`** (`datetime.now(timezone(timedelta(hours=-5))).date()` — Colombia no tiene horario de verano, sin dependencias) reemplaza los 2 `date.today()` (`_calcular_ot_filas` y `/pendientes`). Dep **SOLO backend**. Tablas del OT: **Mongo es la fuente de verdad** — Excel eliminado, `importar_tablas_ot_real.py` bloqueado (ver nota 2026-11-12 en la sección de las 5 tablas).
+
 ## Actualizaciones Recientes (2026-11-10)
 
 ### ANALISTA entra al portal «Mis Indicadores»

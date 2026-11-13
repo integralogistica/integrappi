@@ -15,7 +15,7 @@ normalizado en las demás colecciones).
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from typing import List, Optional
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 import unicodedata
@@ -313,6 +313,17 @@ ESTADO_ENTREGADO = "ENTREGADO"
 # tarifas FUNZA. ot=1 cumplió, 0 no cumplió, None no evaluable.
 
 _PATRON_FECHA = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# (2026-11-12, caso 801233440) Hora de Colombia: el servidor de Render corre en
+# UTC y después de las 7 pm (UTC−5) date.today() ya devuelve el día SIGUIENTE —
+# inflaba `dias_vs_limite` en 1 y marcaba guías «Pendientes vencidas» un día
+# antes. Colombia no tiene horario de verano: UTC−5 fijo, sin dependencias.
+_TZ_CO = timezone(timedelta(hours=-5))
+
+
+def _hoy_colombia() -> date:
+    """Fecha de HOY en Colombia (no la del servidor UTC)."""
+    return datetime.now(_TZ_CO).date()
 
 
 def _fecha_servible(texto: Optional[str]) -> Optional[date]:
@@ -651,7 +662,7 @@ def _calcular_ot_filas(filas: list) -> None:
       citas_agendadas; borrada la manual, vuelve a citas_agendadas."""
     if not filas:
         return
-    hoy = date.today()
+    hoy = _hoy_colombia()
 
     # (2026-10-31) CITASACT del Excel real (citas_agendadas): fuente EXACTA de
     # la fórmula BN — GANA sobre el TMS (trae re-agendadas que el TMS no refleja).
@@ -1520,7 +1531,7 @@ def get_pendientes_cliente(
         if tipo_servicio:
             sel_tipos = set(tipo_servicio)
             minimas = [f for f in minimas if f.get("tipo_servicio") in sel_tipos]
-        hoy = date.today()
+        hoy = _hoy_colombia()
         vencidas, en_curso, no_aplica = [], [], []
         for f in minimas:
             if f.get("novedad") or f.get("cumple_novedad") or f.get("anulada") or f.get("devolucion_total"):
