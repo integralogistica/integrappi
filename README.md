@@ -1027,7 +1027,11 @@ de anuladas en `guias_anuladas`) se extrajo a **`Funciones/trazabilidad_guia.py`
   Finalizado o si `coincide_guia=false` — el bot es de cara a CLIENTES, misma
   regla que el perfil CLIENTE del portal: sin coincidencia el manifiesto
   vigente es OTRO viaje y la posición no es de esta guía; el aviso «carro sin
-  planillar» es solo para perfiles internos del portal),
+  planillar» es solo para perfiles internos del portal — ni cuando el
+  manifiesto no reporta NINGUNA posición GPS (caso 801233636/NNM001: despacho
+  vigente en Monitor pero rastreador sin transmitir — un bloque con solo el
+  conductor no responde «¿dónde está mi guía?»; el portal sí muestra los
+  chips del despacho porque tiene UI para ello),
   otras guías del vehículo y 🖼️ link de evidencia digitalizada (reemplaza al
   tracking genérico). Acotes para el límite de 4096 caracteres de WhatsApp:
   últimos 6 movimientos («…y N más»), 6 compañeras, justificación a 120 car.

@@ -338,6 +338,20 @@ class FormatearTrazabilidadTests(unittest.TestCase):
         self.assertNotIn("Vía Funza", msg)
         self.assertNotIn("planillar", msg)
 
+    def test_manifiesto_sin_gps_NO_muestra_bloque_huerfano(self):
+        """(caso 801233636 / NNM001) Manifiesto vigente CON la guía pero sin
+        NINGUNA posición GPS: el bloque no se publica — el título solo con
+        nada debajo confunde (el portal muestra los chips, el texto plano
+        del bot no tiene chips)."""
+        p = self._enriquecido()
+        p["vehiculo"] = {"ok": True, "existe": True, "vehiculo": {
+            "placa": "NNM001", "manifiesto": "00153625", "estado_viaje": "En ruta",
+            "conductor": "YONATAN OCHOA OCHOA", "ubicacion": "", "lat": None,
+            "lng": None, "velocidad": None, "fecha_reporte_gps": "", "eta_fecha": "",
+            "coincide_guia": True}}
+        msg = formatear_trazabilidad_guia(p)
+        self.assertNotIn("Vehículo en curso", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

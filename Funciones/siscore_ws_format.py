@@ -255,6 +255,18 @@ def _bloque_vehiculo_wa(payload: Dict[str, Any]) -> List[str]:
         return []
     if v.get("coincide_guia") is False:
         return []
+    # (2026-11-13, caso 801233636/NNM001) Hay manifiestos vigentes que NO
+    # reportan NINGUNA posición GPS (el despacho existe en Monitor pero el
+    # rastreador no transmite): sin algún dato de POSICIÓN (ubicación,
+    # velocidad, reporte GPS, ETA o coordenadas) el bloque no se publica —
+    # un título con solo el conductor no responde «¿dónde está mi guía?».
+    hay_posicion = bool(
+        v.get("ubicacion") or v.get("velocidad") is not None
+        or v.get("fecha_reporte_gps") or v.get("eta_fecha")
+        or (v.get("lat") is not None and v.get("lng") is not None)
+    )
+    if not hay_posicion:
+        return []
     lineas = ["\n🚛 *Vehículo en curso*"]
     if v.get("ubicacion"):
         lineas.append(f"📍 {v['ubicacion']}")
