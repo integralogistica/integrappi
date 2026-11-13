@@ -18,9 +18,21 @@
 #
 # Uso: python importar_tablas_ot_real.py
 import re
+import sys
 import warnings
 import unicodedata
 from datetime import datetime
+
+# (2026-11-12) Guarda anti-borrón: el Excel fue eliminado y Mongo es la fuente
+# de verdad — este delete+insert VACIARÍA las 5 colecciones y con ellas toda
+# edición manual. Se niega a correr; si algún día hace falta re-importar de
+# verdad, recuperar el Excel del historial de git y quitar este bloque.
+raise SystemExit(
+    "❌ DEPRECATED (2026-11-12): el Excel 'calculo real ot.xlsx' fue eliminado y "
+    "Mongo es la fuente de verdad de las 5 tablas del OT. Este script hace "
+    "delete+insert y BORRARÍA toda edición manual (ej. PUERTO CONCORDIA). "
+    "Edita las colecciones directo en Mongo (base 'integra')."
+)
 
 warnings.filterwarnings("ignore")
 import openpyxl
