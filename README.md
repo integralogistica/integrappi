@@ -994,6 +994,55 @@ El % OT deja de ser aproximado: `rutas/indicadores_cliente.py` ahora **replica `
 - `GET /indicadores-cliente/{id}/consulta-guia` corre la MISMA `_calcular_ot_filas` sobre la guía consultada → veredicto OT individual (✔/✘/✔ Justificada/Sin evaluar).
 - Deploy backend + frontend JUNTOS.
 
+## Actualizaciones Recientes (2026-11-13)
+
+### Trazabilidad por guía en el bot de WhatsApp (helper compartido)
+
+La consulta de guía del flujo 🧾 CLIENTE del bot (`rutas/whatsapp_integra.py`,
+`_procesar_siscore_y_responder`) pasa de formatear SOLO el SOAP crudo de
+Siscore a mostrar la MISMA Trazabilidad enriquecida de la pestaña 🧭 del
+portal. Para no duplicar lógica, TODO el enriquecimiento del endpoint
+`GET /indicadores-cliente/{id}/consulta-guia` (placa/ciudad del TMS, veredicto
+OT con `_calcular_ot_filas`, otras guías del vehículo, ubicación Monitor,
+novedad justificada, cita de entrega, evidencia digitalizada y persistencia
+de anuladas en `guias_anuladas`) se extrajo a **`Funciones/trazabilidad_guia.py`
+— `enriquecer_consulta_guia(guia, payload, nombres_cliente, detectada_por)`**.
+
+- **Endpoint**: queda igual en respuesta (el portal no cambia); delega en el
+  helper con `nombres_cliente=pg_nombres` (el portal externo no descubre
+  guías de otros clientes) y `detectada_por=usuario`.
+- **Bot**: muestra **CUALQUIER guía** (decisión del 2026-11-13: sin filtro de
+  cliente → `nombres_cliente=None` lista las compañeras de viaje de todos los
+  clientes). `detectada_por="wa:<número>"` queda en la auditoría de
+  anuladas — como comparte proceso con el endpoint, una anulación detectada
+  por el bot también limpia los caches del OT del portal. Timeout del SOAP
+  60s→**90s + 1 intento** (mismo fix 2026-11-06 del portal: el WS responde en
+  40-90s). Si el enriquecimiento falla, degrada al formato viejo de solo WS.
+- **Mensaje WA** (`formatear_trazabilidad_guia` en `Funciones/siscore_ws_format.py`):
+  mismo look del mensaje actual + placa, 🎯 veredicto OT (misma semántica de
+  chips del portal: anulada > devolución total > justificada/con novedad >
+  pendiente/vencida > cumplió/no cumplió), 📅 cita de entrega (franja +
+  re-agendas), 🚧 novedad justificada, 🚛 vehículo en curso (ubicación,
+  velocidad, reporte GPS, ETA + link a Google Maps; nada si el manifiesto está
+  Finalizado o si `coincide_guia=false` — el bot es de cara a CLIENTES, misma
+  regla que el perfil CLIENTE del portal: sin coincidencia el manifiesto
+  vigente es OTRO viaje y la posición no es de esta guía; el aviso «carro sin
+  planillar» es solo para perfiles internos del portal),
+  otras guías del vehículo y 🖼️ link de evidencia digitalizada (reemplaza al
+  tracking genérico). Acotes para el límite de 4096 caracteres de WhatsApp:
+  últimos 6 movimientos («…y N más»), 6 compañeras, justificación a 120 car.
+- **Evidencia digitalizada**: la URL pública del PNG de Siscore (día de
+  EMISIÓN) la computa ahora el BACKEND (`url_evidencia_guia`, espejo del
+  armado que hacía el frontend) y viaja como `payload.evidencia_url`.
+- `_guia_ya_entregada` quedó como alias en el router (la lógica vive en el
+  helper); el helper resuelve colecciones/caches/OT PEREZOSAMENTE vía
+  `rutas.indicadores_cliente` (sin import circular y los patches de los tests
+  sobre ese módulo siguen funcionando).
+- Tests: `tests/test_trazabilidad_guia.py` (24). Dep **SOLO backend**. Para
+  la ubicación del vehículo en el bot hacen falta las `MONITOR_*` en Render
+  (pendientes desde el 2026-11-09) — sin ellas el bloque 🚛 simplemente no
+  aparece.
+
 ## Actualizaciones Recientes (2026-11-12)
 
 ### HOY en hora de Colombia en toda la lógica OT (fix 801233440)

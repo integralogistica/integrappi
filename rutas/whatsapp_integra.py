@@ -369,11 +369,31 @@ def _safe_int(v: Any, default: int) -> int:
 
 async def _procesar_siscore_y_responder(numero: str, guia: str):
     from Funciones.siscore_ws_tracking import consultar_guia_ws
-    from Funciones.siscore_ws_format import formatear_respuesta_guia
+    from Funciones.siscore_ws_format import formatear_trazabilidad_guia
+    from Funciones.trazabilidad_guia import enriquecer_consulta_guia
 
     try:
-        payload = await consultar_guia_ws(guia, timeout_seconds=60.0)
-        texto_respuesta = formatear_respuesta_guia(payload)
+        # (2026-11-13) Timeout holgado + 1 SOLO intento — mismo fix del portal:
+        # el WS de Siscore responde la consulta real en 40-90s; reintentar
+        # solo multiplica la espera del usuario en el chat.
+        payload = await consultar_guia_ws(guia, timeout_seconds=90.0, max_intentos=1)
+        # (2026-11-13) Trazabilidad ENRIQUECIDA — MISMO helper de la pestaña
+        # 🧭 Trazabilidad del portal (Funciones/trazabilidad_guia): veredicto
+        # OT, cita de entrega, ubicación del vehículo (Monitor), novedad
+        # justificada, otras guías del vehículo y evidencia digitalizada. El
+        # bot muestra CUALQUIER guía (sin filtro de cliente). Si el
+        # enriquecimiento falla, se degrada al formato de solo WS (la
+        # consulta SOAP ya tardó — no se pierde por un extra).
+        try:
+            payload = await enriquecer_consulta_guia(
+                guia, payload, nombres_cliente=None, detectada_por=f"wa:{numero}"
+            )
+        except Exception:
+            logger.warning(
+                "[whatsapp-integra] Enriquecimiento de la guía %s falló — se envía solo el WS",
+                guia, exc_info=True,
+            )
+        texto_respuesta = formatear_trazabilidad_guia(payload)
         await enviar_texto(numero, texto_respuesta)
 
         log_whatsapp_event(
@@ -382,7 +402,12 @@ async def _procesar_siscore_y_responder(numero: str, guia: str):
             event="MESSAGE_SENT",
             text="respuesta siscore soap enviada (bg)",
             state="CLIENTE_POST",
-            context={"guia": guia, "ok": bool(payload.get("ok")), "exists": payload.get("exists")},
+            context={
+                "guia": guia,
+                "ok": bool(payload.get("ok")),
+                "exists": payload.get("exists"),
+                "enriquecida": bool(payload.get("ot") or payload.get("placa")),
+            },
         )
     except Exception as e:
         tb = traceback.format_exc()

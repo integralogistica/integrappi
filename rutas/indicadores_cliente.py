@@ -1007,12 +1007,10 @@ _GUIA_PATTERN = _re_guias.compile(r"^[A-Za-z0-9\-]{4,30}$")
 
 
 def _guia_ya_entregada(payload: dict) -> bool:
-    """(2026-11-09) ¿La guía ya se entregó según el WS de Siscore? Mismo
-    criterio del frontend (``index.tsx``: Estado con 'ENTREGA') más
-    'DIGITALIZADA' (entrega con soporte gráfico). No se usa ``ot.entregada``
-    porque depende de que la guía exista en el TMS con fecha de emisión."""
-    estado = str((payload.get("data") or {}).get("Estado") or "").upper()
-    return "ENTREGA" in estado or "DIGITALIZADA" in estado
+    """(2026-11-13) Delegado al helper compartido — se mantiene como alias
+    por compatibilidad (la lógica vive en Funciones/trazabilidad_guia.py)."""
+    from Funciones.trazabilidad_guia import guia_ya_entregada
+    return guia_ya_entregada(payload)
 
 
 @router.get("/{cliente_id}/consulta-guia")
@@ -1046,181 +1044,17 @@ async def get_consulta_guia(
     if not payload.get("ok"):
         logger.warning(f"[indicadores-cliente] Siscore rechazó la consulta de {g}: {payload.get('error')}")
         raise HTTPException(status_code=502, detail="No se pudo consultar la guía en este momento. Intenta de nuevo en unos minutos.")
-    # (2026-10-30) Placa asociada a la guía según el TMS (informe_guias_tms);
-    # ciudad destino del TMS como refuerzo de la que trae el WS.
-    tms = guia_tms_placa(g) or {}
-    if tms.get("placa"):
-        payload["placa"] = tms["placa"]
-    if tms.get("ciudad_destino"):
-        payload["ciudad_destino_tms"] = tms["ciudad_destino"]
-    # (2026-11-10) ⚠️ El informe del TMS NUNCA trae 'ANULADA' (deja el último
-    # estado, p. ej. 'Transito Nacional' — caso 801232571): si el WS EN VIVO
-    # dice que la guía fue anulada, se persiste en `guias_anuladas` para que
-    # el OT la trate como «Con novedad» (auto-cumple) en TODO el dashboard,
-    # no solo en esta consulta. Solo escribe la PRIMERA vez; limpia los
-    # caches para que el efecto sea inmediato.
-    estado_ws = str((payload.get("data") or {}).get("Estado") or "").upper()
-    if "ANULADA" in estado_ws:
-        try:
-            if not col_guias_anuladas.find_one({"guia": g.upper()}):
-                col_guias_anuladas.insert_one({
-                    "guia": g.upper(),
-                    "estado_siscore": estado_ws,
-                    "detectada_el": datetime.now().isoformat(timespec="seconds"),
-                    "detectada_por": usuario,
-                })
-                _CACHE_TABLAS.pop("guias_anuladas", None)
-                _CACHE_GUIAS.clear()
-                _CACHE_PENDIENTES.clear()
-                logger.info(
-                    f"[indicadores-cliente] Guía {g} ANULADA según el WS — pasa a «Con novedad» en el OT"
-                )
-        except Exception:
-            logger.warning(f"[indicadores-cliente] No se pudo persistir la anulación de {g}", exc_info=True)
-    # (2026-10-31) ¿Cumplió la guía el OT? MISMA función del informe
-    # (_calcular_ot_filas) sobre la fila del TMS — el veredicto no puede
-    # divergir del que ven en el gráfico/tabla. Viaja aparte de
-    # `justificada` (Mongo); el frontend prioriza la justificación si
-    # rescata una no cumplida.
-    if tms.get("fecha_emision"):
-        fila_ot = {
-            "guia": g,
-            "estado": tms.get("estado"),
-            "nombre_cliente": tms.get("nombre_cliente"),
-            "destinatario": tms.get("destinatario"),
-            "ciudad_origen": tms.get("ciudad_origen"),
-            "departamento_origen": tms.get("departamento_origen"),
-            "departamento_destino": tms.get("departamento_destino"),
-            "fecha_carga": tms.get("fecha_carga"),
-            "novedad_tms": tms.get("novedad_tms"),
-            "fecha_emision": tms.get("fecha_emision"),
-            "fecha_entrega": tms.get("fecha_entrega"),
-            "fecha_cita": tms.get("fecha_cita"),
-            "ciudad_destino": tms.get("ciudad_destino"),
-        }
-        fila_ot["estado"], _ = _normalizar_estado(fila_ot["estado"])
-        _calcular_ot_filas([fila_ot])
-        payload["ot"] = {
-            "ot": fila_ot.get("ot"),
-            "cumple_novedad": fila_ot.get("cumple_novedad"),
-            "tipo_servicio": fila_ot.get("tipo_servicio"),
-            "ruta": fila_ot.get("ruta"),
-            "fecha_emision": fila_ot.get("fecha_emision"),
-            "fecha_entrega": fila_ot.get("fecha_entrega"),
-            "fecha_promesa": fila_ot.get("fecha_promesa"),
-            "origen_promesa": fila_ot.get("origen_promesa"),
-            # (2026-11-09) La CITA con la que se juzgó (manual de /CitasEntrega
-            # o agendada) y si fue manual — la Trazabilidad del portal la muestra.
-            "fecha_cita_usada": fila_ot.get("fecha_cita_usada"),
-            "cita_manual": bool(fila_ot.get("cita_entrega")),
-            "dias_habiles": fila_ot.get("dias_habiles"),
-            "entregada": fila_ot.get("estado") == ESTADO_ENTREGADO,
-            # (2026-11-10) Guía EN CURSO (sin fecha de entrega): segmento
-            # «Pendientes»/«Pendientes vencidas» — fuera del % OT; `ot` viaja
-            # None para las en curso.
-            "pendiente": bool(fila_ot.get("ot_pendiente")),
-            "pendiente_vencida": bool(fila_ot.get("ot_pendiente_vencida")),
-            # (2026-11-10) Guía ANULADA (estado del informe O detectada por
-            # el WS en vivo): auto-cumple como «Con novedad» — la Trazabilidad
-            # lo muestra con su propio chip (no «Con novedad»).
-            "anulada": bool(fila_ot.get("anulada")),
-            # (2026-11-11) DEVOLUCIÓN TOTAL (novedad del informe TMS): mismo
-            # trato — auto-cumple con chip propio.
-            "devolucion_total": bool(fila_ot.get("devolucion_total")),
-        }
-    # (2026-10-30) Otras guías del mismo vehículo emitidas el mismo día (la
-    # remesa que viajó junta) — solo conocible desde el TMS.
-    # (2026-11-05) SOLO las del cliente del dashboard (pg_nombres): el vehículo
-    # comparte viaje entre clientes y el portal no debe descubrir guías ajenas.
-    if tms.get("placa") and tms.get("fecha_emision"):
-        companeras = guias_placa_dia(tms["placa"], tms["fecha_emision"], g, cliente.get("pg_nombres"))
-        for cp in companeras:
-            cp["estado"], _ = _normalizar_estado(cp.get("estado"))
-        payload["misma_placa"] = companeras
-    # (2026-11-09) ¿Dónde está el VEHÍCULO? — solo para guías NO entregadas:
-    # última posición GPS de la placa según Monitor (Mayasoft, api monitor.pdf).
-    # Mismo criterio de "entregada" que el frontend (Estado con ENTREGA o
-    # DIGITALIZADA). Un fallo de Monitor JAMÁS rompe la consulta (que ya
-    # tardó 40-90s en el SOAP): queda en log y el panel no aparece.
-    # (2026-11-10) Las ANULADAS tampoco: el servicio se canceló, no hay viaje
-    # que seguir. (2026-11-11) La DEVOLUCIÓN TOTAL igual: la carga volvió al
-    # remitente, seguir el vehículo no aporta.
-    if (
-        tms.get("placa")
-        and not _guia_ya_entregada(payload)
-        and not payload.get("ot", {}).get("anulada")
-        and not payload.get("ot", {}).get("devolucion_total")
-    ):
-        try:
-            from Funciones.monitor_ws import consultar_vehiculo_monitor
-            # (2026-11-11) Guías del viaje para validar el manifiesto: la
-            # consultada + las compañeras del mismo vehículo/día (misma_placa,
-            # calculado arriba). Monitor cruza contra el
-            # clientreferencenumber de las remesas → coincide_guia en el
-            # payload: sin coincidencia, el manifiesto vigente de la placa es
-            # OTRO viaje (p. ej. de otro cliente) y el portal no debe mostrar
-            # esa posición como si llevara estas guías.
-            guias_viaje = {g.upper()}
-            for cp in payload.get("misma_placa") or []:
-                if cp.get("guia"):
-                    guias_viaje.add(str(cp["guia"]).strip().upper())
-            payload["vehiculo"] = await consultar_vehiculo_monitor(tms["placa"], guias=guias_viaje)
-        except Exception:
-            logger.warning(
-                "[indicadores-cliente] Error consultando ubicación en Monitor de la placa %s (guía %s)",
-                tms.get("placa"), g, exc_info=True,
-            )
-    # (2026-10-30) ¿La guía tiene novedad JUSTIFICADA registrada?
-    # (novedades_justificadas_ot — las que cargan en /NovedadesOT).
-    nov = col_novedades_ot.find_one(
-        {"guia": g},
-        {"causal": 1, "justificacion": 1, "creado_por": 1, "actualizado_por": 1, "_id": 0},
+    # (2026-11-13) TODO el enriquecimiento (placa/OT/otras guías del vehículo/
+    # ubicación Monitor/novedad justificada/cita de entrega/evidencia
+    # digitalizada/persistencia de anuladas) vive en el helper COMPARTIDO con
+    # el bot de WhatsApp — Funciones/trazabilidad_guia.py. El portal filtra
+    # «otras guías del vehículo» por SU cliente (pg_nombres); el bot no filtra.
+    from Funciones.trazabilidad_guia import enriquecer_consulta_guia
+    payload = await enriquecer_consulta_guia(
+        g, payload,
+        nombres_cliente=cliente.get("pg_nombres"),
+        detectada_por=usuario,
     )
-    if nov:
-        por = nov.get("actualizado_por") or nov.get("creado_por") or {}
-        fecha_por = por.get("fecha")
-        payload["justificada"] = {
-            "causal": nov.get("causal"),
-            "justificacion": nov.get("justificacion"),
-            "nombre": por.get("nombre") or por.get("usuario"),
-            "fecha": fecha_por.isoformat()[:10] if hasattr(fecha_por, "isoformat") else fecha_por,
-        }
-    # (2026-11-09) ¿Tiene CITA DE ENTREGA registrada a mano (/CitasEntrega)?
-    # La fecha vigente es la que se usó para el veredicto OT de arriba; las
-    # re-agendas anteriores viajan en `anteriores[]` (con quién las asignó)
-    # para que el cliente vea la trazabilidad completa de la cita.
-    cita_doc = col_citas_entrega.find_one(
-        {"guia": g},
-        {"fecha": 1, "hora_inicio": 1, "hora_fin": 1, "creado_por": 1,
-         "actualizado_por": 1, "updated_at": 1, "historial": 1, "_id": 0},
-    )
-    if cita_doc:
-        por = cita_doc.get("actualizado_por") or cita_doc.get("creado_por") or {}
-        anteriores = []
-        # Últimas 10, de la MÁS RECIENTE a la más antigua (el array es
-        # append-order: se toma la cola y se invierte). Cada entrada es el
-        # CAMBIO completo {previo, nuevo, por, fecha_cambio}; las entradas
-        # viejas (planas: solo el valor anterior) se normalizan a previo.
-        for h in (cita_doc.get("historial") or [])[-10:][::-1]:
-            if not isinstance(h, dict):
-                continue
-            quien = h.get("por") or {}
-            f_cambio = quien.get("fecha") or h.get("fecha_cambio")
-            previo = h.get("previo") or {k: h.get(k) for k in ("fecha", "hora_inicio", "hora_fin")}
-            anteriores.append({
-                "previo": previo,
-                "nuevo": h.get("nuevo"),
-                "nombre": quien.get("nombre") or quien.get("usuario"),
-                "cambiada": f_cambio.isoformat()[:10] if hasattr(f_cambio, "isoformat") else f_cambio,
-            })
-        payload["cita_entrega"] = {
-            "fecha": cita_doc.get("fecha"),
-            "hora_inicio": cita_doc.get("hora_inicio"),
-            "hora_fin": cita_doc.get("hora_fin"),
-            "nombre": por.get("nombre") or por.get("usuario"),
-            "fecha_asignada": cita_doc.get("updated_at").isoformat()[:10] if hasattr(cita_doc.get("updated_at"), "isoformat") else cita_doc.get("updated_at"),
-            "anteriores": anteriores,
-        }
     return {"success": True, "data": payload}
 
 
