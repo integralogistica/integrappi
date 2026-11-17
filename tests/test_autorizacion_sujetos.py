@@ -306,6 +306,51 @@ class AutorizacionSujetosTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(r.json().get("whatsapp", False))
 
+    def test_reenviar_pendientes_por_placa(self):
+        # (2026-11-17, botón de Estudios por antigüedad) Reenvía a TODOS los
+        # pendientes de la placa con forzar (link anterior anulado) y WhatsApp
+        # cuando la ficha tiene celular; a quien ya autorizó no se le escribe.
+        vehiculos = FakeCol([{
+            "placa": "RPA123",
+            "condCedulaCiudadania": "101010", "condCorreo": "cond@x.com",
+            "condCelular": "312 544 3396",
+            "propDocumento": "202020", "propCorreo": "prop@x.com",  # sin celular
+            "tenedDocumento": "303030", "tenedCorreo": "ten@x.com",
+        }])
+        # El tenedor YA autorizó → queda fuera.
+        self.aceptaciones.insert_one({"conductor_id": None, "sujeto_cedula": "303030",
+                                      "canal": "papel", "version": 2})
+        # Link VIGENTE previo del conductor: el reenvío debe invalidarlo.
+        self.client.post("/conductores/autorizacion/solicitar", json={
+            "placa": "RPA123", "cedula": "101010", "correo": "cond@x.com"})
+        was = []
+        def wa(destino, plantilla, idioma, params, botones=None):
+            was.append(destino)
+            return True
+        with patch.object(conductores, "coleccion_vehiculos", vehiculos), \
+             patch.object(conductores, "enviar_template_sync", side_effect=wa):
+            r = self.client.post("/conductores/autorizacion/reenviar-pendientes",
+                                 json={"placa": "rpa123"})
+        self.assertEqual(r.status_code, 200, r.text)
+        d = r.json()
+        self.assertEqual(d["placa"], "RPA123")
+        por_ced = {x["cedula"]: x for x in d["reenviados"]}
+        self.assertEqual(set(por_ced), {"101010", "202020"})  # tenedor fuera
+        self.assertTrue(por_ced["101010"]["whatsapp"])    # celular en ficha
+        self.assertFalse(por_ced["202020"]["whatsapp"])   # sin celular
+        self.assertEqual(was, ["573125443396"])
+        self.assertEqual(d["sin_correo"], [])
+        # forzar: de cada pendiente queda UN solo token vigente (el anterior
+        # del conductor quedó marcado como reemplazado).
+        vigentes = [t for t in self.tokens.documents if t.get("usado_en") is None]
+        self.assertEqual(len(vigentes), 2)
+        # Placa inexistente → 404 claro.
+        vacia = FakeCol([])
+        with patch.object(conductores, "coleccion_vehiculos", vacia):
+            r2 = self.client.post("/conductores/autorizacion/reenviar-pendientes",
+                                  json={"placa": "NOPE"})
+        self.assertEqual(r2.status_code, 404)
+
     def test_envio_automatico_al_pasar_a_revision(self):
         vehiculo = {
             "placa": "AUTO1",

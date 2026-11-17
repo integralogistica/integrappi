@@ -114,6 +114,13 @@ PLANTILLA_ENRUTA_CLAVE = ("enruta_codigo_acceso", "es_CO")
 # {{2}} = placa y {{3}} = enlace completo (variable de URL: Meta lo vuelve
 # clickeable). A crear/aprobar en Meta Business Manager.
 PLANTILLA_WA_AUTORIZACION = ("autorizacion_datos", "es_CO")
+# (2026-11-17) Verificación de correo (activación de cuenta) y recordatorio de
+# vehículo también por WhatsApp — el caso REAL de soporte: la persona se
+# registró, el correo no le llegó y no puede continuar el proceso. A crear en
+# Meta (Utilidad, es_CO): `verificacion_cuenta` {{1}}=nombre {{2}}=enlace y
+# `recordatorio_cuenta` {{1}}=nombre {{2}}=enlace del login.
+PLANTILLA_WA_VERIFICACION = ("verificacion_cuenta", "es_CO")
+PLANTILLA_WA_RECORDATORIO = ("recordatorio_cuenta", "es_CO")
 EXPIRA_HORAS_VERIFICACION = int(os.getenv("VERIFICACION_EXPIRE_HORAS", "48"))
 
 
@@ -651,9 +658,14 @@ async def registrar_conductor(data: RegistrarConductorInput, background_tasks: B
     token = _generar_token_verificacion(insertado)
     enlace = f"{FRONTEND_URL_VERIFICAR}?token={token}"
     background_tasks.add_task(enviar_correo_verificacion, correo_norm, enlace, (data.nombre or "").strip())
+    # (2026-11-17) Con celular, el enlace TAMBIÉN llega por WhatsApp — el caso
+    # de soporte real: el correo no llega y la persona no puede continuar.
+    if _celular_whatsapp(data.celular or ""):
+        background_tasks.add_task(
+            _enviar_wa_verificacion, data.celular, (data.nombre or "").strip(), enlace)
 
     return {
-        "mensaje": "Conductor registrado. Revisa tu correo para verificar la cuenta.",
+        "mensaje": "Conductor registrado. Revisa tu correo (y WhatsApp si dejaste celular) para verificar la cuenta.",
         "usuario": {"id": str(insertado), "correo": nuevo["correo"], "perfil": "CONDUCTOR"},
     }
 
@@ -933,13 +945,25 @@ def _cuenta_por_id(conductor_id: str) -> Optional[dict]:
     return coleccion_conductores.find_one({"_id": oid})
 
 
+class CelularOpcionalInput(BaseModel):
+    # (2026-11-17) Celular para el WhatsApp: opcional; si viene, se GUARDA en
+    # la cuenta (rescata cuentas registradas antes sin número, o con número
+    # mal digitado) y el enlace también viaja por ese canal.
+    celular: Optional[str] = None
+
+
 @ruta_conductores.post("/{conductor_id}/reenviar-verificacion", response_model=dict)
-async def reenviar_verificacion_seguridad(conductor_id: str, background_tasks: BackgroundTasks):
+async def reenviar_verificacion_seguridad(
+        conductor_id: str, background_tasks: BackgroundTasks,
+        data: Optional[CelularOpcionalInput] = None):
     """
     Reenvía el correo de verificación a UNA cuenta concreta, con respuesta
     EXPLÍCITA para Seguridad (el /reenviar-verificacion público es neutro
     anti-enumeración y no dice si envió): regenera el token — invalida el
     anterior aunque haya expirado — y encola el correo.
+    (2026-11-17) Con celular en el body (o ya guardado en la cuenta), el
+    enlace TAMBIÉN sale por WhatsApp (plantilla verificacion_cuenta); el
+    celular nuevo queda persistido.
     409 si el correo ya está verificado (usa el recordatorio).
     """
     doc = _cuenta_por_id(conductor_id)
@@ -949,13 +973,29 @@ async def reenviar_verificacion_seguridad(conductor_id: str, background_tasks: B
         raise HTTPException(
             status_code=409,
             detail="Ese correo ya está verificado: usa «Enviar recordatorio».")
+    celular = ((data.celular if data else None) or "").strip()
+    if celular:
+        coleccion_conductores.update_one(
+            {"_id": doc["_id"]}, {"$set": {"celular": re.sub(r"\D", "", celular)}})
+    celular_final = re.sub(r"\D", "", celular or str(doc.get("celular") or ""))
     token = _generar_token_verificacion(doc["_id"])
     enlace = f"{FRONTEND_URL_VERIFICAR}?token={token}"
     background_tasks.add_task(
         enviar_correo_verificacion, doc.get("correo") or "", enlace,
         (doc.get("nombre") or "").strip())
-    return {"mensaje": f"Enlace de verificación reenviado a {doc.get('correo', '')} "
-                       f"(vence en {EXPIRA_HORAS_VERIFICACION} horas)."}
+    # WhatsApp INLINE (to_thread): la respuesta puede decir si llegó de verdad.
+    wa_ok = False
+    if celular_final:
+        import asyncio as _asyncio
+        wa_ok = await _asyncio.to_thread(
+            _enviar_wa_verificacion, celular_final,
+            (doc.get("nombre") or "").strip(), enlace)
+    mensaje = (f"Enlace de verificación reenviado a {doc.get('correo', '')} "
+               f"(vence en {EXPIRA_HORAS_VERIFICACION} horas)")
+    if celular_final:
+        mensaje += (" y por WhatsApp ✓" if wa_ok
+                    else f"; el WhatsApp a {celular_final} NO se pudo enviar (revisa el número o la plantilla en Meta)")
+    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok}
 
 
 @ruta_conductores.post("/{conductor_id}/cambiar-perfil", response_model=dict)
@@ -1073,11 +1113,15 @@ def enviar_correo_recordatorio_vehiculo(destinatario: str, nombre: str):
 
 
 @ruta_conductores.post("/{conductor_id}/recordatorio-vehiculo", response_model=dict)
-async def recordatorio_vehiculo(conductor_id: str, background_tasks: BackgroundTasks):
+async def recordatorio_vehiculo(
+        conductor_id: str, background_tasks: BackgroundTasks,
+        data: Optional[CelularOpcionalInput] = None):
     """
     Recordatorio por correo a una cuenta VERIFICADA que aún no inscribe su
     vehículo. 409 si el correo no está verificado (reenvía la verificación) o
     si ya tiene placas vinculadas.
+    (2026-11-17) Con celular en el body (o guardado), también WhatsApp
+    (plantilla recordatorio_cuenta); el celular nuevo queda persistido.
     """
     doc = _cuenta_por_id(conductor_id)
     if not doc:
@@ -1093,10 +1137,24 @@ async def recordatorio_vehiculo(conductor_id: str, background_tasks: BackgroundT
         raise HTTPException(
             status_code=409,
             detail=f"La cuenta ya tiene {placas} vehículo(s) vinculado(s).")
+    celular = ((data.celular if data else None) or "").strip()
+    if celular:
+        coleccion_conductores.update_one(
+            {"_id": doc["_id"]}, {"$set": {"celular": re.sub(r"\D", "", celular)}})
+    celular_final = re.sub(r"\D", "", celular or str(doc.get("celular") or ""))
     background_tasks.add_task(
         enviar_correo_recordatorio_vehiculo, doc.get("correo") or "",
         (doc.get("nombre") or "").strip())
-    return {"mensaje": f"Recordatorio enviado a {doc.get('correo', '')}."}
+    wa_ok = False
+    if celular_final:
+        import asyncio as _asyncio
+        wa_ok = await _asyncio.to_thread(
+            _enviar_wa_recordatorio, celular_final, (doc.get("nombre") or "").strip())
+    mensaje = f"Recordatorio enviado a {doc.get('correo', '')}"
+    if celular_final:
+        mensaje += (" y por WhatsApp ✓" if wa_ok
+                    else f"; el WhatsApp a {celular_final} NO se pudo enviar (revisa el número o la plantilla en Meta)")
+    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok}
 
 
 # ==============================================================================
@@ -1362,6 +1420,42 @@ def _enviar_wa_autorizacion(celular: str, nombre: str, placa: str, enlace: str) 
     return False
 
 
+def _enviar_wa_generico(celular: str, nombre: str, enlace: str,
+                        plantilla: tuple, etiqueta: str) -> bool:
+    """WhatsApp genérico de un enlace (verificación de cuenta / recordatorio
+    de vehículo, 2026-11-17). Fire-and-forget: devuelve True solo con 200 de
+    Meta; un fallo (sin celular útil, plantilla sin aprobar) JAMÁS tumba el
+    envío por correo."""
+    destino = _celular_whatsapp(celular)
+    if not destino:
+        print(f"[{etiqueta}] Sin celular útil ({celular!r}); no se envió WhatsApp.")
+        return False
+    try:
+        ok = enviar_template_sync(
+            destino, plantilla[0], plantilla[1],
+            [nombre or "", enlace])
+        if ok:
+            print(f"[{etiqueta}] WhatsApp enviado a +{destino}")
+            return True
+        print(f"[{etiqueta}] WhatsApp NO enviado a +{destino} — revisar plantilla "
+              f"'{plantilla[0]}' y aprobación en Meta.")
+    except Exception as e:
+        print(f"[{etiqueta}] Error enviando WhatsApp: {e}")
+    return False
+
+
+def _enviar_wa_verificacion(celular: str, nombre: str, enlace: str) -> bool:
+    """WhatsApp con el enlace de VERIFICACIÓN DE CORREO (activación)."""
+    return _enviar_wa_generico(celular, nombre, enlace,
+                               PLANTILLA_WA_VERIFICACION, "verificacion-wa")
+
+
+def _enviar_wa_recordatorio(celular: str, nombre: str) -> bool:
+    """WhatsApp del recordatorio para cuentas verificadas sin vehículo."""
+    return _enviar_wa_generico(celular, nombre, FRONTEND_URL_LOGIN,
+                               PLANTILLA_WA_RECORDATORIO, "recordatorio-wa")
+
+
 def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
                             nombre: str = "", solicitado_por: str = "",
                             forzar: bool = False, celular: str = "") -> dict:
@@ -1452,6 +1546,53 @@ async def solicitar_autorizacion(data: SolicitarAutorizacionInput):
                                    data.nombre or "", data.solicitado_por or "",
                                    forzar=bool(data.forzar),
                                    celular=(data.celular or "").strip())
+
+
+class ReenviarPendientesInput(BaseModel):
+    placa: str
+    solicitado_por: Optional[str] = None
+
+
+@ruta_conductores.post("/autorizacion/reenviar-pendientes", response_model=dict)
+async def reenviar_pendientes_por_placa(data: ReenviarPendientesInput):
+    """(2026-11-17, botón por fila de «Estudios por antigüedad») Reenvía el
+    link de autorización — correo Y WhatsApp si la ficha tiene el celular — a
+    TODAS las personas del estudio de la placa que siguen sin aceptación.
+    Igual que el botón manual por persona: `forzar` invalida el link anterior
+    (si había uno vigente sin usar) y manda uno nuevo; a quien ya autorizó no
+    se le envía nada. Devuelve el detalle por persona para el resumen."""
+    from Funciones import estudios_automaticos as ea
+
+    placa = (data.placa or "").strip().upper()
+    vehiculo = coleccion_vehiculos.find_one({"placa": placa})
+    if not vehiculo:
+        raise HTTPException(status_code=404, detail=f"Vehículo {placa} no encontrado.")
+    correos, celulares = _correos_y_celulares_ficha(vehiculo)
+
+    reenviados, sin_correo = [], []
+    for sujeto in ea.sujetos_estudio(vehiculo):
+        if sujeto.get("tipo") != "persona":
+            continue
+        cedula = sujeto["cedula"]
+        if _sujeto_ya_autorizado(cedula):
+            continue
+        correo = correos.get(cedula)
+        if not correo:
+            sin_correo.append(cedula)
+            continue
+        try:
+            r = _solicitar_autorizacion(
+                placa, cedula, correo, "",
+                (data.solicitado_por or "").strip() or "seguridad",
+                forzar=True, celular=celulares.get(cedula, ""))
+            reenviados.append({"cedula": cedula, "correo": correo,
+                               "whatsapp": bool(r.get("whatsapp")),
+                               "estado": r.get("estado", "enviado")})
+        except Exception as e:
+            print(f"[autorizacion] Reenvío por placa {placa} falló para {cedula}: {e}")
+            reenviados.append({"cedula": cedula, "correo": correo,
+                               "whatsapp": False, "estado": "error"})
+    return {"placa": placa, "reenviados": reenviados, "sin_correo": sin_correo}
 
 
 @ruta_conductores.get("/autorizacion/verificar", response_model=dict)
@@ -1582,13 +1723,9 @@ async def registrar_autorizacion_papel(
             "documento_url": _url_para_cliente(ruta)}
 
 
-def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sistema") -> dict:
-    """Envío AUTOMÁTICO al pasar el vehículo a revisión (2026-10-05): por cada
-    PERSONA del estudio SIN autorización y CON correo en el formulario, un
-    link (idempotente — no duplica correos en re-revisiones). Las empresas
-    (NIT) no aplican; la dedup de personas ya la hace sujetos_estudio."""
-    from Funciones import estudios_automaticos as ea
-
+def _correos_y_celulares_ficha(vehiculo: dict) -> tuple:
+    """(correos, celulares) por cédula desde los campos de la ficha. Compartido
+    por el envío automático al pasar a revisión y el reenvío manual por placa."""
     correos: dict = {}
     celulares: dict = {}
     for campo_doc, campo_correo, campo_celular in (
@@ -1605,6 +1742,17 @@ def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sist
         celular = str(vehiculo.get(campo_celular) or "").strip() if campo_celular else ""
         if ced and celular and ced not in celulares:
             celulares[ced] = celular
+    return correos, celulares
+
+
+def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sistema") -> dict:
+    """Envío AUTOMÁTICO al pasar el vehículo a revisión (2026-10-05): por cada
+    PERSONA del estudio SIN autorización y CON correo en el formulario, un
+    link (idempotente — no duplica correos en re-revisiones). Las empresas
+    (NIT) no aplican; la dedup de personas ya la hace sujetos_estudio."""
+    from Funciones import estudios_automaticos as ea
+
+    correos, celulares = _correos_y_celulares_ficha(vehiculo)
 
     resumen: dict = {"enviado": 0, "pendiente": 0, "ya_autorizado": 0, "sin_correo": []}
     for sujeto in ea.sujetos_estudio(vehiculo):
@@ -2052,6 +2200,12 @@ async def reenviar_verificacion(data: ReenviarVerificacionInput, background_task
         background_tasks.add_task(
             enviar_correo_verificacion, correo_destino, enlace, (doc.get("nombre") or "").strip()
         )
+        # (2026-11-17) Si la cuenta tiene celular guardado, también WhatsApp
+        # (fire-and-forget; la respuesta sigue siendo neutra).
+        if _celular_whatsapp(str(doc.get("celular") or "")):
+            background_tasks.add_task(
+                _enviar_wa_verificacion, doc.get("celular"),
+                (doc.get("nombre") or "").strip(), enlace)
 
     return {"mensaje": "Si el correo está pendiente de verificación, se envió un nuevo enlace."}
 
