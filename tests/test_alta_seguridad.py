@@ -55,7 +55,12 @@ def _match_documento(d, filtro):
                 return False
             continue
         if campo == "_id":
-            if str(d.get("_id")) != str(esperado):
+            if isinstance(esperado, dict) and "$ne" in esperado:
+                # (2026-11-17) $ne sobre _id: lo usa la corrección de correo
+                # (¿el correo nuevo ya pertenece a OTRA cuenta?).
+                if str(d.get("_id")) == str(esperado["$ne"]):
+                    return False
+            elif str(d.get("_id")) != str(esperado):
                 return False
             continue
         actual = d.get(campo)

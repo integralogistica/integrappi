@@ -117,9 +117,15 @@ PLANTILLA_WA_AUTORIZACION = ("autorizacion_datos", "es_CO")
 # (2026-11-17) Verificación de correo (activación de cuenta) y recordatorio de
 # vehículo también por WhatsApp — el caso REAL de soporte: la persona se
 # registró, el correo no le llegó y no puede continuar el proceso. A crear en
-# Meta (Utilidad, es_CO): `verificacion_cuenta` {{1}}=nombre {{2}}=enlace y
-# `recordatorio_cuenta` {{1}}=nombre {{2}}=enlace del login.
-PLANTILLA_WA_VERIFICACION = ("verificacion_cuenta", "es_CO")
+# Meta (Utilidad, es_CO): `enruta_continuar_registro` {{1}}=nombre
+# {{2}}=enlace y `recordatorio_cuenta` {{1}}=nombre {{2}}=enlace del login.
+# ⚠️ El nombre/cuerpo de enruta_continuar_registro EVITA lenguaje de
+# verificación («confirma tu correo», «activa tu cuenta») a propósito: Meta
+# reclasifica eso a Autenticación, categoría cuyo cuerpo FIJO solo admite un
+# código de un solo uso — NO un enlace con URL (mismo arreglo que
+# enruta_clave_cuenta, 2026-10-02). El cuerpo habla de «completar tu
+# registro», que sí es Utilidad.
+PLANTILLA_WA_VERIFICACION = ("enruta_continuar_registro", "es_CO")
 PLANTILLA_WA_RECORDATORIO = ("recordatorio_cuenta", "es_CO")
 EXPIRA_HORAS_VERIFICACION = int(os.getenv("VERIFICACION_EXPIRE_HORAS", "48"))
 
@@ -945,25 +951,57 @@ def _cuenta_por_id(conductor_id: str) -> Optional[dict]:
     return coleccion_conductores.find_one({"_id": oid})
 
 
-class CelularOpcionalInput(BaseModel):
-    # (2026-11-17) Celular para el WhatsApp: opcional; si viene, se GUARDA en
-    # la cuenta (rescata cuentas registradas antes sin número, o con número
-    # mal digitado) y el enlace también viaja por ese canal.
+class ContactoCuentaInput(BaseModel):
+    # (2026-11-17) Contacto de la cuenta, editable por Seguridad al reenviar:
+    # `correo` corrige un correo mal digitado (p.ej. GMAIL.XOM — el WhatsApp
+    # rescataría la activación pero dejaría la cuenta con un correo muerto);
+    # `celular` habilita el WhatsApp. Ambos opcionales; lo que viene, se
+    # persiste en la cuenta.
+    correo: Optional[str] = None
     celular: Optional[str] = None
+
+
+def _aplicar_correo_celular(doc: dict, correo_nuevo: str, celular_nuevo: str) -> tuple:
+    """Valida y persiste correo/celular corregidos en la cuenta. Devuelve
+    (correo_final, celular_final). 400 si el correo nuevo no sirve; 409 si ya
+    pertenece a OTRA cuenta. No toca nada si vienen iguales/vacíos."""
+    cambios: dict = {}
+    correo_final = (doc.get("correo") or "").strip()
+    if correo_nuevo and correo_nuevo.upper() != correo_final.upper():
+        dominio = correo_nuevo.split("@")[-1] if "@" in correo_nuevo else ""
+        if "@" not in correo_nuevo or "." not in dominio:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El correo «{correo_nuevo}» no parece válido (revisa @ y dominio, p. ej. gmail.com).")
+        ocupado = coleccion_conductores.find_one({
+            "correo": {"$regex": f"^{re.escape(correo_nuevo.strip())}$", "$options": "i"},
+            "_id": {"$ne": doc["_id"]}})
+        if ocupado:
+            raise HTTPException(
+                status_code=409,
+                detail=f"El correo {correo_nuevo} ya pertenece a otra cuenta.")
+        cambios["correo"] = correo_nuevo.strip().upper()
+        correo_final = cambios["correo"]
+    celular_final = re.sub(r"\D", "", celular_nuevo or str(doc.get("celular") or ""))
+    if celular_nuevo and celular_final:
+        cambios["celular"] = celular_final
+    if cambios:
+        coleccion_conductores.update_one({"_id": doc["_id"]}, {"$set": cambios})
+    return correo_final, celular_final or ""
 
 
 @ruta_conductores.post("/{conductor_id}/reenviar-verificacion", response_model=dict)
 async def reenviar_verificacion_seguridad(
         conductor_id: str, background_tasks: BackgroundTasks,
-        data: Optional[CelularOpcionalInput] = None):
+        data: Optional[ContactoCuentaInput] = None):
     """
     Reenvía el correo de verificación a UNA cuenta concreta, con respuesta
     EXPLÍCITA para Seguridad (el /reenviar-verificacion público es neutro
     anti-enumeración y no dice si envió): regenera el token — invalida el
     anterior aunque haya expirado — y encola el correo.
-    (2026-11-17) Con celular en el body (o ya guardado en la cuenta), el
-    enlace TAMBIÉN sale por WhatsApp (plantilla verificacion_cuenta); el
-    celular nuevo queda persistido.
+    (2026-11-17) Body opcional `{correo, celular}`: corrige un correo mal
+    digitado (p.ej. GMAIL.XOM) y habilita el WhatsApp (plantilla
+    verificacion_cuenta); lo que viene queda persistido en la cuenta.
     409 si el correo ya está verificado (usa el recordatorio).
     """
     doc = _cuenta_por_id(conductor_id)
@@ -973,15 +1011,13 @@ async def reenviar_verificacion_seguridad(
         raise HTTPException(
             status_code=409,
             detail="Ese correo ya está verificado: usa «Enviar recordatorio».")
-    celular = ((data.celular if data else None) or "").strip()
-    if celular:
-        coleccion_conductores.update_one(
-            {"_id": doc["_id"]}, {"$set": {"celular": re.sub(r"\D", "", celular)}})
-    celular_final = re.sub(r"\D", "", celular or str(doc.get("celular") or ""))
+    correo_final, celular_final = _aplicar_correo_celular(
+        doc, ((data.correo if data else None) or "").strip(),
+        ((data.celular if data else None) or "").strip())
     token = _generar_token_verificacion(doc["_id"])
     enlace = f"{FRONTEND_URL_VERIFICAR}?token={token}"
     background_tasks.add_task(
-        enviar_correo_verificacion, doc.get("correo") or "", enlace,
+        enviar_correo_verificacion, correo_final, enlace,
         (doc.get("nombre") or "").strip())
     # WhatsApp INLINE (to_thread): la respuesta puede decir si llegó de verdad.
     wa_ok = False
@@ -990,12 +1026,12 @@ async def reenviar_verificacion_seguridad(
         wa_ok = await _asyncio.to_thread(
             _enviar_wa_verificacion, celular_final,
             (doc.get("nombre") or "").strip(), enlace)
-    mensaje = (f"Enlace de verificación reenviado a {doc.get('correo', '')} "
+    mensaje = (f"Enlace de verificación reenviado a {correo_final} "
                f"(vence en {EXPIRA_HORAS_VERIFICACION} horas)")
     if celular_final:
         mensaje += (" y por WhatsApp ✓" if wa_ok
                     else f"; el WhatsApp a {celular_final} NO se pudo enviar (revisa el número o la plantilla en Meta)")
-    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok}
+    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok, "correo": correo_final}
 
 
 @ruta_conductores.post("/{conductor_id}/cambiar-perfil", response_model=dict)
@@ -1115,13 +1151,14 @@ def enviar_correo_recordatorio_vehiculo(destinatario: str, nombre: str):
 @ruta_conductores.post("/{conductor_id}/recordatorio-vehiculo", response_model=dict)
 async def recordatorio_vehiculo(
         conductor_id: str, background_tasks: BackgroundTasks,
-        data: Optional[CelularOpcionalInput] = None):
+        data: Optional[ContactoCuentaInput] = None):
     """
     Recordatorio por correo a una cuenta VERIFICADA que aún no inscribe su
     vehículo. 409 si el correo no está verificado (reenvía la verificación) o
     si ya tiene placas vinculadas.
-    (2026-11-17) Con celular en el body (o guardado), también WhatsApp
-    (plantilla recordatorio_cuenta); el celular nuevo queda persistido.
+    (2026-11-17) Body opcional `{correo, celular}`: corrige un correo mal
+    digitado y habilita el WhatsApp (plantilla recordatorio_cuenta); lo que
+    viene queda persistido.
     """
     doc = _cuenta_por_id(conductor_id)
     if not doc:
@@ -1137,24 +1174,22 @@ async def recordatorio_vehiculo(
         raise HTTPException(
             status_code=409,
             detail=f"La cuenta ya tiene {placas} vehículo(s) vinculado(s).")
-    celular = ((data.celular if data else None) or "").strip()
-    if celular:
-        coleccion_conductores.update_one(
-            {"_id": doc["_id"]}, {"$set": {"celular": re.sub(r"\D", "", celular)}})
-    celular_final = re.sub(r"\D", "", celular or str(doc.get("celular") or ""))
+    correo_final, celular_final = _aplicar_correo_celular(
+        doc, ((data.correo if data else None) or "").strip(),
+        ((data.celular if data else None) or "").strip())
     background_tasks.add_task(
-        enviar_correo_recordatorio_vehiculo, doc.get("correo") or "",
+        enviar_correo_recordatorio_vehiculo, correo_final,
         (doc.get("nombre") or "").strip())
     wa_ok = False
     if celular_final:
         import asyncio as _asyncio
         wa_ok = await _asyncio.to_thread(
             _enviar_wa_recordatorio, celular_final, (doc.get("nombre") or "").strip())
-    mensaje = f"Recordatorio enviado a {doc.get('correo', '')}"
+    mensaje = f"Recordatorio enviado a {correo_final}"
     if celular_final:
         mensaje += (" y por WhatsApp ✓" if wa_ok
                     else f"; el WhatsApp a {celular_final} NO se pudo enviar (revisa el número o la plantilla en Meta)")
-    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok}
+    return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok, "correo": correo_final}
 
 
 # ==============================================================================

@@ -1086,3 +1086,59 @@ En `_calcular_ot_filas`, el branch `elif cita:` ponía `origen_promesa='CITA'` p
 Las guías con estado **ANULADA** del TMS entraron a `_ESTADOS_TMS` y en `_calcular_ot_filas` **auto-cumplen** (`ot=1` + `cumple_novedad`, rama `anulada` primera en el veredicto): el servicio se canceló, no es un incumplimiento del transporte. Antes: `estado=null` (contaban en «sin info» del resumen) y, al no tener entrega, caían al segmento **Pendientes vencidas**. Ahora van a **«Con novedad»** (cuentan como cumplidas en el % OT, igual que una justificada), NO son pendientes (tampoco en `/pendientes`), salen de `en_proceso` del resumen y `/consulta-guia` viaja `ot.anulada` — la Trazabilidad pinta chip morado «⊘ Anulada» propio y el panel 🚛 de Monitor NO consulta anuladas. Espejo frontend: chip «⊘ Anul.» en el OT del informe y del detalle del día, «SÍ (anulada)» en el Cumplió de los Excel (`tests/test_ot_pendientes.py::test_anulada_auto_cumple_como_novedad`).
 
 **⚠️ Segunda parte (mismo día): el informe del TMS NUNCA trae 'ANULADA'** — verificado contra la tabla (estados reales: ENTREGADO/CON NOVEDAD/PENDIENTE/En distribucion/Transito Nacional/vacío); la 801232571 quedó «Transito Nacional» y por eso seguía en Pendientes vencidas aunque la Trazabilidad dijera ANULADA (esa viene del WS de Siscore en vivo, otra fuente). Fix: colección **`guias_anuladas`** + mapa `_mapa_guias_anuladas` (TTL 600 s) — `/consulta-guia` **persiste** cada guía que el WS reporta anulada (primera vez, con quién/detección; limpia `_CACHE_GUIAS`, `_CACHE_PENDIENTES` y la entrada del mapa) y `_calcular_ot_filas` la trata como anulada (fila con `anulada: true`, `ot.anulada` en la consulta). Detección orgánica: una anulada entra al sistema la primera vez que alguien la consulta en la Trazabilidad (sembrada a mano la 801232571). Test: `test_anulada_detectada_por_ws_though_informe_dice_transito`.
+
+## Actualizaciones Recientes (2026-11-17)
+
+### Autorización de datos (habeas) y verificación de cuenta TAMBIÉN por WhatsApp
+
+Motivación de soporte: los implicados «crean un correo y el link no llega» y quedan
+atascados. El WhatsApp entra como **segundo canal** en TODOS los envíos de enlaces
+de `rutas/conductores.py`. Fire-and-forget (patrón `_enviar_wa_*`): si Meta falla o
+la plantilla no está aprobada, solo queda el log — el correo NUNCA se cae.
+
+**Plantillas a crear/aprobar en Meta Business Manager** (categoría **Utilidad**,
+idioma **es_CO** EXACTO, sin botones; el ejemplo de la variable de enlace debe ser
+URL completa con `https://` o la revisión la rechaza):
+
+| Plantilla | Variables | Para |
+|---|---|---|
+| `autorizacion_datos` | `{{1}}` nombre · `{{2}}` placa · `{{3}}` enlace habeas | Link /AutorizacionDatos |
+| `enruta_continuar_registro` | `{{1}}` nombre · `{{2}}` enlace /VerificarCorreo | Activación de cuenta. ⚠️ El nombre/cuerpo EVITA lenguaje de verificación a propósito: Meta reclasifica «confirma tu correo»/«activa tu cuenta» a Autenticación, cuyo cuerpo FIJO solo admite un código de un solo uso — NO un enlace con URL |
+| `recordatorio_cuenta` | `{{1}}` nombre · `{{2}}` enlace del login | Recordatorio sin placa |
+
+**Habeas (`_solicitar_autorizacion` + endpoint nuevos)**:
+- `SolicitarAutorizacionInput` suma `celular` opcional; el token en `tokens_autorizacion`
+  guarda `celular` + `wa_enviado` (True solo con 200 real de Meta, vía
+  `_enviar_wa_autorizacion`). La aceptación registra canal **`vinculo_whatsapp`**
+  (antes siempre `vinculo_correo`) + `sujeto_celular` — evidencia fiel del canal.
+  `/habeas-data` expone `token_pendiente_celular`.
+- `enviar_autorizaciones_pendientes` (auto al pasar a revisión) resuelve el celular
+  por cédula desde la ficha (`condCelular`/`propCelular`/`tenedCelular`; el dueño de
+  remolque NO tiene campo de celular en la ficha → solo manual). Helper compartido
+  `_correos_y_celulares_ficha`.
+- **`POST /conductores/autorizacion/reenviar-pendientes`** `{placa}` (botón por fila
+  de «Estudios por antigüedad»): reenvía correo+WA con `forzar` (link anterior
+  anulado) a TODAS las personas sin aceptación de la ficha; ya-autorizados fuera;
+  devuelve detalle por cédula para el Swal.
+
+**Verificación de cuenta (el atasco real: registro → correo no llega → no puede continuar)**:
+- `/conductores/registrar`: nuevo `celular` opcional en el registro público → además
+  del correo, WA con el enlace de verificación (background).
+- `POST /{id}/reenviar-verificacion` y `/{id}/recordatorio-vehiculo` (Seguridad):
+  body opcional `{correo, celular}` — helper `_aplicar_correo_celular` **corrige un
+  correo mal digitado** (caso GMAIL.XOM: sin el fix, el WA rescata la activación pero
+  la cuenta queda «✓ Verificado» con un correo MUERTO), valida dominio (400) y
+  colisión con otra cuenta (409), persiste ambos y manda el WA **inline**
+  (`asyncio.to_thread` → la respuesta reporta `whatsapp: true/false` real).
+- `/reenviar-verificacion` público (anti-enumeración): si la cuenta ya tiene celular
+  guardado, también WA en background; respuesta sigue siendo neutra.
+
+**⚠️ NO confundir los enlaces**: `/VerificarCorreo` (48 h) = activar la CUENTA;
+`/AutorizacionDatos` (30 días) = habeas. Con cuenta, la persona acepta las
+declaraciones EN el portal al primer ingreso; el link habeas es para sujetos SIN
+cuenta (o rescatados por Seguridad).
+
+Tests: `test_autorizacion_sujetos.py` (10), `test_cuentas_sin_vehiculo.py` (incluye
+`test_corrige_correo_xom_y_manda_whatsapp`). Trampa entorno local: un paquete
+`tests` en site-packages tapaba el directorio local — fix `tests/__init__.py` vacío.
+Dep **backend + frontend JUNTOS**.

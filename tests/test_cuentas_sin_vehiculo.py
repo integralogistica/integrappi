@@ -111,6 +111,52 @@ class ReenvioVerificacionSeguridadTests(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertIn("recordatorio", r.json()["detail"].lower())
 
+    def test_corrige_correo_xom_y_manda_whatsapp(self):
+        # (2026-11-17) El caso GMAIL.XOM: el reenvío corrige el correo en la
+        # MISMA petición (si no, el WhatsApp rescataría la activación pero la
+        # cuenta quedaría con un correo muerto) y dispara el WhatsApp.
+        doc = _cuenta("OMARANGULOMIRANDA@GMAIL.XOM")
+        doc["nombre"] = "OMAR ANGULO"
+        fake = FakeColeccion([doc])
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        was = []
+        def wa(destino, plantilla, idioma, params, botones=None):
+            was.append({"to": destino, "plantilla": plantilla})
+            return True
+        with patch.object(conductores, "coleccion_conductores", fake), \
+             patch.object(conductores, "enviar_template_sync", side_effect=wa):
+            r = cliente.post(f"/conductores/{doc['_id']}/reenviar-verificacion",
+                             json={"correo": "omarangulomiranda@gmail.com",
+                                   "celular": "312 544 3396"})
+        self.assertEqual(r.status_code, 200, r.text)
+        cuerpo = r.json()
+        self.assertTrue(cuerpo["whatsapp"])
+        self.assertEqual(cuerpo["correo"], "OMARANGULOMIRANDA@GMAIL.COM")
+        # La cuenta quedó con el correo corregido y el celular guardado.
+        self.assertEqual(doc["correo"], "OMARANGULOMIRANDA@GMAIL.COM")
+        self.assertEqual(doc["celular"], "3125443396")
+        # El mensaje de éxito muestra el correo NUEVO y el WhatsApp.
+        self.assertIn("OMARANGULOMIRANDA@GMAIL.COM", cuerpo["mensaje"])
+        self.assertEqual(was[0]["to"], "573125443396")
+        self.assertEqual(was[0]["plantilla"], "enruta_continuar_registro")
+
+    def test_correo_nuevo_invalido_o_ocupado(self):
+        doc = _cuenta("MAL@X.XOM")
+        otra = _cuenta("TOMADO@GMAIL.COM")
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        # Dominio sin punto → 400 con mensaje que guía al typo.
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])):
+            r = cliente.post(f"/conductores/{doc['_id']}/reenviar-verificacion",
+                             json={"correo": "omar@gmail"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("no parece válido", r.json()["detail"])
+        # Correo de OTRA cuenta → 409.
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc, otra])):
+            r = cliente.post(f"/conductores/{doc['_id']}/reenviar-verificacion",
+                             json={"correo": "tomado@gmail.com"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("otra cuenta", r.json()["detail"])
+
     def test_404_inexistente(self):
         cliente = cliente_de_prueba(conductores.ruta_conductores)
         with patch.object(conductores, "coleccion_conductores", FakeColeccion()):
