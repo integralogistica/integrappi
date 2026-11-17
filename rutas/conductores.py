@@ -109,6 +109,11 @@ FRONTEND_URL_LOGIN = os.getenv(
 # notificaciones oc_*). Creadas por el usuario en WhatsApp Manager.
 PLANTILLA_ENRUTA_CUENTA = ("enruta_clave_cuenta", "es_CO")
 PLANTILLA_ENRUTA_CLAVE = ("enruta_codigo_acceso", "es_CO")
+# (2026-11-17) Link de autorización de tratamiento de datos TAMBIÉN por
+# WhatsApp al implicado (además del correo). Utilidad con {{1}} = nombre,
+# {{2}} = placa y {{3}} = enlace completo (variable de URL: Meta lo vuelve
+# clickeable). A crear/aprobar en Meta Business Manager.
+PLANTILLA_WA_AUTORIZACION = ("autorizacion_datos", "es_CO")
 EXPIRA_HORAS_VERIFICACION = int(os.getenv("VERIFICACION_EXPIRE_HORAS", "48"))
 
 
@@ -1188,6 +1193,9 @@ async def consultar_habeas_data(cedulas: str = ""):
                 # Correo al que se envió el link (pedido 2026-10-07: la tarjeta
                 # debe mostrarlo para que Seguridad sepa a dónde llegó).
                 entrada["token_pendiente_correo"] = pendiente.get("correo", "")
+                # (2026-11-17) Celular al que se envió por WhatsApp, si aplicó.
+                if pendiente.get("wa_enviado"):
+                    entrada["token_pendiente_celular"] = pendiente.get("celular", "")
         except Exception:
             pass
 
@@ -1331,11 +1339,35 @@ def enviar_correo_autorizacion(destinatario: str, enlace: str, nombre: str, plac
         print(f"[ERROR] Error enviando correo de autorización a {destinatario}: {e}")
 
 
+def _enviar_wa_autorizacion(celular: str, nombre: str, placa: str, enlace: str) -> bool:
+    """WhatsApp con el link público de autorización — canal COMPLEMENTARIO al
+    correo (2026-11-17). Devuelve True solo si Meta respondió 200; un fallo
+    (sin celular útil, plantilla «autorizacion_datos» sin aprobar en Meta,
+    red) solo queda en el log: JAMÁS tumba el envío por correo."""
+    destino = _celular_whatsapp(celular)
+    if not destino:
+        print(f"[autorizacion-wa] Sin celular útil ({celular!r}); no se envió WhatsApp.")
+        return False
+    try:
+        ok = enviar_template_sync(
+            destino, PLANTILLA_WA_AUTORIZACION[0], PLANTILLA_WA_AUTORIZACION[1],
+            [nombre or "usuario", (placa or "").strip().upper(), enlace])
+        if ok:
+            print(f"[autorizacion-wa] WhatsApp de autorización enviado a +{destino} ({placa})")
+            return True
+        print(f"[autorizacion-wa] WhatsApp NO enviado a +{destino} — revisar plantilla "
+              f"'{PLANTILLA_WA_AUTORIZACION[0]}' y aprobación en Meta.")
+    except Exception as e:
+        print(f"[autorizacion-wa] Error enviando WhatsApp de autorización: {e}")
+    return False
+
+
 def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
                             nombre: str = "", solicitado_por: str = "",
-                            forzar: bool = False) -> dict:
-    """Crea/regenera el token y envía el correo. Compartido por el endpoint
-    manual (botón de /revision) y el envío automático al pasar a revisión.
+                            forzar: bool = False, celular: str = "") -> dict:
+    """Crea/regenera el token y envía el correo (+ WhatsApp si llega celular,
+    2026-11-17). Compartido por el endpoint manual (botón de /revision) y el
+    envío automático al pasar a revisión.
     Idempotente por defecto (envío AUTOMÁTICO): si ya hay link vigente no se
     re-envía. Con `forzar` (botón «Reenviar» manual, 2026-10-16) SÍ invalida
     el link anterior y manda un correo nuevo — un botón que dice reenviar
@@ -1360,7 +1392,7 @@ def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
             {"$set": {"usado_en": ahora, "resultado": "reemplazado"}})
     except Exception:
         pass
-    coleccion_tokens_aut.insert_one({
+    res_insert = coleccion_tokens_aut.insert_one({
         "cedula": cedula, "correo": correo.upper(),
         "placa": (placa or "").strip().upper(), "nombre": (nombre or "").strip(),
         "token_hash": crear_hash(token_plano),
@@ -1368,11 +1400,25 @@ def _solicitar_autorizacion(placa: str, cedula: str, correo: str,
         "creado_en": ahora,
         "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION),
         "solicitado_por": (solicitado_por or "").strip() or "seguridad",
+        # (2026-11-17) Canal WhatsApp: el celular al que se envió (vacío si no
+        # llegó) y si el envío fue 200 de verdad. La aceptación registra el
+        # canal «vinculo_whatsapp» cuando el link llegó por aquí.
+        "celular": _digitos_aut(celular) or None,
+        "wa_enviado": False,
     })
-    enviar_correo_autorizacion(correo, f"{FRONTEND_URL_AUTORIZACION}?token={token_plano}",
+    enlace = f"{FRONTEND_URL_AUTORIZACION}?token={token_plano}"
+    enviar_correo_autorizacion(correo, enlace,
                                (nombre or "").strip(), (placa or "").strip().upper())
+    wa_ok = False
+    if celular:
+        wa_ok = _enviar_wa_autorizacion(celular, (nombre or "").strip(),
+                                        (placa or "").strip().upper(), enlace)
+        if wa_ok:
+            coleccion_tokens_aut.update_one(
+                {"_id": res_insert.inserted_id}, {"$set": {"wa_enviado": True}})
     return {"estado": "enviado", "enviado_en": ahora,
-            "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION)}
+            "expira": ahora + timedelta(hours=EXPIRA_HORAS_AUTORIZACION),
+            "whatsapp": wa_ok}
 
 
 class SolicitarAutorizacionInput(BaseModel):
@@ -1381,6 +1427,9 @@ class SolicitarAutorizacionInput(BaseModel):
     correo: str
     nombre: Optional[str] = None
     solicitado_por: Optional[str] = None
+    # (2026-11-17) Celular del implicado: si viene, el link TAMBIÉN llega por
+    # WhatsApp (el correo sigue siendo obligatorio).
+    celular: Optional[str] = None
     # «Reenviar» manual (2026-10-16): invalida el link vigente y manda correo
     # nuevo (aunque sea a OTRO correo). El envío automático no lo usa.
     forzar: Optional[bool] = False
@@ -1401,7 +1450,8 @@ async def solicitar_autorizacion(data: SolicitarAutorizacionInput):
         raise HTTPException(status_code=400, detail="Cédula no válida.")
     return _solicitar_autorizacion(data.placa, cedula, data.correo,
                                    data.nombre or "", data.solicitado_por or "",
-                                   forzar=bool(data.forzar))
+                                   forzar=bool(data.forzar),
+                                   celular=(data.celular or "").strip())
 
 
 @ruta_conductores.get("/autorizacion/verificar", response_model=dict)
@@ -1445,10 +1495,13 @@ async def aceptar_autorizacion(data: AceptarAutorizacionInput, request: Request)
         "sujeto_cedula": doc["cedula"],
         "sujeto_nombre": doc.get("nombre", ""),
         "sujeto_correo": doc.get("correo", ""),
+        # (2026-11-17) Si el link llegó por WhatsApp (además del correo), la
+        # evidencia lo registra — auditoría fiel del canal que la persona usó.
+        "sujeto_celular": doc.get("celular") or "",
         "politica_id": politica["_id"],
         "version": politica.get("version"),
         "aceptado_en": ahora,
-        "canal": "vinculo_correo",
+        "canal": "vinculo_whatsapp" if doc.get("wa_enviado") else "vinculo_correo",
         "ip": ip,
         "user_agent": user_agent,
     }
@@ -1537,16 +1590,21 @@ def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sist
     from Funciones import estudios_automaticos as ea
 
     correos: dict = {}
-    for campo_doc, campo_correo in (
-        ("condCedulaCiudadania", "condCorreo"),
-        ("propDocumento", "propCorreo"),
-        ("tenedDocumento", "tenedCorreo"),
-        ("RemolDuenoDocumento", "RemolDuenoCorreo"),
+    celulares: dict = {}
+    for campo_doc, campo_correo, campo_celular in (
+        ("condCedulaCiudadania", "condCorreo", "condCelular"),
+        ("propDocumento", "propCorreo", "propCelular"),
+        ("tenedDocumento", "tenedCorreo", "tenedCelular"),
+        ("RemolDuenoDocumento", "RemolDuenoCorreo", None),  # dueño remolque: sin campo de celular en la ficha
     ):
         ced = _digitos_aut(vehiculo.get(campo_doc))
         correo = str(vehiculo.get(campo_correo) or "").strip()
         if ced and correo and ced not in correos:
             correos[ced] = correo
+        # (2026-11-17) Celular de la ficha: el link también viaja por WhatsApp.
+        celular = str(vehiculo.get(campo_celular) or "").strip() if campo_celular else ""
+        if ced and celular and ced not in celulares:
+            celulares[ced] = celular
 
     resumen: dict = {"enviado": 0, "pendiente": 0, "ya_autorizado": 0, "sin_correo": []}
     for sujeto in ea.sujetos_estudio(vehiculo):
@@ -1562,7 +1620,8 @@ def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sist
                 resumen["sin_correo"].append(cedula)
                 continue
             r = _solicitar_autorizacion(vehiculo.get("placa", ""), cedula, correo,
-                                        "", solicitado_por)
+                                        "", solicitado_por,
+                                        celular=celulares.get(cedula, ""))
             estado = r.get("estado", "enviado")
             resumen[estado] = resumen.get(estado, 0) + 1
         except Exception as e:

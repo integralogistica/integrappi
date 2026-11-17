@@ -255,24 +255,82 @@ class AutorizacionSujetosTests(unittest.TestCase):
         self.assertEqual(por_ced["66666"]["aceptaciones"][0]["canal"], "vinculo_correo")
         self.assertIsNotNone(por_ced["77777"]["token_pendiente"])
 
+    def test_link_tambien_por_whatsapp(self):
+        # (2026-11-17) Con celular, el link llega por correo Y WhatsApp; la
+        # aceptación registra canal vinculo_whatsapp con el celular del sujeto.
+        was_enviados = []
+        def wa_fake(destino, plantilla, idioma, params, botones=None):
+            was_enviados.append({"to": destino, "plantilla": plantilla, "params": params})
+            return True
+        with patch.object(conductores, "enviar_template_sync", side_effect=wa_fake):
+            r = self.client.post("/conductores/autorizacion/solicitar", json={
+                "placa": "SWA123", "cedula": "88.888", "correo": "tenedor@x.com",
+                "nombre": "MARIA LOPEZ", "celular": "312 544 3396"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["estado"], "enviado")
+        self.assertTrue(r.json()["whatsapp"])
+        # 1 correo + 1 WhatsApp, ambos con el MISMO link.
+        self.assertEqual(len(self.correos_enviados), 1)
+        self.assertEqual(len(was_enviados), 1)
+        token = self._token_del_correo()
+        self.assertEqual(was_enviados[0]["to"], "573125443396")
+        self.assertEqual(was_enviados[0]["plantilla"], "autorizacion_datos")
+        self.assertEqual(was_enviados[0]["params"][0], "MARIA LOPEZ")
+        self.assertEqual(was_enviados[0]["params"][2],
+                         f"https://integralogistica.com/integrapp/AutorizacionDatos?token={token}")
+        # Token en BD: celular guardado y wa_enviado=True tras el 200 de Meta.
+        doc_token = self.tokens.documents[0]
+        self.assertEqual(doc_token["celular"], "3125443396")
+        self.assertTrue(doc_token["wa_enviado"])
+        # Aceptar con ese token → evidencia canal vinculo_whatsapp + celular.
+        r = self.client.post("/conductores/autorizacion/aceptar", json={
+            "token": token, "declaraciones_aceptadas": [
+                "origen_fondos", "sarlaft", "tratamiento_datos"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        for e in self.aceptaciones.documents:
+            self.assertEqual(e["canal"], "vinculo_whatsapp")
+            self.assertEqual(e["sujeto_celular"], "3125443396")
+        # /habeas-data expone el celular del link pendiente de otro sujeto.
+        self.tokens.insert_one({"cedula": "99999", "usado_en": None,
+                                "expira": datetime.utcnow() + timedelta(hours=24),
+                                "creado_en": datetime.utcnow(),
+                                "wa_enviado": True, "celular": "3110000000"})
+        r = self.client.get("/conductores/habeas-data?cedulas=99999")
+        self.assertEqual(r.json()["personas"][0]["token_pendiente_celular"], "3110000000")
+
+    def test_sin_celular_no_toca_whatsapp(self):
+        with patch.object(conductores, "enviar_template_sync",
+                          side_effect=AssertionError("no debe llamar WhatsApp")):
+            r = self.client.post("/conductores/autorizacion/solicitar", json={
+                "placa": "X", "cedula": "12.345", "correo": "solo@correo.com"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json().get("whatsapp", False))
+
     def test_envio_automatico_al_pasar_a_revision(self):
         vehiculo = {
             "placa": "AUTO1",
             "condCedulaCiudadania": "111", "condCorreo": "cond@x.com",
-            "propDocumento": "222", "propCorreo": "prop@x.com",
+            "propDocumento": "222", "propCorreo": "prop@x.com", "propCelular": "3135550000",
             "tenedDocumento": "900.123.456-7", "tenedTipoDocumento": "NIT",
             "RemolDuenoDocumento": "333",  # sin RemolDuenoCorreo
         }
         # El conductor ya tiene cuenta con aceptación → no se le escribe.
         self.cuentas.insert_one({"_id": "cid-1", "cedula": "111",
                                  "aceptacion_politica": {"version": 2}})
-        resumen = conductores.enviar_autorizaciones_pendientes(vehiculo)
+        was_auto = []
+        def wa_auto(destino, plantilla, idioma, params, botones=None):
+            was_auto.append(destino)
+            return True
+        with patch.object(conductores, "enviar_template_sync", side_effect=wa_auto):
+            resumen = conductores.enviar_autorizaciones_pendientes(vehiculo)
         self.assertEqual(resumen["ya_autorizado"], 1)      # el conductor
         self.assertEqual(resumen["enviado"], 1)            # el propietario
         self.assertEqual(resumen["sin_correo"], ["333"])   # dueño remolque
         # La empresa (NIT) no genera envío NI aparece en sin_correo.
         self.assertEqual(len(self.correos_enviados), 1)
         self.assertEqual(self.correos_enviados[0]["to"], ["prop@x.com"])
+        # (2026-11-17) El celular de la ficha también dispara el WhatsApp.
+        self.assertEqual(was_auto, ["573135550000"])
         # Re-ejecutar (re-revisión): idempotente, no duplica.
         resumen2 = conductores.enviar_autorizaciones_pendientes(vehiculo)
         self.assertEqual(resumen2["pendiente"], 1)
