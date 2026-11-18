@@ -144,9 +144,10 @@ class PoliticasConductoresTests(unittest.TestCase):
     def test_get_token_valido_no_marca_verificado(self):
         resp = asyncio_run(conductores.verificar_correo(token="token-prueba"))
         self.assertEqual(resp["estado"], "pendiente_aceptacion")
-        # La v1 sin declaraciones se auto-upgradea a v2 (declaraciones).
+        # La v1 sin declaraciones se auto-upgradea (declaraciones; 8 desde
+        # 2026-11-18: + Acuerdo de Nivel de Servicio).
         self.assertEqual(resp["politica"]["version"], 2)
-        self.assertEqual(len(resp["politica"]["declaraciones"]), 7)
+        self.assertEqual(len(resp["politica"]["declaraciones"]), 8)
         self.assertEqual(resp["correo"], "JUAN@X.COM")
         # El GET no marca verificado al conductor.
         self.assertFalse(self.col_conductores.documents[0]["correo_verificado"])
@@ -201,7 +202,7 @@ class PoliticasConductoresTests(unittest.TestCase):
         self.assertEqual(resp["estado"], "verificado")
 
         # Evidencia: UNA entrada POR declaración (7).
-        self.assertEqual(len(self.col_aceptaciones.inserts), 7)
+        self.assertEqual(len(self.col_aceptaciones.inserts), 8)
         ids_declaraciones = {d["id"] for d in conductores.DECLARACIONES_V2}
         for evidencia in self.col_aceptaciones.inserts:
             self.assertEqual(evidencia["version"], 2)
@@ -214,7 +215,7 @@ class PoliticasConductoresTests(unittest.TestCase):
         doc = self.col_conductores.documents[0]
         self.assertTrue(doc["correo_verificado"])
         self.assertEqual(doc["aceptacion_politica"]["version"], 2)
-        self.assertEqual(len(doc["declaraciones_aceptadas"]), 7)
+        self.assertEqual(len(doc["declaraciones_aceptadas"]), 8)
         self.assertIn("verificacion_token_hash", doc)
 
     def test_post_faltan_declaraciones_rechaza(self):
@@ -234,7 +235,7 @@ class PoliticasConductoresTests(unittest.TestCase):
                            if i not in conductores.DECLARACIONES_NO_EXIGIDAS]
         resp = self._post(declaraciones=sin_tratamiento)
         self.assertEqual(resp["estado"], "verificado")
-        self.assertEqual(len(self.col_aceptaciones.inserts), 6)
+        self.assertEqual(len(self.col_aceptaciones.inserts), 7)
         for evidencia in self.col_aceptaciones.inserts:
             self.assertNotIn(evidencia["declaracion_id"], conductores.DECLARACIONES_NO_EXIGIDAS)
         doc = self.col_conductores.documents[0]
@@ -245,7 +246,7 @@ class PoliticasConductoresTests(unittest.TestCase):
         # Si el titular SÍ la marca, la evidencia se registra como las demás.
         resp = self._post(declaraciones=self._ids_declaraciones())
         self.assertEqual(resp["estado"], "verificado")
-        self.assertEqual(len(self.col_aceptaciones.inserts), 7)
+        self.assertEqual(len(self.col_aceptaciones.inserts), 8)
         doc = self.col_conductores.documents[0]
         self.assertIn("tratamiento_datos", doc["declaraciones_aceptadas"])
 
@@ -253,7 +254,7 @@ class PoliticasConductoresTests(unittest.TestCase):
         self._post()
         resp = self._post()  # doble click / refresh
         self.assertEqual(resp["estado"], "ya_verificado")
-        self.assertEqual(len(self.col_aceptaciones.inserts), 7)
+        self.assertEqual(len(self.col_aceptaciones.inserts), 8)
 
     # ── Auto-siembra y auto-upgrade ─────────────────────────────────────────
     def test_politica_datos_auto_siembra_y_upgrade(self):
@@ -261,7 +262,7 @@ class PoliticasConductoresTests(unittest.TestCase):
         resp = asyncio_run(conductores.obtener_politica_datos())
         # Siembra v1 e inmediatamente la upgradea a v2 (declaraciones).
         self.assertEqual(resp["version"], 2)
-        self.assertEqual(len(resp["declaraciones"]), 7)
+        self.assertEqual(len(resp["declaraciones"]), 8)
         activos = [d for d in self.col_politicas.documents if d.get("activo")]
         self.assertEqual(len(activos), 1)
 

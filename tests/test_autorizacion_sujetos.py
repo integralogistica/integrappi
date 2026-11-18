@@ -110,6 +110,10 @@ POLITICA_V2 = {
         {"id": "origen_fondos", "titulo": "Origen de Fondos", "texto_html": "<p>a</p>"},
         {"id": "sarlaft", "titulo": "SARLAFT", "texto_html": "<p>b</p>"},
         {"id": "tratamiento_datos", "titulo": "Tratamiento de Datos", "texto_html": "<p>c</p>"},
+        # (2026-11-18) Incluye la Declaración 8 para que el fixture NO sea
+        # auto-upgradeado por _politica_vigente (sube de versión si falta).
+        {"id": "acuerdo_nivel_servicio", "titulo": "Acuerdo de Nivel de Servicio",
+         "texto_html": "<p>d</p>"},
     ],
 }
 
@@ -166,16 +170,17 @@ class AutorizacionSujetosTests(unittest.TestCase):
         cuerpo = r.json()
         self.assertEqual(cuerpo["estado"], "pendiente")
         self.assertEqual(cuerpo["placa"], "WOO453")
-        self.assertEqual(len(cuerpo["politica"]["declaraciones"]), 3)
+        self.assertEqual(len(cuerpo["politica"]["declaraciones"]), 4)
 
         # POST aceptar: exigidas marcadas (tratamiento_datos no exigida).
         r = self.client.post("/conductores/autorizacion/aceptar", json={
-            "token": token, "declaraciones_aceptadas": ["origen_fondos", "sarlaft"]})
+            "token": token,
+            "declaraciones_aceptadas": ["origen_fondos", "sarlaft", "acuerdo_nivel_servicio"]})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["estado"], "aceptado")
         # Evidencia: UNA entrada por declaración marcada, canal vinculo_correo.
         entradas = self.aceptaciones.documents
-        self.assertEqual(len(entradas), 2)
+        self.assertEqual(len(entradas), 3)
         for e in entradas:
             self.assertEqual(e["sujeto_cedula"], "55444333")
             self.assertEqual(e["canal"], "vinculo_correo")
@@ -183,7 +188,8 @@ class AutorizacionSujetosTests(unittest.TestCase):
             self.assertIn("ip", e)
         # Token consumido: reusar el link → 400.
         r = self.client.post("/conductores/autorizacion/aceptar", json={
-            "token": token, "declaraciones_aceptadas": ["origen_fondos", "sarlaft"]})
+            "token": token,
+            "declaraciones_aceptadas": ["origen_fondos", "sarlaft", "acuerdo_nivel_servicio"]})
         self.assertEqual(r.status_code, 400)
 
     def test_aceptar_exige_todas_las_declaraciones(self):
@@ -225,7 +231,7 @@ class AutorizacionSujetosTests(unittest.TestCase):
                          "Vehiculos/T1/2026-10-05/autorizacionFisica_44444_t1.pdf")
         # Una entrada POR declaración de la política vigente (firma completa).
         entradas = [e for e in self.aceptaciones.documents if e["canal"] == "papel"]
-        self.assertEqual(len(entradas), 3)
+        self.assertEqual(len(entradas), 4)
         self.assertEqual(entradas[0]["registrado_por"], "EDWIN")
         self.assertTrue(entradas[0]["documento_ruta"].startswith("Vehiculos/"))
 
@@ -285,7 +291,8 @@ class AutorizacionSujetosTests(unittest.TestCase):
         # Aceptar con ese token → evidencia canal vinculo_whatsapp + celular.
         r = self.client.post("/conductores/autorizacion/aceptar", json={
             "token": token, "declaraciones_aceptadas": [
-                "origen_fondos", "sarlaft", "tratamiento_datos"]})
+                "origen_fondos", "sarlaft", "tratamiento_datos",
+                "acuerdo_nivel_servicio"]})
         self.assertEqual(r.status_code, 200, r.text)
         for e in self.aceptaciones.documents:
             self.assertEqual(e["canal"], "vinculo_whatsapp")

@@ -4783,6 +4783,31 @@ async def disparar_estudios_seguridad(placa: str, usuario: Optional[str] = None)
     })
 
 
+@ruta_vehiculos.post("/estudios-seguridad/{placa}/redisparar")
+async def redisparar_estudio_sujeto(placa: str, estudio_id: str = Form(...),
+                                    usuario: Optional[str] = None):
+    """
+    (2026-11-18, pedido del usuario) Redisparo INDIVIDUAL por actor: re-consulta
+    SOLO el sujeto de ese estudio (force en personas — re-consulta real, la
+    misma semántica de «Volver a consultar» sin pagar los demás actores de la
+    corrida). Fire-and-forget: el avance se sigue con el polling de siempre.
+    `usuario`: nombre de quien lo disparó (sello del estudio + auditoría).
+    """
+    import asyncio
+    from Funciones import estudios_automaticos as ea
+    placa_limpia = placa.strip().upper()
+    # Validación SÍNCRONA: los 404/422 llegan al usuario antes de lanzar la
+    # tarea en background (estudio inexistente, en cola/curso, sujeto fuera
+    # de la ficha…).
+    _estudio, sujeto = ea.validar_redisparo(placa_limpia, estudio_id)
+    asyncio.create_task(ea.redisparar_estudio_ejecutar(
+        placa_limpia, estudio_id, sujeto, (usuario or "").strip() or None))
+    quien = sujeto.get("cedula") or sujeto.get("nit") or sujeto.get("placa", "")
+    return JSONResponse(status_code=status.HTTP_200_OK, content={
+        "message": f"Estudio de {quien} redisparado; el avance aparece en la tarjeta en unos minutos.",
+    })
+
+
 @ruta_vehiculos.post("/estudios-seguridad/{placa}/reintentar-fuentes")
 async def reintentar_fuentes_estudio(placa: str, estudio_id: str = Form(...)):
     """

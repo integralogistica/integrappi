@@ -286,10 +286,12 @@ class GuardarCitaTests(unittest.TestCase):
         self.assertEqual(doc["fecha"], "2026-11-12")                            # la nueva vigente
 
     def test_perfil_sin_permiso_rechazado(self):
+        # ANALISTA pasó a tener permiso (PERFILES_CITAS se amplió); el perfil
+        # sin permiso del test pasa a SEGURIDAD.
         cliente = cliente_de_prueba(citas_entrega.router)
-        info_analista = {**_INFO, "perfil": "ANALISTA"}
-        with patch.object(citas_entrega, "_resolver_usuario", lambda u: info_analista):
-            r = cliente.get("/citas-entrega/", params={"usuario": "TANALISTA"})
+        info_sin_permiso = {**_INFO, "perfil": "SEGURIDAD"}
+        with patch.object(citas_entrega, "_resolver_usuario", lambda u: info_sin_permiso):
+            r = cliente.get("/citas-entrega/", params={"usuario": "TSEGURIDAD"})
         self.assertEqual(r.status_code, 403)
 
 

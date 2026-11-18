@@ -1338,6 +1338,102 @@ class ReintentarEstudioUnicoTests(unittest.TestCase):
         self.assertIn("sigue fallando", cuerpo["message"])
 
 
+class RedisparoIndividualTests(unittest.TestCase):
+    """(2026-11-18) POST /vehiculos/estudios-seguridad/{placa}/redisparar:
+    botón «Redisparar» por actor — re-consulta SOLO ese sujeto con force
+    (mismas reglas que «Volver a consultar», sin pagar los demás)."""
+
+    def _vehiculo(self, estado="finalizado"):
+        return vehiculo_completo(
+            condCedulaCiudadania="1020304050",
+            estudiosSeguridadAuto=[{
+                "id": "est-1", "tipo": "persona", "estado": estado,
+                "cedula": "1020304050", "roles": ["conductor"],
+                "reporte_id": "rep-viejo", "hallazgo": False,
+            }])
+
+    def test_redispara_solo_ese_sujeto_con_force(self):
+        import asyncio
+        veh = self._vehiculo()
+        fake = FakeColeccion([veh])
+        capturados = []
+
+        async def llamar(sujeto):
+            capturados.append(dict(sujeto))
+            return await _respuesta_ok()
+
+        async def sin_pdf(*a, **kw):
+            return None
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "_llamar_proveedor", llamar), \
+             patch.object(estudios_automaticos, "_archivar_pdf_reporte", sin_pdf):
+            _estudio, sujeto = estudios_automaticos.validar_redisparo("ABC123", "est-1")
+            asyncio.run(estudios_automaticos.redisparar_estudio_ejecutar(
+                "ABC123", "est-1", sujeto, "EDWIN ZARATE"))
+        self.assertEqual(len(capturados), 1)              # SOLO este sujeto
+        self.assertEqual(capturados[0]["cedula"], "1020304050")
+        self.assertTrue(capturados[0].get("force"))       # re-consulta real
+        estudio = next(e for e in veh["estudiosSeguridadAuto"] if e["id"] == "est-1")
+        self.assertEqual(estudio["estado"], "finalizado")
+        self.assertEqual(estudio["disparado_por"], "EDWIN ZARATE")
+        self.assertEqual(estudio["canal"], "manual")
+        self.assertEqual(estudio["reporte_id"], "rep-123")  # el viejo se pisó
+        aud = [a for a in veh.get("auditoriaVehiculo", [])
+               if a.get("accion") == "estudios_consultados"]
+        self.assertEqual(len(aud), 1)
+        self.assertIn("Redisparo individual", aud[0]["detalle"])
+        self.assertEqual(aud[0]["actor"], "EDWIN ZARATE")
+
+    def test_422_si_esta_en_cola_o_en_curso(self):
+        for estado in ("pendiente", "en_curso"):
+            fake = FakeColeccion([self._vehiculo(estado=estado)])
+            with patch.object(estudios_automaticos, "coleccion_vehiculos", fake):
+                with self.assertRaises(HTTPException) as ctx:
+                    estudios_automaticos.validar_redisparo("ABC123", "est-1")
+            self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_404_si_el_estudio_no_existe(self):
+        fake = FakeColeccion([self._vehiculo()])
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake):
+            with self.assertRaises(HTTPException) as ctx:
+                estudios_automaticos.validar_redisparo("ABC123", "no-existe")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_endpoint(self):
+        veh = self._vehiculo()
+        fake = FakeColeccion([veh])
+        cliente = cliente_de_prueba()
+        lanzados = []
+
+        async def ejecutar_fake(placa, estudio_id, sujeto, disparado_por=None):
+            lanzados.append((placa, estudio_id, disparado_por))
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "redisparar_estudio_ejecutar", ejecutar_fake):
+            r = cliente.post(
+                "/vehiculos/estudios-seguridad/ABC123/redisparar",
+                data={"estudio_id": "est-1"}, params={"usuario": "DIANA SEGURIDAD"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("redisparado", r.json()["message"])
+        self.assertEqual(lanzados, [("ABC123", "est-1", "DIANA SEGURIDAD")])
+
+    def test_endpoint_valida_antes_de_lanzar(self):
+        # Estudio en curso → 422 SIN lanzar nada.
+        fake = FakeColeccion([self._vehiculo(estado="en_curso")])
+        cliente = cliente_de_prueba()
+
+        async def ejecutar_fake(*a, **kw):
+            raise AssertionError("no debe lanzarse")
+
+        with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
+             patch.object(estudios_automaticos, "redisparar_estudio_ejecutar", ejecutar_fake):
+            r = cliente.post(
+                "/vehiculos/estudios-seguridad/ABC123/redisparar",
+                data={"estudio_id": "est-1"})
+        self.assertEqual(r.status_code, 422)
+
+
 class SelloOrigenCorridaTests(unittest.TestCase):
     """(2026-10-21) Cada estudio queda sellado con quién disparó la corrida
     (`canal`/`disparado_por`) para el historial de /revision. Además valida el

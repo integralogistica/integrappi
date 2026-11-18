@@ -375,7 +375,7 @@ class HabeasDataTests(unittest.TestCase):
             resp = self.client.get("/conductores/habeas-data?cedulas=99999")
         self.assertEqual(resp.status_code, 200, resp.text)
         decls = resp.json()["declaraciones_politica"]
-        self.assertEqual(len(decls), 7)
+        self.assertEqual(len(decls), 8)  # 8 desde 2026-11-18 (+ Acuerdo de Nivel de Servicio)
         td = next(d for d in decls if d["id"] == "tratamiento_datos")
         self.assertTrue(td["opcional"])
         self.assertFalse(decls[0]["opcional"])

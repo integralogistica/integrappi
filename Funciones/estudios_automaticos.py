@@ -637,15 +637,13 @@ async def reintentar_fuentes_estudio(placa: str, estudio_id: str) -> dict:
     return cambios
 
 
-async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
+def _estudio_y_sujeto(placa: str, estudio_id: str, exigir_error: bool = False) -> tuple:
     """
-    Reintenta UN estudio fallido (botón «Reintentar esta consulta» de la
-    tarjeta en error, 2026-10-09 — pedido del usuario: «Volver a consultar»
-    re-consulta TODOS los sujetos con force y su costo; acá solo el que
-    falló, SIN force: si el proveedor ya tiene el resultado/caché, sale
-    gratis o barato). El sujeto se reconstruye de la ficha ACTUAL del
-    vehículo (mismas reglas de sujetos_estudio: fecha de expedición, tdoc
-    del RUT, etc.). Devuelve el estudio actualizado.
+    Lookup compartido del reintento/redisparo INDIVIDUAL: encuentra el estudio
+    por `id` en la corrida VIGENTE y reconstruye su sujeto desde la ficha
+    ACTUAL del vehículo (mismas reglas de sujetos_estudio: fecha de
+    expedición, tdoc del RUT, etc.). Devuelve (estudio, sujeto); lanza
+    404/422 si no aplica.
     """
     placa = str(placa or "").strip().upper()
     vehiculo = coleccion_vehiculos.find_one({"placa": placa})
@@ -659,12 +657,12 @@ async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
             status_code=404,
             detail="Estudio no encontrado en la corrida vigente "
                    "(las corridas anteriores no se re-intentan: usa «Volver a consultar»).")
-    if estudio.get("estado") != "error":
+    if exigir_error and estudio.get("estado") != "error":
         raise HTTPException(
             status_code=422,
             detail="Solo se puede reintentar un estudio FALLIDO. Los finalizados "
-                   "se renuevan con «Volver a consultar» y sus fuentes caídas con "
-                   "«Reintentar fuentes fallidas».")
+                   "se renuevan con «Volver a consultar» (o su botón «Redisparar») "
+                   "y sus fuentes caídas con «Reintentar fuentes fallidas».")
 
     def _clave(e: dict) -> str:
         if e.get("tipo") == "vehiculo":
@@ -680,6 +678,20 @@ async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
             status_code=422,
             detail="El sujeto de este estudio ya no corresponde a la ficha del "
                    "vehículo (¿cambiaron cédula/placa?). Usa «Volver a consultar».")
+    return estudio, sujeto
+
+
+async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
+    """
+    Reintenta UN estudio fallido (botón «Reintentar esta consulta» de la
+    tarjeta en error, 2026-10-09 — pedido del usuario: «Volver a consultar»
+    re-consulta TODOS los sujetos con force y su costo; acá solo el que
+    falló, SIN force: si el proveedor ya tiene el resultado/caché, sale
+    gratis o barato). El sujeto se reconstruye de la ficha ACTUAL del
+    vehículo (ver _estudio_y_sujeto). Devuelve el estudio actualizado.
+    """
+    placa = str(placa or "").strip().upper()
+    estudio, sujeto = _estudio_y_sujeto(placa, estudio_id, exigir_error=True)
 
     # _ejecutar_uno hace TODO el ciclo: en_curso → proveedor (con sus
     # reintentos de lanzamiento) → resultado/PDF → persistir (o error crudo).
@@ -691,6 +703,63 @@ async def reintentar_estudio_unico(placa: str, estudio_id: str) -> dict:
         (e for e in ((vehiculo or {}).get("estudiosSeguridadAuto") or [])
          if isinstance(e, dict) and e.get("id") == estudio_id), estudio)
     return actualizado
+
+
+def validar_redisparo(placa: str, estudio_id: str) -> tuple:
+    """
+    (2026-11-18, pedido del usuario: «todos los actores individualmente
+    deberían tener ese botón de redisparar») Validación del REDISPARO
+    INDIVIDUAL: el estudio debe existir en la corrida vigente y NO estar ya
+    en cola o en curso. Devuelve (estudio, sujeto); lanza 404/422 si no
+    aplica. Se llama SÍNCRONAMENTE desde el endpoint para que los errores
+    lleguen al usuario antes de lanzar la tarea en background.
+    """
+    estudio, sujeto = _estudio_y_sujeto(placa, estudio_id, exigir_error=False)
+    if estudio.get("estado") in ("pendiente", "en_curso"):
+        raise HTTPException(
+            status_code=422,
+            detail="Ese estudio ya está en cola o en curso; espera a que "
+                   "termine para volver a consultarlo.")
+    return estudio, sujeto
+
+
+async def redisparar_estudio_ejecutar(placa: str, estudio_id: str, sujeto: dict,
+                                      disparado_por: str = None) -> None:
+    """
+    Ejecución del redisparo individual (2026-11-18): resetea el estudio a
+    pendiente (sellado con quién lo corrió), deja auditoría y corre SOLO a
+    este sujeto — force en personas (re-consulta REAL, no la caché del
+    proveedor: misma semántica que «Volver a consultar» pero sin pagar los
+    demás actores de la corrida). La corrida NO se archiva ni se toca la
+    vigencia. Fire-and-forget: el front sigue el avance con el polling.
+    """
+    placa = str(placa or "").strip().upper()
+    actor = (disparado_por or "").strip() or None
+    if sujeto.get("tipo") == "persona":
+        sujeto["force"] = True
+    _actualizar_estudio(placa, estudio_id, {
+        "estado": "pendiente",
+        "iniciado_en": datetime.utcnow(),
+        "finalizado_en": None, "error": None, "error_proveedor": None,
+        "hallazgo": None, "categoria": None, "fuentes": None,
+        "reporte_id": None, "pdf_gcs": None, "reutilizado_de": None,
+        "canal": "manual", "disparado_por": actor,
+    })
+    try:
+        quien = f"{sujeto['tipo']} {sujeto.get('cedula') or sujeto.get('nit') or sujeto.get('placa', '')}"
+        coleccion_vehiculos.update_one(
+            {"placa": placa},
+            {"$push": {"auditoriaVehiculo": {"$each": [{
+                "fecha": datetime.utcnow(),
+                "actor": actor,
+                "via": "seguridad",
+                "accion": "estudios_consultados",
+                "detalle": f"Redisparo individual — 1 sujeto: {quien}"[:300],
+            }], "$slice": -200}}},
+        )
+    except Exception as e:
+        print(f"[estudios-auto] No se pudo auditar el redisparo de {placa}: {e}")
+    await _ejecutar_uno(placa, sujeto, estudio_id)
 
 
 def _log(mensaje: str) -> None:

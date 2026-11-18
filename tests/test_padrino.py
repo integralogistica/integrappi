@@ -63,6 +63,15 @@ class FakeColeccion:
     def count_documents(self, query=None):
         return len([d for d in self.documents if self._match(d, query or {})])
 
+    def insert_one(self, doc):
+        doc = dict(doc)
+        doc["_id"] = doc.get("_id") or ObjectId()
+        self.documents.append(doc)
+
+        class _Resultado:
+            inserted_id = doc["_id"]
+        return _Resultado()
+
 
 def _cliente(router):
     from fastapi import FastAPI
@@ -152,7 +161,9 @@ class GuardEstadoTests(unittest.TestCase):
 
 
 class GuardConductoresTests(unittest.TestCase):
-    """invitar/reenviar/desvincular con solicitante PADRINO → 403."""
+    """invitar/reenviar/desvincular con solicitante PADRINO: 403 en el slot 1
+    (conductor principal) y PERMITIDO en el slot 2 (segundo conductor,
+    2026-11-18)."""
 
     def setUp(self):
         self.vehiculo = {"placa": "XYZ789", "idUsuario": "ten-1", "estadoIntegra": "registro_incompleto",
@@ -174,7 +185,7 @@ class GuardConductoresTests(unittest.TestCase):
         from contextlib import ExitStack
         datos = InvitarConductorInput(
             id_tenedor="cualquiera", placa="XYZ789",
-            correo_conductor="dos@correo.com", slot=2,
+            correo_conductor="dos@correo.com", slot=1,
             solicitante="Padrino Juan")
         with ExitStack() as stack:
             for p in self._parches():
@@ -183,12 +194,27 @@ class GuardConductoresTests(unittest.TestCase):
                 asyncio.run(conductores.invitar_conductor(datos, _TareasFake()))
         self.assertEqual(ctx.exception.status_code, 403)
 
+    def test_invitar_padrino_slot2_puede(self):
+        """(2026-11-18) El padrino SÍ puede invitar al SEGUNDO conductor."""
+        import asyncio
+        from rutas.conductores import InvitarConductorInput
+        from contextlib import ExitStack
+        datos = InvitarConductorInput(
+            id_tenedor="cualquiera", placa="XYZ789",
+            correo_conductor="dos@correo.com", slot=2,
+            solicitante="Padrino Juan")
+        with ExitStack() as stack:
+            for p in self._parches():
+                stack.enter_context(p)
+            resultado = asyncio.run(conductores.invitar_conductor(datos, _TareasFake()))
+        self.assertEqual(resultado["estado"], "invitado")
+
     def test_desvincular_con_solicitante_padrino_rechaza(self):
         import asyncio
         from rutas.conductores import DesvincularConductorInput
         from contextlib import ExitStack
         datos = DesvincularConductorInput(
-            id_tenedor="ten-1", placa="XYZ789", slot=2, solicitante="Padrino Juan")
+            id_tenedor="ten-1", placa="XYZ789", slot=1, solicitante="Padrino Juan")
         with ExitStack() as stack:
             for p in self._parches():
                 stack.enter_context(p)
@@ -196,7 +222,83 @@ class GuardConductoresTests(unittest.TestCase):
                 asyncio.run(conductores.desvincular_conductor(datos))
         self.assertEqual(ctx.exception.status_code, 403)
 
+    def test_desvincular_padrino_slot2_puede(self):
+        """(2026-11-18) El padrino SÍ puede quitar al SEGUNDO conductor."""
+        import asyncio
+        from rutas.conductores import DesvincularConductorInput
+        from contextlib import ExitStack
+        self.vehiculo["idConductor2"] = None
+        self.vehiculo["invitacionConductor2"] = {"correo": "DOS@correo.com", "estado": "pendiente"}
+        datos = DesvincularConductorInput(
+            id_tenedor="ten-1", placa="XYZ789", slot=2, solicitante="Padrino Juan")
+        with ExitStack() as stack:
+            parches = self._parches()
+            parches[1] = patch.object(conductores, "coleccion_vehiculos",
+                                      FakeColeccion([dict(self.vehiculo)]))
+            for p in parches:
+                stack.enter_context(p)
+            resultado = asyncio.run(conductores.desvincular_conductor(datos))
+        self.assertIn("desvinculado", resultado["mensaje"].lower())
+
     def test_reenviar_con_solicitante_padrino_rechaza(self):
+        # Slot 1 con conductor VINCULADO → el padrino sigue sin poder.
+        import asyncio
+        from rutas.conductores import ReenviarInvitacionInput
+        from contextlib import ExitStack
+        datos = ReenviarInvitacionInput(
+            id_tenedor="ten-1", placa="XYZ789", slot=1, solicitante="Padrino Juan")
+        with ExitStack() as stack:
+            parches = self._parches()
+            parches[1] = patch.object(conductores, "coleccion_vehiculos",
+                                      FakeColeccion([dict(self.vehiculo)]))
+            for p in parches:
+                stack.enter_context(p)
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(conductores.reenviar_invitacion(datos, _TareasFake()))
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_invitar_padrino_slot1_vacio_puede(self):
+        """(2026-11-18) Fuerza mayor: el padrino puede invitar al conductor
+        PRINCIPAL cuando el slot 1 está VACÍO (p. ej. conductor fallecido)."""
+        import asyncio
+        from rutas.conductores import InvitarConductorInput
+        from contextlib import ExitStack
+        self.vehiculo["idConductor"] = None
+        self.vehiculo["invitacionConductor"] = None
+        datos = InvitarConductorInput(
+            id_tenedor="cualquiera", placa="XYZ789",
+            correo_conductor="nuevo@correo.com", slot=1,
+            solicitante="Padrino Juan")
+        with ExitStack() as stack:
+            parches = self._parches()
+            parches[1] = patch.object(conductores, "coleccion_vehiculos",
+                                      FakeColeccion([dict(self.vehiculo)]))
+            for p in parches:
+                stack.enter_context(p)
+            resultado = asyncio.run(conductores.invitar_conductor(datos, _TareasFake()))
+        self.assertEqual(resultado["estado"], "invitado")
+
+    def test_quitar_padrino_invitacion_pendiente_slot1_puede(self):
+        """(2026-11-18) Fuerza mayor: el padrino puede quitar la invitación
+        PENDIENTE del conductor principal (sin conductor vinculado)."""
+        import asyncio
+        from rutas.conductores import DesvincularConductorInput
+        from contextlib import ExitStack
+        self.vehiculo["idConductor"] = None
+        self.vehiculo["invitacionConductor"] = {"correo": "UNO@correo.com", "estado": "pendiente"}
+        datos = DesvincularConductorInput(
+            id_tenedor="ten-1", placa="XYZ789", slot=1, solicitante="Padrino Juan")
+        with ExitStack() as stack:
+            parches = self._parches()
+            parches[1] = patch.object(conductores, "coleccion_vehiculos",
+                                      FakeColeccion([dict(self.vehiculo)]))
+            for p in parches:
+                stack.enter_context(p)
+            resultado = asyncio.run(conductores.desvincular_conductor(datos))
+        self.assertIn("desvinculado", resultado["mensaje"].lower())
+
+    def test_reenviar_padrino_slot2_puede(self):
+        """(2026-11-18) El padrino SÍ puede reenviar la invitación del 2º."""
         import asyncio
         from rutas.conductores import ReenviarInvitacionInput
         from contextlib import ExitStack
@@ -208,11 +310,17 @@ class GuardConductoresTests(unittest.TestCase):
             parches = self._parches()
             parches[1] = patch.object(conductores, "coleccion_vehiculos",
                                       FakeColeccion([dict(self.vehiculo)]))
+            # El reenvío busca la cuenta stub del invitado por su correo.
+            parches.append(patch.object(
+                conductores, "coleccion_conductores",
+                FakeColeccion([{"_id": ObjectId(), "correo": "DOS@correo.com",
+                                "activo": False}])))
+            parches.append(patch.object(conductores, "_generar_token_verificacion",
+                                        return_value="token-nuevo"))
             for p in parches:
                 stack.enter_context(p)
-            with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(conductores.reenviar_invitacion(datos, _TareasFake()))
-        self.assertEqual(ctx.exception.status_code, 403)
+            resultado = asyncio.run(conductores.reenviar_invitacion(datos, _TareasFake()))
+        self.assertIn("reenviada", resultado["mensaje"].lower())
 
     def test_solicitante_seguridad_pasa_el_guard(self):
         """Seguridad llega hasta la validación de NEGOCIO (409 slot ocupado),

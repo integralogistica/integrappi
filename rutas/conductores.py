@@ -275,6 +275,20 @@ DECLARACIONES_V2 = [
             "actores viales o la integridad de la carga.</p>"
         ),
     },
+    # (2026-11-18, pedido del usuario) Declaración 8: lectura y aceptación del
+    # Acuerdo de Nivel de Servicio del conductor — el PDF vive en el bucket
+    # público y se muestra como un enlace limpio dentro de la declaración.
+    {
+        "id": "acuerdo_nivel_servicio",
+        "titulo": "Declaración 8 — Acuerdo de Nivel de Servicio",
+        "texto_html": (
+            "<p>Declaro que he leído el <b>Acuerdo de Nivel de Servicio del Conductor</b> "
+            "de ORION TRANSPORTADORA DE CARGA S.A.S. y acepto sus términos y condiciones.</p>"
+            "<p>📄 <a href=\"https://storage.googleapis.com/integrapp/Imagenes/"
+            "ACUERDO_NIVEL_DE_SERVICIO_CONDUCTOR.pdf\" target=\"_blank\" "
+            "rel=\"noopener\">Ver el Acuerdo de Nivel de Servicio (PDF)</a></p>"
+        ),
+    },
 ]
 
 POLITICA_DATOS_TITULO_V2 = "Declaraciones de Vinculación y Autorización de Tratamiento de Datos Personales"
@@ -290,7 +304,10 @@ def _politica_vigente() -> Optional[dict]:
     """
     Política activa. Auto-siembra la v1 si la colección está vacía y, si la
     activa no tiene `declaraciones` (modelo v1 de política única), auto-publica
-    la v2 con las 7 declaraciones de vinculación individuales.
+    la versión con declaraciones individuales. (2026-11-18) También auto-publica
+    la versión siguiente si a la activa le falta la Declaración 8 «Acuerdo de
+    Nivel de Servicio» (SLA del conductor): las políticas ya desplegadas con
+    las 7 originales se suben solas a 8 en el primer GET tras el deploy.
     """
     if coleccion_politicas.count_documents({}) == 0:
         coleccion_politicas.insert_one({
@@ -302,22 +319,24 @@ def _politica_vigente() -> Optional[dict]:
             "publicado_por": "SISTEMA",
         })
     politica = coleccion_politicas.find_one({"activo": True}, sort=[("version", -1)])
-    if politica and not politica.get("declaraciones"):
-        # Upgrade a v2: declaraciones individuales (Origen de Fondos, SARLAFT,
-        # PTEE, Información Veraz, Tratamiento de Datos, SST, PESV).
-        ultima = coleccion_politicas.find_one({}, sort=[("version", -1)])
-        nueva_version = (ultima or {}).get("version", 1) + 1
-        coleccion_politicas.update_many({"activo": True}, {"$set": {"activo": False}})
-        coleccion_politicas.insert_one({
-            "version": nueva_version,
-            "titulo": POLITICA_DATOS_TITULO_V2,
-            "declaraciones": DECLARACIONES_V2,
-            "activo": True,
-            "publicado_en": datetime.now(timezone.utc),
-            "publicado_por": "SISTEMA",
-            "auto_upgrade": True,
-        })
-        politica = coleccion_politicas.find_one({"activo": True}, sort=[("version", -1)])
+    if politica:
+        ids_activos = {d.get("id") for d in (politica.get("declaraciones") or [])}
+        if not ids_activos or "acuerdo_nivel_servicio" not in ids_activos:
+            # Upgrade: v1 (sin declaraciones) → declaraciones individuales, o
+            # 7 declaraciones → + Declaración 8 (SLA, 2026-11-18).
+            ultima = coleccion_politicas.find_one({}, sort=[("version", -1)])
+            nueva_version = (ultima or {}).get("version", 1) + 1
+            coleccion_politicas.update_many({"activo": True}, {"$set": {"activo": False}})
+            coleccion_politicas.insert_one({
+                "version": nueva_version,
+                "titulo": POLITICA_DATOS_TITULO_V2,
+                "declaraciones": DECLARACIONES_V2,
+                "activo": True,
+                "publicado_en": datetime.now(timezone.utc),
+                "publicado_por": "SISTEMA",
+                "auto_upgrade": True,
+            })
+            politica = coleccion_politicas.find_one({"activo": True}, sort=[("version", -1)])
     return politica
 
 
@@ -1297,7 +1316,9 @@ async def consultar_habeas_data(cedulas: str = ""):
     # Declaraciones de la política VIGENTE (2026-10-07): el front las usa para
     # pintar en ROJO las declaraciones que a cada persona le faltan — en la
     # práctica solo puede faltar la opcional («Tratamiento de Datos Personales»,
-    # DECLARACIONES_NO_EXIGIDAS), porque las demás son exigidas por el backend.
+    # DECLARACIONES_NO_EXIGIDAS) y, desde el 2026-11-18, la «Declaración 8 —
+    # Acuerdo de Nivel de Servicio» para quienes aceptaron ANTES del cambio
+    # (las demás son exigidas por el backend).
     declaraciones_politica = []
     try:
         politica = _politica_vigente() or {}
@@ -1765,6 +1786,11 @@ def _correos_y_celulares_ficha(vehiculo: dict) -> tuple:
     celulares: dict = {}
     for campo_doc, campo_correo, campo_celular in (
         ("condCedulaCiudadania", "condCorreo", "condCelular"),
+        # (2026-11-18) SEGUNDO CONDUCTOR como sujeto de habeas data: su link de
+        # autorización también viaja por correo + WhatsApp al pasar a revisión.
+        # Va después del conductor 1 para que, si es la misma cédula, gane el
+        # correo del conductor principal (dedup «first in»).
+        ("cond2CedulaCiudadania", "cond2Correo", "cond2Celular"),
         ("propDocumento", "propCorreo", "propCelular"),
         ("tenedDocumento", "tenedCorreo", "tenedCelular"),
         ("RemolDuenoDocumento", "RemolDuenoCorreo", None),  # dueño remolque: sin campo de celular en la ficha
@@ -1778,6 +1804,31 @@ def _correos_y_celulares_ficha(vehiculo: dict) -> tuple:
         if ced and celular and ced not in celulares:
             celulares[ced] = celular
     return correos, celulares
+
+
+def _disparar_habeas_conductor2(vehiculo: dict, placa: str, correo_fallback: str = "",
+                                celular_fallback: str = "", solicitado_por: str = "sistema") -> None:
+    """
+    (2026-11-18) Habeas data del SEGUNDO CONDUCTOR en el momento de invitarlo o
+    vincularlo (pedido del usuario: «que le dispare lo de habeas data tanto al
+    correo como al WhatsApp que registren para ese personaje»). Si su cédula ya
+    está en la ficha, envía el link de autorización por correo + WhatsApp.
+    Idempotente (no duplica si ya hay link vigente o ya autorizó). Si aún no
+    hay cédula, lo cubre el envío automático al pasar el vehículo a revisión.
+    Best-effort: un fallo jamás tumba la invitación.
+    """
+    try:
+        cedula = _digitos_aut(vehiculo.get("cond2CedulaCiudadania"))
+        if len(cedula) < 4 or _sujeto_ya_autorizado(cedula):
+            return
+        correo = str(vehiculo.get("cond2Correo") or "").strip() or (correo_fallback or "").strip()
+        celular = str(vehiculo.get("cond2Celular") or "").strip() or (celular_fallback or "").strip()
+        if not correo or "@" not in correo:
+            return
+        r = _solicitar_autorizacion(placa, cedula, correo, "", solicitado_por, celular=celular)
+        print(f"[autorizacion] Conductor 2 de {placa}: {r.get('estado')}")
+    except Exception as e:
+        print(f"[autorizacion] No se pudo enviar el habeas al conductor 2 de {placa}: {e}")
 
 
 def enviar_autorizaciones_pendientes(vehiculo: dict, solicitado_por: str = "sistema") -> dict:
@@ -2391,7 +2442,13 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
     # el tenedor declarado debe ser el dueño de la ficha.
     es_seguridad = bool((data.solicitante or "").strip())
     actor = (data.solicitante or "").strip() or None
-    _rechazar_padrino(data.solicitante)
+    # (2026-11-18) PADRINO: gestiona el slot 2 completo y, en el slot 1, SOLO
+    # mientras no haya conductor VINCULADO — invitar con el espacio vacío o
+    # reenviar (casos de fuerza mayor: p. ej. conductor principal fallecido
+    # que nunca aceptó). Reemplazar un conductor VINCULADO sigue siendo del
+    # tenedor/Seguridad. Espejo del front (caja del slot 1 al padrino).
+    if data.slot != 2 and vehiculo.get("idConductor"):
+        _rechazar_padrino(data.solicitante)
     if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
 
@@ -2455,6 +2512,12 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
                   "antes": vehiculo.get(campo_id) or "(ninguno)",
                   "despues": existente.get("correo", "")}],
             )
+            # (2026-11-18) Habeas data inmediato del 2º conductor (correo+WA).
+            if data.slot == 2:
+                background_tasks.add_task(
+                    _disparar_habeas_conductor2, vehiculo, placa, correo_invitado,
+                    (data.celular_conductor or "").strip(), actor or "tenedor",
+                )
             return {
                 "estado": "vinculado",
                 "mensaje": "El conductor ya tenía cuenta: quedó vinculado al vehículo.",
@@ -2544,6 +2607,13 @@ async def invitar_conductor(data: InvitarConductorInput, background_tasks: Backg
         )
     except Exception as e:
         print(f"[padrinos] No se pudo agendar el aviso de invitación de {placa}: {e}")
+    # (2026-11-18) Habeas data inmediato del 2º conductor (correo+WA) cuando
+    # su cédula ya se conoce; si no, lo cubre el envío al pasar a revisión.
+    if data.slot == 2:
+        background_tasks.add_task(
+            _disparar_habeas_conductor2, vehiculo, placa, correo_invitado,
+            (data.celular_conductor or "").strip(), actor or "tenedor",
+        )
     return {
         "estado": "invitado",
         "mensaje": f"Invitación enviada a {correo_invitado}. El conductor quedará vinculado al aceptar.",
@@ -2565,7 +2635,10 @@ async def reenviar_invitacion(data: ReenviarInvitacionInput, background_tasks: B
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     es_seguridad = bool((data.solicitante or "").strip())
-    _rechazar_padrino(data.solicitante)
+    # (2026-11-18) PADRINO: reenvía el slot 2 y el slot 1 sin conductor
+    # VINCULADO (invitación pendiente — fuerza mayor).
+    if data.slot != 2 and vehiculo.get("idConductor"):
+        _rechazar_padrino(data.solicitante)
     if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
     campo_id, campo_inv = _campos_slot(data.slot)
@@ -2749,7 +2822,11 @@ async def desvincular_conductor(data: DesvincularConductorInput):
     if not vehiculo:
         raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
     es_seguridad = bool((data.solicitante or "").strip())
-    _rechazar_padrino(data.solicitante)
+    # (2026-11-18) PADRINO: quita el slot 2 y, en el slot 1, SOLO la invitación
+    # PENDIENTE (sin conductor vinculado, fuerza mayor) — quitar un conductor
+    # VINCULADO sigue siendo del tenedor/Seguridad.
+    if data.slot != 2 and vehiculo.get("idConductor"):
+        _rechazar_padrino(data.solicitante)
     if not es_seguridad and str(vehiculo.get("idUsuario", "")) != str(data.id_tenedor):
         raise HTTPException(status_code=403, detail="El vehículo no pertenece a este tenedor.")
     campo_id, campo_inv = _campos_slot(data.slot)
