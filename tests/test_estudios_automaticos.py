@@ -219,21 +219,27 @@ class SujetosEstudioTests(unittest.TestCase):
         self.assertEqual(empresa["roles"], ["propietario"])
 
     def test_estudio_de_empresa_usa_el_flujo_nit(self):
-        """El sujeto empresa consulta por launch/verify/nit + sondeo, y su
+        """El sujeto empresa consulta por el endpoint GENERAL typedoc=NIT
+        (2026-11-19: launch/verify/nit responde 403 en esta cuenta) y su
         PDF se archiva con el endpoint pdf-nit."""
         veh = vehiculo_completo(
             condCedulaCiudadania="1020304050",
             propDocumento="901923029", propTipoDocumento="NIT")
         fake = FakeColeccion([veh])
 
-        async def lanzar_nit(nit):
-            assert int(nit.nit) == 901923029
-            return {"jobid": "job-nit"}
+        consultas = []
 
-        async def esperar(jobid, maximo, intervalo):
-            assert jobid == "job-nit"
-            return {"estado": "finalizado", "hallazgo": False, "hallazgos": "",
-                    "results": {"RUES": False}, "id": "rep-nit-1"}
+        async def consulta_por_tipo(consulta):
+            # Empresa por el endpoint general: typedoc=NIT + doc = el NIT.
+            if consulta.typedoc == "NIT":
+                consultas.append(consulta)
+                return {"lanzamiento": {"jobid": "job-nit",
+                                        "nombre": "EMPRESA SAS"},
+                        "resultado": {"estado": "finalizado",
+                                      "hallazgo": False, "hallazgos": "",
+                                      "results": {"RUES": False},
+                                      "id": "rep-nit-1"}}
+            return await _respuesta_ok(consulta)
 
         async def pdf_nit(_id):
             return b"%PDF-empresa"
@@ -242,9 +248,8 @@ class SujetosEstudioTests(unittest.TestCase):
         import asyncio
         with patch.object(estudios_automaticos, "coleccion_vehiculos", fake), \
              patch.object(estudios_automaticos, "_configurado", lambda: True), \
-             patch.object(estudios_automaticos, "consulta_completa", _respuesta_ok), \
-             patch.object(estudios_automaticos, "_td_verificar_nit", lanzar_nit), \
-             patch.object(estudios_automaticos, "_td_esperar", esperar), \
+             patch.object(estudios_automaticos, "consulta_completa", consulta_por_tipo), \
+             patch.object(estudios_automaticos, "consulta_vehiculo", _respuesta_ok), \
              patch.object(estudios_automaticos, "_td_reporte_nit_pdf", pdf_nit), \
              patch.object(estudios_automaticos, "_subir_blob_pdf",
                           lambda ruta, c: subidas.append(ruta)):
@@ -254,6 +259,10 @@ class SujetosEstudioTests(unittest.TestCase):
         self.assertEqual(empresa["estado"], "finalizado")
         self.assertEqual(empresa["reporte_id"], "rep-nit-1")
         self.assertTrue(any("empresa_901923029" in r for r in subidas))
+        # La empresa fue consultada por el endpoint general con su NIT.
+        self.assertEqual(len(consultas), 1)
+        self.assertEqual(str(consultas[0].doc), "901923029")
+        self.assertFalse(consultas[0].force)
 
     def test_documentos_propietario_empresa(self):
         """Con propietario NIT: la cédula del propietario NO se exige y el

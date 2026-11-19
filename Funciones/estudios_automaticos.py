@@ -47,7 +47,6 @@ from fastapi import HTTPException
 # por nombre en este namespace.
 from rutas.tusdatos import (
     ConsultaCompletaIn,
-    NitIn,
     VehiculoCompletaIn,
     _bajar_pdf_validado as _td_bajar_pdf_validado,
     _bajar_reporte_car_pdf as _td_reporte_car_pdf,
@@ -58,7 +57,6 @@ from rutas.tusdatos import (
     consulta_completa,
     consulta_vehiculo,
     reintentar_fuentes as _td_reintentar,
-    verificar_nit as _td_verificar_nit,
 )
 
 # Archivo de los PDFs de reporte en el bucket PRIVADO (2026-09-28, pedido del
@@ -482,8 +480,10 @@ async def disparar_estudios(placa: str, re_revision: bool = False,
             return
 
         if forzar:
+            # force en personas Y empresas: ambos van por /api/launch, que
+            # re-consulta de verdad (sin force devuelve la caché del proveedor).
             for s in sujetos:
-                if s["tipo"] == "persona":
+                if s["tipo"] in ("persona", "empresa"):
                     s["force"] = True
 
         coleccion_vehiculos.update_one(
@@ -728,14 +728,14 @@ async def redisparar_estudio_ejecutar(placa: str, estudio_id: str, sujeto: dict,
     """
     Ejecución del redisparo individual (2026-11-18): resetea el estudio a
     pendiente (sellado con quién lo corrió), deja auditoría y corre SOLO a
-    este sujeto — force en personas (re-consulta REAL, no la caché del
-    proveedor: misma semántica que «Volver a consultar» pero sin pagar los
+    este sujeto — force en personas y empresas (re-consulta REAL, no la caché
+    del proveedor: misma semántica que «Volver a consultar» pero sin pagar los
     demás actores de la corrida). La corrida NO se archiva ni se toca la
     vigencia. Fire-and-forget: el front sigue el avance con el polling.
     """
     placa = str(placa or "").strip().upper()
     actor = (disparado_por or "").strip() or None
-    if sujeto.get("tipo") == "persona":
+    if sujeto.get("tipo") in ("persona", "empresa"):
         sujeto["force"] = True
     _actualizar_estudio(placa, estudio_id, {
         "estado": "pendiente",
@@ -853,13 +853,18 @@ async def _llamar_proveedor(sujeto: dict) -> dict:
 async def _invocar_handler(sujeto: dict) -> dict:
     """Una llamada (sin reintentos) al handler del wrapper correspondiente."""
     if sujeto["tipo"] == "empresa":
-        # Validación de EMPRESA por NIT (flujos propios del proveedor):
-        # launch/verify/nit → jobid → sondeo hasta el resultado.
-        lanzamiento = await _td_verificar_nit(NitIn(nit=int(sujeto["nit"])))
-        jobid = lanzamiento.get("jobid") if isinstance(lanzamiento, dict) else None
-        resultado = ((await _td_esperar(jobid, 300, 5)) if jobid
-                     else (lanzamiento if isinstance(lanzamiento, dict) else {}))
-        return {"lanzamiento": lanzamiento, "resultado": resultado}
+        # EMPRESA por NIT por el endpoint GENERAL /api/launch con
+        # typedoc=NIT (2026-11-19): el dedicado /api/launch/verify/nit
+        # responde 403 «No cuentas con acceso a este servicio» — producto no
+        # habilitado en la cuenta (verificado en vivo, con saldo disponible y
+        # cumpliendo el contrato publicado en docs.tusdatos.co). En cambio el
+        # endpoint general SÍ consulta las fuentes de empresa (caso real
+        # 830503352: finalizado + PDF de 1.3 MB por report_nit_pdf) y soporta
+        # force igual que las personas. Misma shape {lanzamiento, resultado}.
+        kwargs = {"typedoc": "NIT", "doc": str(int(sujeto["nit"]))}
+        if sujeto.get("force"):
+            kwargs["force"] = True
+        return await consulta_completa(ConsultaCompletaIn(**kwargs))
     if sujeto["tipo"] == "persona":
         kwargs = {"typedoc": "CC", "doc": sujeto["cedula"]}
         # fechaE opcional para CC: afina el match (cédulas comunes).
