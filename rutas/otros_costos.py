@@ -1448,6 +1448,21 @@ class AccionConObservacionRequest(BaseModel):
     observacion: str = ""
 
 
+class DevolverRequest(AccionConObservacionRequest):
+    # Etapa a la que se devuelve: 'operativo' (el creador, como siempre) o
+    # 'tramite' (bandeja del ANALISTA, para que corrija su registro en Vulcano
+    # sin repetir toda la cadena). Se recuerda en `devolucion_info` el punto de
+    # retorno para que quien corrige pueda volver directo.
+    devolver_a: Literal["operativo", "tramite"] = "operativo"
+
+
+class EnviarAprobacionRequest(AccionConObservacionRequest):
+    # True = volver DIRECTO a la etapa donde estaba la solicitud cuando se
+    # devolvió (la que registró `devolucion_info`), sin repetir las etapas ya
+    # validadas. False (default) = recorrer toda la cadena desde aprobación.
+    retorno_directo: bool = False
+
+
 class MarcarTramiteVulcanoRequest(BaseModel):
     consecutivo: str
     usuario: str
@@ -2003,7 +2018,7 @@ async def editar_solicitud(
 
 
 @router.post("/enviar-aprobacion")
-async def enviar_aprobacion(req: AccionConObservacionRequest, request: Request):
+async def enviar_aprobacion(req: EnviarAprobacionRequest, request: Request):
     info = _resolver_usuario(req.usuario)
     _requiere(info, {"OPERATIVO", "DESPACHADOR", "ADMIN"}, "enviar solicitudes a aprobación")
     doc = col_activos.find_one({"consecutivo": req.consecutivo})
@@ -2022,17 +2037,56 @@ async def enviar_aprobacion(req: AccionConObservacionRequest, request: Request):
     )
 
     estado_prev = doc.get("estado")
-    mov = _nuevo_movimiento("envio_aprobacion", estado_prev, "pendiente_aprobacion", info, req.observacion, _ip(request))
-    col_activos.update_one(
+    # Retorno directo: volver a la etapa donde estaba cuando se devolvió (la que
+    # registró devolucion_info) en vez de recorrer toda la cadena de nuevo. El
+    # que corrige decide: si la corrección cambia algo que las demás etapas deben
+    # revisar, envía por la cadena completa (retorno_directo=False).
+    dev_info = doc.get("devolucion_info")
+    retorno = None
+    if req.retorno_directo:
+        if not isinstance(dev_info, dict) or not dev_info.get("estado_retorno"):
+            raise HTTPException(
+                status_code=422,
+                detail="La solicitud no tiene una devolución con punto de retorno; envíela por la cadena normal.",
+            )
+        retorno = dev_info
+
+    ahora = _ahora_utc()
+    if retorno:
+        estado_nuevo = retorno.get("estado_retorno")
+        mov = _nuevo_movimiento("retorno_directo", estado_prev, estado_nuevo, info, req.observacion, _ip(request))
+        set_fields = {"estado": estado_nuevo, "updated_at": ahora}
+        if estado_nuevo == "aprobado":
+            # Restaurar también el trámite que tenía cuando la devolvieron (ej:
+            # devuelta por Financiero con trámite OK → vuelve lista para pagar).
+            set_fields["tramite_vulcano"] = retorno.get("tramite_retorno") or "pendiente"
+    else:
+        estado_nuevo = "pendiente_aprobacion"
+        mov = _nuevo_movimiento("envio_aprobacion", estado_prev, estado_nuevo, info, req.observacion, _ip(request))
+        set_fields = {"estado": estado_nuevo, "updated_at": ahora}
+    res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": estado_prev},
-        {"$set": {"estado": "pendiente_aprobacion", "updated_at": _ahora_utc()},
+        {"$set": set_fields, "$unset": {"devolucion_info": ""},
          "$push": {"historial_movimientos": mov}},
     )
-    # Avisar a COORDINADOR/CONTROL que tienen una solicitud pendiente (fire-and-forget).
+    # Anti-carrera: si otro proceso cambió el estado entre el find y el update.
+    if res.matched_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="La solicitud cambió de estado (acción simultánea). Recargue e intente de nuevo.",
+        )
+    # Avisar al actor de la etapa de destino (fire-and-forget).
     doc_actualizado = col_activos.find_one({"consecutivo": req.consecutivo})
     if doc_actualizado:
-        await asyncio.to_thread(_notificar_envio_aprobacion, doc_actualizado)
-    return {"mensaje": "Solicitud enviada a aprobación", "estado": "pendiente_aprobacion"}
+        if retorno and estado_nuevo == "aprobado" and doc_actualizado.get("tramite_vulcano") == "ok":
+            await asyncio.to_thread(_notificar_tramite_ok, doc_actualizado)      # → FINANCIERO
+        elif retorno and estado_nuevo == "aprobado":
+            await asyncio.to_thread(_notificar_aprobacion, doc_actualizado)      # → ANALISTA
+        else:
+            await asyncio.to_thread(_notificar_envio_aprobacion, doc_actualizado)
+    if retorno:
+        return {"mensaje": "Solicitud enviada de vuelta a la etapa que la devolvió", "estado": estado_nuevo}
+    return {"mensaje": "Solicitud enviada a aprobación", "estado": estado_nuevo}
 
 
 def _obtener_y_validar_aprobacion(req, info) -> dict:
@@ -2098,11 +2152,19 @@ async def marcar_tramite_vulcano(req: MarcarTramiteVulcanoRequest, request: Requ
         "fecha": ahora, "observacion": req.observacion or "",
     }
     mov = _nuevo_movimiento("tramite_vulcano", None, req.tramite_vulcano, info, req.observacion, _ip(request))
+    # Si era una devolución dirigida al trámite, al marcar OK el ciclo se
+    # completa (vuelve a la bandeja de Financiero): limpiar la marca para que
+    # futuros envíos no ofrezcan retorno directo a un punto ya consumido.
+    update: dict = {"$set": {"tramite_vulcano": req.tramite_vulcano, "tramite_vulcano_info": tramite_info, "updated_at": ahora}}
+    if req.tramite_vulcano == "ok" and isinstance(doc.get("devolucion_info"), dict) \
+            and doc.get("devolucion_info", {}).get("etapa") == "tramite":
+        update["$unset"] = {"devolucion_info": ""}
+        mov["observacion"] = (f"{mov['observacion']} " if mov["observacion"] else "") + "[corrige devolución al trámite]"
+    update["$push"] = {"historial_movimientos": mov}
     # Guardar atómicamente SOLO si sigue aprobado (anti-carrera).
     res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": "aprobado"},
-        {"$set": {"tramite_vulcano": req.tramite_vulcano, "tramite_vulcano_info": tramite_info, "updated_at": ahora},
-         "$push": {"historial_movimientos": mov}},
+        update,
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=409, detail="La solicitud cambió de estado (acción simultánea).")
@@ -2114,7 +2176,7 @@ async def marcar_tramite_vulcano(req: MarcarTramiteVulcanoRequest, request: Requ
 
 
 @router.post("/devolver")
-async def devolver_solicitud(req: AccionConObservacionRequest, request: Request):
+async def devolver_solicitud(req: DevolverRequest, request: Request):
     info = _resolver_usuario(req.usuario)
     _requiere(info, {"COORDINADOR", "CONTROL", "ADMIN", "ANALISTA", "FINANCIERO"}, "devolver solicitudes")
     if not (req.observacion or "").strip():
@@ -2147,18 +2209,52 @@ async def devolver_solicitud(req: AccionConObservacionRequest, request: Request)
             status_code=403,
             detail="El trámite ya fue marcado OK y la solicitud pasó a Financiero; no se puede devolver desde aquí.",
         )
+    # Devolución dirigida: al trámite del ANALISTA sólo se puede devolver desde
+    # la bandeja de Financiero (aprobada con trámite OK). En cualquier otro
+    # estado sería un no-op (ya estaría en la bandeja del Analista).
+    if req.devolver_a == "tramite" and not (
+        estado_prev == "aprobado" and doc.get("tramite_vulcano") == "ok"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Sólo se puede devolver al trámite del Analista una solicitud aprobada "
+                   "con trámite Vulcano OK (bandeja de Financiero).",
+        )
     # Alcance de clientes: quien no puede aprobar un cliente tampoco lo devuelve
     # (sólo aplica devolviendo desde 'pendiente'; desde 'aprobado' devuelven
     # Analista/Financiero, a los que el alcance no restringe).
     if estado_prev == "pendiente_aprobacion":
         _denegar_fuera_de_alcance(info, doc)
 
+    ahora = _ahora_utc()
+    # Punto de retorno: dónde estaba la solicitud y quién la devolvió. Quien
+    # corrige puede usarlo en /enviar-aprobacion (retorno_directo) para volver
+    # acá sin repetir las etapas ya validadas.
+    devolucion_info = {
+        "etapa": req.devolver_a,
+        "estado_retorno": estado_prev,
+        "tramite_retorno": doc.get("tramite_vulcano"),
+        "devuelto_por": {"usuario": info["usuario"], "nombre": info["nombre"], "rol": perfil},
+        "fecha": ahora,
+        "motivo": req.observacion,
+    }
     mov = _nuevo_movimiento("devolucion", estado_prev, "devuelto", info, req.observacion, _ip(request))
-    set_fields = {"estado": "devuelto", "updated_at": _ahora_utc()}
-    # Al devolver desde 'aprobado', resetear el trámite Vulcano para que el
-    # analista lo revise de nuevo al reaprobar (/aprobar también lo resetea).
-    if estado_prev == "aprobado":
+    mov["devuelto_a"] = req.devolver_a
+    set_fields = {"devolucion_info": devolucion_info, "updated_at": ahora}
+    if req.devolver_a == "tramite":
+        # La solicitud SE QUEDA en 'aprobado' y el trámite vuelve a 'pendiente':
+        # cae en la bandeja del ANALISTA para que corrija su registro en Vulcano.
+        # Al marcar OK de nuevo vuelve naturalmente a Financiero (retorno directo).
+        mov["estado_nuevo"] = "aprobado"
         set_fields["tramite_vulcano"] = "pendiente"
+        estado_resultado = "aprobado"
+    else:
+        set_fields["estado"] = "devuelto"
+        # Al devolver desde 'aprobado', resetear el trámite Vulcano para que el
+        # analista lo revise de nuevo al reaprobar (/aprobar también lo resetea).
+        if estado_prev == "aprobado":
+            set_fields["tramite_vulcano"] = "pendiente"
+        estado_resultado = "devuelto"
     res = col_activos.update_one(
         {"consecutivo": req.consecutivo, "estado": estado_prev},
         {"$set": set_fields, "$push": {"historial_movimientos": mov}},
@@ -2169,9 +2265,14 @@ async def devolver_solicitud(req: AccionConObservacionRequest, request: Request)
             status_code=409,
             detail="La solicitud cambió de estado (acción simultánea). Recargue e intente de nuevo.",
         )
-    # Avisar al creador con el motivo para que corrija (fire-and-forget).
-    await asyncio.to_thread(_notificar_devolucion, doc, req.observacion)
-    return {"mensaje": "Solicitud devuelta", "estado": "devuelto"}
+    if req.devolver_a == "tramite":
+        # Avisar al ANALISTA que tiene la solicitud de vuelta en su bandeja
+        # (fire-and-forget; misma plantilla del flujo normal).
+        await asyncio.to_thread(_notificar_aprobacion, doc)
+    else:
+        # Avisar al creador con el motivo para que corrija (fire-and-forget).
+        await asyncio.to_thread(_notificar_devolucion, doc, req.observacion)
+    return {"mensaje": "Solicitud devuelta", "estado": estado_resultado, "devuelto_a": req.devolver_a}
 
 
 @router.post("/rechazar")

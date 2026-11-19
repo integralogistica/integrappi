@@ -195,6 +195,30 @@ def estado_por_autorizacion(costo_real: float, costo_teorico: float):
     return ("REQUIERE AUTORIZACION CONTROL", porc)
 
 
+# 🔒 Uso mínimo del vehículo solicitado (2026-11-19): por debajo del 50% de uso
+# el vehículo viaja muy subutilizado → aunque el flete cumpla (PREAUTORIZADO o
+# solo COORDINADOR), requiere autorización de CONTROL obligatoria. Sin tipo
+# evaluable (sin tope conocido) la regla no aplica. Mismo cálculo que la
+# columna «% Uso» (_uso_vehiculo_pct de este mismo archivo).
+UMBRAL_USO_CONTROL = 0.5
+
+
+def requiere_control_por_uso(kg, tipo_sicetac, tipo_sugerido) -> bool:
+    """True si el % de uso del vehículo solicitado es < UMBRAL_USO_CONTROL."""
+    uso = _uso_vehiculo_pct(kg, tipo_sicetac, tipo_sugerido)
+    return uso is not None and uso < UMBRAL_USO_CONTROL
+
+
+def aplicar_regla_uso(estado: str, kg, tipo_sicetac, tipo_sugerido) -> str:
+    """Sube el estado a 'REQUIERE AUTORIZACION CONTROL' cuando el uso del
+    vehículo queda por debajo del umbral (gana el estado más restrictivo,
+    igual que cuando el sobrecosto supera el 7%)."""
+    if estado in ("PREAUTORIZADO", "REQUIERE AUTORIZACION COORDINADOR") \
+            and requiere_control_por_uso(kg, tipo_sicetac, tipo_sugerido):
+        return "REQUIERE AUTORIZACION CONTROL"
+    return estado
+
+
 # Jerarquía para autorizar en función del estado textual
 def perfil_puede_autorizar(perfil: str, estado: str) -> bool:
     p = (perfil or "").upper()
@@ -522,6 +546,10 @@ async def cargar_masivo(creado_por: str = Form(...), archivo: UploadFile = File(
         costo_teorico = tbase + pad_teo + cargue_teo
         costo_real = real
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        # Uso < 50%: autorización de CONTROL obligatoria aunque el flete cumpla.
+        estado_calc = aplicar_regla_uso(
+            estado_calc, kilos_por_veh.get(veh, 0.0), None, r.get("tipo_vehiculo")
+        )
 
         r.update({
             "valor_flete_sistema": tbase,
@@ -813,7 +841,13 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
         # Real: mayor entre cargue y descargue_kabi + desvío + puntos adicionales + flete solicitado
         costo_real = total_flete_solicitado + total_desvio_vehiculo + total_punto_adicional + total_cargue_per_juridica
 
+        # Kilos reales del vehículo (suma de sus docs): se usan para la regla de
+        # uso < 50% y para sincronizar el total físico en el update de abajo.
+        kilos_reales_veh = float(sum(float(dd.get("num_kilos", 0) or 0) for dd in docs))
+
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        # Uso < 50%: autorización de CONTROL obligatoria aunque el flete cumpla.
+        estado_calc = aplicar_regla_uso(estado_calc, kilos_reales_veh, tipo_vehiculo_sicetac, None)
         set_aut_por = usuario if estado_calc == "PREAUTORIZADO" else "NA"
         set_fecha_aut = ahora_str if estado_calc == "PREAUTORIZADO" else "NA"
 
@@ -841,7 +875,7 @@ async def ajustar_totales_vehiculo(payload: AjustesVehiculosPayload, request: Re
             # (mismo invariante que la carga, la fusión y la división). Permite
             # reparar desde "Editar vehículo" carros que quedaron con totales
             # viejos, p.ej. tras una división fallida.
-            "total_kilos_vehiculo":         float(sum(float(dd.get("num_kilos", 0) or 0) for dd in docs)),
+            "total_kilos_vehiculo":         kilos_reales_veh,
             "total_cajas_vehiculo":         int(sum(int(dd.get("num_cajas", 0) or 0) for dd in docs)),
 
             # Totales y diferenciales
@@ -2527,6 +2561,8 @@ async def fusionar_vehiculos(payload: FusionVehiculosPayload):
         costo_real = total_flete_solicitado + total_cargue_descargue + total_desvio_vehiculo + total_punto_adicional
 
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        # Uso < 50%: autorización de CONTROL obligatoria aunque el flete cumpla.
+        estado_calc = aplicar_regla_uso(estado_calc, total_kilos, tipo_sic, None)
         ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Causal del sobre costo: si la fusión genera sobre costo, exige causal
@@ -2863,6 +2899,8 @@ async def dividir_vehiculo(payload: DividirHastaTresPayload):
         costo_teorico = tbase + pto_teorico + cargue_teorico
         costo_real = float(tflete) + float(tcarg) + float(tdesv) + float(tpad)
         estado_calc, porc = estado_por_autorizacion(costo_real, costo_teorico)
+        # Uso < 50%: autorización de CONTROL obligatoria aunque el flete cumpla.
+        estado_calc = aplicar_regla_uso(estado_calc, total_kilos, tipo_sic, None)
 
         return {
             "tipo_sic": tipo_sic,

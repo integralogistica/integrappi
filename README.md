@@ -1087,6 +1087,34 @@ Las guías con estado **ANULADA** del TMS entraron a `_ESTADOS_TMS` y en `_calcu
 
 **⚠️ Segunda parte (mismo día): el informe del TMS NUNCA trae 'ANULADA'** — verificado contra la tabla (estados reales: ENTREGADO/CON NOVEDAD/PENDIENTE/En distribucion/Transito Nacional/vacío); la 801232571 quedó «Transito Nacional» y por eso seguía en Pendientes vencidas aunque la Trazabilidad dijera ANULADA (esa viene del WS de Siscore en vivo, otra fuente). Fix: colección **`guias_anuladas`** + mapa `_mapa_guias_anuladas` (TTL 600 s) — `/consulta-guia` **persiste** cada guía que el WS reporta anulada (primera vez, con quién/detección; limpia `_CACHE_GUIAS`, `_CACHE_PENDIENTES` y la entrada del mapa) y `_calcular_ot_filas` la trata como anulada (fila con `anulada: true`, `ot.anulada` en la consulta). Detección orgánica: una anulada entra al sistema la primera vez que alguien la consulta en la Trazabilidad (sembrada a mano la 801232571). Test: `test_anulada_detectada_por_ws_though_informe_dice_transito`.
 
+## Actualizaciones Recientes (2026-11-19)
+
+### Otros Costos — Devolución dirigida + retorno directo (no repetir toda la cadena)
+
+**Problema**: si una solicitud ya avanzada (ej: en bandeja de Financiero) tenía un error de UNA persona (el Analista que registró mal en Vulcano, o el operativo que digitó mal), `/devolver` la tiraba SIEMPRE hasta el creador y al corregir recorría de nuevo TODA la cadena (aprobación → trámite → pago).
+
+**Solución** (2 mecanismos en `rutas/otros_costos.py`):
+
+1. **Devolución dirigida** — `POST /otros-costos/devolver` suma `devolver_a` (`Literal["operativo","tramite"]`, default `"operativo"` = comportamiento de siempre):
+   - `devolver_a="tramite"` (sólo desde la bandeja de Financiero: aprobada + `tramite_vulcano=="ok"`; en otro estado → 422): la solicitud **se queda en `aprobado`** y el trámite vuelve a `pendiente` → cae en la bandeja del ANALISTA para que corrija su registro en Vulcano. Al marcar trámite OK de nuevo vuelve naturalmente a Financiero (retorno directo implícito). Se notifica al ANALISTA con la misma plantilla `oc_para_tramite` (sin plantillas nuevas en Meta).
+   - En ambos destinos se persiste **`devolucion_info`** (el "punto de retorno"): `{etapa, estado_retorno, tramite_retorno, devuelto_por{usuario,nombre,rol}, fecha, motivo}`. El movimiento de historial lleva `devuelto_a` para la trazabilidad.
+2. **Retorno directo** — `POST /otros-costos/enviar-aprobacion` suma `retorno_directo: bool` (default `False` = cadena completa como siempre). Con `True` y habiendo `devolucion_info`: la solicitud vuelve **directo al estado/trámite en que estaba cuando la devolvieron** (ej: `aprobado` + trámite `ok` = bandeja de Financiero; `aprobado` + `pendiente` = Analista), se limpia `devolucion_info` (`$unset`) y se notifica al actor de destino (`oc_para_pago` / `oc_para_tramite`). Sin `devolucion_info` y `True` → 422. **Quien corrige decide**: directo (sólo era ese dato) o cadena completa (la corrección cambia algo que las demás etapas deben revisar).
+   - `/marcar-tramite-vulcano` en `ok` sobre una devolución `etapa=="tramite"` consume la marca (`$unset` de `devolucion_info`) — el ciclo se completó.
+
+Todo retrocompatible: peticiones sin los campos nuevos se comportan exactamente como antes. Tests: `tests/test_devolucion_dirigida_oc.py` (7). Dep **backend + frontend JUNTOS**.
+
+## Actualizaciones Recientes (2026-11-19, 2.ª tanda)
+
+### Uso del vehículo < 50% → autorización de CONTROL obligatoria (Pedidos y SolicitudVehiculos)
+
+**Regla**: si el % de uso del vehículo solicitado (`kg reales ÷ tope del tipo`, la misma columna «% Uso»; tipo SICETAC con respaldo del sugerido) es **menor al 50%**, el vehículo pasa a autorización de **CONTROL** aunque el flete cumpla (PREAUTORIZADO/PREAPROBADO o solo COORDINADOR). **Gana el estado más restrictivo** (mismo criterio del sobrecosto >7% y del municipio restringido). Sin tipo evaluable (sin tope conocido) la regla NO aplica. Es una regla permanente (`UMBRAL_USO_CONTROL = 0.5`), NO está tras variable de entorno.
+
+**Pedidos** (`rutas/pedidos.py`): helper `aplicar_regla_uso(estado, kg, tipo_sicetac, tipo_sugerido)` + `requiere_control_por_uso`, aplicado en los **4 puntos** donde se calcula el estado: carga masiva (`cargar-pedidos`), `ajustar-totales-vehiculo` (editar vehículo; los kg reales se izan antes del cálculo y reutilizan en el `$set` del total físico), `fusionar-vehiculos` y el `_calc` de `dividir-vehiculo`. Como el frontend de Pedidos solo pinta el estado del backend (y `perfilPuedeAutorizar` ya distingue CONTROL), ahí no hubo cambio de frontend.
+
+**SolicitudVehiculos** (`rutas/siscore_consultas.py`): helpers `_uso_vehiculo_planilla` / `_requiere_autorizacion_control_uso` / `_aplicar_regla_uso_control`, aplicados en los mismos 4 puntos que el bloqueo por municipio (patrón idéntico): `guardar-busqueda` (planilla nueva y **re-consulta** — si el estado preservado quedó por debajo de CONTROL y el uso aplica, sube), `actualizar-planilla-pedidos` (edición; evalúa sobre el doc mezclado con el `tipo_veh_sicetac` editado) y `actualizar-estado-planilla` (Enviar — mutación ANTES del historial/notificaciones). Log de auditoría `[USO<50%]`. Los estados CREADO/APROBADO pasan sin cambio; las ya en REQUIERE_APROBACION_CONTROL o aprobadas no se tocan.
+
+⚠️ Aplica «de ahora en adelante»: los vehículos/planillas YA creados en PREAUTORIZADO/PREAPROBADO no se migran; suben de tier la próxima vez que se recalculan (edición, re-consulta o al Enviar). Tests: `tests/test_regla_uso_control.py` (10). Dep **backend + frontend JUNTOS** (SV necesita el espejo del frontend; Pedidos sólo backend).
+
 ## Actualizaciones Recientes (2026-11-17)
 
 ### Autorización de datos (habeas) y verificación de cuenta TAMBIÉN por WhatsApp

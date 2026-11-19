@@ -1,0 +1,289 @@
+# Telemetría de uso del portal de clientes (2026-11-19)
+#
+# Mide QUIÉN usa el portal de indicadores de clientes (p.ej. fresenius-kabi)
+# y sus pestañas internas, de cualquier perfil, con frecuencia diaria — para
+# reportar números de adopción al cliente.
+#
+# - POST /telemetria/evento : beacon fire-and-forget del frontend (NUNCA falla).
+# - GET  /telemetria/resumen: agregados para la página interna solo-ADMIN.
+#
+# Colección `eventos_portal` (una colección = un propósito, regla de oro del
+# README). El frontend envía `usuario` (cookie usuarioPedidosCookie) y el
+# backend resuelve perfil/nombre en baseusuarios BEST-EFFORT: un usuario
+# desconocido se registra crudo (perfil null), sin rechazar el beacon.
+#
+# TTL de 180 días sobre `fecha` (datetime BSON): reportería periódica con
+# ventana default de 30 días; 180 da margen 6× para re-emitir informes. Si
+# algún día se quiere comparativa anual, subir con collMod (nota abajo).
+
+import logging
+from collections import Counter
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+
+from bd.bd_cliente import bd_cliente
+from rutas.otros_costos import (
+    _resolver_usuario,
+    _requiere,
+    _ahora_utc,
+    _hoy_colombia,
+)
+
+logger = logging.getLogger("telemetria")
+
+router = APIRouter(prefix="/telemetria", tags=["Telemetría"])
+
+db = bd_cliente["integra"]
+col_eventos = db["eventos_portal"]
+
+EVENTOS_VALIDOS = {"pageview", "pestana", "consulta_guia", "pendientes", "export_excel"}
+MODOS_VALIDOS = {"externo", "interno"}
+DIAS_TTL = 180
+
+# Índices idempotentes al importar (mismo patrón que otros_costos.py).
+# OJO: el TTL va sobre `fecha` (datetime) — Mongo NO aplica TTL sobre strings
+# como fecha_col.
+try:
+    col_eventos.create_index(
+        [("cliente_id", 1), ("fecha_col", 1)], name="idx_tl_cliente_fecha"
+    )
+except Exception as _e:
+    logger.warning(f"[TELEMETRIA] No se pudo crear índice cliente/fecha: {_e}")
+try:
+    col_eventos.create_index(
+        [("usuario", 1), ("fecha_col", 1)], name="idx_tl_usuario_fecha"
+    )
+except Exception as _e:
+    logger.warning(f"[TELEMETRIA] No se pudo crear índice usuario/fecha: {_e}")
+for _campo in ("evento", "fecha_col"):
+    try:
+        col_eventos.create_index(_campo)
+    except Exception:
+        pass
+try:
+    col_eventos.create_index(
+        [("fecha", 1)], name="idx_tl_fecha_ttl", expireAfterSeconds=DIAS_TTL * 86400
+    )
+except Exception as _e:
+    logger.warning(f"[TELEMETRIA] No se pudo crear índice TTL: {_e}")
+
+
+# ── Beacon del frontend ───────────────────────────────────────────────────────
+class EventoBeacon(BaseModel):
+    usuario: str = Field(..., max_length=60)
+    cliente_id: str = Field(..., max_length=60)
+    modo: str = Field("externo", max_length=10)
+    evento: str = Field(..., max_length=30)
+    detalle: dict = Field(default_factory=dict)
+    sesion_id: str = Field(..., max_length=64)
+
+
+def _sanear_detalle(detalle: dict) -> dict:
+    """Claves/valores a string recortados, máx 8 claves (defensa en profundidad)."""
+    saneado = {}
+    for i, (k, v) in enumerate(detalle.items()):
+        if i >= 8:
+            break
+        saneado[str(k)[:40]] = str(v)[:120]
+    return saneado
+
+
+@router.post("/evento")
+async def registrar_evento(ev: EventoBeacon, request: Request):
+    # Beacon: cualquier anomalía responde 200 rápido — jamás ruido en consola
+    # del navegador ni bloquea la navegación.
+    if ev.evento not in EVENTOS_VALIDOS or ev.modo not in MODOS_VALIDOS:
+        return {"success": True, "guardado": False}
+
+    try:
+        info = _resolver_usuario(ev.usuario)
+        usuario = info["usuario"]
+        nombre = info.get("nombre", "")
+        perfil = info.get("perfil")
+        regional = info.get("regional", "")
+    except HTTPException:
+        # Usuario sin cookie válida / no existe en baseusuarios: se registra
+        # crudo para no perder el evento (perfil null lo delata en reportes).
+        usuario = str(ev.usuario).strip().upper()
+        nombre = ""
+        perfil = None
+        regional = ""
+
+    doc = {
+        "fecha": _ahora_utc(),
+        "fecha_col": _hoy_colombia().strftime("%Y-%m-%d"),
+        "usuario": usuario,
+        "nombre": nombre,
+        "perfil": perfil,
+        "regional": regional,
+        "cliente_id": ev.cliente_id,
+        "modo": ev.modo,
+        "evento": ev.evento,
+        "detalle": _sanear_detalle(ev.detalle),
+        "sesion_id": ev.sesion_id,
+        "user_agent": request.headers.get("user-agent", "")[:250],
+        "ip": request.client.host if request.client else "",
+    }
+    try:
+        col_eventos.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"[TELEMETRIA] No se pudo guardar evento {ev.evento}: {e}")
+        return {"success": True, "guardado": False}
+    return {"success": True, "guardado": True}
+
+
+# ── Resumen para la página interna (solo ADMIN) ───────────────────────────────
+@router.get("/resumen")
+async def resumen(
+    usuario: str = Query(..., description="Usuario ADMIN que consulta (cookie)"),
+    cliente_id: Optional[str] = Query(None, description="Filtro por portal (opcional)"),
+    desde: Optional[str] = Query(None, description="YYYY-MM-DD (default: hace 29 días)"),
+    hasta: Optional[str] = Query(None, description="YYYY-MM-DD (default: hoy Colombia)"),
+):
+    info = _resolver_usuario(usuario)
+    _requiere(info, {"ADMIN"}, "ver la telemetría del portal")
+
+    hoy = _hoy_colombia().strftime("%Y-%m-%d")
+    hasta_val = hasta or hoy
+    desde_val = desde or (_hoy_colombia() - timedelta(days=29)).strftime("%Y-%m-%d")
+    for etiqueta, valor in (("desde", desde_val), ("hasta", hasta_val)):
+        try:
+            datetime.strptime(valor, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"Fecha '{etiqueta}' inválida: usar YYYY-MM-DD"
+            )
+    if desde_val > hasta_val:
+        raise HTTPException(status_code=422, detail="'desde' no puede ser mayor que 'hasta'")
+
+    match: dict = {"fecha_col": {"$gte": desde_val, "$lte": hasta_val}}
+    if cliente_id:
+        match["cliente_id"] = cliente_id
+
+    # Por día: eventos + usuarios únicos
+    por_dia = sorted(
+        (
+            {"fecha": d["_id"], "eventos": d["eventos"], "usuarios": len(d["usr"])}
+            for d in col_eventos.aggregate(
+                [
+                    {"$match": match},
+                    {
+                        "$group": {
+                            "_id": "$fecha_col",
+                            "eventos": {"$sum": 1},
+                            "usr": {"$addToSet": "$usuario"},
+                        }
+                    },
+                ]
+            )
+        ),
+        key=lambda x: x["fecha"],
+    )
+
+    # Por usuario: una sola pasada; el desglose por evento se cuenta en Python
+    por_usuario = []
+    for d in col_eventos.aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": {
+                        "usuario": "$usuario",
+                        "nombre": {"$first": "$nombre"},
+                        "perfil": {"$first": "$perfil"},
+                    },
+                    "eventos": {"$sum": 1},
+                    "dias": {"$addToSet": "$fecha_col"},
+                    "ultima_conexion": {"$max": "$fecha"},
+                    "evs": {"$push": "$evento"},
+                }
+            },
+            {"$sort": {"eventos": -1}},
+        ]
+    ):
+        por_usuario.append(
+            {
+                "usuario": d["_id"]["usuario"],
+                "nombre": d["_id"].get("nombre") or "",
+                "perfil": d["_id"].get("perfil"),
+                "eventos": d["eventos"],
+                "dias_activos": len(d["dias"]),
+                "ultima_conexion": d["ultima_conexion"],
+                "por_evento": dict(Counter(d["evs"])),
+            }
+        )
+
+    por_evento = [
+        {"evento": d["_id"], "total": d["total"]}
+        for d in col_eventos.aggregate(
+            [
+                {"$match": match},
+                {"$group": {"_id": "$evento", "total": {"$sum": 1}}},
+                {"$sort": {"total": -1}},
+            ]
+        )
+    ]
+
+    # Pestañas: pageview lleva la pestaña inicial y `pestana` los cambios
+    por_pestana = [
+        {"pestana": d["_id"], "total": d["total"]}
+        for d in col_eventos.aggregate(
+            [
+                {"$match": {**match, "evento": {"$in": ["pageview", "pestana"]}, "detalle.pestana": {"$exists": True}}},
+                {"$group": {"_id": "$detalle.pestana", "total": {"$sum": 1}}},
+                {"$sort": {"total": -1}},
+            ]
+        )
+    ]
+
+    por_cliente = sorted(
+        (
+            {"cliente_id": d["_id"], "eventos": d["eventos"], "usuarios": len(d["usr"])}
+            for d in col_eventos.aggregate(
+                [
+                    {"$match": match},
+                    {
+                        "$group": {
+                            "_id": "$cliente_id",
+                            "eventos": {"$sum": 1},
+                            "usr": {"$addToSet": "$usuario"},
+                        }
+                    },
+                ]
+            )
+        ),
+        key=lambda x: -x["eventos"],
+    )
+
+    sesiones = list(
+        col_eventos.aggregate(
+            [
+                {"$match": match},
+                {"$group": {"_id": None, "s": {"$addToSet": "$sesion_id"}}},
+            ]
+        )
+    )
+    sesiones_unicas = len(sesiones[0]["s"]) if sesiones else 0
+
+    kpi = {
+        "eventos_total": sum(e["total"] for e in por_evento),
+        "usuarios_unicos": len(por_usuario),
+        "sesiones_unicas": sesiones_unicas,
+        "dias_activos": len(por_dia),
+    }
+
+    return {
+        "success": True,
+        "data": {
+            "kpi": kpi,
+            "por_dia": por_dia,
+            "por_usuario": por_usuario,
+            "por_evento": por_evento,
+            "por_pestana": por_pestana,
+            "por_cliente": por_cliente,
+        },
+        "rango": {"desde": desde_val, "hasta": hasta_val, "cliente_id": cliente_id},
+    }

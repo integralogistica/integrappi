@@ -130,6 +130,52 @@ def _requiere_autorizacion_municipio(doc: dict) -> bool:
     return any(_normalizar_municipio_txt(m) == municipio_restringido for m in municipios)
 
 
+# ── Autorización CONTROL por uso del vehículo (2026-11-19) ────────────────────
+# Si el % de uso del vehículo solicitado (peso_real ÷ tope del tipo, la misma
+# columna «% Uso» de la web) es menor al 50%, la planilla NO puede quedar en
+# PREAPROBADO ni en REQUIERE_APROBACION_COORDINADOR aunque el flete cumpla:
+# pasa a REQUIERE_APROBACION_CONTROL (aprueban solo CONTROL/ADMIN). Sin tipo
+# evaluable (sin tope conocido) la regla no aplica.
+UMBRAL_USO_CONTROL = 0.5
+
+
+def _uso_vehiculo_planilla(doc: dict):
+    """% de uso del vehículo como DECIMAL (peso_real ÷ tope del tipo solicitado);
+    None si el tipo no tiene tope conocido. Espejo de usoVehiculoSolicitado del
+    frontend y de los topes de indicadores_costo_operacion."""
+    from rutas.indicadores_costo_operacion import TOPES_TIPO_VEH, _tipo_solicitado
+    tope = TOPES_TIPO_VEH.get(
+        _tipo_solicitado(doc.get("tipo_veh_sicetac") or doc.get("tipo_vehiculo"))
+    )
+    if not tope:
+        return None
+    try:
+        return float(doc.get("peso_real") or 0) / tope
+    except (TypeError, ValueError):
+        return None
+
+
+def _requiere_autorizacion_control_uso(doc: dict) -> bool:
+    uso = _uso_vehiculo_planilla(doc)
+    return uso is not None and uso < UMBRAL_USO_CONTROL
+
+
+def _aplicar_regla_uso_control(estado, doc: dict, origen: str = ""):
+    """Sube PREAPROBADO / REQUIERE_APROBACION_COORDINADOR a
+    REQUIERE_APROBACION_CONTROL cuando el uso del vehículo queda por debajo
+    del umbral (gana el estado más restrictivo, igual que el sobrecosto >7%).
+    CREADO/APROBADO/CONTROL pasan sin cambio."""
+    if estado in ("PREAPROBADO", "REQUIERE_APROBACION_COORDINADOR") \
+            and _requiere_autorizacion_control_uso(doc):
+        uso_pct = round((_uso_vehiculo_planilla(doc) or 0) * 100, 1)
+        logger.info(
+            f"[USO<50%] Planilla {doc.get('planilla')} ({doc.get('consecutivo')}): "
+            f"uso {uso_pct}% → REQUIERE_APROBACION_CONTROL {origen}".strip()
+        )
+        return "REQUIERE_APROBACION_CONTROL"
+    return estado
+
+
 @router.get("/nombres-usuarios")
 async def obtener_nombres_usuarios():
     """Mapa {USUARIO: nombre} de baseusuarios (solo esos dos campos). Lo consulta el
@@ -2687,6 +2733,10 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                     f"→ REQUIERE_APROBACION_COORDINADOR"
                 )
 
+            # Uso del vehículo < 50%: autorización de CONTROL obligatoria aunque
+            # el flete cumpla (gana el estado más restrictivo).
+            planilla_doc["estado"] = _aplicar_regla_uso_control(planilla_doc.get("estado"), planilla_doc, "(guardar)")
+
             # Verificar si ya existe un documento con esta planilla
             existente = coleccion_pedidos_medical.find_one({"planilla": resultado.get("planilla")})
 
@@ -2702,6 +2752,9 @@ async def guardar_busqueda(request: GuardarBusquedaRequest):
                 if planilla_doc["estado"] == "PREAPROBADO" and _requiere_autorizacion_municipio(planilla_doc):
                     planilla_doc["estado"] = "REQUIERE_APROBACION_COORDINADOR"
                     logger.info(f"[BLOQUEO MUNICIPIO] Planilla {planilla_doc.get('planilla')} re-consultada → REQUIERE_APROBACION_COORDINADOR")
+                # Regla de uso < 50% también al re-consultar: si el estado
+                # preservado quedó por debajo de CONTROL y el uso aplica, subir.
+                planilla_doc["estado"] = _aplicar_regla_uso_control(planilla_doc["estado"], planilla_doc, "(re-consulta)")
                 if existente.get("consecutivo"):
                     # Mantener el consecutivo existente y ACTUALIZAR cons_info para devolver al frontend
                     planilla_doc["consecutivo"] = existente.get("consecutivo")
@@ -3342,6 +3395,13 @@ async def actualizar_planilla_pedidos(request: ActualizarPlanillaPedidosRequest)
         if request.estado == "PREAPROBADO" and _requiere_autorizacion_municipio(doc_actual):
             request.estado = "REQUIERE_APROBACION_COORDINADOR"
             logger.info(f"[BLOQUEO MUNICIPIO] Planilla {request.planilla}: edición → REQUIERE_APROBACION_COORDINADOR (municipio restringido)")
+        # Regla de uso < 50%: la edición no puede dejar la planilla por debajo de
+        # CONTROL. Se evalúa sobre el doc MEZCLADO con los campos editables que
+        # cambian el uso (el tipo SICETAC puede venir en la propia edición).
+        doc_editado = dict(doc_actual)
+        if request.tipo_veh_sicetac:
+            doc_editado["tipo_veh_sicetac"] = request.tipo_veh_sicetac
+        request.estado = _aplicar_regla_uso_control(request.estado, doc_editado, "(edición)")
         if request.estado is not None and request.estado != estado_anterior:
             campos_modificados.append({
                 "campo": "estado",
@@ -3541,6 +3601,10 @@ async def actualizar_estado_planilla(request: ActualizarEstadoPlanillaRequest):
         if request.estado == "PREAPROBADO" and _requiere_autorizacion_municipio(doc_actual):
             request.estado = "REQUIERE_APROBACION_COORDINADOR"
             logger.info(f"[BLOQUEO MUNICIPIO] Planilla {request.planilla}: Enviar → REQUIERE_APROBACION_COORDINADOR (municipio restringido)")
+
+        # Regla de uso < 50%: al Enviar, aunque el flete cumpla, sube a CONTROL
+        # (mutación ANTES del historial/notificaciones, mismo patrón del municipio).
+        request.estado = _aplicar_regla_uso_control(request.estado, doc_actual, "(enviar)")
 
         # ── Autorización con perfil REAL (baseusuarios), no el del frontend ──
         info_usuario = _resolver_usuario_estado(request.aprobado_por)
