@@ -2710,6 +2710,9 @@ async def subir_estudio_seguridad(
                             "ruta": url_archivo,
                             "fecha": fecha_carga,
                             "nombre": archivo.filename or "",
+                            # Quién lo cargó (2026-11-19): se muestra en la
+                            # columna «Disparado por» del Historial de estudios.
+                            "cargado_por": editado_por or None,
                         }],
                         "$position": 0,
                         "$slice": 20,
@@ -4613,6 +4616,8 @@ def estudios_seguridad(placa: str):
                 "url": _url_para_cliente(d["ruta"]),
                 "fecha": d.get("fecha"),
                 "nombre": d.get("nombre") or "",
+                # Adjuntos previos al 2026-11-19 no traen sello → None ('—').
+                "cargado_por": d.get("cargado_por"),
             })
     return JSONResponse(status_code=status.HTTP_200_OK, content={
         "placa": placa,
