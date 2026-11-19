@@ -51,10 +51,12 @@ class ColEventosFake(FakeColeccion):
                 {"_id": "2026-11-18", "eventos": 9, "usr": ["A", "B"]},
                 {"_id": "2026-11-19", "eventos": 5, "usr": ["A"]},
             ]
-        if isinstance(grupo, dict) and "usuario" in grupo:
+        if grupo == "$usuario":
             return [
                 {
-                    "_id": {"usuario": "KABI.USER", "nombre": "Usuario Kabi", "perfil": "CLIENTE"},
+                    "_id": "KABI.USER",
+                    "nombre": "Usuario Kabi",
+                    "perfil": "CLIENTE",
                     "eventos": 12,
                     "dias": ["2026-11-18", "2026-11-19"],
                     "ultima_conexion": "2026-11-19T14:00:00",
@@ -189,6 +191,32 @@ class TestResumen(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         for pipeline in self.col.pipelines:
             self.assertEqual(pipeline[0]["$match"].get("cliente_id"), "fresenius-kabi")
+
+    def test_pipelines_sintaxis_valida_para_mongo(self):
+        """Regresión del bug productivo 2026-11-19 (Location28689): el
+        acumulador $first SOLO vale en el nivel superior del $group — dentro
+        de un _id anidado Mongo lo lee como la expresión $first (pide array).
+        Los fakes no ejecutan la pipeline: acá se valida su FORMA."""
+        self.client.get("/telemetria/resumen", params={"usuario": "ADMIN.X"})
+        self.assertTrue(self.col.pipelines)
+
+        def _sin_acumuladores_dentro(valor, ruta=""):
+            if isinstance(valor, dict):
+                for k, v in valor.items():
+                    if k in ("$first", "$last", "$sum", "$avg", "$max", "$min", "$push", "$addToSet"):
+                        # acumulador: su argumento debe ser campo ("$nombre") o expr simple, no otro acumulador
+                        if isinstance(v, dict) and any(
+                            kk.startswith("$") and kk != "$literal" for kk in v
+                        ):
+                            raise AssertionError(f"Acumulador {k} anidado en {ruta}: {v}")
+                    else:
+                        _sin_acumuladores_dentro(v, f"{ruta}.{k}")
+            elif isinstance(valor, list):
+                for i, item in enumerate(valor):
+                    _sin_acumuladores_dentro(item, f"{ruta}[{i}]")
+
+        for pipeline in self.col.pipelines:
+            _sin_acumuladores_dentro(pipeline)
 
 
 if __name__ == "__main__":

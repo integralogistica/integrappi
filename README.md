@@ -1170,3 +1170,17 @@ Tests: `test_autorizacion_sujetos.py` (10), `test_cuentas_sin_vehiculo.py` (incl
 `test_corrige_correo_xom_y_manda_whatsapp`). Trampa entorno local: un paquete
 `tests` en site-packages tapaba el directorio local — fix `tests/__init__.py` vacío.
 Dep **backend + frontend JUNTOS**.
+
+## Actualizaciones Recientes (2026-11-19)
+
+### Nuevo módulo: Telemetría de uso del portal de clientes (`rutas/telemetria.py`)
+
+Mide la adopción del portal de indicadores de clientes (`/integrapp/indicadores/mis-clientes/fresenius-kabi/` y los demás wrappers de `DashboardCliente`): quiénes lo usan (cualquier perfil), con qué frecuencia diaria, qué pestañas y qué acciones — para reportar números al cliente.
+
+**Colección `eventos_portal`** (bd `integra`, una colección = un propósito): `{fecha (datetime UTC), fecha_col ("YYYY-MM-DD" hora Colombia), usuario, nombre, perfil, regional, cliente_id, modo (externo|interno), evento, detalle, sesion_id, user_agent, ip}`. Índices `(cliente_id, fecha_col)`, `(usuario, fecha_col)`, `evento`, `fecha_col` y **TTL de 180 días sobre `fecha`** — ⚠️ el TTL va sobre datetime BSON; Mongo NO aplica TTL sobre strings como `fecha_col`. Ajustable con `collMod` si algún día se quiere comparativa anual.
+
+**Endpoints**:
+- `POST /telemetria/evento` — beacon del frontend (fire-and-forget, `keepalive`). **NUNCA falla**: evento/modo fuera de los válidos → `200 {guardado: false}`; usuario se resuelve **best-effort** con `_resolver_usuario` (otros_costos) — desconocido se guarda crudo con `perfil: null`, sin 401 (inverso del patrón de autorización normal). `detalle` saneado (claves/valores str recortados, máx 8). Eventos: `pageview`, `pestana`, `consulta_guia`, `pendientes`, `export_excel`.
+- `GET /telemetria/resumen` — **solo ADMIN** (`_resolver_usuario` + `_requiere`). Query: `usuario` (obligatorio), `cliente_id` (opcional), `desde`/`hasta` `YYYY-MM-DD` (default últimos 30 días; 422 si formato inválido o desde > hasta). Devuelve `{kpi {eventos_total, usuarios_unicos, sesiones_unicas, dias_activos}, por_dia, por_usuario (con dias_activos, ultima_conexion y desglose por_evento), por_evento, por_pestana, por_cliente}` — KPIs derivados en Python de las agregaciones (`$group/$addToSet/$sum`, agrupación por `fecha_col`).
+
+Registrado en `main.py` como `ruta_telemetria`. Tests: `tests/test_telemetria_portal.py` (8, corren con `python _stub_bd.py tests.test_telemetria_portal`). Los datos empiezan a acumularse SOLO tras el deploy. Dep **backend + frontend JUNTOS** (los beacons necesitan el endpoint).

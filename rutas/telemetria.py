@@ -183,18 +183,19 @@ async def resumen(
         key=lambda x: x["fecha"],
     )
 
-    # Por usuario: una sola pasada; el desglose por evento se cuenta en Python
+    # Por usuario: una sola pasada; el desglose por evento se cuenta en Python.
+    # ⚠️ $first como ACUMULADOR solo vale en el nivel superior del $group —
+    # dentro de un _id anidado Mongo lo lee como la EXPRESIÓN $first (espera
+    # array) y revienta con Location28689 (bug productivo 2026-11-19).
     por_usuario = []
     for d in col_eventos.aggregate(
         [
             {"$match": match},
             {
                 "$group": {
-                    "_id": {
-                        "usuario": "$usuario",
-                        "nombre": {"$first": "$nombre"},
-                        "perfil": {"$first": "$perfil"},
-                    },
+                    "_id": "$usuario",
+                    "nombre": {"$first": "$nombre"},
+                    "perfil": {"$first": "$perfil"},
                     "eventos": {"$sum": 1},
                     "dias": {"$addToSet": "$fecha_col"},
                     "ultima_conexion": {"$max": "$fecha"},
@@ -206,9 +207,9 @@ async def resumen(
     ):
         por_usuario.append(
             {
-                "usuario": d["_id"]["usuario"],
-                "nombre": d["_id"].get("nombre") or "",
-                "perfil": d["_id"].get("perfil"),
+                "usuario": d["_id"],
+                "nombre": d.get("nombre") or "",
+                "perfil": d.get("perfil"),
                 "eventos": d["eventos"],
                 "dias_activos": len(d["dias"]),
                 "ultima_conexion": d["ultima_conexion"],
