@@ -868,8 +868,13 @@ async def buscar_conductores(q: str = ""):
         {"correo": {"$regex": patron, "$options": "i"}},
         {"nombre": {"$regex": patron, "$options": "i"}},
     ]
+    # (2026-11-20) La cédula SOLO se busca si la consulta ES numérica (dígitos
+    # y separadores): buscar un correo como STIVENAMON33@GMAIL.COM dejaba 2
+    # dígitos sueltos ("33") que matcheaban 20 cédulas cualquiera y el
+    # limit(20) sepultaba la coincidencia exacta del correo — el paso 2 del
+    # alta no dejaba "encontrar" una cuenta que sí existía.
     cedula_digitos = re.sub(r"\D", "", texto)
-    if cedula_digitos:
+    if cedula_digitos and re.fullmatch(r"[\d\s.,\-]+", texto):
         condiciones.append({"cedula": {"$regex": cedula_digitos, "$options": "i"}})
 
     cuentas = []
