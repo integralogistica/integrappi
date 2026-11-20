@@ -1069,6 +1069,31 @@ de anuladas en `guias_anuladas`) se extrajo a **`Funciones/trazabilidad_guia.py`
 - **Depuración**: borradas las 230 identidades (`error == correccion`) inútiles, PERO **11 claves identidad se quedan** porque la clave de lookup ALFANUMÉRICA las hace canonicalizar basura real del TMS (`'BOYA CA'`→BOYACA, `'CUNDINAMARC A'`, `'SANTAMARTA'`, `'VALLEDEL CAUCA'`, `'SANTA FE DE ANTIOQUIA'` + BOGOTA/POPAYAN/APARTADO/ANTIOQUIA/RIONEGRO/TULUA por colisiones) — sin ellas esas 11 guías caen a «No aplica». También se eliminaron duplicados y quedó 1 doc por clave (las colisiones BOGOTA/APARTADO resolvían por ORDEN de `find()`, no determinista). **Método seguro para tocar la colección**: replicar norm/alnum, computar claves usadas por los DISTINCT reales de PG y verificar equivalencia del mapa = 0 diffs ANTES de borrar. Respaldo: `integrappi/correcciones_nombres_respaldo_2026-11-20.json`.
 - **Bot 001** (repo `agentes`): `ciudad_destino` entró a `CAMPOS_ACTUALIZAR` — antes solo se escribía al INSERT y una corrección de destino hecha en Siscore quedaba ignorada. ⚠️ PENDIENTE push al repo (copia local en `AGENTE IA/Bot 001/`).
 
+## Actualizaciones Recientes (2026-11-20, 2.ª tanda)
+
+### Fix WhatsApp de verificación — parámetro nombre vacío (#131008) (`rutas/conductores.py`)
+
+El WhatsApp de verificación de cuenta (`enruta_continuar_registro`, ya creada y
+aprobada en Meta) fallaba con `400 (#131008) "Parameter of type text is missing
+text value"` desde el mismo día del feature: **el registro público ya no pide
+`nombre`** (desde 2026-10-06 lo aporta la IA en el paso 2), así que `{{1}}`
+viajaba como `""` y Meta rechaza parámetros de texto vacíos. Fix en
+`_enviar_wa_generico`: `[nombre or "usuario", enlace]` (mismo patrón que
+`_enviar_wa_autorizacion`). Repara de paso `recordatorio_cuenta` y el reenvío
+(`/reenviar-verificacion`), que usan el mismo helper. Tests OK. Dep **SOLO backend**.
+
+### Fix «Cuentas sin vehículo» — cuentas nuevas INVISIBLES en VistaAlta (`limit(500)` sin orden)
+
+`GET /conductores/sin-vehiculo` hacía `find({"activo": {"$ne": False}}).limit(500)`
+**sin orden**: la colección pasó de ~200 a **1.100+ activos** y el orden natural
+dejaba las cuentas NUEVAS después del corte — exactamente las que Seguridad
+necesita ver para reenviar verificación/recordatorio (caso real
+caronte779@gmail.com: cuenta existente, activa, sin verificar, invisible en
+`/revision/alta`). Fix: tope de seguridad `limit(5000)` + **proyección de 6
+campos** (antes el `find` traía el doc COMPLETO, incluido el hash de la clave,
+para usar 6 campos). Verificado contra prod: 1.100 traídas, la cuenta incluida.
+Tests OK. Dep **SOLO backend** (mismo deploy del fix anterior).
+
 ## Actualizaciones Recientes (2026-11-12)
 
 ### HOY en hora de Colombia en toda la lógica OT (fix 801233440)
