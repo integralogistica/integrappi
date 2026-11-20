@@ -940,7 +940,16 @@ async def cuentas_sin_vehiculo():
                 vinculados.add(val)
 
     cuentas = []
-    for doc in coleccion_conductores.find({"activo": {"$ne": False}}).limit(500):
+    # (2026-11-20) El tope de 500 sin orden dejaba FUERA a las cuentas nuevas
+    # cuando la colección pasó de ~200 a 1.100+ activos (el find sin sort trae
+    # orden natural → las recientes caían después del corte y no salían en la
+    # vista). Tope alto de seguridad + proyección (antes viajaba el doc
+    # COMPLETO, incluido el hash de la clave, para usar 6 campos).
+    for doc in coleccion_conductores.find(
+            {"activo": {"$ne": False}},
+            {"nombre": 1, "correo": 1, "perfil": 1, "celular": 1,
+             "correo_verificado": 1, "alta_por_seguridad": 1},
+    ).limit(5000):
         cid = str(doc.get("_id"))
         if cid in vinculados:
             continue
