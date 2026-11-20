@@ -142,6 +142,12 @@ async def resumen(
     cliente_id: Optional[str] = Query(None, description="Filtro por portal (opcional)"),
     desde: Optional[str] = Query(None, description="YYYY-MM-DD (default: hace 29 días)"),
     hasta: Optional[str] = Query(None, description="YYYY-MM-DD (default: hoy Colombia)"),
+    usuario_filtro: Optional[str] = Query(
+        None, description="Limita TODO el resumen a un usuario (2026-11-20)"
+    ),
+    audiencia: str = Query(
+        "todos", description="todos | clientes (perfil CLIENTE) | internos (2026-11-20)"
+    ),
 ):
     info = _resolver_usuario(usuario)
     _requiere(info, {"ADMIN"}, "ver la telemetría del portal")
@@ -158,10 +164,25 @@ async def resumen(
             )
     if desde_val > hasta_val:
         raise HTTPException(status_code=422, detail="'desde' no puede ser mayor que 'hasta'")
+    if audiencia not in ("todos", "clientes", "internos"):
+        raise HTTPException(
+            status_code=422,
+            detail="audiencia debe ser: todos | clientes | internos",
+        )
 
     match: dict = {"fecha_col": {"$gte": desde_val, "$lte": hasta_val}}
     if cliente_id:
         match["cliente_id"] = cliente_id
+    # (2026-11-20) Foco en un usuario: para la reunión con el cliente, ver SU
+    # uso del portal (KPIs, días, pestañas — todo el resumen acotado).
+    if usuario_filtro:
+        match["usuario"] = usuario_filtro.strip().upper()
+    # (2026-11-20) Audiencia: CLIENTE externo vs usuarios internos (los demás
+    # perfiles, incl. perfil null = no resuelto en baseusuarios).
+    if audiencia == "clientes":
+        match["perfil"] = "CLIENTE"
+    elif audiencia == "internos":
+        match["perfil"] = {"$ne": "CLIENTE"}
 
     # Por día: eventos + usuarios únicos
     por_dia = sorted(
@@ -286,5 +307,11 @@ async def resumen(
             "por_pestana": por_pestana,
             "por_cliente": por_cliente,
         },
-        "rango": {"desde": desde_val, "hasta": hasta_val, "cliente_id": cliente_id},
+        "rango": {
+            "desde": desde_val,
+            "hasta": hasta_val,
+            "cliente_id": cliente_id,
+            "usuario_filtro": usuario_filtro,
+            "audiencia": audiencia,
+        },
     }
