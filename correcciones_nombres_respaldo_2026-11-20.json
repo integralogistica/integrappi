@@ -1,0 +1,1018 @@
+[
+ {
+  "error": "BOYACA",
+  "correccion": "BOYACA"
+ },
+ {
+  "error": "CAUCA",
+  "correccion": "CAUCA"
+ },
+ {
+  "error": "GUAVIARE",
+  "correccion": "GUAVIARE"
+ },
+ {
+  "error": "MAGDALENA",
+  "correccion": "MAGDALENA"
+ },
+ {
+  "error": "SUCRE",
+  "correccion": "SUCRE"
+ },
+ {
+  "error": "GIRON",
+  "correccion": "GIRON"
+ },
+ {
+  "error": "RIOHACHA",
+  "correccion": "RIOHACHA"
+ },
+ {
+  "error": "MEDELLIN",
+  "correccion": "MEDELLIN"
+ },
+ {
+  "error": "POPAYAN",
+  "correccion": "POPAYAN"
+ },
+ {
+  "error": "SABANETA",
+  "correccion": "SABANETA"
+ },
+ {
+  "error": "BARANOA",
+  "correccion": "BARANOA"
+ },
+ {
+  "error": "PUERTO ASIS",
+  "correccion": "PUERTO ASIS"
+ },
+ {
+  "error": "SAN GIL",
+  "correccion": "SAN GIL"
+ },
+ {
+  "error": "CAPITANEJO",
+  "correccion": "CAPITANEJO"
+ },
+ {
+  "error": "PARAMO",
+  "correccion": "PARAMO"
+ },
+ {
+  "error": "BOGOTA",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "COROZAL",
+  "correccion": "COROZAL"
+ },
+ {
+  "error": "CORDOBA",
+  "correccion": "CORDOBA"
+ },
+ {
+  "error": "CUNDINAMARCA",
+  "correccion": "CUNDINAMARCA"
+ },
+ {
+  "error": "CESAR",
+  "correccion": "CESAR"
+ },
+ {
+  "error": "CORDOBA",
+  "correccion": "CORDOBA"
+ },
+ {
+  "error": "CARTAGENA",
+  "correccion": "CARTAGENA"
+ },
+ {
+  "error": "GIRARDOTA",
+  "correccion": "GIRARDOTA"
+ },
+ {
+  "error": "ITAGUI",
+  "correccion": "ITAGUI"
+ },
+ {
+  "error": "OCANA",
+  "correccion": "OCANA"
+ },
+ {
+  "error": "POPAYAN",
+  "correccion": "POPAYAN"
+ },
+ {
+  "error": "TULUA",
+  "correccion": "TULUA"
+ },
+ {
+  "error": "CUNDINAMARCA",
+  "correccion": "CUNDINAMARCA"
+ },
+ {
+  "error": "PALMIRA",
+  "correccion": "PALMIRA"
+ },
+ {
+  "error": "CHAPARRAL",
+  "correccion": "CHAPARRAL"
+ },
+ {
+  "error": "CHARALA",
+  "correccion": "CHARALA"
+ },
+ {
+  "error": "CARTAGO",
+  "correccion": "CARTAGO"
+ },
+ {
+  "error": "CAUCASIA",
+  "correccion": "CAUCASIA"
+ },
+ {
+  "error": "QUIMBAYA",
+  "correccion": "QUIMBAYA"
+ },
+ {
+  "error": "PAIPA",
+  "correccion": "PAIPA"
+ },
+ {
+  "error": "MAGDALENA",
+  "correccion": "MAGDALENA"
+ },
+ {
+  "error": "BOLIVAR",
+  "correccion": "BOLIVAR"
+ },
+ {
+  "error": "SANTANDER",
+  "correccion": "SANTANDER"
+ },
+ {
+  "error": "SAN JUAN DEL CESAR",
+  "correccion": "SAN JUAN DEL CESAR"
+ },
+ {
+  "error": "BUENAVENTURA",
+  "correccion": "BUENAVENTURA"
+ },
+ {
+  "error": "FLORIDABLANCA",
+  "correccion": "FLORIDABLANCA"
+ },
+ {
+  "error": "HUILA",
+  "correccion": "HUILA"
+ },
+ {
+  "error": "VALLE DE CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "CHOCO",
+  "correccion": "CHOCO"
+ },
+ {
+  "error": "BOGOTA D.C",
+  "correccion": "BOGOTA DC"
+ },
+ {
+  "error": "SANTANDER",
+  "correccion": "SANTANDER"
+ },
+ {
+  "error": "NORTE DE SANTANDER",
+  "correccion": "NORTE DE SANTANDER"
+ },
+ {
+  "error": "CASANARE",
+  "correccion": "CASANARE"
+ },
+ {
+  "error": "APARTADO",
+  "correccion": "APARTADO"
+ },
+ {
+  "error": "BARRANQUILLA",
+  "correccion": "BARRANQUILLA"
+ },
+ {
+  "error": "CHIA",
+  "correccion": "CHIA"
+ },
+ {
+  "error": "LIBANO",
+  "correccion": "LIBANO"
+ },
+ {
+  "error": "SOACHA",
+  "correccion": "SOACHA"
+ },
+ {
+  "error": "VILLAVICENCIO",
+  "correccion": "VILLAVICENCIO"
+ },
+ {
+  "error": "BUCARAMANGA",
+  "correccion": "BUCARAMANGA"
+ },
+ {
+  "error": "PUERTO WILCHES",
+  "correccion": "PUERTO WILCHES"
+ },
+ {
+  "error": "CAUCA",
+  "correccion": "CAUCA"
+ },
+ {
+  "error": "ZAMBRANO",
+  "correccion": "ZAMBRANO"
+ },
+ {
+  "error": "LA ESTRELLA",
+  "correccion": "LA ESTRELLA"
+ },
+ {
+  "error": "LA DORADA",
+  "correccion": "LA DORADA"
+ },
+ {
+  "error": "ESPINAL",
+  "correccion": "ESPINAL"
+ },
+ {
+  "error": "MONTERIA",
+  "correccion": "MONTERIA"
+ },
+ {
+  "error": "PIEDECUESTA",
+  "correccion": "PIEDECUESTA"
+ },
+ {
+  "error": "SOGAMOSO",
+  "correccion": "SOGAMOSO"
+ },
+ {
+  "error": "URIBIA",
+  "correccion": "URIBIA"
+ },
+ {
+  "error": "ANTIOQUIA",
+  "correccion": "ANTIOQUIA"
+ },
+ {
+  "error": "CALI",
+  "correccion": "CALI"
+ },
+ {
+  "error": "FUNZA",
+  "correccion": "FUNZA"
+ },
+ {
+  "error": "VALLEDUPAR",
+  "correccion": "VALLEDUPAR"
+ },
+ {
+  "error": "EL ZULIA",
+  "correccion": "EL ZULIA"
+ },
+ {
+  "error": "ARATOCA",
+  "correccion": "ARATOCA"
+ },
+ {
+  "error": "BOGOTA BOGOTA D C",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "GARZON",
+  "correccion": "GARZON"
+ },
+ {
+  "error": "CASANARE",
+  "correccion": "CASANARE"
+ },
+ {
+  "error": "CHINCHINA",
+  "correccion": "CHINCHINA"
+ },
+ {
+  "error": "VALLE DEL CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "MAICAO",
+  "correccion": "MAICAO"
+ },
+ {
+  "error": "MEDELLIN",
+  "correccion": "MEDELLIN"
+ },
+ {
+  "error": "PLATO",
+  "correccion": "PLATO"
+ },
+ {
+  "error": "TENJO",
+  "correccion": "TENJO"
+ },
+ {
+  "error": "NARIA¯A¿A½O",
+  "correccion": "NARINO"
+ },
+ {
+  "error": "COTA",
+  "correccion": "COTA"
+ },
+ {
+  "error": "ENVIGADO",
+  "correccion": "ENVIGADO"
+ },
+ {
+  "error": "GIRON",
+  "correccion": "GIRON"
+ },
+ {
+  "error": "MANIZALES",
+  "correccion": "MANIZALES"
+ },
+ {
+  "error": "PIEDECUESTA",
+  "correccion": "PIEDECUESTA"
+ },
+ {
+  "error": "TUNJA",
+  "correccion": "TUNJA"
+ },
+ {
+  "error": "SORACA",
+  "correccion": "SORACA"
+ },
+ {
+  "error": "VALLE DEL CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "DAGUA",
+  "correccion": "DAGUA"
+ },
+ {
+  "error": "SAN JACINTO",
+  "correccion": "SAN JACINTO"
+ },
+ {
+  "error": "LA GUIAJIRA",
+  "correccion": "LA GUAJIRA"
+ },
+ {
+  "error": "TUNJA",
+  "correccion": "TUNJA"
+ },
+ {
+  "error": "MONIQUIRA",
+  "correccion": "MONIQUIRA"
+ },
+ {
+  "error": "LA GUAJIRA",
+  "correccion": "LA GUAJIRA"
+ },
+ {
+  "error": "HUILA",
+  "correccion": "HUILA"
+ },
+ {
+  "error": "MANIZALES",
+  "correccion": "MANIZALES"
+ },
+ {
+  "error": "PASTO",
+  "correccion": "PASTO"
+ },
+ {
+  "error": "SINCELEJO",
+  "correccion": "SINCELEJO"
+ },
+ {
+  "error": "VALLEDUPAR",
+  "correccion": "VALLEDUPAR"
+ },
+ {
+  "error": "CESAR",
+  "correccion": "CESAR"
+ },
+ {
+  "error": "VELEZ",
+  "correccion": "VELEZ"
+ },
+ {
+  "error": "MONTELIBANO",
+  "correccion": "MONTELIBANO"
+ },
+ {
+  "error": "PUERTO COLOMBIA",
+  "correccion": "PUERTO COLOMBIA"
+ },
+ {
+  "error": "OCAA¯A¿A½A",
+  "correccion": "OCANA"
+ },
+ {
+  "error": "SANTAFE DE ANTIOQUIA",
+  "correccion": "SANTAFE DE ANTIOQUIA"
+ },
+ {
+  "error": "SUPIA",
+  "correccion": "SUPIA"
+ },
+ {
+  "error": "CIENAGA",
+  "correccion": "CIENAGA"
+ },
+ {
+  "error": "CESAR",
+  "correccion": "CESAR"
+ },
+ {
+  "error": "CAJICA",
+  "correccion": "CAJICA"
+ },
+ {
+  "error": "ANTIOQUIA",
+  "correccion": "ANTIOQUIA"
+ },
+ {
+  "error": "LA CEJA",
+  "correccion": "LA CEJA"
+ },
+ {
+  "error": "FACATATIVA",
+  "correccion": "FACATATIVA"
+ },
+ {
+  "error": "GIRARDOT",
+  "correccion": "GIRARDOT"
+ },
+ {
+  "error": "LORICA",
+  "correccion": "LORICA"
+ },
+ {
+  "error": "MAGANGUE",
+  "correccion": "MAGANGUE"
+ },
+ {
+  "error": "TUNJA",
+  "correccion": "TUNJA"
+ },
+ {
+  "error": "RISARALDA",
+  "correccion": "RISARALDA"
+ },
+ {
+  "error": "SANTANDER",
+  "correccion": "SANTANDER"
+ },
+ {
+  "error": "BOGOTA",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "NEIVA",
+  "correccion": "NEIVA"
+ },
+ {
+  "error": "RIO NEGRO",
+  "correccion": "RIONEGRO"
+ },
+ {
+  "error": "TERUEL",
+  "correccion": "TERUEL"
+ },
+ {
+  "error": "GALAN",
+  "correccion": "GALAN"
+ },
+ {
+  "error": "GUADALAJARA DE BUGA",
+  "correccion": "GUADALAJARA DE BUGA"
+ },
+ {
+  "error": "NARINO",
+  "correccion": "NARINO"
+ },
+ {
+  "error": "BOGOTA",
+  "correccion": "BOGOTA DC"
+ },
+ {
+  "error": "NARIA‘O",
+  "correccion": "NARINO"
+ },
+ {
+  "error": "BOGOTA, D.C.",
+  "correccion": "BOGOTA DC"
+ },
+ {
+  "error": "ATLANTICO",
+  "correccion": "ATLANTICO"
+ },
+ {
+  "error": "SANTA MARTA",
+  "correccion": "SANTA MARTA"
+ },
+ {
+  "error": "BUCARAMANGA",
+  "correccion": "BUCARAMANGA"
+ },
+ {
+  "error": "COTA",
+  "correccion": "COTA"
+ },
+ {
+  "error": "BOYACA",
+  "correccion": "BOYACA"
+ },
+ {
+  "error": "BARRANQUILLA",
+  "correccion": "BARRANQUILLA"
+ },
+ {
+  "error": "TURBACO",
+  "correccion": "TURBACO"
+ },
+ {
+  "error": "LA UNION",
+  "correccion": "LA UNION"
+ },
+ {
+  "error": "NARIA‘O",
+  "correccion": "NARINO"
+ },
+ {
+  "error": "SAN JOSE DEL GUAVIARE",
+  "correccion": "SAN JOSE DEL GUAVIARE"
+ },
+ {
+  "error": "FLORENCIA",
+  "correccion": "FLORENCIA"
+ },
+ {
+  "error": "FRESNO",
+  "correccion": "FRESNO"
+ },
+ {
+  "error": "PITALITO",
+  "correccion": "PITALITO"
+ },
+ {
+  "error": "RIONEGRO",
+  "correccion": "RIONEGRO"
+ },
+ {
+  "error": "NORTE DE SANTANDER",
+  "correccion": "NORTE DE SANTANDER"
+ },
+ {
+  "error": "NARIA‘O",
+  "correccion": "NARINO"
+ },
+ {
+  "error": "APARTADO",
+  "correccion": "APARTADO"
+ },
+ {
+  "error": "PUTUMAYO",
+  "correccion": "PUTUMAYO"
+ },
+ {
+  "error": "MALAGA",
+  "correccion": "MALAGA"
+ },
+ {
+  "error": "SOATA",
+  "correccion": "SOATA"
+ },
+ {
+  "error": "SAN MARCOS",
+  "correccion": "SAN MARCOS"
+ },
+ {
+  "error": "GACHETA",
+  "correccion": "GACHETA"
+ },
+ {
+  "error": "NORTE DE SANTANDER",
+  "correccion": "NORTE DE SANTANDER"
+ },
+ {
+  "error": "APARTADO",
+  "correccion": "APARTADO ANTIOQUIA"
+ },
+ {
+  "error": "HUILA",
+  "correccion": "HUILA"
+ },
+ {
+  "error": "META",
+  "correccion": "META"
+ },
+ {
+  "error": "RISARALDA",
+  "correccion": "RISARALDA"
+ },
+ {
+  "error": "BARRANCABERMEJA",
+  "correccion": "BARRANCABERMEJA"
+ },
+ {
+  "error": "BELLO",
+  "correccion": "BELLO"
+ },
+ {
+  "error": "BUGA",
+  "correccion": "BUGALAGRANDE"
+ },
+ {
+  "error": "DUITAMA",
+  "correccion": "DUITAMA"
+ },
+ {
+  "error": "GUAMO",
+  "correccion": "GUAMO"
+ },
+ {
+  "error": "PEREIRA",
+  "correccion": "PEREIRA"
+ },
+ {
+  "error": "PITALITO",
+  "correccion": "PITALITO"
+ },
+ {
+  "error": "SOCORRO",
+  "correccion": "SOCORRO"
+ },
+ {
+  "error": "GUADALAJARA DE BUGA",
+  "correccion": "GUADALAJARA DE BUGA"
+ },
+ {
+  "error": "ATLATICO",
+  "correccion": "ATLANTICO"
+ },
+ {
+  "error": "IPIALES",
+  "correccion": "IPIALES"
+ },
+ {
+  "error": "SAMPUES",
+  "correccion": "SAMPUES"
+ },
+ {
+  "error": "BOGOTA D C",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "SANTA MARTA",
+  "correccion": "SANTA MARTA"
+ },
+ {
+  "error": "ANTIOQUIA",
+  "correccion": "ANTIOQUIA"
+ },
+ {
+  "error": "CUNDINAMARCA",
+  "correccion": "CUNDINAMARCA"
+ },
+ {
+  "error": "EL CARMEN DE BOLIVAR",
+  "correccion": "EL CARMEN DE BOLIVAR"
+ },
+ {
+  "error": "LOS PATIOS",
+  "correccion": "LOS PATIOS"
+ },
+ {
+  "error": "ARAUCA",
+  "correccion": "ARAUCA"
+ },
+ {
+  "error": "ARJONA",
+  "correccion": "ARJONA"
+ },
+ {
+  "error": "BOGOTA",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "CALI",
+  "correccion": "CALI"
+ },
+ {
+  "error": "IBAGUE",
+  "correccion": "IBAGUE"
+ },
+ {
+  "error": "MOSQUERA",
+  "correccion": "MOSQUERA"
+ },
+ {
+  "error": "CAUCA",
+  "correccion": "CAUCA"
+ },
+ {
+  "error": "TOLIMA",
+  "correccion": "TOLIMA"
+ },
+ {
+  "error": "CUCUTA",
+  "correccion": "CUCUTA"
+ },
+ {
+  "error": "PASTO",
+  "correccion": "PASTO"
+ },
+ {
+  "error": "RICAURTE",
+  "correccion": "RICAURTE"
+ },
+ {
+  "error": "ZIPAQUIRA",
+  "correccion": "ZIPAQUIRA"
+ },
+ {
+  "error": "CESAR",
+  "correccion": "CESAR"
+ },
+ {
+  "error": "BOLIVAR",
+  "correccion": "BOLIVAR"
+ },
+ {
+  "error": "SUCRE",
+  "correccion": "SUCRE"
+ },
+ {
+  "error": "CALDAS",
+  "correccion": "CALDAS"
+ },
+ {
+  "error": "AGUACHICA",
+  "correccion": "AGUACHICA"
+ },
+ {
+  "error": "ARMENIA",
+  "correccion": "ARMENIA"
+ },
+ {
+  "error": "CUCUTA",
+  "correccion": "CUCUTA"
+ },
+ {
+  "error": "ATLANTICA",
+  "correccion": "ATLANTICO"
+ },
+ {
+  "error": "ATLANTICO",
+  "correccion": "ATLANTICO"
+ },
+ {
+  "error": "CARTAGENA",
+  "correccion": "CARTAGENA"
+ },
+ {
+  "error": "FLORIDABLANCA",
+  "correccion": "FLORIDABLANCA"
+ },
+ {
+  "error": "IBAGUE",
+  "correccion": "IBAGUE"
+ },
+ {
+  "error": "DOSQUEBRADAS RISARALDA",
+  "correccion": "DOSQUEBRADAS"
+ },
+ {
+  "error": "COYA",
+  "correccion": "COTA"
+ },
+ {
+  "error": "CARTAGENA DE INDIAS",
+  "correccion": "CARTAGENA"
+ },
+ {
+  "error": "TOCAIMA",
+  "correccion": "TOCAIMA"
+ },
+ {
+  "error": "PUERTO TEJADA",
+  "correccion": "PUERTO TEJADA"
+ },
+ {
+  "error": "COPACABANA",
+  "correccion": "COPACABANA"
+ },
+ {
+  "error": "CUNDINAMARA",
+  "correccion": "CUNDINAMARCA"
+ },
+ {
+  "error": "FUNZA",
+  "correccion": "FUNZA"
+ },
+ {
+  "error": "VALLE DEL CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "ATLANTICO",
+  "correccion": "ATLANTICO"
+ },
+ {
+  "error": "TOLIMA",
+  "correccion": "TOLIMA"
+ },
+ {
+  "error": "BOGOTA, D C",
+  "correccion": "BOGOTA"
+ },
+ {
+  "error": "ENVIGADO",
+  "correccion": "ENVIGADO"
+ },
+ {
+  "error": "MARIQUITA",
+  "correccion": "MARIQUITA"
+ },
+ {
+  "error": "YOPAL",
+  "correccion": "YOPAL"
+ },
+ {
+  "error": "YUMBO",
+  "correccion": "YUMBO"
+ },
+ {
+  "error": "VALLE DEL CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "FUSAGASUGA",
+  "correccion": "FUSAGASUGA"
+ },
+ {
+  "error": "JAMUNDI",
+  "correccion": "JAMUNDI"
+ },
+ {
+  "error": "SIMACOTA",
+  "correccion": "SIMACOTA"
+ },
+ {
+  "error": "LA PLATA",
+  "correccion": "LA PLATA"
+ },
+ {
+  "error": "CERETE",
+  "correccion": "CERETE"
+ },
+ {
+  "error": "QUIBDO",
+  "correccion": "QUIBDO"
+ },
+ {
+  "error": "VALLE DEL CAUCA",
+  "correccion": "VALLE DEL CAUCA"
+ },
+ {
+  "error": "ARAUCA",
+  "correccion": "ARAUCA"
+ },
+ {
+  "error": "PUERTO BOYACA",
+  "correccion": "PUERTO BOYACA"
+ },
+ {
+  "error": "DOSQUEBRADAS",
+  "correccion": "DOSQUEBRADAS"
+ },
+ {
+  "error": "HONDA",
+  "correccion": "HONDA"
+ },
+ {
+  "error": "PALMIRA",
+  "correccion": "PALMIRA"
+ },
+ {
+  "error": "SABANETA",
+  "correccion": "SABANETA"
+ },
+ {
+  "error": "TUMACO",
+  "correccion": "TUMACO"
+ },
+ {
+  "error": "BOLIVAR",
+  "correccion": "BOLIVAR"
+ },
+ {
+  "error": "FACATATIVA",
+  "correccion": "FACATATIVA"
+ },
+ {
+  "error": "GALAPA",
+  "correccion": "GALAPA"
+ },
+ {
+  "error": "RIONEGRO",
+  "correccion": "RIONEGRO"
+ },
+ {
+  "error": "BUGALAGRANDE",
+  "correccion": "BUGALAGRANDE"
+ },
+ {
+  "error": "MADRID",
+  "correccion": "MADRID"
+ },
+ {
+  "error": "CONFINES",
+  "correccion": "CONFINES"
+ },
+ {
+  "error": "COMBITA",
+  "correccion": "COMBITA"
+ },
+ {
+  "error": "BOYACA",
+  "correccion": "BOYACA"
+ },
+ {
+  "error": "CAQUETA",
+  "correccion": "CAQUETA"
+ },
+ {
+  "error": "QUINDIO",
+  "correccion": "QUINDIO"
+ },
+ {
+  "error": "TOLIMA",
+  "correccion": "TOLIMA"
+ },
+ {
+  "error": "FUNZA",
+  "correccion": "FUNZA"
+ },
+ {
+  "error": "NEIVA",
+  "correccion": "NEIVA"
+ },
+ {
+  "error": "RIOSUCIO",
+  "correccion": "RIOSUCIO"
+ },
+ {
+  "error": "SABANALARGA",
+  "correccion": "SABANALARGA"
+ },
+ {
+  "error": "SARAVENA",
+  "correccion": "SARAVENA"
+ },
+ {
+  "error": "AN TIOQUIA",
+  "correccion": "ANTIOQUIA"
+ },
+ {
+  "error": "ITAGUI",
+  "correccion": "ITAGUI"
+ },
+ {
+  "error": "OCANA",
+  "correccion": "OCANA"
+ },
+ {
+  "error": "PEREIRA",
+  "correccion": "PEREIRA"
+ },
+ {
+  "error": "PINCHOTE",
+  "correccion": "PINCHOTE"
+ },
+ {
+  "error": "SOLEDAD",
+  "correccion": "SOLEDAD"
+ },
+ {
+  "error": "CHIQUINQUIRA",
+  "correccion": "CHIQUINQUIRA"
+ },
+ {
+  "error": "A CIENAGA",
+  "correccion": "CIENAGA"
+ }
+]
