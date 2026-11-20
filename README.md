@@ -1057,6 +1057,18 @@ de anuladas en `guias_anuladas`) se extrajo a **`Funciones/trazabilidad_guia.py`
   (pendientes desde el 2026-11-09) — sin ellas el bloque 🚛 simplemente no
   aparece.
 
+## Actualizaciones Recientes (2026-11-20)
+
+### Telemetría del portal — filtros de audiencia y foco de usuario (`rutas/telemetria.py`)
+
+`GET /telemetria/resumen` suma 2 params opcionales (retrocompatibles): **`audiencia`** (`todos` default | `clientes` = perfil CLIENTE | `internos` = resto, incl. perfil null) y **`usuario_filtro`** (acota TODO el resumen — KPIs, por_día, pestañas — a un usuario; se matchea `.strip().upper()`). Echo en `rango`. Para las reuniones con el cliente: elegir «Clientes» (o enfocar a una persona) y mostrar SU uso del portal. Verificado: clientes 26 + internos 103 = 129 eventos. Dep **backend + frontend JUNTOS** (si se separan, backend antes: FastAPI ignora params desconocidos y el filtro no aplicaría).
+
+### `correcciones_nombres` depurada 254 → 26 docs (DATOS, sin deploy)
+
+- **Fix guías 801232548/49** («No aplica» estando entregadas): `ciudad_destino='Â CIENAGA'` (mojibake NBSP del CSV del TMS) → `_norm_nombre` lo reduce a `'A CIENAGA'` y ningún nivel del lookup matcheaba `CIENAGA/MAGDALENA` (3 días) de `tiempos_entrega`. Solución: doc `{error:'A CIENAGA', correccion:'CIENAGA'}`. Tras el fix quedan **«No cumplieron»** (promesa 06-nov, entrega 09-nov).
+- **Depuración**: borradas las 230 identidades (`error == correccion`) inútiles, PERO **11 claves identidad se quedan** porque la clave de lookup ALFANUMÉRICA las hace canonicalizar basura real del TMS (`'BOYA CA'`→BOYACA, `'CUNDINAMARC A'`, `'SANTAMARTA'`, `'VALLEDEL CAUCA'`, `'SANTA FE DE ANTIOQUIA'` + BOGOTA/POPAYAN/APARTADO/ANTIOQUIA/RIONEGRO/TULUA por colisiones) — sin ellas esas 11 guías caen a «No aplica». También se eliminaron duplicados y quedó 1 doc por clave (las colisiones BOGOTA/APARTADO resolvían por ORDEN de `find()`, no determinista). **Método seguro para tocar la colección**: replicar norm/alnum, computar claves usadas por los DISTINCT reales de PG y verificar equivalencia del mapa = 0 diffs ANTES de borrar. Respaldo: `integrappi/correcciones_nombres_respaldo_2026-11-20.json`.
+- **Bot 001** (repo `agentes`): `ciudad_destino` entró a `CAMPOS_ACTUALIZAR` — antes solo se escribía al INSERT y una corrección de destino hecha en Siscore quedaba ignorada. ⚠️ PENDIENTE push al repo (copia local en `AGENTE IA/Bot 001/`).
+
 ## Actualizaciones Recientes (2026-11-12)
 
 ### HOY en hora de Colombia en toda la lógica OT (fix 801233440)

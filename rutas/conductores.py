@@ -1487,9 +1487,12 @@ def _enviar_wa_generico(celular: str, nombre: str, enlace: str,
         print(f"[{etiqueta}] Sin celular útil ({celular!r}); no se envió WhatsApp.")
         return False
     try:
+        # `nombre` llega vacío desde /registrar (el form ya no lo pide, la IA lo
+        # aporta en el paso 2) — Meta rechaza parámetros text vacíos (#131008),
+        # así que se manda un saludo genérico (mismo patrón que _enviar_wa_autorizacion).
         ok = enviar_template_sync(
             destino, plantilla[0], plantilla[1],
-            [nombre or "", enlace])
+            [nombre or "usuario", enlace])
         if ok:
             print(f"[{etiqueta}] WhatsApp enviado a +{destino}")
             return True
