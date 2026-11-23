@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, UploadFile, Form
 from pymongo import MongoClient
+import logging
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -16,11 +17,16 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("La variable de entorno MONGO_URI no está configurada.")
+# Credenciales GCS opcionales al importar (mismo patrón tolerante de vehiculos.py):
+# si faltan, la app arranca igual y sólo falla /subir-imagen en el momento del uso.
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-if not GOOGLE_APPLICATION_CREDENTIALS:
-    raise ValueError("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS no está configurada.")
+if GOOGLE_APPLICATION_CREDENTIALS:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
+else:
+    logging.getLogger(__name__).warning(
+        "GOOGLE_APPLICATION_CREDENTIALS no está configurada: /biometria/subir-imagen fallará en el momento del uso."
+    )
 BUCKET_NAME = os.getenv("BUCKET_NAME", "integrapp")  # Ajusta si tu bucket se llama distinto
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
 
 # ─── MONGO ─────────────────────────────────────────────────────────────────────
 from bd.bd_cliente import bd_cliente
@@ -91,7 +97,7 @@ async def guardar_huellas_completas(data: GuardarHuellasFullRequest):
     """
     try:
         # Convertir índices a cadenas para la clave en Mongo
-        doc_huellas = { str(idx): dedo.dict() for idx, dedo in data.huellas.items() }
+        doc_huellas = { str(idx): dedo.model_dump() for idx, dedo in data.huellas.items() }
         result = collection.update_one(
             {"tenedor": data.tenedor},
             {"$set": {"huellas": doc_huellas}},

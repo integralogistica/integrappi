@@ -56,6 +56,7 @@ from rutas.inventario_escaner import ruta_inventario_escaner
 from rutas.controlador_gastos import ruta_controlador_gastos
 from rutas.tusdatos import ruta_tusdatos
 from rutas.consultar_biometrico import ruta_verificacion
+from rutas.puente_biometrico import ruta_biometria
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,10 @@ app.include_router(ruta_tusdatos)
 # Biometría (huellas): consulta por cédula contra la colección `biometria`.
 # Recuperado 2026-10-22 como consulta OPCIONAL (indicador en /revision y HV).
 app.include_router(ruta_verificacion)
+# Biometría (huellas): PUENTE de la app de escritorio HuellasIntegrapp
+# (InstaladorHuellas.zip): captura con lector DigitalPersona → /subir-imagen (GCS)
+# + /guardar_completo (plantillas en `biometria`). Re-montado 2026-11-23.
+app.include_router(ruta_biometria)
 
 @app.get("/", tags=['Home'])
 async def root():
