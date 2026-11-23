@@ -1,11 +1,20 @@
 # archivo: rutas/ruta_fletes.py
 
-from fastapi import APIRouter, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, HTTPException, status, UploadFile, File, Query, Form, Request
 from pymongo import MongoClient
 from pydantic import BaseModel
 from typing import List, Dict
 import os
 import pandas as pd
+
+# Auditoría de tarifarios (perfil real + eventos en historial_tarifas)
+from rutas.historial_tarifas import (
+    PERFILES_EDICION_TARIFAS,
+    _resolver_usuario,
+    _requiere,
+    _diff_campos,
+    _registrar_evento,
+)
 
 # ------------------------------
 # 🔗 Conexión MongoDB

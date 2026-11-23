@@ -27,6 +27,7 @@ from rutas.clientes_general import ruta_clientes_general
 from rutas.ciudades_general import ruta_ciudades_general
 from rutas.fletes import ruta_fletes
 from rutas.tarifas_rutas_fmc import ruta_tarifas_rutas_fmc
+from rutas.historial_tarifas import ruta_historial_tarifas
 from rutas.pedidos import ruta_pedidos
 from rutas.whatsapp_integra import ruta_whatsapp_integra
 from rutas.whatsapp_report_integra import ruta_whatsapp_report
@@ -204,6 +205,7 @@ app.include_router(ruta_clientes_general)
 app.include_router(ruta_ciudades_general)
 app.include_router(ruta_fletes)
 app.include_router(ruta_tarifas_rutas_fmc)
+app.include_router(ruta_historial_tarifas)
 app.include_router(ruta_pedidos)
 app.include_router(ruta_revision)
 app.include_router(ruta_whatsapp_integra)
