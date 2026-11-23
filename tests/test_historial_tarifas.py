@@ -151,6 +151,11 @@ class DiffCamposTests(unittest.TestCase):
             ],
         )
 
+    def test_id_de_mongo_no_se_reporta_como_cambio(self):
+        anterior = {"_id": "abc123", "tarifas": {"TURBO": 1}}
+        nuevo = {"tarifas": {"TURBO": 1}}
+        self.assertEqual(ht._diff_campos(anterior, nuevo), [])
+
     def test_dict_anidado_tarifas(self):
         cambios = ht._diff_campos(
             {"tarifas": {"TURBO": 1.0, "NHR": 2.0}},
@@ -295,6 +300,40 @@ class EndpointHistorialTests(unittest.TestCase):
         col.find_one.return_value = USUARIO_CONTROL
         ht.col_usuarios = col
         r = self.client.get("/historial-tarifas/?usuario=JCONTROL&tarifario=otra_cosa")
+        self.assertEqual(r.status_code, 400)
+
+    def test_filtro_por_registro(self):
+        col = MagicMock()
+        col.find_one.return_value = USUARIO_CONTROL
+        ht.col_usuarios = col
+        r = self.client.get("/historial-tarifas/?usuario=JCONTROL&registro=FUNZA%20%E2%86%92%20CALI")
+        self.assertEqual(r.status_code, 200)
+        self.col_historial.find.assert_called_once_with({"registro": "FUNZA → CALI"})
+
+    def test_filtro_registro_con_masivas_requiere_tarifario(self):
+        col = MagicMock()
+        col.find_one.return_value = USUARIO_CONTROL
+        ht.col_usuarios = col
+        r = self.client.get("/historial-tarifas/?usuario=JCONTROL&registro=X&incluir_masivas=true")
+        self.assertEqual(r.status_code, 400)
+
+    def test_filtro_registro_con_masivas(self):
+        col = MagicMock()
+        col.find_one.return_value = USUARIO_CONTROL
+        ht.col_usuarios = col
+        r = self.client.get("/historial-tarifas/?usuario=JCONTROL&tarifario=fletes&registro=X&incluir_masivas=true")
+        self.assertEqual(r.status_code, 200)
+        esperado = {"$or": [
+            {"registro": "X", "tarifario": "fletes"},
+            {"accion": "carga_masiva", "tarifario": "fletes"},
+        ]}
+        self.col_historial.find.assert_called_once_with(esperado)
+
+    def test_accion_invalida_da_400(self):
+        col = MagicMock()
+        col.find_one.return_value = USUARIO_CONTROL
+        ht.col_usuarios = col
+        r = self.client.get("/historial-tarifas/?usuario=JCONTROL&accion=otra")
         self.assertEqual(r.status_code, 400)
 
 

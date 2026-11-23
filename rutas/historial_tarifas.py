@@ -74,9 +74,11 @@ def _limpiar_valor(v):
 
 def _diff_campos(anterior: dict, nuevo: dict) -> list:
     """Compara campo a campo la unión de claves. Devuelve
-    [{campo, valor_anterior, valor_nuevo}] SOLO de lo que cambió."""
+    [{campo, valor_anterior, valor_nuevo}] SOLO de lo que cambió.
+    `_id` se ignora: el doc viejo de Mongo lo trae y el payload de
+    edición no → aparecería como cambio falso."""
     cambios = []
-    claves = sorted(set(list(anterior.keys()) + list(nuevo.keys())))
+    claves = sorted(k for k in set(list(anterior.keys()) + list(nuevo.keys())) if k != "_id")
     for campo in claves:
         va = _limpiar_valor(anterior.get(campo))
         vn = _limpiar_valor(nuevo.get(campo))
@@ -166,8 +168,27 @@ def _modelo_evento(e: dict) -> dict:
 # ------------------------------
 # ✅ Listar historial de cambios de tarifas (ADMIN/CONTROL)
 # ------------------------------
+ACCIONES_VALIDAS = {"creacion", "edicion", "eliminacion", "carga_masiva"}
+
+
 @ruta_historial_tarifas.get("/", response_model=list)
-async def obtener_historial(usuario: str, tarifario: Optional[str] = None, limite: int = 500):
+async def obtener_historial(
+    usuario: str,
+    tarifario: Optional[str] = None,
+    registro: Optional[str] = None,
+    accion: Optional[str] = None,
+    incluir_masivas: bool = False,
+    limite: int = 500,
+):
+    """Historial de cambios de tarifas, más reciente primero.
+
+    `registro` filtra por una tarifa específica ("ORIGEN → DESTINO" o
+    "CENTRO_COSTO → RUTA") — lo consume el modal de edición para mostrar
+    qué cambios ha sufrido esa tarifa. Con `incluir_masivas` (requiere
+    `tarifario`) se suman las cargas masivas de ese tarifario: en `fletes`
+    el masivo REEMPLAZA todo el tarifario, así que cualquier tarifa vivió
+    esos eventos.
+    """
     info = _resolver_usuario(usuario)
     _requiere(info, PERFILES_EDICION_TARIFAS, "ver el historial de tarifas")
 
@@ -179,6 +200,21 @@ async def obtener_historial(usuario: str, tarifario: Optional[str] = None, limit
                 detail=f"Tarifario inválido: '{tarifario}'. Válidos: {', '.join(sorted(TARIFARIOS_VALIDOS))}",
             )
         filtro["tarifario"] = tarifario
+    if accion:
+        if accion not in ACCIONES_VALIDAS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Acción inválida: '{accion}'. Válidas: {', '.join(sorted(ACCIONES_VALIDAS))}",
+            )
+        filtro["accion"] = accion
+
+    if registro and incluir_masivas:
+        if not tarifario:
+            raise HTTPException(status_code=400, detail="incluir_masivas requiere tarifario")
+        filtro = {"$or": [{"registro": registro, "tarifario": tarifario},
+                          {"accion": "carga_masiva", "tarifario": tarifario}]}
+    elif registro:
+        filtro = {"registro": registro}
 
     limite = max(1, min(limite, 2000))
     docs = col_historial.find(filtro).sort("fecha", -1).limit(limite)
