@@ -1221,3 +1221,17 @@ Mide la adopción del portal de indicadores de clientes (`/integrapp/indicadores
 - `GET /telemetria/resumen` — **solo ADMIN** (`_resolver_usuario` + `_requiere`). Query: `usuario` (obligatorio), `cliente_id` (opcional), `desde`/`hasta` `YYYY-MM-DD` (default últimos 30 días; 422 si formato inválido o desde > hasta). Devuelve `{kpi {eventos_total, usuarios_unicos, sesiones_unicas, dias_activos}, por_dia, por_usuario (con dias_activos, ultima_conexion y desglose por_evento), por_evento, por_pestana, por_cliente}` — KPIs derivados en Python de las agregaciones (`$group/$addToSet/$sum`, agrupación por `fecha_col`).
 
 Registrado en `main.py` como `ruta_telemetria`. Tests: `tests/test_telemetria_portal.py` (8, corren con `python _stub_bd.py tests.test_telemetria_portal`). Los datos empiezan a acumularse SOLO tras el deploy. Dep **backend + frontend JUNTOS** (los beacons necesitan el endpoint).
+
+## Actualizaciones Recientes (2026-11-23)
+
+### Auditoría de tarifarios: perfil CONTROL + historial de cambios (`rutas/historial_tarifas.py`)
+
+El perfil **CONTROL** ahora puede gestionar los dos tarifarios (antes `/GestionTarifasRutas` era solo ADMIN y `/Tarifas` cualquier logueado), y **todo cambio queda auditado** para responder ante auditoría (quién creó/modificó/eliminó tarifas y cuándo).
+
+**Colección nueva `historial_tarifas`** (un evento = un doc; sobrevive a eliminaciones): `{accion (creacion|edicion|eliminacion|carga_masiva), tarifario (fletes|fletes_rutas_fmc), registro ("ORIGEN → DESTINO" / "CC → RUTA"), registro_id, usuario, nombre_usuario, rol, fecha (UTC ISO), campos_modificados [{campo, valor_anterior, valor_nuevo}] (diff antes→después), snapshot (eliminaciones: doc completo), resumen (carga masiva: insertados/errores/borrados + snapshot_borrados en fletes, cuyo masivo REEMPLAZA TODO con delete_many+insert_many — el snapshot permite restaurar), ip}`.
+
+- **Seguridad**: patrón otros_costos — cada endpoint de escritura recibe `usuario` (**obligatorio**: Query en REST, Form en los masivos) y lo resuelve con `_resolver_usuario` (perfil REAL de `baseusuarios`, 401/403) + `_requiere(PERFILES_EDICION_TARIFAS = {ADMIN, CONTROL})`. El backend NO confía en el perfil del frontend.
+- **Endpoints instrumentados**: POST/PUT/DELETE y cargar-masivo de `/fletes` y `/fletes-rutas-fmc`. Los GET no cambian (Pedidos lee la colección `tarifas` directo por Mongo, sin afecto). `POST /fletes/cargar-otros-costos` (config_otros_costos) NO se toca.
+- **Nuevo router `/historial-tarifas`**: `GET /?usuario=&tarifario=&limite=` → eventos más reciente primero; solo ADMIN/CONTROL.
+- **Frontend**: `ModalHistorialTarifas` compartido (tabla con diffs antes→después, snapshot expandible de eliminaciones, filtro por tarifario, export Excel con xlsx) en `/Tarifas` y `/GestionTarifasRutas`; `/Tarifas` en modo **solo lectura** para perfiles ≠ ADMIN/CONTROL (sin botones de editar); API clients envían `usuario` (cookie `usuarioPedidosCookie`).
+- Tests: `tests/test_historial_tarifas.py` (21; TestClient sobre app FastAPI envuelta — el handler 422 vive en la app, no en el router pelón). Dep **backend PRIMERO, luego frontend JUNTOS** (si el frontend nuevo llega antes, toda escritura falla con 422 por falta de `usuario`).

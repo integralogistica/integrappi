@@ -13,6 +13,7 @@ from rutas.historial_tarifas import (
     _resolver_usuario,
     _requiere,
     _diff_campos,
+    _limpiar_valor,
     _registrar_evento,
 )
 
@@ -74,7 +75,10 @@ def modelo_flete(f: dict) -> dict:
 # ✅ Crear flete/tarifa individual
 # ------------------------------
 @ruta_fletes.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
-async def crear_flete(data: Flete):
+async def crear_flete(data: Flete, usuario: str = Query(...), request: Request = None):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "crear tarifas de fletes")
+    ip = request.client.host if request and request.client else ""
     origen = data.origen.upper().strip()
     destino = data.destino.upper().strip()
     # Verificar duplicado
@@ -91,6 +95,17 @@ async def crear_flete(data: Flete):
         "promesa_entrega_dias": int(data.promesa_entrega_dias),
     }
     coleccion_fletes.insert_one(nuevo)
+    _registrar_evento(
+        accion="creacion",
+        tarifario="fletes",
+        registro=f"{origen} → {destino}",
+        info=info,
+        campos_modificados=[
+            {"campo": c, "valor_anterior": None, "valor_nuevo": v}
+            for c, v in _limpiar_valor(nuevo).items()
+        ],
+        ip=ip,
+    )
     return {"mensaje": "Flete creado exitosamente", "flete": modelo_flete(nuevo)}
 
 # ------------------------------
@@ -98,7 +113,14 @@ async def crear_flete(data: Flete):
 # ------------------------------
 # Carga masiva corregida con campo TIPO
 @ruta_fletes.post("/cargar-masivo", response_model=dict)
-async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
+async def cargar_fletes_masivo(
+    archivo: UploadFile = File(...),
+    usuario: str = Form(...),
+    request: Request = None,
+):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "cargar masivamente tarifas de fletes")
+    ip = request.client.host if request and request.client else ""
     try:
         df = pd.read_excel(archivo.file)
         df.columns = [col.strip().upper().replace(" ", "_") for col in df.columns]
@@ -126,9 +148,25 @@ async def cargar_fletes_masivo(archivo: UploadFile = File(...)):
                 if col not in columnas_fijas:
                     tarifas[col] = float(row[col])
             registros.append({"origen": origen, "destino": destino, "ruta": ruta, "tipo": tipo, "pago_cargue_desc": pago_cargue_desc,"equivalencia_centro_costo": equivalencia_centro_costo, "promesa_entrega_dias": promesa, "tarifas": tarifas})
+        # Snapshot de lo que se va a reemplazar ANTES del delete_many:
+        # permite reconstruir el tarifario previo ante una carga errónea
+        # (cientos de filas — muy por debajo del límite de 16 MB de MongoDB).
+        borrados = [_limpiar_valor(d) for d in coleccion_fletes.find({})]
         coleccion_fletes.delete_many({})
         if registros:
             coleccion_fletes.insert_many(registros)
+        _registrar_evento(
+            accion="carga_masiva",
+            tarifario="fletes",
+            registro=f"{len(registros)} tarifas cargadas (reemplazo total)",
+            info=info,
+            resumen={
+                "insertados": len(registros),
+                "borrados": len(borrados),
+                "snapshot_borrados": borrados,
+            },
+            ip=ip,
+        )
         return {"mensaje": f"{len(registros)} tarifas cargadas con TIPO, anteriores eliminadas"}
     except HTTPException:
         raise
@@ -176,9 +214,15 @@ async def get_flete(origen: str, destino: str):
 # ✅ Actualizar flete por origen y destino
 # ------------------------------
 @ruta_fletes.put("/{origen}/{destino}", response_model=dict)
-async def actualizar_flete(origen: str, destino: str, data: Flete):
+async def actualizar_flete(origen: str, destino: str, data: Flete, usuario: str = Query(...), request: Request = None):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "editar tarifas de fletes")
+    ip = request.client.host if request and request.client else ""
     o = origen.upper().strip()
     d = destino.upper().strip()
+    anterior = coleccion_fletes.find_one({"origen": o, "destino": d})
+    if not anterior:
+        raise HTTPException(status_code=404, detail="Flete no encontrado para actualizar")
     actualiza = {
         "origen": o,
         "destino": d,
@@ -192,18 +236,42 @@ async def actualizar_flete(origen: str, destino: str, data: Flete):
     result = coleccion_fletes.update_one({"origen": o, "destino": d}, {"$set": actualiza})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Flete no encontrado para actualizar")
+    campos = _diff_campos(_limpiar_valor(anterior), _limpiar_valor(actualiza))
+    if campos:
+        _registrar_evento(
+            accion="edicion",
+            tarifario="fletes",
+            registro=f"{o} → {d}",
+            info=info,
+            campos_modificados=campos,
+            ip=ip,
+        )
     return {"mensaje": "Flete actualizado", "flete": actualiza}
 
 # ------------------------------
 # ✅ Eliminar flete por origen y destino
 # ------------------------------
 @ruta_fletes.delete("/{origen}/{destino}", response_model=dict)
-async def eliminar_flete(origen: str, destino: str):
+async def eliminar_flete(origen: str, destino: str, usuario: str = Query(...), request: Request = None):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "eliminar tarifas de fletes")
+    ip = request.client.host if request and request.client else ""
     o = origen.upper().strip()
     d = destino.upper().strip()
+    anterior = coleccion_fletes.find_one({"origen": o, "destino": d})
+    if not anterior:
+        raise HTTPException(status_code=404, detail="Flete no encontrado para eliminar")
     result = coleccion_fletes.delete_one({"origen": o, "destino": d})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Flete no encontrado para eliminar")
+    _registrar_evento(
+        accion="eliminacion",
+        tarifario="fletes",
+        registro=f"{o} → {d}",
+        info=info,
+        snapshot=_limpiar_valor(anterior),
+        ip=ip,
+    )
     return {"mensaje": "Flete eliminado exitosamente"}
 
 

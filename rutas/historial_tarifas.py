@@ -10,6 +10,7 @@
 from fastapi import APIRouter, HTTPException, status
 from datetime import datetime, timezone
 from typing import Optional
+from bson import ObjectId
 
 from bd.bd_cliente import bd_cliente
 client = bd_cliente
@@ -58,7 +59,10 @@ def _requiere(info: dict, perfiles: set, accion: str):
 
 # ── Diff de campos (antes → después) ────────────────────────────────────────
 def _limpiar_valor(v):
-    """Normaliza un valor para comparación/almacenamiento (ObjectId → str)."""
+    """Normaliza un valor para comparación/almacenamiento (ObjectId → str,
+    floats enteros → int) para que el diff y el JSON del historial salgan limpios."""
+    if isinstance(v, ObjectId):
+        return str(v)
     if isinstance(v, dict):
         return {k: _limpiar_valor(x) for k, x in v.items()}
     if isinstance(v, list):

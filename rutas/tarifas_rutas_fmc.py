@@ -1,12 +1,22 @@
 # archivo: rutas/tarifas_rutas_fmc.py
 
-from fastapi import APIRouter, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, HTTPException, status, UploadFile, File, Query, Form, Request
 from pymongo import MongoClient
 from pydantic import BaseModel
 from typing import List
 import os
 import pandas as pd
 from io import StringIO, BytesIO
+
+# Auditoría de tarifarios (perfil real + eventos en historial_tarifas)
+from rutas.historial_tarifas import (
+    PERFILES_EDICION_TARIFAS,
+    _resolver_usuario,
+    _requiere,
+    _diff_campos,
+    _limpiar_valor,
+    _registrar_evento,
+)
 
 # ------------------------------
 # 🔗 Conexión MongoDB
@@ -85,7 +95,10 @@ async def obtener_tarifas():
 # ✅ Crear tarifa individual
 # ------------------------------
 @ruta_tarifas_rutas_fmc.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
-async def crear_tarifa(data: TarifaRutaFmc):
+async def crear_tarifa(data: TarifaRutaFmc, usuario: str = Query(...), request: Request = None):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "crear tarifas de rutas FMC")
+    ip = request.client.host if request and request.client else ""
     # Verificar duplicado por centro_costo y ruta
     cc = data.centro_costo.upper().strip()
     ruta = data.ruta.upper().strip()
@@ -112,17 +125,37 @@ async def crear_tarifa(data: TarifaRutaFmc):
 
     result = coleccion_tarifas.insert_one(nuevo)
     nuevo["_id"] = result.inserted_id
+    _registrar_evento(
+        accion="creacion",
+        tarifario="fletes_rutas_fmc",
+        registro=f"{cc} → {ruta}",
+        registro_id=str(result.inserted_id),
+        info=info,
+        campos_modificados=[
+            {"campo": c, "valor_anterior": None, "valor_nuevo": v}
+            for c, v in _limpiar_valor(nuevo).items()
+        ],
+        ip=ip,
+    )
     return {"mensaje": "Tarifa creada exitosamente", "tarifa": modelo_tarifa(nuevo)}
 
 # ------------------------------
 # ✅ Actualizar tarifa
 # ------------------------------
 @ruta_tarifas_rutas_fmc.put("/{tarifa_id}", response_model=dict)
-async def actualizar_tarifa(tarifa_id: str, data: TarifaRutaFmc):
+async def actualizar_tarifa(tarifa_id: str, data: TarifaRutaFmc, usuario: str = Query(...), request: Request = None):
     from bson import ObjectId
+
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "editar tarifas de rutas FMC")
+    ip = request.client.host if request and request.client else ""
 
     if not ObjectId.is_valid(tarifa_id):
         raise HTTPException(status_code=400, detail="ID inválido")
+
+    anterior = coleccion_tarifas.find_one({"_id": ObjectId(tarifa_id)})
+    if not anterior:
+        raise HTTPException(status_code=404, detail="Tarifa no encontrada")
 
     actualiza = {
         "centro_costo": data.centro_costo.upper().strip(),
@@ -146,22 +179,52 @@ async def actualizar_tarifa(tarifa_id: str, data: TarifaRutaFmc):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Tarifa no encontrada")
 
+    campos = _diff_campos(_limpiar_valor(anterior), _limpiar_valor(actualiza))
+    if campos:
+        _registrar_evento(
+            accion="edicion",
+            tarifario="fletes_rutas_fmc",
+            registro=f"{actualiza['centro_costo']} → {actualiza['ruta']}",
+            registro_id=tarifa_id,
+            info=info,
+            campos_modificados=campos,
+            ip=ip,
+        )
+
     return {"mensaje": "Tarifa actualizada", "tarifa": actualiza}
 
 # ------------------------------
 # ✅ Eliminar tarifa
 # ------------------------------
 @ruta_tarifas_rutas_fmc.delete("/{tarifa_id}", response_model=dict)
-async def eliminar_tarifa(tarifa_id: str):
+async def eliminar_tarifa(tarifa_id: str, usuario: str = Query(...), request: Request = None):
     from bson import ObjectId
+
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "eliminar tarifas de rutas FMC")
+    ip = request.client.host if request and request.client else ""
 
     if not ObjectId.is_valid(tarifa_id):
         raise HTTPException(status_code=400, detail="ID inválido")
+
+    anterior = coleccion_tarifas.find_one({"_id": ObjectId(tarifa_id)})
+    if not anterior:
+        raise HTTPException(status_code=404, detail="Tarifa no encontrada")
 
     result = coleccion_tarifas.delete_one({"_id": ObjectId(tarifa_id)})
 
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Tarifa no encontrada")
+
+    _registrar_evento(
+        accion="eliminacion",
+        tarifario="fletes_rutas_fmc",
+        registro=f"{anterior.get('centro_costo', '')} → {anterior.get('ruta', '')}",
+        registro_id=tarifa_id,
+        info=info,
+        snapshot=_limpiar_valor(anterior),
+        ip=ip,
+    )
 
     return {"mensaje": "Tarifa eliminada exitosamente"}
 
@@ -169,7 +232,14 @@ async def eliminar_tarifa(tarifa_id: str):
 # ✅ Cargar tarifas masivamente desde archivo (Excel o plano)
 # ------------------------------
 @ruta_tarifas_rutas_fmc.post("/cargar-masivo", response_model=dict)
-async def cargar_tarifas_masivo(archivo: UploadFile = File(...)):
+async def cargar_tarifas_masivo(
+    archivo: UploadFile = File(...),
+    usuario: str = Form(...),
+    request: Request = None,
+):
+    info = _resolver_usuario(usuario)
+    _requiere(info, PERFILES_EDICION_TARIFAS, "cargar masivamente tarifas de rutas FMC")
+    ip = request.client.host if request and request.client else ""
     try:
         nombre_archivo = archivo.filename.lower()
 
@@ -282,6 +352,18 @@ async def cargar_tarifas_masivo(archivo: UploadFile = File(...)):
                         "error": str(e)
                     })
 
+        # Auditoría de la carga (insert-only: este endpoint NO borra nada)
+        _registrar_evento(
+            accion="carga_masiva",
+            tarifario="fletes_rutas_fmc",
+            registro=f"{registros_exitosos} tarifas cargadas (solo inserciones)",
+            info=info,
+            resumen={
+                "insertados": registros_exitosos,
+                "errores": registros_errores,
+            },
+            ip=ip,
+        )
         return {
             "mensaje": f"Carga completada. {registros_exitosos} registros procesados exitosamente, {registros_errores} con errores",
             "exitosos": registros_exitosos,
