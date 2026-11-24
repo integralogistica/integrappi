@@ -102,6 +102,9 @@ class ActualizarDatosInput(BaseModel):
     celular: Optional[str] = None
     clave: Optional[str] = None  # solo si quiere cambiarla
     usuario: Optional[str] = None  # nombre de usuario
+    # (2026-11-24) WhatsApp de Otros Costos: False = esta persona NO recibe las
+    # notificaciones del módulo aunque tenga el perfil. None = no cambiar.
+    notificar_otros_costos: Optional[bool] = None
 
 class UsuarioLite(BaseModel):
     id: str
@@ -155,6 +158,8 @@ def modelo_usuario(u) -> dict:
         # Perfiles adicionales (2026-10-15): p. ej. OPERATIVO que también es Padrino.
         "perfiles_adicionales": u.get("perfiles_adicionales") or [],
         "activo": u.get("activo", True),
+        # (2026-11-24) False = NO recibe los WhatsApp de Otros Costos.
+        "notificar_otros_costos": u.get("notificar_otros_costos", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
         # En BD puede ser ObjectId (scripts viejos) o string: normalizar.
         "empresa_id_seguridad": str(u["empresa_id"]) if u.get("empresa_id") else None,
@@ -788,6 +793,10 @@ async def actualizar_datos_usuario(id: str, data: ActualizarDatosInput):
 
     if data.clave and data.clave.strip() and not es_hash(data.clave.strip()):
         actualiza["clave"] = crear_hash(data.clave.strip())
+
+    # (2026-11-24) Interruptor de WhatsApp de Otros Costos (None = no tocar)
+    if data.notificar_otros_costos is not None:
+        actualiza["notificar_otros_costos"] = bool(data.notificar_otros_costos)
 
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     if result.matched_count == 0:

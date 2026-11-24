@@ -681,6 +681,11 @@ def _enviar_a_perfil(perfil: str, plantilla: tuple, body_params_fn, *, consecuti
             usuarios = filtrados
         enviadas = 0
         for u in usuarios:
+            # (2026-11-24) Interruptor por usuario: quien lo apagó no recibe
+            # WhatsApp de Otros Costos aunque tenga el perfil.
+            if u.get("notificar_otros_costos") is False:
+                logger.info(f"[NOTIF OC] {perfil} {u.get('usuario')} desactivó las notificaciones; se saltea ({consecutivo}).")
+                continue
             celular = _normalizar_celular_co(u.get("celular"))
             if not celular:
                 logger.info(f"[NOTIF OC] {perfil} {u.get('usuario')} sin celular válido; se saltea ({consecutivo}).")

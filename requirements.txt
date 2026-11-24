@@ -103,3 +103,6 @@ xlsxwriter==3.2.5
 playwright==1.49.0
 # El portal descarga el Excel como HTML-disfrazado-de-.xls; read_html usa lxml
 lxml==5.3.0
+# Módulo Financiero (schema `fin`): ORM + migraciones dedicadas (2026-11-24)
+SQLAlchemy==2.0.41
+alembic==1.15.2

@@ -60,6 +60,24 @@ from rutas.consultar_biometrico import ruta_verificacion
 from rutas.puente_biometrico import ruta_biometria
 from Funciones.sync_api_v3 import ejecutar_sync_v3, archivar_mes_v3
 
+# Módulo Financiero (2026-11-24): réplica interna del módulo externo en el
+# schema `fin` de Postgres. Fase 0: auth + salud. Fase 1: traslados + adjuntos.
+from rutas.fin_auth import router as ruta_fin_auth
+from rutas.fin_salud import router as ruta_fin_salud
+from rutas.fin_traslados import router as ruta_fin_traslados
+from rutas.fin_adjuntos import router as ruta_fin_adjuntos
+from rutas.fin_viajes import router as ruta_fin_viajes
+from rutas.fin_configuracion import router as ruta_fin_configuracion
+from rutas.fin_requisiciones import router as ruta_fin_requisiciones
+from rutas.fin_catalogos import router as ruta_fin_catalogos
+from rutas.fin_contabilidad import router as ruta_fin_contabilidad
+from rutas.fin_pagos import router as ruta_fin_pagos
+from rutas.fin_servicios import router as ruta_fin_servicios
+from rutas.fin_cajas import router as ruta_fin_cajas
+from rutas.fin_usuarios import router as ruta_fin_usuarios
+from rutas.fin_auditoria import router as ruta_fin_auditoria
+from rutas.fin_admin import router as ruta_fin_admin, router_respaldo as ruta_fin_respaldo
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,6 +261,23 @@ app.include_router(ruta_verificacion)
 # (InstaladorHuellas.zip): captura con lector DigitalPersona → /subir-imagen (GCS)
 # + /guardar_completo (plantillas en `biometria`). Re-montado 2026-11-23.
 app.include_router(ruta_biometria)
+# ── Módulo Financiero (schema fin) — bloque aditivo, Fases 0-3 ──
+app.include_router(ruta_fin_auth)
+app.include_router(ruta_fin_salud)
+app.include_router(ruta_fin_traslados)
+app.include_router(ruta_fin_adjuntos)
+app.include_router(ruta_fin_viajes)
+app.include_router(ruta_fin_configuracion)
+app.include_router(ruta_fin_requisiciones)
+app.include_router(ruta_fin_catalogos)
+app.include_router(ruta_fin_contabilidad)
+app.include_router(ruta_fin_pagos)
+app.include_router(ruta_fin_servicios)
+app.include_router(ruta_fin_cajas)
+app.include_router(ruta_fin_usuarios)
+app.include_router(ruta_fin_auditoria)
+app.include_router(ruta_fin_admin)
+app.include_router(ruta_fin_respaldo)
 
 @app.get("/", tags=['Home'])
 async def root():

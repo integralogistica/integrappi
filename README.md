@@ -1247,3 +1247,16 @@ La app de escritorio **HuellasIntegrapp** (`HuellasHoja\`, WinForms C#; se distr
 - **Consulta** (montada desde 2026-10-22, `/verificacion` en `consultar_biometrico.py`): chips de huellas en /revision, HV PDF (registro dactilar en hoja propia), columna «Huellas» en estudios por antigüedad.
 - **Instalador todo-en-uno** (frontend, `integrapp-next/public/InstaladorHuellas.zip`, commit 7dabf3b): `Instalar.bat` instala runtime+driver del lector (MSI "DigitalPersona One Touch RTE 1.6.1", incluye `usbdpfp.sys`), copia la app a `C:\HuellasIntegrapp`, desbloquea archivos y crea el acceso directo — se publica solo con cada deploy del frontend (`public/` → `out/`).
 - ⚠️ **TRAMPA**: el MSI de DigitalPersona FUERZA reinicio de Windows incluso en extracción (`msiexec /a`) o con `REBOOT=ReallySuppress` — jamás ejecutarlo en la máquina de desarrollo; para inspeccionar sus tablas usar WindowsInstaller COM `OpenDatabase(..., 0)` (solo lectura, seguro).
+
+## Actualizaciones Recientes (2026-11-24)
+
+### Nuevo módulo: Módulo Financiero (schema `fin` de Postgres)
+
+Réplica interna del módulo financiero externo (`ModuloFinanciero-api/front`) DENTRO de integrappi — una sola factura de Render, cambios 100 % aditivos (nada toca Mongo ni `informe_guias_tms`).
+
+- **Paquete aislado** `financiero/`: modelos (14 tablas en schema `fin`), servicios (máquinas de estado, consecutivos atómicos ON CONFLICT, bloqueo optimista 409, parser DIAN Excel/XML UBL, correos Resend fire-and-forget) y auth propia (`rutas/fin_auth.py`): acepta el JWT del login de IntegrApp y lo canjea por sesión de módulo de 12 h; el rol lo define `fin.usuarios` por correo (sin claves).
+- **Routers** `rutas/fin_*.py` (prefix `/fin`, 65 rutas): requisiciones con OC automática `AAAA-386+` y calificación de proveedor, pagos urgentes de Tesorería, traslados (Presidencia), viajes (tarifa A/B/C enmascarada), facturas DIAN (carga Excel/ZIP, radicación, causación con asiento que cuadra, glosas), servicios públicos, cajas menores, adjuntos GCS (URL firmada), catálogos paginados, configuración, usuarios (CRUD + Excel), bitácora (+export), admin de registros y respaldo.
+- **Migraciones**: instancia Alembic dedicada `fin_alembic/` (`alembic -c fin_alembic.ini upgrade head`); solo conoce el schema `fin`.
+- **Siembra**: `python scripts/fin_semilla.py --admin <correo>` (catálogos 49k centros de costo, proveedores, presupuesto, personal de viajes + configuración).
+- **Tests**: `tests/fin/` (86, SQLite con ATTACH AS fin).
+- Documentación completa en `docs/financiero.md`. Front: grupo FINANZAS en `/Modulos` (9 rutas `/Financiero/*`).
