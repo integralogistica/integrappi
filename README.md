@@ -1260,3 +1260,10 @@ Réplica interna del módulo financiero externo (`ModuloFinanciero-api/front`) D
 - **Siembra**: `python scripts/fin_semilla.py --admin <correo>` (catálogos 49k centros de costo, proveedores, presupuesto, personal de viajes + configuración).
 - **Tests**: `tests/fin/` (86, SQLite con ATTACH AS fin).
 - Documentación completa en `docs/financiero.md`. Front: grupo FINANZAS en `/Modulos` (9 rutas `/Financiero/*`).
+
+### Módulo Financiero — 2.ª tanda (2026-11-24, post-F6)
+
+- **Permisos finos por usuario**: `fin.usuarios.permisos` (JSONB, migración `0003_permisos_usuario`) guarda solo los overrides por sección; `require_seccion` los respeta en los GET de los 7 módulos (403). Defaults por rol en `services/permisos.py` (`DEFAULT_SECCIONES_POR_ROL`).
+- **Alta simplificada**: `GET /fin/usuarios/candidatos` (perfil FINANCIERO de `baseusuarios`) alimenta el autocompletado; nombre y username se **derivan** del correo (nombre resincronizado desde Mongo en cada edición); el rol `admin` no se ofrece en pantalla y solo el Principal crea/asciende admins (403 para admin adicional).
+- **WhatsApp de Otros Costos con interruptor por usuario**: campo `notificar_otros_costos` en `baseusuarios` (checkbox en GestionUsuarios); `_enviar_a_perfil` saltea a quien lo apagó.
+- **Perfil FINANCIERO de IntegrApp**: aterriza en `/EleccionFinanciero` y `/Modulos` redirige a los perfiles micro-portal a su hogar (cambio en `integrapp-next`).

@@ -33,6 +33,31 @@ No hay login propio: el módulo acepta dos Bearer tokens firmados con el
 El **rol lo define `fin.usuarios`** (por correo, sin claves). Desactivar a
 alguien corta su acceso al instante (se revalida `activo` en cada request).
 
+### Alta y gobierno de usuarios (2026-11-24, post-F6)
+
+- **Candidatos**: `GET /fin/usuarios/candidatos?q=` lista usuarios de
+  IntegrApp con perfil FINANCIERO (Mongo `baseusuarios`, activos, con correo);
+  el formulario autocompleta desde ahí y el correo no se escribe a mano.
+- **Nombre y username derivados**: el nombre se lee de `baseusuarios` por
+  correo (`_nombre_desde_baseusuarios`, se resincroniza en cada PUT) y el
+  username se deriva del correo (`_derivar_username`). Nadie los escribe.
+- **Permisos finos por usuario**: `fin.usuarios.permisos` (JSONB, migración
+  0003) guarda solo los overrides `{seccion: bool}` sobre
+  `DEFAULT_SECCIONES_POR_ROL`; la dependencia `require_seccion(seccion)`
+  (aplicada a los GET de los 7 módulos) devuelve 403 si la persona no tiene
+  la sección. El admin ve todo y no se recorta.
+- **Gobierno**: el rol `admin` no se ofrece en pantalla. Solo el
+  Administrador Principal (rol admin) puede otorgar la casilla
+  `es_admin_adicional`, crear/ascender otros admin y cambiar el rol de un
+  admin (403 para el admin adicional). No puede eliminarse a sí mismo ni
+  borrar al último admin activo.
+- **Perfil FINANCIERO de IntegrApp**: aterriza en `/EleccionFinanciero`
+  (elige Otros Costos ⬅➡ Módulo Financiero) y `/Modulos` redirige a los
+  perfiles micro-portal a su hogar (guardia en `ModulosP`, front).
+- **WhatsApp de Otros Costos**: campo `notificar_otros_costos` (bool, default
+  true) en `baseusuarios`; `_enviar_a_perfil` (otros_costos.py) saltea a
+  quien lo tiene en False. Checkbox en GestionUsuarios → editar usuario.
+
 ## Flujos
 
 - **Requisiciones**: radicación (jefe de área → compras → financiera) →
