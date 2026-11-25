@@ -2036,9 +2036,26 @@ def obtener_vehiculos(id_usuario: str, estadoIntegra: Optional[str] = None):
     # La bitácora de auditoría es de /revision: el conductor no la necesita.
     for v in vehiculos:
         v.pop("auditoriaVehiculo", None)
+    # (2026-11-25) Perfil ACTUAL de la cuenta: si Seguridad lo corrigió
+    # (p. ej. CONDUCTOR→TENEDOR para que registre más placas), el panel
+    # refresca la cookie sin obligar a re-loguearse. Best-effort: un fallo
+    # jamás tumba la consulta (id puede no ser ObjectId en cuentas legacy).
+    perfil_cuenta = "CONDUCTOR"
+    try:
+        from bson import ObjectId as _ObjectId
+        try:
+            _oid = _ObjectId(id_usuario)
+        except Exception:
+            _oid = None
+        cuenta = coleccion_conductores_cuenta.find_one(
+            {"_id": _oid} if _oid else {"_id": id_usuario}, {"perfil": 1})
+        perfil_cuenta = ((cuenta or {}).get("perfil") or "CONDUCTOR").upper()
+    except Exception as e:
+        print(f"[obtener-vehiculos] No se pudo resolver el perfil de {id_usuario}: {e}")
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"message": "Búsqueda finalizada", "vehiculos": _json_seguro(_firmar_documentos(vehiculos))}
+        content={"message": "Búsqueda finalizada", "vehiculos": _json_seguro(_firmar_documentos(vehiculos)),
+                 "perfil": perfil_cuenta}
     )
 
 

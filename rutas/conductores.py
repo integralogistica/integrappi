@@ -390,6 +390,9 @@ class CambioClaveInput(BaseModel):
 
 class CambiarPerfilInput(BaseModel):
     perfil: str  # CONDUCTOR | TENEDOR (corrección del rol elegido al registrarse)
+    # (2026-11-25) Quién ordena el cambio: usuario/nombre de Seguridad o ADMIN en
+    # baseusuarios. Obligatorio para autorizar — el endpoint ya no es anónimo.
+    solicitante: Optional[str] = None
 
 
 # ==============================================================================
@@ -895,6 +898,11 @@ async def buscar_conductores(q: str = ""):
                 and not doc.get("aceptacion_politica")),
             # Placas propias: un CONDUCTOR con 1 placa ya no puede recibir otra.
             "placas_propias": coleccion_vehiculos.count_documents({"idUsuario": cid}),
+            # (2026-11-25) Placas donde llega como conductor invitado: si tiene,
+            # NO puede promoverse a TENEDOR (409 del cambiar-perfil) — el front
+            # lo deshabilita con explicación en vez de descubrir el 409 al vuelo.
+            "placas_invitado": coleccion_vehiculos.count_documents(
+                {"$or": [{"idConductor": cid}, {"idConductor2": cid}]}),
         })
     return {"cuentas": cuentas}
 
@@ -1067,18 +1075,52 @@ async def reenviar_verificacion_seguridad(
     return {"mensaje": f"{mensaje}.", "whatsapp": wa_ok, "correo": correo_final}
 
 
+def _auditar_perfil_tenedor(placa: str, solicitante: str, correo: str) -> None:
+    """
+    (2026-11-25) Bitácora de la promoción CONDUCTOR→TENEDOR sobre cada ficha
+    propia — mismo formato de `auditoriaVehiculo` que `_registrar_auditoria`
+    (vehiculos.py) y el script `migrar_conductor_tenedor.py`. BEST-EFFORT:
+    un fallo JAMÁS tumba el cambio de perfil. Clon local: importar el helper
+    de rutas.vehiculos cruza los routers (vehiculos importa conductores).
+    """
+    entrada = {
+        "fecha": datetime.utcnow(),
+        "actor": (solicitante or "").strip() or None,
+        "via": "seguridad",
+        "accion": "perfil_tenedor",
+        "detalle": f"Cuenta {correo} promovida a TENEDOR por Seguridad (podrá registrar varias placas).",
+    }
+    try:
+        coleccion_vehiculos.update_one(
+            {"placa": placa},
+            {"$push": {"auditoriaVehiculo": {"$each": [entrada], "$slice": -200}}},
+        )
+    except Exception as e:
+        print(f"[auditoria] No se pudo registrar 'perfil_tenedor' de {placa}: {e}")
+
+
 @ruta_conductores.post("/{conductor_id}/cambiar-perfil", response_model=dict)
 async def cambiar_perfil_cuenta(conductor_id: str, data: CambiarPerfilInput):
     """
     (2026-10-19, pedido del usuario) Corrige el PERFIL de una cuenta que se
-    registró con el rol equivocado (p.ej. eligió TENEDOR en el registro y es
-    CONDUCTOR). El perfil se fija al registrarse y NUNCA cambia solo.
+    registró con el rol equivocado. El perfil se fija al registrarse y NUNCA
+    cambia solo.
 
-    SOLO cuentas SIN ninguna placa inscrita (idUsuario/idConductor/
-    idConductor2): sin fichas ligadas el perfil no tiene dependencias (regla
-    CONDUCTOR=1 placa / TENEDOR=N, invitaciones) y el cambio es seguro. Con
-    placas → 409: hay que revisar las fichas a mano antes.
+    (2026-11-25, pedido del usuario) RELAJADO: un CONDUCTOR con placas PROPIAS
+    (idUsuario — se registró su propio vehículo) SÍ puede pasar a TENEDOR por
+    Seguridad/ADMIN para que registre más placas e invite conductores; cada
+    ficha propia queda auditada (`accion:"perfil_tenedor"`). Lo que NO cambia:
+
+    · Con fichas INVITADAS (idConductor/idConductor2 en fichas ajenas) → 409:
+      un TENEDOR no puede ser conductor invitado (`invitar-conductor` lo
+      rechaza) — hay que desvincularlo primero.
+    · TENEDOR→CONDUCTOR sigue exigiendo 0 placas (propias ni invitadas).
+    · `solicitante` (SEGURIDAD o ADMIN en baseusuarios) es OBLIGATORIO: el
+      endpoint ya no es anónimo.
     """
+    solicitante_doc = _requiere_seguridad(data.solicitante)
+    solicitante = solicitante_doc.get("usuario") or solicitante_doc.get("nombre") or ""
+    _rechazar_padrino(data.solicitante)
     perfil_nuevo = (data.perfil or "").strip().upper()
     if perfil_nuevo not in ("CONDUCTOR", "TENEDOR"):
         raise HTTPException(status_code=400, detail="Perfil no válido: CONDUCTOR o TENEDOR.")
@@ -1090,18 +1132,41 @@ async def cambiar_perfil_cuenta(conductor_id: str, data: CambiarPerfilInput):
         return {"mensaje": f"{doc.get('correo', '')} ya es {perfil_nuevo}.",
                 "perfil": perfil_nuevo}
     cid = str(doc["_id"])
-    placas = coleccion_vehiculos.count_documents(
-        {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]})
-    if placas:
+    fichas = list(coleccion_vehiculos.find(
+        {"$or": [{"idUsuario": cid}, {"idConductor": cid}, {"idConductor2": cid}]},
+        {"placa": 1, "idUsuario": 1, "idConductor": 1, "idConductor2": 1}))
+    propias = [f for f in fichas if str(f.get("idUsuario") or "") == cid]
+    invitadas = [f for f in fichas
+                 if str(f.get("idConductor") or "") == cid
+                 or str(f.get("idConductor2") or "") == cid]
+    if perfil_nuevo == "TENEDOR":
+        # CONDUCTOR→TENEDOR: permitido con placas propias; con invitadas no.
+        if invitadas:
+            placas_inv = ", ".join(str(f.get("placa") or "?") for f in invitadas)
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{doc.get('correo', '')} es conductor invitado en: {placas_inv}. "
+                        "Un tenedor no puede ser conductor invitado — desvincúlalo primero."),
+            )
+        coleccion_conductores.update_one(
+            {"_id": doc["_id"]}, {"$set": {"perfil": perfil_nuevo}})
+        for ficha in propias:
+            _auditar_perfil_tenedor(
+                str(ficha.get("placa") or ""), solicitante, doc.get("correo", ""))
+        return {"mensaje": (f"{doc.get('correo', '')} pasó de {perfil_actual} a TENEDOR: "
+                            f"ya puede registrar varias placas."),
+                "perfil": perfil_nuevo, "placas_auditoria": len(propias)}
+    # TENEDOR→CONDUCTOR: exige 0 placas (propias ni invitadas), como siempre.
+    if fichas:
         raise HTTPException(
             status_code=409,
-            detail=(f"{doc.get('correo', '')} tiene {placas} placa(s) inscrita(s): "
+            detail=(f"{doc.get('correo', '')} tiene {len(fichas)} placa(s) inscrita(s): "
                     "el perfil no se cambia solo — revisa sus fichas primero."),
         )
     coleccion_conductores.update_one(
         {"_id": doc["_id"]}, {"$set": {"perfil": perfil_nuevo}})
     return {"mensaje": f"{doc.get('correo', '')} pasó de {perfil_actual} a {perfil_nuevo}.",
-            "perfil": perfil_nuevo}
+            "perfil": perfil_nuevo, "placas_auditoria": 0}
 
 
 @ruta_conductores.post("/{conductor_id}/eliminar", response_model=dict)
@@ -2901,6 +2966,34 @@ def _requiere_admin(usuario: str) -> dict:
             detail=f"Su perfil ({user.get('perfil')}) no tiene permiso para administrar políticas.",
         )
     return user
+
+
+def _requiere_seguridad(usuario: Optional[str]) -> dict:
+    """
+    (2026-11-25) Valida que el `solicitante` de acciones sensibles sobre cuentas
+    (hoy: cambiar-perfil) resuelva en baseusuarios con perfil SEGURIDAD o ADMIN.
+
+    Resolución tolerante al patrón de `_rechazar_padrino`: primero match exacto
+    por `usuario` (upper) y fallback por `nombre` (regex i, escapado) — el
+    frontend envía `seguridadNombre` (= nombre || usuario) y `seguridadUsuario`
+    no siempre existe.
+    """
+    nombre = (usuario or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=403, detail="Falta el solicitante.")
+    doc = coleccion_baseusuarios.find_one({"usuario": nombre.upper()})
+    if not doc:
+        doc = coleccion_baseusuarios.find_one(
+            {"nombre": {"$regex": f"^{re.escape(nombre)}$", "$options": "i"}})
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Solicitante '{nombre}' no encontrado.")
+    perfil = str(doc.get("perfil") or "").upper()
+    if perfil not in ("SEGURIDAD", "ADMIN"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Su perfil ({perfil or 'sin perfil'}) no tiene permiso para corregir cuentas de conductores.",
+        )
+    return doc
 
 
 class NuevaPoliticaInput(BaseModel):

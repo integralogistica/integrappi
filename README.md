@@ -1267,3 +1267,18 @@ Réplica interna del módulo financiero externo (`ModuloFinanciero-api/front`) D
 - **Alta simplificada**: `GET /fin/usuarios/candidatos` (perfil FINANCIERO de `baseusuarios`) alimenta el autocompletado; nombre y username se **derivan** del correo (nombre resincronizado desde Mongo en cada edición); el rol `admin` no se ofrece en pantalla y solo el Principal crea/asciende admins (403 para admin adicional).
 - **WhatsApp de Otros Costos con interruptor por usuario**: campo `notificar_otros_costos` en `baseusuarios` (checkbox en GestionUsuarios); `_enviar_a_perfil` saltea a quien lo apagó.
 - **Perfil FINANCIERO de IntegrApp**: aterriza en `/EleccionFinanciero` y `/Modulos` redirige a los perfiles micro-portal a su hogar (cambio en `integrapp-next`).
+
+## Actualizaciones Recientes (2026-11-25)
+
+### Conductores — CONDUCTOR con placa propia puede pasar a TENEDOR (autorizado por Seguridad)
+
+`POST /conductores/{id}/cambiar-perfil` (`rutas/conductores.py`) se RELAJÓ y YA NO ES ANÓNIMO:
+
+- **Autorización obligatoria**: el body exige `solicitante` que resuelva en `baseusuarios` con perfil **SEGURIDAD o ADMIN** (nuevo helper `_requiere_seguridad`, match por `usuario` upper o por `nombre` regex-i — el frontend envía `seguridadNombre`). 403 sin solicitante / perfil ajeno, 404 inexistente; `_rechazar_padrino` también aplica (PADRINO → 403).
+- **CONDUCTOR → TENEDOR permitido con placas PROPIAS** (las que son `idUsuario` de la cuenta, 0..N): era el caso atrapado — el conductor se registró, inscribió SU placa y quería registrar más. Cada ficha propia queda auditada en `auditoriaVehiculo` con `accion:"perfil_tenedor"` + actor + fecha (helper local `_auditar_perfil_tenedor`, clon best-effort de `_registrar_auditoria`; mismo formato del script `migrar_conductor_tenedor.py`). Respuesta nueva: `placas_auditoria`.
+- **CONDUCTOR con placas INVITADAS → 409**: si el cuenta es `idConductor`/`idConductor2` en fichas ajenas no puede ser TENEDOR (un tenedor no puede ser conductor invitado — `invitar-conductor` lo rechazaría para siempre); el mensaje lista las placas para desvincularlas primero.
+- **TENEDOR → CONDUCTOR sin cambio**: sigue exigiendo 0 placas (propias ni invitadas), 409 si tiene.
+- **`GET /conductores/buscar`** devuelve `placas_invitado` además de `placas_propias` — el front deshabilita la promoción con explicación en vez de descubrir el 409 al vuelo.
+- **`GET /vehiculos/obtener-vehiculos`** devuelve `perfil` (el real de la cuenta, best-effort) — el panel del conductor refresca la cookie `conductorPerfil` sin re-login.
+
+Front asociado (`integrapp-next`): tarjeta «🔎 Buscar cuenta y corregir su perfil» en `/revision/alta` (búsqueda libre, fuera del flujo de alta), «Corregir perfil» también en los resultados del paso 2, Swal direccional. Dep backend + frontend JUNTOS (el frontend nuevo manda `solicitante`; el backend viejo lo ignora → si se separa, frontend primero). Tests: `tests/test_cuentas_sin_vehiculo.py` (28 OK: autorización, promoción con auditoría, 409 por invitadas, idempotencia, buscar).

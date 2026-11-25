@@ -195,54 +195,176 @@ class RecordatorioVehiculoTests(unittest.TestCase):
 
 
 class CambiarPerfilTests(unittest.TestCase):
-    """(2026-10-19) Corrección del PERFIL elegido al registrarse (p.ej. la
-    cuenta se creó como TENEDOR pero la persona es CONDUCTOR): el perfil se
-    fija en el registro y nunca cambia solo — este endpoint lo corrige, pero
-    SOLO mientras la cuenta no tenga placas inscritas (con fichas ligadas hay
-    que revisarlas a mano)."""
+    """(2026-10-19) Corrección del PERFIL elegido al registrarse. (2026-11-25)
+    RELAJADO y CON AUTORIZACIÓN: el `solicitante` (SEGURIDAD/ADMIN en
+    baseusuarios) es obligatorio; un CONDUCTOR con placas PROPIAS (idUsuario)
+    SÍ puede pasar a TENEDOR para registrar varias placas (cada ficha propia
+    queda auditada), pero con placas INVITADAS (idConductor/idConductor2 en
+    fichas ajenas) → 409 (un tenedor no puede ser conductor invitado) y
+    TENEDOR→CONDUCTOR sigue exigiendo 0 placas."""
+
+    SEGURIDAD = {"_id": "u1", "usuario": "SEGUSER", "nombre": "Laura Seguridad",
+                 "perfil": "SEGURIDAD"}
+    ADMIN = {"_id": "u2", "usuario": "ADMINUSER", "nombre": "Ana Admin",
+             "perfil": "ADMIN"}
+    OPERATIVO = {"_id": "u3", "usuario": "OPUSER", "nombre": "Oscar Operativo",
+                 "perfil": "OPERATIVO"}
+    PADRINO = {"_id": "u4", "usuario": "PADUSER", "nombre": "Pablo Padrino",
+               "perfil": "PADRINO"}
+
+    def baseusuarios_fake(self):
+        return FakeColeccion([dict(self.SEGURIDAD), dict(self.ADMIN),
+                              dict(self.OPERATIVO), dict(self.PADRINO)])
+
+    def cliente_cambiar(self, doc, vehiculos_fake, body):
+        cliente = cliente_de_prueba(conductores.ruta_conductores)
+        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
+             patch.object(conductores, "coleccion_vehiculos", vehiculos_fake), \
+             patch.object(conductores, "coleccion_baseusuarios", self.baseusuarios_fake()):
+            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil", json=body)
+        return r
 
     def test_cambia_tenedor_a_conductor_sin_placas(self):
         doc = _cuenta("EQUIVOCADO@X.COM", perfil="TENEDOR", correo_verificado=True)
-        fake = FakeColeccion([doc])
-        cliente = cliente_de_prueba(conductores.ruta_conductores)
-        with patch.object(conductores, "coleccion_conductores", fake), \
-             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
-            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
-                             json={"perfil": "conductor"})
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "conductor", "solicitante": "SEGUSER"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(doc["perfil"], "CONDUCTOR")       # quedó corregido
         self.assertIn("CONDUCTOR", r.json()["mensaje"])
+        self.assertEqual(r.json()["placas_auditoria"], 0)
 
     def test_409_con_placas_inscritas_no_toca_el_perfil(self):
+        # TENEDOR→CONDUCTOR sigue exigiendo 0 placas (propias ni invitadas).
         doc = _cuenta("CONFICHA@X.COM", perfil="TENEDOR")
         vehiculos_fake = FakeColeccion(
             [{"_id": "v1", "placa": "ABC123", "idUsuario": str(doc["_id"])}])
-        cliente = cliente_de_prueba(conductores.ruta_conductores)
-        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
-             patch.object(conductores, "coleccion_vehiculos", vehiculos_fake):
-            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
-                             json={"perfil": "CONDUCTOR"})
+        r = self.cliente_cambiar(doc, vehiculos_fake,
+                                 {"perfil": "CONDUCTOR", "solicitante": "SEGUSER"})
         self.assertEqual(r.status_code, 409)
         self.assertEqual(doc["perfil"], "TENEDOR")          # intacto
 
     def test_400_perfil_fuera_de_catalogo(self):
         # ADMIN/SEGURIDAD/PADRUNO… no son perfiles de portal: se rechazan.
         doc = _cuenta("X@X.COM")
-        cliente = cliente_de_prueba(conductores.ruta_conductores)
-        with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
-             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
-            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
-                             json={"perfil": "ADMIN"})
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "ADMIN", "solicitante": "SEGUSER"})
         self.assertEqual(r.status_code, 400)
 
     def test_mismo_perfil_es_idempotente(self):
         doc = _cuenta("YA@X.COM", perfil="CONDUCTOR")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "CONDUCTOR", "solicitante": "SEGUSER"})
+        self.assertEqual(r.status_code, 200)
+
+    # ── (2026-11-25) CONDUCTOR con placa propia → TENEDOR ──
+
+    def test_conductor_con_placa_propia_pasa_a_tenedor_y_audita(self):
+        """El caso pedido: se registró como CONDUCTOR e inscribió SU placa →
+        Seguridad lo promueve a TENEDOR para que registre más placas. El
+        cambio queda auditado en la ficha (accion perfil_tenedor)."""
+        doc = _cuenta("CONPLACA@X.COM", correo_verificado=True)
+        vehiculo = {"_id": "v1", "placa": "ABC123", "idUsuario": str(doc["_id"])}
+        r = self.cliente_cambiar(doc, FakeColeccion([vehiculo]),
+                                 {"perfil": "TENEDOR", "solicitante": "SEGUSER"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(doc["perfil"], "TENEDOR")
+        self.assertEqual(r.json()["placas_auditoria"], 1)
+        entrada = vehiculo["auditoriaVehiculo"][0]
+        self.assertEqual(entrada["accion"], "perfil_tenedor")
+        self.assertEqual(entrada["via"], "seguridad")
+        self.assertEqual(entrada["actor"], "SEGUSER")
+        self.assertIn("CONPLACA@X.COM", entrada["detalle"])
+
+    def test_conductor_invitado_no_pasa_a_tenedor(self):
+        """Es conductor INVITADO (idConductor) en la ficha de otro → 409: un
+        tenedor no puede ser conductor invitado; el perfil queda intacto."""
+        doc = _cuenta("INVITADO@X.COM")
+        vehiculos_fake = FakeColeccion(
+            [{"_id": "v9", "placa": "ZZZ999", "idUsuario": "otro",
+              "idConductor": str(doc["_id"])}])
+        r = self.cliente_cambiar(doc, vehiculos_fake,
+                                 {"perfil": "TENEDOR", "solicitante": "SEGUSER"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("invitado", r.json()["detail"].lower())
+        self.assertEqual(doc["perfil"], "CONDUCTOR")
+
+    def test_conductor_propia_e_invitada_no_pasa_a_tenedor(self):
+        doc = _cuenta("MIXTO@X.COM")
+        vehiculos_fake = FakeColeccion([
+            {"_id": "v1", "placa": "AAA111", "idUsuario": str(doc["_id"])},
+            {"_id": "v2", "placa": "BBB222", "idUsuario": "otro",
+             "idConductor2": str(doc["_id"])},
+        ])
+        r = self.cliente_cambiar(doc, vehiculos_fake,
+                                 {"perfil": "TENEDOR", "solicitante": "SEGUSER"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("BBB222", r.json()["detail"])
+        self.assertEqual(doc["perfil"], "CONDUCTOR")
+
+    def test_admin_tambien_puede_promover(self):
+        doc = _cuenta("ADMINPROMUEVE@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "TENEDOR", "solicitante": "ADMINUSER"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(doc["perfil"], "TENEDOR")
+
+    # ── (2026-11-25) Autorización del solicitante ──
+
+    def test_sin_solicitante_rechaza(self):
+        doc = _cuenta("X@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(), {"perfil": "TENEDOR"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(doc["perfil"], "CONDUCTOR")
+
+    def test_solicitante_operativo_rechaza(self):
+        doc = _cuenta("X@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "TENEDOR", "solicitante": "OPUSER"})
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("OPERATIVO", r.json()["detail"])
+
+    def test_solicitante_desconocido_404(self):
+        doc = _cuenta("X@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "TENEDOR", "solicitante": "NADIE"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_solicitante_por_nombre_resuelve(self):
+        """El front envía seguridadNombre (= nombre || usuario): el helper
+        resuelve por nombre cuando el usuario exacto no matchea."""
+        doc = _cuenta("NOMBRE@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "TENEDOR", "solicitante": "Laura Seguridad"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(doc["perfil"], "TENEDOR")
+
+    def test_solicitante_padrino_rechaza(self):
+        doc = _cuenta("X@X.COM")
+        r = self.cliente_cambiar(doc, FakeColeccion(),
+                                 {"perfil": "TENEDOR", "solicitante": "PADUSER"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(doc["perfil"], "CONDUCTOR")
+
+
+class BuscarPlacasInvitadoTests(unittest.TestCase):
+    """(2026-11-25) /buscar expone placas_invitado para que el front
+    deshabilite la promoción a TENEDOR con explicación (no 409 al vuelo)."""
+
+    def test_buscar_devuelve_placas_invitado(self):
+        doc = _cuenta("BUSCADA@X.COM", correo_verificado=True)
+        vehiculos_fake = FakeColeccion([
+            {"_id": "v1", "placa": "AAA111", "idUsuario": str(doc["_id"])},
+            {"_id": "v2", "placa": "BBB222", "idUsuario": "otro",
+             "idConductor": str(doc["_id"])},
+        ])
         cliente = cliente_de_prueba(conductores.ruta_conductores)
         with patch.object(conductores, "coleccion_conductores", FakeColeccion([doc])), \
-             patch.object(conductores, "coleccion_vehiculos", FakeColeccion()):
-            r = cliente.post(f"/conductores/{doc['_id']}/cambiar-perfil",
-                             json={"perfil": "CONDUCTOR"})
+             patch.object(conductores, "coleccion_vehiculos", vehiculos_fake):
+            r = cliente.get("/conductores/buscar", params={"q": "BUSCADA"})
         self.assertEqual(r.status_code, 200)
+        cuenta = r.json()["cuentas"][0]
+        self.assertEqual(cuenta["placas_propias"], 1)
+        self.assertEqual(cuenta["placas_invitado"], 1)
 
 
 class EliminarCuentaTests(unittest.TestCase):
