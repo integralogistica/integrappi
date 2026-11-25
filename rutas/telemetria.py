@@ -39,7 +39,18 @@ router = APIRouter(prefix="/telemetria", tags=["Telemetría"])
 db = bd_cliente["integra"]
 col_eventos = db["eventos_portal"]
 
-EVENTOS_VALIDOS = {"pageview", "pestana", "consulta_guia", "pendientes", "export_excel"}
+# (2026-11-25) "accion" = evento genérico de la app general (detalle.accion
+# nombra la acción concreta: export_excel de Histórico, crear_oc, login…);
+# "login" = entradas exitosas a la app / portal de conductores.
+EVENTOS_VALIDOS = {
+    "pageview",
+    "pestana",
+    "consulta_guia",
+    "pendientes",
+    "export_excel",
+    "accion",
+    "login",
+}
 MODOS_VALIDOS = {"externo", "interno"}
 DIAS_TTL = 180
 
@@ -63,6 +74,17 @@ for _campo in ("evento", "fecha_col"):
         col_eventos.create_index(_campo)
     except Exception:
         pass
+# (2026-11-25) Telemetría general de la app: índice por módulo y hora del día.
+try:
+    col_eventos.create_index(
+        [("modulo", 1), ("fecha_col", 1)], name="idx_tl_modulo_fecha"
+    )
+except Exception as _e:
+    logger.warning(f"[TELEMETRIA] No se pudo crear índice modulo/fecha: {_e}")
+try:
+    col_eventos.create_index("hora_col")
+except Exception:
+    pass
 try:
     col_eventos.create_index(
         [("fecha", 1)], name="idx_tl_fecha_ttl", expireAfterSeconds=DIAS_TTL * 86400
@@ -74,7 +96,11 @@ except Exception as _e:
 # ── Beacon del frontend ───────────────────────────────────────────────────────
 class EventoBeacon(BaseModel):
     usuario: str = Field(..., max_length=60)
-    cliente_id: str = Field(..., max_length=60)
+    # (2026-11-25) Optional: los beacons de la app general (telemetriaApp.ts) no
+    # llevan cliente_id — solo el módulo. El portal Kabi sigue enviándolo.
+    cliente_id: Optional[str] = Field(None, max_length=60)
+    # (2026-11-25) Módulo de la app (tabla ruta→módulo del frontend global).
+    modulo: Optional[str] = Field(None, max_length=30)
     modo: str = Field("externo", max_length=10)
     evento: str = Field(..., max_length=30)
     detalle: dict = Field(default_factory=dict)
@@ -112,14 +138,21 @@ async def registrar_evento(ev: EventoBeacon, request: Request):
         perfil = None
         regional = ""
 
+    ahora_col = _hoy_colombia()
     doc = {
         "fecha": _ahora_utc(),
-        "fecha_col": _hoy_colombia().strftime("%Y-%m-%d"),
+        "fecha_col": ahora_col.strftime("%Y-%m-%d"),
         "usuario": usuario,
         "nombre": nombre,
         "perfil": perfil,
         "regional": regional,
         "cliente_id": ev.cliente_id,
+        # (2026-11-25) Telemetría general: módulo (mayúsculas; None para el
+        # portal Kabi, que se clasifica por cliente_id) y hora del día en
+        # Colombia computada en el BACKEND (no se confía en el reloj cliente)
+        # para el análisis de horas pico. Eventos legacy: campo ausente.
+        "modulo": (ev.modulo or "").strip().upper() or None,
+        "hora_col": ahora_col.hour,
         "modo": ev.modo,
         "evento": ev.evento,
         "detalle": _sanear_detalle(ev.detalle),
@@ -140,6 +173,9 @@ async def registrar_evento(ev: EventoBeacon, request: Request):
 async def resumen(
     usuario: str = Query(..., description="Usuario ADMIN que consulta (cookie)"),
     cliente_id: Optional[str] = Query(None, description="Filtro por portal (opcional)"),
+    modulo: Optional[str] = Query(
+        None, description="Filtro por módulo de la app (2026-11-25, telemetría general)"
+    ),
     desde: Optional[str] = Query(None, description="YYYY-MM-DD (default: hace 29 días)"),
     hasta: Optional[str] = Query(None, description="YYYY-MM-DD (default: hoy Colombia)"),
     usuario_filtro: Optional[str] = Query(
@@ -173,6 +209,9 @@ async def resumen(
     match: dict = {"fecha_col": {"$gte": desde_val, "$lte": hasta_val}}
     if cliente_id:
         match["cliente_id"] = cliente_id
+    # (2026-11-25) Filtro por módulo de la app general (va en mayúsculas en el doc).
+    if modulo:
+        match["modulo"] = modulo.strip().upper()
     # (2026-11-20) Foco en un usuario: para la reunión con el cliente, ver SU
     # uso del portal (KPIs, días, pestañas — todo el resumen acotado).
     if usuario_filtro:
@@ -184,25 +223,43 @@ async def resumen(
     elif audiencia == "internos":
         match["perfil"] = {"$ne": "CLIENTE"}
 
-    # Por día: eventos + usuarios únicos
-    por_dia = sorted(
-        (
-            {"fecha": d["_id"], "eventos": d["eventos"], "usuarios": len(d["usr"])}
-            for d in col_eventos.aggregate(
-                [
-                    {"$match": match},
-                    {
-                        "$group": {
-                            "_id": "$fecha_col",
-                            "eventos": {"$sum": 1},
-                            "usr": {"$addToSet": "$usuario"},
-                        }
-                    },
-                ]
-            )
-        ),
-        key=lambda x: x["fecha"],
-    )
+    # Por día: eventos + usuarios únicos + DESGLOSE POR MÓDULO (2026-11-25,
+    # 9.ª tanda: barras apiladas por módulo en el dashboard de uso). Se agrupa
+    # por (fecha, módulo clasificado) y se re-ensambla en Python (usuarios de
+    # la cubeta = unión de los usuarios de cada módulo). Las claves
+    # fecha/eventos/usuarios no cambian → uso-kabi (UsoPortalKP) intacto.
+    _clasif_modulo = {
+        "$ifNull": [
+            "$modulo",
+            {"$concat": ["portal_", {"$ifNull": ["$cliente_id", "sin_clasificar"]}]},
+        ]
+    }
+    acumulado_dia: dict = {}
+    for g in col_eventos.aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": {"fecha": "$fecha_col", "modulo": _clasif_modulo},
+                    "eventos": {"$sum": 1},
+                    "usr": {"$addToSet": "$usuario"},
+                }
+            },
+        ]
+    ):
+        fecha = g["_id"]["fecha"]
+        acc = acumulado_dia.setdefault(fecha, {"usr": set(), "mods": Counter()})
+        acc["usr"].update(g["usr"])
+        acc["mods"][g["_id"]["modulo"]] += g["eventos"]
+    por_dia = [
+        {
+            "fecha": fecha,
+            "eventos": sum(acc["mods"].values()),
+            "usuarios": len(acc["usr"]),
+            "por_modulo": dict(acc["mods"]),
+        }
+        for fecha, acc in sorted(acumulado_dia.items())
+    ]
 
     # Por usuario: una sola pasada; el desglose por evento se cuenta en Python.
     # ⚠️ $first como ACUMULADOR solo vale en el nivel superior del $group —
@@ -280,6 +337,75 @@ async def resumen(
         key=lambda x: -x["eventos"],
     )
 
+    # (2026-11-25) Por módulo de la app: los eventos del portal Kabi (legacy y
+    # actuales) no llevan `modulo` — el $ifNull los clasifica como
+    # portal_<cliente_id> para que no aparezcan como null.
+    por_modulo = sorted(
+        (
+            {
+                "modulo": d["_id"],
+                "eventos": d["eventos"],
+                "usuarios": len(d["usr"]),
+            }
+            for d in col_eventos.aggregate(
+                [
+                    {"$match": match},
+                    {
+                        "$group": {
+                            "_id": {
+                                "$ifNull": [
+                                    "$modulo",
+                                    {
+                                        "$concat": [
+                                            "portal_",
+                                            {"$ifNull": ["$cliente_id", "sin_clasificar"]},
+                                        ]
+                                    },
+                                ]
+                            },
+                            "eventos": {"$sum": 1},
+                            "usr": {"$addToSet": "$usuario"},
+                        }
+                    },
+                ]
+            )
+        ),
+        key=lambda x: -x["eventos"],
+    )
+
+    # (2026-11-25) Por hora del día en Colombia (0-23): horas pico, con
+    # desglose por módulo (9.ª tanda). Los eventos legacy (sin hora_col)
+    # quedan fuera — el frontend rellena las 24 horas.
+    acumulado_hora: dict = {}
+    for g in col_eventos.aggregate(
+        [
+            {"$match": {**match, "hora_col": {"$type": "int"}}},
+            {
+                "$group": {
+                    "_id": {"hora": "$hora_col", "modulo": _clasif_modulo},
+                    "eventos": {"$sum": 1},
+                    "usr": {"$addToSet": "$usuario"},
+                }
+            },
+        ]
+    ):
+        hora = g["_id"]["hora"]
+        acc = acumulado_hora.setdefault(hora, {"usr": set(), "mods": Counter()})
+        acc["usr"].update(g["usr"])
+        acc["mods"][g["_id"]["modulo"]] += g["eventos"]
+    por_hora = [
+        {
+            "hora": hora,
+            "eventos": sum(acc["mods"].values()),
+            "usuarios": len(acc["usr"]),
+            "por_modulo": dict(acc["mods"]),
+        }
+        # ⚠️ iterar .items(): usar solo `for hora in ...` reutilizaría la
+        # variable `acc` que FUGA de la comprehension de por_dia (bug real
+        # detectado por los tests: todas las horas mostraban el último día).
+        for hora, acc in sorted(acumulado_hora.items())
+    ]
+
     sesiones = list(
         col_eventos.aggregate(
             [
@@ -306,11 +432,14 @@ async def resumen(
             "por_evento": por_evento,
             "por_pestana": por_pestana,
             "por_cliente": por_cliente,
+            "por_modulo": por_modulo,
+            "por_hora": por_hora,
         },
         "rango": {
             "desde": desde_val,
             "hasta": hasta_val,
             "cliente_id": cliente_id,
+            "modulo": modulo,
             "usuario_filtro": usuario_filtro,
             "audiencia": audiencia,
         },

@@ -24,6 +24,7 @@ API REST para el sistema de gestión de pedidos y pacientes Medical Care.
 - `POST /loginseguridad` - Login seguridad
 - `POST /loginConductor` - Login conductor
 - `GET /perfiles-disponibles` - Lista de perfiles válidos
+- `GET /perfiles-meta` - Matriz de perfiles con grupo/etiqueta/descripción (para el formulario agrupado de GestionUsuarios; 2026-11-25)
 - `GET /despachadores` - Lista de despachadores
 
 ### Pacientes Medical Care (`/pacientes-medical-care`)
@@ -1282,3 +1283,39 @@ Réplica interna del módulo financiero externo (`ModuloFinanciero-api/front`) D
 - **`GET /vehiculos/obtener-vehiculos`** devuelve `perfil` (el real de la cuenta, best-effort) — el panel del conductor refresca la cookie `conductorPerfil` sin re-login.
 
 Front asociado (`integrapp-next`): tarjeta «🔎 Buscar cuenta y corregir su perfil» en `/revision/alta` (búsqueda libre, fuera del flujo de alta), «Corregir perfil» también en los resultados del paso 2, Swal direccional. Dep backend + frontend JUNTOS (el frontend nuevo manda `solicitante`; el backend viejo lo ignora → si se separa, frontend primero). Tests: `tests/test_cuentas_sin_vehiculo.py` (28 OK: autorización, promoción con auditoría, 409 por invitadas, idempotencia, buscar).
+
+## Actualizaciones Recientes (2026-11-25, «poner en orden la casa»)
+
+### Telemetría extendida a TODA la app (`rutas/telemetria.py`)
+
+- **`EventoBeacon`**: `cliente_id` pasó a **opcional** (los beacons de la app general no lo llevan) y entra el campo **`modulo`** (máx 30, se guarda en MAYÚSCULAS o None). El portal Kabi sigue enviando `cliente_id` igual que siempre (100% retrocompatible).
+- **`hora_col`** (int 0-23): hora del día en Colombia computada en el BACKEND a partir de `_hoy_colombia()` (no se confía en el reloj del cliente) — alimenta el análisis de horas pico. Eventos previos al cambio no lo traen (quedan fuera de `por_hora`, sin romperse).
+- **`EVENTOS_VALIDOS`**: + **`accion`** (genérico; `detalle.accion` nombra la acción concreta: export_excel, crear_oc, buscar_solicitud…) y **`login`**. Índices nuevos: `(modulo, fecha_col)` y `hora_col`.
+- **`GET /telemetria/resumen`**: param nuevo `modulo` y agregaciones nuevas **`por_modulo`** (los eventos legacy del portal Kabi se clasifican como `portal_<cliente_id>` vía `$ifNull`) y **`por_hora`**. Todo lo demás (kpi, por_dia, por_usuario, por_evento, por_pestana, por_cliente, audiencia, usuario_filtro) quedó igual → `/indicadores/uso-kabi` no cambió. Tests: `tests/test_telemetria_portal.py` (11).
+- ⚠️ **Deploy backend ANTES que el frontend nuevo**: el beacon general contra un backend viejo cae en 422 silencioso (lo traga el `.catch`) y se pierden datos.
+
+### Blindaje de perfiles + matriz con metadatos (`rutas/baseusuarios.py`)
+
+- **Validación contra `PERFILES_VALIDOS`** en `POST /` (crear) y `PATCH /{id}/perfil` (antes aceptaban cualquier string → perfiles fantasma; 422 claro ahora). `_normalizar_perfiles_adicionales` ya validaba contra su set.
+- **`PERFILES_META` + `GET /perfiles-meta`** (endpoint NUEVO; `/perfiles-disponibles` no cambia): lista `{perfil, grupo, etiqueta, descripcion, puede[], sin_acceso?}` — grupos OPERACIÓN / ANÁLISIS / FINANZAS / CLIENTES / SEGURIDAD / SOLO NOTIFICACIONES / ADMINISTRACIÓN / LEGADO. Alimenta el select agrupado de GestionUsuarios (el de crear usuarios dejó de ser una lista plana de siglas). OPERADOR lleva descripción que lo distingue de OPERATIVO; CLIENTE_FMC marcado `sin_acceso` (solo WhatsApp).
+- **`CONDUCTOR` salió de `PERFILES_VALIDOS`** (F8): los conductores reales viven en la colección `conductores` con login propio. Auditoría (`scripts/auditar_perfiles.py`, solo lectura): 97 usuarios, **3 cuentas CONDUCTOR legado en baseusuarios, ninguna en `conductores`** — desactivadas las 2 activas con `scripts/desactivar_conductores_legado.py` (respaldo sin claves: `respaldo_conductores_baseusuarios_2026-11-25.json`; PRUEBA123 ya estaba inactiva). `loginConductor` queda como legado (valida `["CONDUCTOR","ADMIN"]` inline, no contra la lista). CLIENTE_FMC: 0 usuarios hoy, se conserva con etiqueta. OPERADOR: 1 usuario, en uso.
+
+## Actualizaciones Recientes (2026-11-25, 3.ª tanda — control por-usuario de notificaciones)
+
+### Correo de placas aprobadas y aviso de revisión: interruptor por usuario
+
+Dos envíos masivos por perfil no tenían opt-out (y el de Seguridad además no filtraba por `activo`):
+
+- **`notificar_placas`** (default True; perfil FINANCIERO): `_notificar_financieros_aprobacion` (`vehiculos.py`) saltea a quien lo tenga en False — el correo de placas aprobadas (informe financiero + certificaciones) ya no es «todos los financieros». Test: `tests/test_informe_financiero.py::test_opt_out_notificar_placas`.
+- **`notificar_revisiones`** (default True; perfil SEGURIDAD): `enviar_notificacion_seguridad` y `_enviar_wa_seguridad` saltean a quien lo tenga en False; además el CORREO ganó el filtro de `activo` que solo tenía el WhatsApp (les llegaba a SEGURIDAD desactivados).
+- Patrón idéntico a `notificar_otros_costos` (2026-11-24): `Optional[bool] = None` en `ActualizarDatosInput` (`baseusuarios.py`), escritura en `PATCH /{id}/datos`, default True en `modelo_usuario()`, skip `is False` en el envío. Dep **backend PRIMERO** (el frontend nuevo envía los campos; el backend viejo los ignora sin romper, pero los toggles no guardarían).
+
+### Telemetría: desglose por módulo en por_dia/por_hora (9.ª tanda, 2026-11-25)
+
+Cada cubeta de `GET /telemetria/resumen` en `por_dia` y `por_hora` ahora incluye **`por_modulo`** ({módulo: eventos}) para las barras apiladas de `/indicadores/uso-app`. Se agrupa por (fecha|hora, módulo clasificado con el mismo `$ifNull` de por_modulo) y se re-ensambla en Python (usuarios de la cubeta = unión de los de cada módulo). Claves fecha/eventos/usuarios intactas → `/indicadores/uso-kabi` (UsoPortalKP) no cambia. Tests: `tests/test_telemetria_portal.py` (11). ⚠️ Bug encontrado por los tests: una comprehension `for hora in sorted(x)` que usaba la variable `acc` FUGADA de la comprehension anterior daba valores del último día en todas las horas — iterar `.items()`. Dep backend PRIMERO que el frontend de la 9.ª tanda.
+
+## Actualizaciones Recientes (2026-11-25, 10.ª tanda)
+
+### Nuevo módulo: Apariencia — efectos de temporada (`rutas/apariencia.py`)
+
+El ADMIN configura el efecto visual global de la app (navidad, halloween, fiestas patrias, celebración, san valentín, semana santa) desde `/Apariencia` del hub. Colección **`config_apariencia`** (1 doc: efecto + auditoría). `GET /apariencia` público con cache en memoria 60 s; `PUT` solo ADMIN (patrón `_resolver_usuario`/`_requiere`), valida contra `EFECTOS_VALIDOS` (422) e invalida el cache para efecto inmediato. Tests: `tests/test_apariencia.py` (5). Registrar en `main.py` (hecho). Dep backend PRIMERO que el frontend de la 10.ª tanda.

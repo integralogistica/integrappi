@@ -1,0 +1,31 @@
+[
+  {
+    "_id": "6932efd69e2858994136fe27",
+    "nombre": "SANTIAGO ACOSTA",
+    "correo": "SANTIAGOZARATEACOSTA@GMAIL.COM",
+    "regional": "BUCARAMANGA",
+    "celular": "3102084306",
+    "perfil": "CONDUCTOR",
+    "usuario": "PRUEBA123",
+    "recovery_code": "",
+    "activo": false
+  },
+  {
+    "_id": "694a9fa9e065fafa58ae5c83",
+    "nombre": "PEPITO PEREZ",
+    "correo": "RICHARD223015@GMAIL.COM",
+    "regional": "FUNZA",
+    "celular": "3124841812",
+    "perfil": "CONDUCTOR",
+    "usuario": "RICHARD223015@GMAIL.COM"
+  },
+  {
+    "_id": "695d3151e065fafa58ae5d48",
+    "nombre": "YAMID LEITON",
+    "correo": "YAMIDLEITON84@GMAIL.COM",
+    "regional": "CALI",
+    "celular": "3116203027",
+    "perfil": "CONDUCTOR",
+    "usuario": "YAMIDLEITON84@GMAIL.COM"
+  }
+]

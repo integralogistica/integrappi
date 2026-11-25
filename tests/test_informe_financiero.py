@@ -243,6 +243,27 @@ class NotificacionFinancierosTests(unittest.TestCase):
                           side_effect=AssertionError("no debía enviar")):
             vehiculos._notificar_financieros_aprobacion(_vehiculo())  # no raise
 
+    def test_opt_out_notificar_placas(self):
+        """(2026-11-25) Interruptor por usuario: un FINANCIERO con
+        `notificar_placas: False` queda fuera de los destinatarios (default
+        True; sólo se saltea si es exactamente False)."""
+        enviado = {}
+
+        def _enviar(params):
+            enviado.update(params)
+
+        fake_base = FakeColeccion([
+            {"usuario": "FIN ROSA", "correo": "rosa@integra.com", "perfil": "FINANCIERO", "activo": True},
+            {"usuario": "FIN APAGADO", "correo": "apagado@integra.com", "perfil": "FINANCIERO",
+             "activo": True, "notificar_placas": False},
+        ])
+        with patch.object(vehiculos, "coleccion_baseusuarios", fake_base), \
+             patch.object(vehiculos, "_pdf_informe_financiero", return_value=b"%PDF-informe"), \
+             patch.object(vehiculos, "_descargar_blob", return_value=b"x"), \
+             patch.object(vehiculos.resend.Emails, "send", side_effect=_enviar):
+            vehiculos._notificar_financieros_aprobacion(_vehiculo())
+        self.assertEqual(enviado["to"], ["rosa@integra.com"])
+
     def test_aprobacion_real_dispara_y_reactivacion_no(self):
         import asyncio
 

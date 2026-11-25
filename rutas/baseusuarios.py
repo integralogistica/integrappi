@@ -105,6 +105,11 @@ class ActualizarDatosInput(BaseModel):
     # (2026-11-24) WhatsApp de Otros Costos: False = esta persona NO recibe las
     # notificaciones del módulo aunque tenga el perfil. None = no cambiar.
     notificar_otros_costos: Optional[bool] = None
+    # (2026-11-25) Correo de placas APROBADAS (informe financiero, perfil
+    # FINANCIERO) y correo+WA de placas PENDIENTES de revisión (perfil
+    # SEGURIDAD): False = no recibe. None = no cambiar. Default True.
+    notificar_placas: Optional[bool] = None
+    notificar_revisiones: Optional[bool] = None
 
 class UsuarioLite(BaseModel):
     id: str
@@ -160,6 +165,10 @@ def modelo_usuario(u) -> dict:
         "activo": u.get("activo", True),
         # (2026-11-24) False = NO recibe los WhatsApp de Otros Costos.
         "notificar_otros_costos": u.get("notificar_otros_costos", True),
+        # (2026-11-25) False = NO recibe el correo de placas aprobadas
+        # (informe financiero) ni el correo/WA de placas pendientes de revisión.
+        "notificar_placas": u.get("notificar_placas", True),
+        "notificar_revisiones": u.get("notificar_revisiones", True),
         "notificaciones_mc": u.get("notificaciones_mc") or [],
         # En BD puede ser ObjectId (scripts viejos) o string: normalizar.
         "empresa_id_seguridad": str(u["empresa_id"]) if u.get("empresa_id") else None,
@@ -540,6 +549,13 @@ async def crear_baseusuario(data: BaseUsuario):
     # valida y DERIVA los portales clásicos (los perfiles externos no reciben).
     # Si no viene, se usa el comportamiento histórico (clientes directo).
     perfil_nuevo = data.perfil.upper()
+    # (2026-11-25) Blindaje: el perfil DEBE ser uno de la matriz válida —
+    # antes se aceptaba cualquier string y quedaban perfiles fantasma en BD.
+    if perfil_nuevo not in PERFILES_VALIDOS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Perfil inválido: '{perfil_nuevo}'. Válidos: {', '.join(PERFILES_VALIDOS)}",
+        )
     nits = _normalizar_clientes_siscore(data.clientes_siscore) if data.clientes_siscore is not None else None
     if perfil_nuevo in ("CLIENTE_FMC", "CLIENTE"):
         clientes_val = []
@@ -577,11 +593,87 @@ async def obtener_baseusuarios():
 # (2026-10-14) PADRINO: como Seguridad pero SOLO impersonar placas para
 # cargar documentos/datos — sin autorizar estados ni gestionar conductores
 # (guards en vehiculos.actualizar-estado y conductores.invitar/desvincular).
-PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONDUCTOR', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'PADRINO', 'SEGURIDAD', 'VISUALIZADOR']
+# (2026-11-25, F8) CONDUCTOR salió de la matriz: los conductores reales viven
+# en la colección `conductores` (CONDUCTOR/TENEDOR) con login propio
+# (loginConductor de este router queda como legado para cuentas ADMIN de
+# soporte). Las 3 cuentas legado de baseusuarios fueron desactivadas el mismo
+# día (scripts/desactivar_conductores_legado.py, respaldo sin claves).
+PERFILES_VALIDOS = ['ADMIN', 'ANALISTA', 'CLIENTE', 'CLIENTE_ESTUDIOS', 'CLIENTE_FMC', 'CONTROL', 'COORDINADOR', 'DESPACHADOR', 'FINANCIERO', 'OPERADOR', 'OPERATIVO', 'PADRINO', 'SEGURIDAD', 'VISUALIZADOR']
+
+# (2026-11-25) Metadatos de la matriz de perfiles para GestionUsuarios: agrupa
+# y DESCRIBE qué puede hacer cada perfil — crear usuarios dejó de ser un
+# dropdown plano de 15 siglas sin contexto. `sin_acceso` marca perfiles que no
+# ingresan a la app (solo reciben notificaciones). Mantener sincronizado con
+# PERFILES_VALIDOS (cada perfil válido DEBE tener su entrada acá).
+PERFILES_META = [
+    # ── OPERACIÓN ──
+    {"perfil": "OPERATIVO", "grupo": "OPERACIÓN", "etiqueta": "Operativo",
+     "descripcion": "Operación multi-módulo: Solicitud de Vehículos, Otros Costos (crea), Cuentas por Placa, Citas y Novedades OT.",
+     "puede": ["Solicitud de Vehículos", "Otros Costos (crea)", "Cuentas por Placa", "Portal Mis Indicadores"]},
+    {"perfil": "COORDINADOR", "grupo": "OPERACIÓN", "etiqueta": "Coordinador",
+     "descripcion": "Supervisa la operación: aprueba planillas ≤7% y Otros Costos ≤ $500.000 dentro de su alcance de clientes.",
+     "puede": ["Todo lo del Operativo", "Aprobaciones (con alcance)"]},
+    {"perfil": "CONTROL", "grupo": "OPERACIÓN", "etiqueta": "Control",
+     "descripcion": "Control total de aprobaciones (planillas >7%, uso <50%, Otros Costos > $500.000) y edición de tarifarios.",
+     "puede": ["Todas las aprobaciones", "Tarifarios (edita)"]},
+    {"perfil": "DESPACHADOR", "grupo": "OPERACIÓN", "etiqueta": "Despachador",
+     "descripcion": "Despacho en Pedidos Kabi: carga y edita pedidos; crea Otros Costos y Cuentas por Placa.",
+     "puede": ["Pedidos Kabi", "Otros Costos (crea)", "Cuentas por Placa"]},
+    {"perfil": "OPERADOR", "grupo": "OPERACIÓN", "etiqueta": "Operador (Pedidos)",
+     "descripcion": "Operación del portal Kabi — gestión de pedidos por regional (carga, edición, autorización). No confundir con Operativo.",
+     "puede": ["Pedidos Kabi (su regional)"]},
+    # ── ANÁLISIS ──
+    {"perfil": "ANALISTA", "grupo": "ANÁLISIS", "etiqueta": "Analista",
+     "descripcion": "Trámite Vulcano de Otros Costos, aprueba planillas PREAPROBADAS, ve todos los históricos e indicadores.",
+     "puede": ["Otros Costos (trámite)", "Históricos", "Portal Mis Indicadores"]},
+    {"perfil": "VISUALIZADOR", "grupo": "ANÁLISIS", "etiqueta": "Visualizador",
+     "descripcion": "Solo lectura: dashboards de indicadores, portal de clientes e históricos.",
+     "puede": ["Indicadores (lectura)", "Históricos (lectura)"]},
+    # ── FINANZAS ──
+    {"perfil": "FINANCIERO", "grupo": "FINANZAS", "etiqueta": "Financiero",
+     "descripcion": "Paga Otros Costos (con trámite OK), carga archivo bancario, Módulo Financiero e informe de Estado de Vehículos.",
+     "puede": ["Otros Costos (paga)", "Módulo Financiero"]},
+    # ── CLIENTES ──
+    {"perfil": "CLIENTE", "grupo": "CLIENTES", "etiqueta": "Cliente externo",
+     "descripcion": "Portal «Mis Indicadores»: ve SOLO los dashboards de los clientes que se le asignen.",
+     "puede": ["Portal Mis Indicadores (asignado)"]},
+    # ── SEGURIDAD ──
+    {"perfil": "SEGURIDAD", "grupo": "SEGURIDAD", "etiqueta": "Seguridad",
+     "descripcion": "Portal de revisión En Ruta: aprueba vehículos, gestiona estudios y cuentas de conductores.",
+     "puede": ["Portal Seguridad (/revision)"]},
+    {"perfil": "PADRINO", "grupo": "SEGURIDAD", "etiqueta": "Padrino",
+     "descripcion": "Vista simplificada de Seguridad: SOLO impersonar placas para cargar documentos. Se asigna normalmente como ADICIONAL a otro perfil.",
+     "puede": ["Seguridad (solo carga de docs)"]},
+    {"perfil": "CLIENTE_ESTUDIOS", "grupo": "SEGURIDAD", "etiqueta": "Empresa de estudios",
+     "descripcion": "Empresa externa de estudios de seguridad: consulta los estudios publicados de su empresa.",
+     "puede": ["Portal de estudios"]},
+    # ── SOLO NOTIFICACIONES ──
+    {"perfil": "CLIENTE_FMC", "grupo": "SOLO NOTIFICACIONES", "etiqueta": "Solo notificaciones",
+     "descripcion": "NO ingresa a la aplicación: solo recibe notificaciones WhatsApp de Medical Care. Se crea sin clave.",
+     "puede": ["Notificaciones WhatsApp"], "sin_acceso": True},
+    # ── ADMINISTRACIÓN ──
+    {"perfil": "ADMIN", "grupo": "ADMINISTRACIÓN", "etiqueta": "Administrador",
+     "descripcion": "Acceso total: gestión de usuarios, todos los módulos, aprobaciones y configuración.",
+     "puede": ["Todo"]},
+    # LEGADO (pendiente limpieza 2026-11-25 F8: los conductores reales viven en
+    # la colección `conductores`; se mantiene para no romper cuentas históricas).
+    {"perfil": "CONDUCTOR", "grupo": "LEGADO", "etiqueta": "Conductor (legado)",
+     "descripcion": "PERFIL LEGADO — no crear cuentas nuevas: los conductores se registran solos en el portal En Ruta.",
+     "puede": [], "sin_acceso": True},
+]
+
 
 @ruta_baseusuarios.get("/perfiles-disponibles", response_model=List[str])
 async def obtener_perfiles_disponibles():
     return PERFILES_VALIDOS
+
+
+@ruta_baseusuarios.get("/perfiles-meta", response_model=List[dict])
+async def obtener_perfiles_meta():
+    """(2026-11-25) Matriz de perfiles con grupo/etiqueta/descripción para el
+    formulario de GestionUsuarios (agrupado por optgroup + panel explicativo).
+    Complementa /perfiles-disponibles (que sigue devolviendo la lista plana)."""
+    return PERFILES_META
 
 
 @ruta_baseusuarios.get("/despachadores", response_model=List[UsuarioLite])
@@ -797,6 +889,11 @@ async def actualizar_datos_usuario(id: str, data: ActualizarDatosInput):
     # (2026-11-24) Interruptor de WhatsApp de Otros Costos (None = no tocar)
     if data.notificar_otros_costos is not None:
         actualiza["notificar_otros_costos"] = bool(data.notificar_otros_costos)
+    # (2026-11-25) Interruptores de notificaciones de placas (None = no tocar)
+    if data.notificar_placas is not None:
+        actualiza["notificar_placas"] = bool(data.notificar_placas)
+    if data.notificar_revisiones is not None:
+        actualiza["notificar_revisiones"] = bool(data.notificar_revisiones)
 
     result = coleccion_usuarios.update_one({"_id": oid}, {"$set": actualiza})
     if result.matched_count == 0:
@@ -893,6 +990,12 @@ async def actualizar_perfil_usuario(id: str, data: ActualizarPerfilInput):
     perfil_norm = data.perfil.strip().upper()
     if not perfil_norm:
         raise HTTPException(status_code=400, detail="El perfil no puede estar vacío")
+    # (2026-11-25) Blindaje contra la matriz válida (mismo criterio del POST /).
+    if perfil_norm not in PERFILES_VALIDOS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Perfil inválido: '{perfil_norm}'. Válidos: {', '.join(PERFILES_VALIDOS)}",
+        )
 
     result = coleccion_usuarios.update_one(
         {"_id": oid},

@@ -69,6 +69,23 @@ class ColEventosFake(FakeColeccion):
             return [{"_id": "gerenciales", "total": 8}, {"_id": "trazabilidad", "total": 4}]
         if grupo == "$cliente_id":
             return [{"_id": "fresenius-kabi", "eventos": 12, "usr": ["KABI.USER"]}]
+        # (2026-11-25) Telemetría general: por módulo (expresión $ifNull como
+        # _id) y por hora del día en Colombia. (9.ª tanda) por_dia/por_hora
+        # agrupan por dict {fecha|hora, modulo} — se distinguen por sus claves.
+        if isinstance(grupo, dict) and "fecha" in grupo:
+            return [
+                {"_id": {"fecha": "2026-11-18", "modulo": "OTROS_COSTOS"}, "eventos": 6, "usr": ["A", "B"]},
+                {"_id": {"fecha": "2026-11-18", "modulo": "portal_fresenius-kabi"}, "eventos": 3, "usr": ["A"]},
+                {"_id": {"fecha": "2026-11-19", "modulo": "OTROS_COSTOS"}, "eventos": 5, "usr": ["A"]},
+            ]
+        if isinstance(grupo, dict) and "hora" in grupo:
+            return [
+                {"_id": {"hora": 9, "modulo": "OTROS_COSTOS"}, "eventos": 5, "usr": ["A", "B"]},
+                {"_id": {"hora": 9, "modulo": "MODULOS"}, "eventos": 2, "usr": ["A"]},
+                {"_id": {"hora": 14, "modulo": "OTROS_COSTOS"}, "eventos": 5, "usr": ["A"]},
+            ]
+        if isinstance(grupo, dict) and "$ifNull" in grupo:
+            return [{"_id": "portal_fresenius-kabi", "eventos": 12, "usr": ["KABI.USER"]}]
         if grupo is None:
             return [{"s": ["ses-1", "ses-2"]}]
         raise AssertionError(f"Pipeline no esperado: {grupo}")
@@ -137,6 +154,29 @@ class TestEventoBeacon(unittest.TestCase):
         self.assertEqual(doc["detalle"]["guia"], "801233440")
         self.assertEqual(len(doc["detalle"]["x"]), 120)
 
+    def test_beacon_app_general_sin_cliente_id_con_modulo(self):
+        """(2026-11-25) Beacon de la app general: sin cliente_id, con módulo;
+        modulo se guarda en MAYÚSCULAS y hora_col es un entero 0-23."""
+        r = self._beacon(
+            cliente_id=None,
+            modulo="otros_costos",
+            modo="interno",
+            evento="accion",
+            detalle={"accion": "export_excel"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["guardado"])
+        doc = self.col.documents[-1]
+        self.assertIsNone(doc["cliente_id"])
+        self.assertEqual(doc["modulo"], "OTROS_COSTOS")
+        self.assertIsInstance(doc["hora_col"], int)
+        self.assertTrue(0 <= doc["hora_col"] <= 23)
+
+    def test_beacon_login_y_accion_son_validos(self):
+        for evento in ("login", "accion"):
+            r = self._beacon(evento=evento)
+            self.assertTrue(r.json()["guardado"], evento)
+
 
 class TestResumen(unittest.TestCase):
     def setUp(self):
@@ -174,6 +214,16 @@ class TestResumen(unittest.TestCase):
         self.assertEqual(u["por_evento"], {"pageview": 2, "consulta_guia": 1})
         self.assertEqual(data["por_pestana"][0]["pestana"], "gerenciales")
         self.assertEqual(data["por_cliente"][0]["cliente_id"], "fresenius-kabi")
+        # (2026-11-25) Agregaciones de la telemetría general
+        self.assertEqual(data["por_modulo"][0]["modulo"], "portal_fresenius-kabi")
+        self.assertEqual(data["por_modulo"][0]["eventos"], 12)
+        self.assertEqual(data["por_hora"][0]["hora"], 9)
+        # (9.ª tanda) Desglose por módulo en cada cubeta de día/hora.
+        self.assertEqual(data["por_dia"][0]["fecha"], "2026-11-18")
+        self.assertEqual(data["por_dia"][0]["eventos"], 9)  # 6 OC + 3 portal
+        self.assertEqual(data["por_dia"][0]["por_modulo"], {"OTROS_COSTOS": 6, "portal_fresenius-kabi": 3})
+        self.assertEqual(data["por_hora"][0]["por_modulo"], {"OTROS_COSTOS": 5, "MODULOS": 2})
+        self.assertIn("modulo", r.json()["rango"])
         self.assertIn("rango", r.json())
 
     def test_resumen_fecha_invalida(self):

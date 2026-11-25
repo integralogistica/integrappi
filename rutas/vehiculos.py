@@ -1550,9 +1550,25 @@ def enviar_notificacion_seguridad(placa: str, nombre_conductor_busqueda: str):
         return
 
     try:
-        # 1. Buscar destinatarios (Usuarios de Seguridad)
-        cursor_seguridad = coleccion_baseusuarios.find({"perfil": "SEGURIDAD"})
-        destinatarios = [u.get("correo") for u in cursor_seguridad if u.get("correo")]
+        # 1. Buscar destinatarios (Usuarios de Seguridad ACTIVOS).
+        # (2026-11-25) Fix: la query no filtraba por `activo` — les llegaba el
+        # aviso a SEGURIDAD desactivados (históricos sin el campo cuentan como
+        # activos, mismo criterio del resto del sistema). Además, el interruptor
+        # por usuario `notificar_revisiones` (modal Notificaciones) permite
+        # excluir a quien lo apagó — default True.
+        cursor_seguridad = coleccion_baseusuarios.find({
+            "perfil": "SEGURIDAD",
+            "$or": [{"activo": True}, {"activo": {"$exists": False}}],
+        })
+        destinatarios = []
+        for u in cursor_seguridad:
+            correo = (u.get("correo") or "").strip()
+            if not correo:
+                continue
+            if u.get("notificar_revisiones") is False:
+                print(f"[seguridad] {u.get('usuario')} tiene notificar_revisiones=False: se omite el aviso de revisión")
+                continue
+            destinatarios.append(correo)
 
         if not destinatarios:
             print(f"[RESEND] ⚠️ No se encontraron usuarios SEGURIDAD para la placa {placa}.")
@@ -1655,6 +1671,11 @@ def _enviar_wa_seguridad(placa: str, nombre_conductor: str = "") -> None:
             return
         enviados = 0
         for u in usuarios:
+            # (2026-11-25) Interruptor por usuario (modal Notificaciones): el
+            # flag `notificar_revisiones` cubre AMBOS canales del aviso.
+            if u.get("notificar_revisiones") is False:
+                print(f"[WA-Seguridad] {u.get('usuario')} tiene notificar_revisiones=False: se omite.")
+                continue
             celular = _normalizar_celular_co(u.get("celular"))
             if not celular:
                 print(f"[WA-Seguridad] {u.get('usuario') or u.get('correo') or '?'} sin celular valido; se saltea.")
@@ -5911,8 +5932,19 @@ def _notificar_financieros_aprobacion(vehiculo: dict) -> None:
             "perfil": "FINANCIERO",
             "$or": [{"activo": True}, {"activo": {"$exists": False}}],
         }))
-        destinatarios = [f["correo"].strip() for f in financieros
-                         if (f.get("correo") or "").strip()]
+        # (2026-11-25) Interruptor por usuario (modal Notificaciones de
+        # GestionUsuarios): quien apagó `notificar_placas` no recibe el correo
+        # — default True, sólo se saltea si es exactamente False (mismo patrón
+        # de notificar_otros_costos en otros_costos._enviar_a_perfil).
+        destinatarios = []
+        for f in financieros:
+            correo = (f.get("correo") or "").strip()
+            if not correo:
+                continue
+            if f.get("notificar_placas") is False:
+                print(f"[financiero] {f.get('usuario')} tiene notificar_placas=False: se omite el correo de aprobación")
+                continue
+            destinatarios.append(correo)
         if not destinatarios:
             print("[financiero] Aprobación sin destinatarios: no hay perfiles FINANCIERO activos con correo")
             return
