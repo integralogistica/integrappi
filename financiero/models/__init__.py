@@ -8,10 +8,14 @@ from financiero.models.base import TimestampMixin, VersionMixin, JSONFin
 from financiero.models.usuario import Usuario, RolUsuario
 from financiero.models.consecutivo import Consecutivo
 from financiero.models.requisicion import Requisicion, EstadoRequisicion
+from financiero.models.tercero import EstadoTercero, TerceroCompras
 from financiero.models.traslado import Traslado, EstadoTraslado
 from financiero.models.viaje import Viaje, EstadoViaje, CiudadViaje
 from financiero.models.adjunto import Adjunto
-from financiero.models.catalogo import CentroCosto, Proveedor, PresupuestoResponsable, PersonalViaje
+from financiero.models.catalogo import CentroCosto, Proveedor, PresupuestoResponsable, PersonalViaje, SedeCajaMenor
+from financiero.models.dian import TransportadorOmitido, DianUpload, DianToken
+from financiero.models.contabilidad import EstadoQuote, Quote
+from financiero.models.catalogo import ContratoServicio
 from financiero.models.auditoria import RegistroAuditoria
 from financiero.models.configuracion import Configuracion
 from financiero.models.contabilidad import (
@@ -29,6 +33,8 @@ __all__ = [
     "Consecutivo",
     "Requisicion",
     "EstadoRequisicion",
+    "EstadoTercero",
+    "TerceroCompras",
     "Traslado",
     "EstadoTraslado",
     "Viaje",
@@ -39,6 +45,13 @@ __all__ = [
     "Proveedor",
     "PresupuestoResponsable",
     "PersonalViaje",
+    "SedeCajaMenor",
+    "TransportadorOmitido",
+    "DianUpload",
+    "DianToken",
+    "EstadoQuote",
+    "Quote",
+    "ContratoServicio",
     "RegistroAuditoria",
     "Configuracion",
     "CajaMenor",

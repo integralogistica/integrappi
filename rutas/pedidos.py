@@ -1,8 +1,9 @@
 # archivo: rutas/ruta_pedidos.py
 
-from fastapi import APIRouter, HTTPException, status, UploadFile, File, Body, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Body, Form, Query
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from bson import ObjectId
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Literal
@@ -15,6 +16,7 @@ import time
 from collections import defaultdict 
 from zoneinfo import ZoneInfo
 from fastapi import Request
+from rutas.baseusuarios import obtener_baseusuario_actual
 
 # ------------------------------
 # 🔗 Conexión MongoDB
@@ -1764,6 +1766,83 @@ async def cargar_numeros_pedido(
         "vehiculos_completados": movidos
     }
 
+
+
+class ReabrirVehiculoPayload(BaseModel):
+    consecutivo_vehiculo: str
+    motivo: str
+    destino: Literal["vulcano", "edicion"]
+
+
+@ruta_pedidos.post("/reabrir-vehiculo")
+def reabrir_vehiculo(
+    payload: ReabrirVehiculoPayload,
+    usuario: dict = Depends(obtener_baseusuario_actual),
+):
+    if (usuario.get("perfil") or "").upper() != "ADMIN":
+        raise HTTPException(403, "Solo ADMIN puede reabrir vehículos")
+
+    cv = payload.consecutivo_vehiculo.strip()
+    motivo = payload.motivo.strip()
+    if not cv or not motivo or len(motivo) > 500:
+        raise HTTPException(400, "Indica el consecutivo y un motivo de hasta 500 caracteres")
+
+    filtro = {"consecutivo_vehiculo": cv}
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def mover(session):
+        if coleccion_pedidos.find_one(filtro, {"_id": 1}, session=session):
+            raise HTTPException(409, "El consecutivo ya tiene registros en Pedidos")
+        docs = list(coleccion_pedidos_completados.find(filtro, session=session))
+        if not docs:
+            raise HTTPException(404, "El consecutivo no está en Pedidos Completados")
+        if any(doc.get("estado") != "COMPLETADO" for doc in docs):
+            raise HTTPException(409, "Todos los registros del consecutivo deben estar completados")
+
+        for doc in docs:
+            doc.setdefault("historial_reaperturas", []).append({
+                "usuario": usuario["usuario"],
+                "fecha": fecha,
+                "motivo": motivo,
+                "destino": payload.destino,
+                "numero_pedido": doc.pop("numero_pedido", None),
+                "pedido_actualizado_vulcano_por": doc.pop("pedido_actualizado_vulcano_por", None),
+                "fecha_pedido_actualizado_vulcano": doc.pop("fecha_pedido_actualizado_vulcano", None),
+                "autorizado_por": doc.get("autorizado_por"),
+                "fecha_autorizacion": doc.get("fecha_autorizacion"),
+            })
+            doc["estado"] = "AUTORIZADO"
+            if payload.destino == "edicion":
+                estado, porcentaje = estado_por_autorizacion(
+                    float(doc.get("total_flete_vehiculo") or 0),
+                    float(doc.get("costo_teorico_vehiculo") or 0),
+                )
+                doc["estado"] = aplicar_regla_uso(
+                    estado, doc.get("total_kilos_vehiculo"),
+                    doc.get("tipo_vehiculo_sicetac"), doc.get("tipo_vehiculo"),
+                )
+                doc["porcentaje_sobre_teorico"] = porcentaje
+                preautorizado = doc["estado"] == "PREAUTORIZADO"
+                doc["autorizado_por"] = "SISTEMA" if preautorizado else "NA"
+                doc["fecha_autorizacion"] = fecha if preautorizado else "NA"
+
+        coleccion_pedidos.insert_many(docs, session=session)
+        borrados = coleccion_pedidos_completados.delete_many(
+            {"_id": {"$in": [doc["_id"] for doc in docs]}}, session=session,
+        )
+        if borrados.deleted_count != len(docs):
+            raise HTTPException(409, "Cambió el grupo durante la reapertura")
+        return {"consecutivo_vehiculo": cv, "pedidos_reabiertos": len(docs)}
+
+    try:
+        with client.start_session() as session:
+            return session.with_transaction(mover)
+    except DuplicateKeyError as exc:
+        raise HTTPException(409, "Hay registros duplicados en Pedidos") from exc
+    except OperationFailure as exc:
+        if exc.code == 20:
+            raise HTTPException(503, "La reapertura requiere transacciones en MongoDB") from exc
+        raise
 
 
 # Exportar a excel COMPLETADOS por rango fechas

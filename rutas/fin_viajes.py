@@ -41,6 +41,17 @@ def exigir_viajero_propio(vj_in, usuario: Usuario):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo puedes solicitar viajes para ti mismo: el viajero debe ser el usuario que solicita.")
 
 
+def validar_ruta_y_duracion(vj_in):
+    """Reglas del formulario original: ciudades distintas y máximo 60 días por solicitud."""
+    if vj_in.origen == vj_in.destino:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El origen y el destino deben ser ciudades distintas.")
+    dias = (vj_in.fecha_fin.date() - vj_in.fecha_inicio.date()).days + 1
+    if dias < 1:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El regreso no puede ser anterior a la salida.")
+    if dias > 60:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El máximo es de 60 días por solicitud de viaje.")
+
+
 def firmas_viaje(vj: Viaje) -> dict:
     """Firmas electrónicas del formato, en el orden en que se van aprobando:
     solicitó -> autorizó -> controller. Cada una queda en None hasta que esa persona actúa."""
@@ -77,14 +88,20 @@ def es_admin(u: Usuario) -> bool:
     return u.rol == RolUsuario.ADMIN or u.es_admin_adicional
 
 
-def visible(v: Viaje, u: Usuario) -> bool:
+def _resp_anticipo_config(db: Session, u: Usuario) -> bool:
+    """Responsables de anticipo sumados por el administrador (viajes_responsables_anticipo)."""
+    return str(u.id) in {str(x) for x in cfg_obtener(db, "viajes_responsables_anticipo")}
+
+
+def visible(v: Viaje, u: Usuario, db: Session = None) -> bool:
     """Quien lo creó, su autorizador y el admin lo ven siempre; Tesorería, Compras, Controller
-    y Gerente financiero cuando ya pasó la autorización; los aprobadores de pagos cuando llega el anticipo."""
+    y Gerente financiero cuando ya pasó la autorización; los aprobadores de pagos (y los
+    responsables de anticipo de la configuración) cuando llega el anticipo."""
     if es_admin(u) or str(v.solicitante_id) == str(u.id) or (v.autorizador_id and str(v.autorizador_id) == str(u.id)):
         return True
     if u.rol in (RolUsuario.TESORERIA, RolUsuario.COMPRAS, RolUsuario.CONTROLLER, RolUsuario.GERENTE_FINANCIERO):
         return v.estado not in (EstadoViaje.SOLICITADO, EstadoViaje.RECHAZADO, EstadoViaje.BORRADOR)
-    if u.es_aprobador_pagos:
+    if u.es_aprobador_pagos or (db is not None and _resp_anticipo_config(db, u)):
         return v.estado in (EstadoViaje.TIQUETES_GESTIONADOS, EstadoViaje.ANTICIPO_PAGADO, EstadoViaje.LEGALIZADO, EstadoViaje.CERRADO)
     return False
 
@@ -100,7 +117,7 @@ def listar_viajes(
     if estado:
         stmt = stmt.where(Viaje.estado == estado)
     stmt = stmt.order_by(Viaje.created_at.desc())
-    return [enmascarar_viaje_segun_rol(v, current_user) for v in db.scalars(stmt).all() if visible(v, current_user)]
+    return [enmascarar_viaje_segun_rol(v, current_user) for v in db.scalars(stmt).all() if visible(v, current_user, db)]
 
 
 @router.get("/autorizadores", response_model=List[dict])
@@ -120,7 +137,7 @@ def listar_autorizadores(db: Session = Depends(get_db_fin), _: Usuario = Depends
 def obtener_viaje(id: uuid.UUID, db: Session = Depends(get_db_fin), current_user: Usuario = Depends(get_usuario_fin),
                     __seccion=Depends(require_seccion("viajes"))):
     v = db.get(Viaje, id)
-    if not v or not visible(v, current_user):
+    if not v or not visible(v, current_user, db):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Viaje no encontrado.")
     return enmascarar_viaje_segun_rol(v, current_user)
 
@@ -134,6 +151,7 @@ def crear_viaje(
     usuario: Usuario = Depends(require_not_consulta),
 ):
     exigir_viajero_propio(vj_in, usuario)
+    validar_ruta_y_duracion(vj_in)
     # Validar autorizador existente y con casilla/rol
     autorizador = db.get(Usuario, vj_in.autorizador_id)
     if not autorizador or not autorizador.activo:
@@ -202,6 +220,7 @@ def transicion_estado_viaje(
     id: uuid.UUID,
     transicion: AccionTransicionRequest,
     request: Request,
+    background: BackgroundTasks,
     db: Session = Depends(get_db_fin),
     usuario: Usuario = Depends(require_not_consulta),
 ):
@@ -250,7 +269,10 @@ def transicion_estado_viaje(
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Acción de viaje no reconocida.")
 
-    StateMachineService.validar_transicion_viaje(vj, nuevo_estado, usuario)
+    StateMachineService.validar_transicion_viaje(
+        vj, nuevo_estado, usuario,
+        resp_anticipo_extra=(accion == "PAGAR_ANTICIPO" and _resp_anticipo_config(db, usuario)),
+    )
 
     vj.estado = nuevo_estado
     vj.version += 1
@@ -271,6 +293,14 @@ def transicion_estado_viaje(
     db.commit()
     db.refresh(vj)
 
+    # Aviso al responsable del paso siguiente (fire-and-forget)
+    if accion == "AUTORIZAR":
+        notificaciones.viaje_autorizado(background, db, vj, usuario.nombre)
+    elif accion == "RECHAZAR":
+        notificaciones.viaje_rechazado(background, db, vj, transicion.observacion or "")
+    elif accion == "PAGAR_ANTICIPO":
+        notificaciones.viaje_anticipo_pagado(background, db, vj)
+
     AuditService.registrar(db=db, modulo="viajes", accion=accion, entidad_id=str(vj.id), usuario=usuario,
                            ip_cliente=get_client_ip(request), detalles={"consecutivo": vj.consecutivo, "estado": vj.estado.value})
     return enmascarar_viaje_segun_rol(vj, usuario)
@@ -286,6 +316,7 @@ def corregir_y_reenviar(id: uuid.UUID, vj_in: ViajeCreate, request: Request, ver
     if vj.estado != EstadoViaje.RECHAZADO:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Solo se corrigen viajes rechazados.")
     exigir_viajero_propio(vj_in, usuario)
+    validar_ruta_y_duracion(vj_in)
     autorizador = db.get(Usuario, vj_in.autorizador_id)
     if not autorizador or not autorizador.activo or not (
             autorizador.rol in (RolUsuario.ADMIN, RolUsuario.CONTROLLER, RolUsuario.GERENTE_FINANCIERO, RolUsuario.PRESIDENCIA)

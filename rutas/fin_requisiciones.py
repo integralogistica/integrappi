@@ -145,6 +145,22 @@ def crear_requisicion(
     else:
         notificaciones.req_pendiente_compras(background, db, nueva)
 
+    # Enlace con el proveedor nuevo creado por el front (fin.terceros_compras)
+    tercero_id = (req_in.datos_front or {}).get("tercero_id")
+    if tercero_id:
+        try:
+            tercero_uuid = uuid.UUID(str(tercero_id))
+        except (ValueError, TypeError, AttributeError):
+            tercero_uuid = None
+        if tercero_uuid:
+            from financiero.models.tercero import TerceroCompras
+            ter = db.get(TerceroCompras, tercero_uuid)
+            if ter and not ter.requisicion_id:
+                ter.requisicion_id = nueva.id
+                ter.consecutivo_req = nueva.consecutivo
+                ter.version += 1
+                db.commit()
+
     return nueva
 
 
@@ -236,6 +252,11 @@ def transicion_estado_requisicion(
         req.historial_cambios = hist
         db.commit()
         db.refresh(req)
+        notificaciones.req_entregada(background, db, req)
+        AuditService.registrar(
+            db=db, modulo="requisiciones", accion="ENTREGAR", entidad_id=str(req.id), usuario=usuario,
+            ip_cliente=get_client_ip(request), detalles={"consecutivo": req.consecutivo, "oc": req.oc_numero},
+        )
         return req
 
     elif accion == "RECIBIR_TOTAL":
@@ -272,6 +293,9 @@ def transicion_estado_requisicion(
         # Pago urgente aprobado → nace la fila en la bandeja de Tesorería
         if req.pago_urgente and req.pago_aprobado:
             from financiero.models.contabilidad import EstadoPagoUrgente, PagoUrgente
+            # Herencia bancaria del original: del catálogo de proveedores por NIT
+            from rutas.fin_pagos import datos_bancarios
+            heredado = datos_bancarios(db, req.proveedor_nit)
             db.add(PagoUrgente(
                 requisicion_id=req.id,
                 consecutivo_req=req.consecutivo,
@@ -281,6 +305,14 @@ def transicion_estado_requisicion(
                 valor=req.total,
                 fecha_requerida=req.pago_fecha or ahora,
                 estado=EstadoPagoUrgente.PENDIENTE.value,
+                origen="requisicion",
+                nit=req.proveedor_nit, nit_pago=req.proveedor_nit,
+                banco=heredado.get("banco"), tipo_cuenta=heredado.get("tipo_cuenta"),
+                no_cuenta=heredado.get("no_cuenta"),
+                tipo_doc="Factura",
+                requerimiento=f"ORDEN DE COMPRA {req.oc_numero} · REQUISICIÓN {req.consecutivo}".upper(),
+                asunto=((req.items[0].get("descripcion") if req.items else "") +
+                        (" Y OTROS" if len(req.items or []) > 1 else "")).upper() or None,
                 historial_cambios=[{
                     "fecha": ahora.isoformat(), "usuario": usuario.nombre, "username": usuario.username,
                     "accion": "CREAR", "estado_anterior": None, "estado_nuevo": EstadoPagoUrgente.PENDIENTE.value,

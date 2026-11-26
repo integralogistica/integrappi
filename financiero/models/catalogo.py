@@ -5,7 +5,9 @@ scripts/fin_semilla.py desde los datos del módulo externo).
 # tablas nuevas de presupuesto-responsables y personal-viajes que allá vivían
 # como JSON estático del front.
 """
-from sqlalchemy import Boolean, Integer, String
+import uuid
+
+from sqlalchemy import Boolean, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from financiero.constantes import ESQUEMA_FIN
@@ -66,4 +68,42 @@ class PersonalViaje(Base):
     nombre: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
     cargo: Mapped[str] = mapped_column(String(150), nullable=True)
     categoria: Mapped[str] = mapped_column(String(2), nullable=True)  # A/B/C
+    activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class SedeCajaMenor(Base):
+    """Maestro oficial de sedes de caja menor (ex MAESTRO_CAJAS_MENORES_SEDES
+    del front): responsable, cédula, jefe inmediato, CCO y subcuenta 110510xx
+    del cruce en Tesorería."""
+    __tablename__ = "cat_sedes_cm"
+    __table_args__ = ({"schema": ESQUEMA_FIN},)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    nombre: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)  # id del original (MONTEVIDEO, GALAPA...)
+    etiqueta: Mapped[str] = mapped_column(String(150), nullable=True)              # 'CEDI Montevideo'...
+    responsable: Mapped[str] = mapped_column(String(150), nullable=True)
+    identificacion: Mapped[str] = mapped_column(String(20), nullable=True)
+    jefe_inmediato: Mapped[str] = mapped_column(String(150), nullable=True)        # nombre; se mapea a fin.usuarios
+    cco: Mapped[str] = mapped_column(String(20), nullable=True)
+    cuenta: Mapped[str] = mapped_column(String(20), nullable=True)                 # 110510xx
+    activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ContratoServicio(Base):
+    """Maestro de contratos fijos de servicios públicos (ex getMasterContratos
+    que deducía de históricos): cada mes se replica una fila por contrato en
+    fin.servicios_publicos vía POST /fin/servicios/generar-periodo."""
+    __tablename__ = "cat_contratos_servicios"
+    __table_args__ = ({"schema": ESQUEMA_FIN},)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    servicio: Mapped[str] = mapped_column(String(80), nullable=False)
+    inmueble: Mapped[str] = mapped_column(String(150), nullable=False)
+    categoria: Mapped[str] = mapped_column(String(20), default="publicos", nullable=False)
+    concepto: Mapped[str] = mapped_column(String(150), nullable=True)
+    contrato: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    nit_tercero: Mapped[str] = mapped_column(String(50), nullable=True)
+    tercero: Mapped[str] = mapped_column(String(250), nullable=True)
+    fecha_exp: Mapped[str] = mapped_column(String(60), nullable=True)     # día de corte
+    url_pago: Mapped[str] = mapped_column(String(500), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

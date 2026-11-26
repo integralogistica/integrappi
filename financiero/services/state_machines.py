@@ -136,7 +136,8 @@ class StateMachineService:
         cls,
         vj: Viaje,
         nuevo_estado: EstadoViaje,
-        usuario: Usuario
+        usuario: Usuario,
+        resp_anticipo_extra: bool = False,
     ):
         actual = vj.estado
         admin = cls.es_admin(usuario)
@@ -175,7 +176,7 @@ class StateMachineService:
 
         # 3) Anticipo: Tesorería o aprobador de pagos, con presupuesto y tiquetes ya gestionados
         if actual == EstadoViaje.TIQUETES_GESTIONADOS and nuevo_estado == EstadoViaje.ANTICIPO_PAGADO:
-            permitido = usuario.rol == RolUsuario.TESORERIA or usuario.es_aprobador_pagos or admin
+            permitido = usuario.rol == RolUsuario.TESORERIA or usuario.es_aprobador_pagos or admin or resp_anticipo_extra
             if not permitido:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo Tesorería o un aprobador de pagos pueden registrar el anticipo.")
             return
@@ -196,6 +197,81 @@ class StateMachineService:
             if not permitido:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo Contabilidad o Controller pueden cerrar el ciclo del viaje.")
             return
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Transición no permitida de '{actual.value}' a '{nuevo_estado.value}'."
+        )
+
+    # -------------------------------------------------------------------------
+    # MÁQUINA DE ESTADOS: CAJAS MENORES (FORM-FIN-007)
+    # Radicada → Jefe inmediato → Controller → Contabilidad (FC) → cruce
+    # Tesorería (110510) → reembolso. Contabilidad NO aprueba jefe ni cruza;
+    # Tesorería NO registra el comprobante FC.
+    # -------------------------------------------------------------------------
+    @classmethod
+    def validar_transicion_caja(
+        cls,
+        caja,
+        nuevo_estado,
+        usuario: Usuario,
+        jefe_nombre: str = None,
+    ):
+        from financiero.models.contabilidad import EstadoCajaMenor as E
+        actual = caja.estado
+        admin = cls.es_admin(usuario)
+        es_conta = usuario.rol == RolUsuario.CONTABILIDAD
+        es_teso = usuario.rol == RolUsuario.TESORERIA
+
+        if nuevo_estado == E.RECHAZADA:
+            if actual in (E.REEMBOLSADA, E.RECHAZADA, E.EN_EDICION):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se rechaza una caja en estado '{actual.value}'.")
+            return  # cualquier participante del circuito puede devolver con motivo
+
+        if nuevo_estado == E.RADICADA and actual == E.EN_EDICION:
+            if es_conta and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Contabilidad no radica cajas menores: las radica el responsable de la sede.")
+            return
+
+        if actual == E.RADICADA and nuevo_estado == E.APROBADA_JEFE:
+            if es_conta and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Contabilidad no participa en la primera aprobación.")
+            es_jefe = jefe_nombre and usuario.nombre.strip().upper() == jefe_nombre.strip().upper()
+            if not (admin or es_jefe):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo el jefe inmediato de la sede (o un administrador) aprueba esta caja.")
+            return
+
+        if actual == E.APROBADA_JEFE and nuevo_estado == E.APROBADA_CONTROLLER:
+            if usuario.rol not in (RolUsuario.CONTROLLER, RolUsuario.GERENTE_FINANCIERO) and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo el Controller aprueba esta caja (2ª aprobación).")
+            return
+
+        if actual == E.APROBADA_CONTROLLER and nuevo_estado == E.CONTABILIZADA:
+            if not es_conta and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo Contabilidad registra el comprobante FC.")
+            if not (caja.datos or {}).get("no_comprobante_fc"):
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Indica el número del comprobante FC.")
+            return
+
+        if actual == E.CONTABILIZADA and nuevo_estado == E.CRUZADA:
+            if es_conta and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Contabilidad no cruza: el cruce de la cuenta 110510 lo hace Tesorería.")
+            if not es_teso and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo Tesorería cruza facturas y cuentas de cobro.")
+            return
+
+        if actual == E.CRUZADA and nuevo_estado == E.REEMBOLSADA:
+            if not es_teso and not admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo Tesorería registra el egreso del reembolso.")
+            if not (caja.datos or {}).get("no_egreso_banco"):
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Indica el número del egreso bancario.")
+            return
+
+        if nuevo_estado == E.EN_EDICION and actual == E.RECHAZADA and admin:
+            return  # el admin reabrea una caja rechazada para que se corrija
+
+        if nuevo_estado == E.RADICADA and actual == E.RECHAZADA and admin:
+            return  # reabrir directo al circuito
 
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

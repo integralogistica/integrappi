@@ -50,6 +50,8 @@ class Usuario(Base, TimestampMixin):
         default=RolUsuario.CONSULTA,
     )
     area: Mapped[str] = mapped_column(String(100), nullable=True)
+    # Sede de caja menor (fin.cat_sedes_cm.nombre) para el filtro de sede exclusiva
+    sede_cm: Mapped[str] = mapped_column(String(120), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Casillas y privilegios especiales

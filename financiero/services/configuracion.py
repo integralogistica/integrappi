@@ -22,6 +22,7 @@ CLAVES: dict[str, dict[str, Any]] = {
     "viajes_autorizadores": {"tipo": list, "defecto": []},       # ids de usuarios que pueden autorizar además de los roles fijos
     "viajes_responsables_anticipo": {"tipo": list, "defecto": []},
     "viajes_festivos": {"tipo": dict, "defecto": {"extra": [], "quitar": []}},
+    "pagos_motivos_rechazo": {"tipo": list, "defecto": []},   # vacío = defaults del router
 }
 
 

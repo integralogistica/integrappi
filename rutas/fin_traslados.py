@@ -138,7 +138,8 @@ def corregir_y_reenviar(id: uuid.UUID, req: TrasladoReenvio, request: Request, d
 
 @router.post("/{id}/transicion", response_model=TrasladoResponse)
 def transicion_estado_traslado(id: uuid.UUID, transicion: AccionTransicionRequest, request: Request,
-                               db: Session = Depends(get_db_fin), usuario: Usuario = Depends(require_not_consulta)):
+                               background: BackgroundTasks, db: Session = Depends(get_db_fin),
+                               usuario: Usuario = Depends(require_not_consulta)):
     tr = cargar_con_bloqueo(db, Traslado, id, transicion.version, "Traslado")
     accion = transicion.accion.upper()
     ahora = datetime.now(timezone.utc)
@@ -177,6 +178,12 @@ def transicion_estado_traslado(id: uuid.UUID, transicion: AccionTransicionReques
     tr.historial_cambios = [*(tr.historial_cambios or []), _evento(usuario, accion, anterior, nuevo, transicion.observacion or "")]
     db.commit()
     db.refresh(tr)
+
+    # Aviso al responsable del paso siguiente (fire-and-forget)
+    if nuevo == EstadoTraslado.APROBADO:
+        notificaciones.traslado_aprobado(background, db, tr)
+    elif nuevo == EstadoTraslado.RECHAZADO:
+        notificaciones.traslado_rechazado(background, db, tr, transicion.observacion or "")
     AuditService.registrar(db=db, modulo="traslados", accion=accion, entidad_id=str(id), usuario=usuario,
                            ip_cliente=get_client_ip(request), detalles={"consecutivo": tr.consecutivo, "estado": tr.estado.value})
     return tr

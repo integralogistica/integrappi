@@ -231,7 +231,7 @@ class TestPagosUrgentes:
 
         # la bandeja de pagos tiene el pendiente
         r = api.get("/fin/pagos?estado=PENDIENTE", headers=_h(CORREO_TESO))
-        pagos = [p for p in r.json() if p["consecutivo_req"] == req["consecutivo"]]
+        pagos = [p for p in r.json()["pagos"] if p["consecutivo_req"] == req["consecutivo"]]
         assert len(pagos) == 1
         p = pagos[0]
         assert p["valor"] == 200000
@@ -265,7 +265,7 @@ class TestPagosUrgentes:
             r = api.post(f"/fin/requisiciones/{req['id']}/transicion", headers=_h(correo),
                          json={"accion": "APROBAR", "version": r.json()["version"], "datos_adicionales": datos})
         r = api.get("/fin/pagos?estado=PENDIENTE", headers=_h(CORREO_TESO))
-        p = [x for x in r.json() if x["consecutivo_req"] == req["consecutivo"]][0]
+        p = [x for x in r.json()["pagos"] if x["consecutivo_req"] == req["consecutivo"]][0]
         r = api.post(f"/fin/pagos/{p['id']}/rechazar", headers=_h(CORREO_TESO), json={"version": p["version"]})
         assert r.status_code == 422
         r = api.post(f"/fin/pagos/{p['id']}/rechazar", headers=_h(CORREO_TESO),

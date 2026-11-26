@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from financiero.database import get_db_fin
 from financiero.dependencies import require_admin
+from financiero.models.contabilidad import CajaMenor, EstadoFactura, FacturaDian
 from financiero.models.requisicion import EstadoRequisicion, Requisicion
 from financiero.models.traslado import EstadoTraslado, Traslado
 from financiero.models.usuario import Usuario
@@ -52,6 +53,22 @@ MODULOS = {
                     "anticipo_detalle", "anticipo_pagado", "fecha_pago_anticipo", "legalizacion_detalle"),
         "editables": ("viajero_nombre", "viajero_cedula", "viajero_cargo", "objetivo", "observaciones",
                       "origen", "destino", "fecha_inicio", "fecha_fin", "requiere_tiquetes", "datos_front"),
+    },
+    "cajas": {
+        "modelo": CajaMenor,
+        "estado_inicial": "RADICADA",
+        "reabrir_desde": ("RECHAZADA",),
+        "limpiar": (),
+        "editables": ("sede", "responsable", "responsable_cc", "centro_costo_principal", "periodo",
+                      "saldo_inicial", "movimientos", "datos", "politica", "total_reembolso"),
+    },
+    "facturas": {
+        "modelo": FacturaDian,
+        "estado_inicial": EstadoFactura.PENDIENTE,
+        "reabrir_desde": (EstadoFactura.ANULADA, EstadoFactura.RECHAZADA),
+        "limpiar": ("fecha_rechazo", "rechazado_por", "fecha_causacion", "causada_por_id"),
+        "editables": ("proveedor", "nit_proveedor", "estado", "categoria_contable", "num_orden_compra",
+                      "observacion_recepcion", "estado_contable", "num_causacion", "oc_vinculada", "detalles"),
     },
 }
 
@@ -161,6 +178,12 @@ def eliminar(modulo: str, id: uuid.UUID, request: Request,
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registro no encontrado.")
     snapshot = {c.name: str(getattr(obj, c.name))[:500]
                 for c in cfg["modelo"].__table__.columns}
+    if modulo == "cajas":
+        if (obj.datos or {}).get("contabilizado_en"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se elimina una caja contabilizada (generó asiento).")
+        # las facturas electrónicas vinculadas vuelven al estado de legalización
+        from rutas.fin_cajas import _desvincular_facturas_de_caja
+        _desvincular_facturas_de_caja(obj, db)
     db.delete(obj)
     db.commit()
     AuditService.registrar(db=db, modulo=modulo, accion="ELIMINAR", entidad_id=str(id), usuario=admin,

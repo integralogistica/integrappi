@@ -34,6 +34,11 @@ router = APIRouter(prefix="/fin/adjuntos", tags=["Financiero · Adjuntos"])
 MAX_TAMANO = FIN_ADJUNTO_MAX_MB * 1024 * 1024
 TIPOS_PERMITIDOS = {"application/pdf", "image/jpeg", "image/jpg", "image/png"}
 
+# Tipado opcional del documento (proveedores nuevos, cotizaciones de requisición,
+# circuito de cajas menores y órdenes de compra de facturas DIAN)
+TIPOS_DOCUMENTO = {"", "rut", "cert_bancaria", "camara_comercio", "cotizacion",
+                   "comprobante_fc", "cruce", "egreso_auxiliar", "reembolso", "soporte_caja", "orden_compra"}
+
 # Roles que además ven adjuntos de soportes (modulo_origen empieza por "soporte")
 ROLES_SOPORTES = {RolUsuario.CALIDAD, RolUsuario.CONSULTA, RolUsuario.CONTABILIDAD, RolUsuario.TESORERIA}
 
@@ -90,6 +95,7 @@ def _serializar(adj: Adjunto) -> dict:
         "tamano_bytes": adj.tamano_bytes,
         "modulo_origen": adj.modulo_origen,
         "referencia_id": adj.referencia_id,
+        "tipo_documento": getattr(adj, "tipo_documento", None),
         "subido_por_id": str(adj.subido_por_id) if adj.subido_por_id else None,
         "created_at": adj.created_at.isoformat() if adj.created_at else None,
     }
@@ -100,11 +106,15 @@ def subir_adjunto(
     archivo: UploadFile = File(...),
     modulo_origen: str = Form(...),
     referencia_id: str = Form(...),
+    tipo_documento: str = Form(""),
     db: Session = Depends(get_db_fin),
     usuario: Usuario = Depends(require_not_consulta),
 ):
     if (modulo_origen or "").strip() == "" or (referencia_id or "").strip() == "":
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "modulo_origen y referencia_id son obligatorios.")
+    if (tipo_documento or "").strip().lower() not in TIPOS_DOCUMENTO:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            f"tipo_documento no válido. Permitidos: {', '.join(sorted(t for t in TIPOS_DOCUMENTO if t))}.")
     if (archivo.content_type or "") not in TIPOS_PERMITIDOS:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"Tipo no permitido ({archivo.content_type}): PDF, JPG o PNG.")
 
@@ -133,12 +143,13 @@ def subir_adjunto(
         referencia_id=referencia_id.strip(),
         db=db,
         usuario=usuario,
+        tipo_documento=tipo_documento.strip().lower() or None,
     )
     return _serializar(adj)
 
 
 def subir_bytes_gcs(contenido: bytes, nombre: str, tipo_mime: str, modulo_origen: str,
-                    referencia_id: str, db: Session, usuario: Usuario) -> Adjunto:
+                    referencia_id: str, db: Session, usuario: Usuario, tipo_documento: str = None) -> Adjunto:
     """Sube bytes ya en memoria a GCS y registra el adjunto. La usan el
     endpoint /subir y la carga de ZIPs DIAN (PDFs que venían dentro)."""
     if not contenido:
@@ -162,6 +173,7 @@ def subir_bytes_gcs(contenido: bytes, nombre: str, tipo_mime: str, modulo_origen
         ruta_almacenamiento=ruta,
         modulo_origen=modulo_origen[:50],
         referencia_id=referencia_id[:100],
+        tipo_documento=(tipo_documento or None),
         subido_por_id=usuario.id,
         created_at=datetime.now(timezone.utc),
     )

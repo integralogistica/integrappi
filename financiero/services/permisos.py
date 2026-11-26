@@ -53,7 +53,7 @@ def puede_ver_tarifa_viaje(usuario: Usuario) -> bool:
 
 SECCIONES_FIN = (
     "requisiciones", "traslados", "viajes", "facturas",
-    "pagos", "servicios", "cajas", "administracion",
+    "pagos", "servicios", "cajas", "administracion", "proveedores",
 )
 
 _TODAS = set(SECCIONES_FIN)
@@ -61,8 +61,8 @@ DEFAULT_SECCIONES_POR_ROL: dict[RolUsuario, set[str]] = {
     RolUsuario.ADMIN: _TODAS,
     # Tesorería: todo menos traslados y administración
     RolUsuario.TESORERIA: {"requisiciones", "viajes", "facturas", "pagos", "servicios", "cajas"},
-    RolUsuario.CONTABILIDAD: {"facturas", "servicios", "cajas", "viajes", "pagos"},
-    RolUsuario.COMPRAS: {"requisiciones", "facturas", "pagos", "viajes"},
+    RolUsuario.CONTABILIDAD: {"facturas", "servicios", "cajas", "viajes", "pagos", "proveedores"},
+    RolUsuario.COMPRAS: {"requisiciones", "facturas", "pagos", "viajes", "proveedores"},
     RolUsuario.CONTROLLER: {"requisiciones", "traslados", "viajes"},
     RolUsuario.GERENTE_FINANCIERO: {"requisiciones", "traslados", "viajes"},
     RolUsuario.PRESIDENCIA: {"traslados", "viajes"},

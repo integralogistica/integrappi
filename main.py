@@ -70,6 +70,8 @@ from rutas.fin_adjuntos import router as ruta_fin_adjuntos
 from rutas.fin_viajes import router as ruta_fin_viajes
 from rutas.fin_configuracion import router as ruta_fin_configuracion
 from rutas.fin_requisiciones import router as ruta_fin_requisiciones
+from rutas.fin_terceros import router as ruta_fin_terceros
+from rutas.fin_quotes import router as ruta_fin_quotes
 from rutas.fin_catalogos import router as ruta_fin_catalogos
 from rutas.fin_contabilidad import router as ruta_fin_contabilidad
 from rutas.fin_pagos import router as ruta_fin_pagos
@@ -271,6 +273,8 @@ app.include_router(ruta_fin_adjuntos)
 app.include_router(ruta_fin_viajes)
 app.include_router(ruta_fin_configuracion)
 app.include_router(ruta_fin_requisiciones)
+app.include_router(ruta_fin_terceros)
+app.include_router(ruta_fin_quotes)
 app.include_router(ruta_fin_catalogos)
 app.include_router(ruta_fin_contabilidad)
 app.include_router(ruta_fin_pagos)
