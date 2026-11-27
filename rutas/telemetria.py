@@ -184,6 +184,14 @@ async def resumen(
     audiencia: str = Query(
         "todos", description="todos | clientes (perfil CLIENTE) | internos (2026-11-20)"
     ),
+    solo_portales: bool = Query(
+        False,
+        description=(
+            "Solo eventos de los PORTALES de clientes (cliente_id presente): excluye la "
+            "telemetría general de la app (2026-11-27 — lo envía uso-kabi, que mide la "
+            "adopción del portal, no el uso interno de la app)"
+        ),
+    ),
 ):
     info = _resolver_usuario(usuario)
     _requiere(info, {"ADMIN"}, "ver la telemetría del portal")
@@ -209,6 +217,12 @@ async def resumen(
     match: dict = {"fecha_col": {"$gte": desde_val, "$lte": hasta_val}}
     if cliente_id:
         match["cliente_id"] = cliente_id
+    # (2026-11-27) uso-kabi mide SOLO los portales de clientes: sin esto, la
+    # vista «Todos los portales» arrastraba también la telemetría general de
+    # la app (pageviews/acciones/login de todos los módulos, cliente_id null)
+    # e inflaba KPIs/usuarios con gente que nunca abrió el portal.
+    elif solo_portales:
+        match["cliente_id"] = {"$ne": None}
     # (2026-11-25) Filtro por módulo de la app general (va en mayúsculas en el doc).
     if modulo:
         match["modulo"] = modulo.strip().upper()
@@ -442,5 +456,6 @@ async def resumen(
             "modulo": modulo,
             "usuario_filtro": usuario_filtro,
             "audiencia": audiencia,
+            "solo_portales": solo_portales,
         },
     }

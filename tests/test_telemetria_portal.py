@@ -242,6 +242,29 @@ class TestResumen(unittest.TestCase):
         for pipeline in self.col.pipelines:
             self.assertEqual(pipeline[0]["$match"].get("cliente_id"), "fresenius-kabi")
 
+    def test_resumen_solo_portales_excluye_telemetria_general(self):
+        """(2026-11-27) uso-kabi (solo_portales=true) solo ve eventos con
+        cliente_id: sin el filtro, «Todos los portales» arrastraba también los
+        pageviews/acciones de la telemetría general de la app (cliente_id null)."""
+        r = self.client.get(
+            "/telemetria/resumen",
+            params={"usuario": "ADMIN.X", "solo_portales": "true"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(self.col.pipelines)
+        for pipeline in self.col.pipelines:
+            self.assertEqual(pipeline[0]["$match"].get("cliente_id"), {"$ne": None})
+        self.assertTrue(r.json()["rango"]["solo_portales"])
+
+    def test_resumen_solo_portales_no_pisa_filtro_de_cliente(self):
+        """cliente_id explícito + solo_portales: gana el filtro concreto."""
+        self.client.get(
+            "/telemetria/resumen",
+            params={"usuario": "ADMIN.X", "solo_portales": "true", "cliente_id": "fresenius-kabi"},
+        )
+        for pipeline in self.col.pipelines:
+            self.assertEqual(pipeline[0]["$match"].get("cliente_id"), "fresenius-kabi")
+
     def test_pipelines_sintaxis_valida_para_mongo(self):
         """Regresión del bug productivo 2026-11-19 (Location28689): el
         acumulador $first SOLO vale en el nivel superior del $group — dentro
