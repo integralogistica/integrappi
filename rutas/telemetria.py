@@ -420,6 +420,33 @@ async def resumen(
         for hora, acc in sorted(acumulado_hora.items())
     ]
 
+    # (2026-11-27) Usuarios ÚNICOS por día y PERFIL: cuánta gente de cada
+    # perfil usa la app cada día (gráfico apilado de uso-app). Cuenta
+    # usuarios distintos (addToSet), no eventos — un usuario que navega 200
+    # páginas cuenta 1. Perfil null (identidad no resuelta) → "SIN PERFIL".
+    acum_dia_perfil: dict = {}
+    for g in col_eventos.aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": {
+                        "fecha": "$fecha_col",
+                        "perfil": {"$ifNull": ["$perfil", "SIN PERFIL"]},
+                    },
+                    "usr": {"$addToSet": "$usuario"},
+                }
+            },
+        ]
+    ):
+        acum_dia_perfil.setdefault(g["_id"]["fecha"], {})[g["_id"]["perfil"]] = len(
+            g["usr"]
+        )
+    por_dia_perfil = [
+        {"fecha": fecha, "por_perfil": perfiles}
+        for fecha, perfiles in sorted(acum_dia_perfil.items())
+    ]
+
     sesiones = list(
         col_eventos.aggregate(
             [
@@ -448,6 +475,7 @@ async def resumen(
             "por_cliente": por_cliente,
             "por_modulo": por_modulo,
             "por_hora": por_hora,
+            "por_dia_perfil": por_dia_perfil,
         },
         "rango": {
             "desde": desde_val,

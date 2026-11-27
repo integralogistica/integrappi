@@ -72,6 +72,14 @@ class ColEventosFake(FakeColeccion):
         # (2026-11-25) Telemetría general: por módulo (expresión $ifNull como
         # _id) y por hora del día en Colombia. (9.ª tanda) por_dia/por_hora
         # agrupan por dict {fecha|hora, modulo} — se distinguen por sus claves.
+        # (2026-11-27) por_dia_perfil agrupa por dict {fecha, perfil}: se
+        # prueba ANTES que el de fecha+modulo (ambos traen "fecha").
+        if isinstance(grupo, dict) and "perfil" in grupo:
+            return [
+                {"_id": {"fecha": "2026-11-18", "perfil": "ADMIN"}, "usr": ["A", "B"]},
+                {"_id": {"fecha": "2026-11-18", "perfil": "OPERATIVO"}, "usr": ["C"]},
+                {"_id": {"fecha": "2026-11-19", "perfil": "ADMIN"}, "usr": ["A"]},
+            ]
         if isinstance(grupo, dict) and "fecha" in grupo:
             return [
                 {"_id": {"fecha": "2026-11-18", "modulo": "OTROS_COSTOS"}, "eventos": 6, "usr": ["A", "B"]},
@@ -223,6 +231,14 @@ class TestResumen(unittest.TestCase):
         self.assertEqual(data["por_dia"][0]["eventos"], 9)  # 6 OC + 3 portal
         self.assertEqual(data["por_dia"][0]["por_modulo"], {"OTROS_COSTOS": 6, "portal_fresenius-kabi": 3})
         self.assertEqual(data["por_hora"][0]["por_modulo"], {"OTROS_COSTOS": 5, "MODULOS": 2})
+        # (2026-11-27) Usuarios únicos por día y perfil (addToSet, no eventos)
+        self.assertEqual(
+            data["por_dia_perfil"],
+            [
+                {"fecha": "2026-11-18", "por_perfil": {"ADMIN": 2, "OPERATIVO": 1}},
+                {"fecha": "2026-11-19", "por_perfil": {"ADMIN": 1}},
+            ],
+        )
         self.assertIn("modulo", r.json()["rango"])
         self.assertIn("rango", r.json())
 
